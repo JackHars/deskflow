@@ -9,6 +9,8 @@
 
 #include "deskflow/IClient.h"
 
+#include <optional>
+
 namespace deskflow {
 class IStream;
 }
@@ -49,6 +51,13 @@ public:
   virtual bool isPrimary() const
   {
     return false;
+  }
+
+  // A programmatic opt-in, never a configured computer name or an input grant.
+  // Only the current protocol's authenticated remote proxy implements it.
+  virtual std::optional<std::uint32_t> requestInputSequenceTrace()
+  {
+    return std::nullopt;
   }
 
   //@}

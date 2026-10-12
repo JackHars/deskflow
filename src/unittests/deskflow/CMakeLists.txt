@@ -63,3 +63,19 @@ if(BUILD_X11_SUPPORT)
   )
 endif()
 
+if(BUILD_WINDOWSHARE)
+  create_test(
+    NAME InputSequenceTests
+    DEPENDS app
+    LIBS arch base io ${extra_libs}
+    SOURCE InputSequenceTests.cpp
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/deskflow"
+  )
+  create_test(
+    NAME ComputerInputSequenceTests
+    DEPENDS app
+    LIBS arch base io mt net platform server client ${extra_libs}
+    SOURCE ComputerInputSequenceTests.cpp
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/deskflow"
+  )
+endif()

@@ -53,6 +53,7 @@ add_library(${lib_name} STATIC ${PLATFORM_CODE}
   IKeyState.cpp
   IKeyState.h
   IPlatformComputer.h
+  InputSequence.h
   IPrimaryComputer.cpp
   IPrimaryComputer.h
   IScreenSaver.h

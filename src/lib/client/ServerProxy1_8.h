@@ -23,6 +23,13 @@ protected:
   ConnectionResult parseHandshakeMessage(const uint8_t *code) override;
   ConnectionResult parseMessage(const uint8_t *code) override;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool supportsInputSequence() const override
+  {
+    return true;
+  }
+#endif
+
 private:
   void setServerLayouts();
   void setActiveServerLayout(const std::string_view &layout);

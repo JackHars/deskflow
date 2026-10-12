@@ -18,6 +18,7 @@
 #include "deskflow/ipc/CoreIpcServer.h"
 #include "io/IStream.h"
 #include "server/ClientProxy1_1.h"
+#include "server/ClientProxy1_8.h"
 #include "server/InputFilter.h"
 #include "server/PrimaryClient.h"
 
@@ -314,6 +315,32 @@ private:
   std::shared_ptr<WireCapture> m_capture;
 };
 
+class TracedRoutingClient : public ClientProxy1_8
+{
+public:
+  TracedRoutingClient(
+      const char *name, Server *server, IEventQueue *events, const std::shared_ptr<WireCapture> &capture
+  )
+      : ClientProxy1_8(name, new RoutingStream(capture), server, events)
+  {
+  }
+  void getShape(int32_t &x, int32_t &y, int32_t &width, int32_t &height) const override
+  {
+    x = y = 0;
+    width = height = 1000;
+  }
+  void getCursorPos(int32_t &x, int32_t &y) const override
+  {
+    x = y = 500;
+  }
+  // Packet framing/parser coverage is in ClientProxyTests. Here drive the
+  // validated transition to exercise the real Server routing and writer join.
+  void acknowledge(std::uint32_t generation)
+  {
+    receiveInputSequenceAck(generation);
+  }
+};
+
 class RoutingEventQueue : public MockEventQueue
 {
 public:
@@ -529,6 +556,88 @@ void ServerTests::originalCapture_exactDispatchAndOwnership()
   QVERIFY(!scrolled->ticket.live());
   server.revokeSelectedPeer();
   QVERIFY(!routes->live());
+}
+
+void ServerTests::originalCapture_negotiatedPacketsRetainRecipientAndStamp()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  auto &server = *f.server;
+  f.config.addComputer("traced");
+  f.config.addComputer("untrusted");
+  f.config.addOption("traced", kOptionInputSequenceTrace, 101);
+  f.config.addOption("", kOptionInputSequenceTrace, 202);
+  QVERIFY(server.setConfig(f.config));
+  auto capture = std::make_shared<WireCapture>();
+  capture->authenticate();
+  auto *client = new TracedRoutingClient("traced", &server, &f.events, capture);
+  server.adoptClient(client);
+  QVERIFY(server.m_clientSet.contains(client));
+  QVERIFY(!capture->take().contains("ISQ1")); // Config cannot enable tracing.
+
+  auto routes = std::make_shared<OriginalInputRoutes>();
+  QVERIFY(server.setOriginalInputRoutes(routes));
+  server.sendOptions(client);
+  const auto options = capture->take();
+  const auto option = options.indexOf("ISQ1");
+  QVERIFY(option >= 0);
+  QCOMPARE(options.sliced(option + 4, 4), QByteArray::fromHex("00000001"));
+  client->acknowledge(1);
+  f.first->authenticate();
+  server.sendOptions(f.firstClient); // An authenticated historical protocol stays unchanged.
+  QVERIFY(!f.first->take().contains("ISQ1"));
+  auto untrusted = std::make_shared<WireCapture>();
+  server.adoptClient(new TracedRoutingClient("untrusted", &server, &f.events, untrusted));
+  QVERIFY(!untrusted->take().contains("ISQ1"));
+
+  server.switchComputer(client, 100, 200, false);
+  QVERIFY(!capture->take().contains("DSEQ")); // Unstamped enter/control writes.
+  std::uint64_t sequence = 0;
+  const auto dispatch = [&](EventTypes type, void *data) {
+    Event event(
+        type, f.primary.getEventTarget(), data, Event::EventFlags::DontFreeData, OriginalInputStamp{81, ++sequence, 1}
+    );
+    return f.events.dispatchEvent(event);
+  };
+  IPlatformComputer::MotionInfo motion{7, -3};
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion));
+  auto decision = routes->pop();
+  QVERIFY(decision && decision->pointKnown);
+  QCOMPARE(decision->recipient, server.m_inputRecipients.at(client));
+  QCOMPARE(decision->x, 107);
+  QCOMPARE(decision->y, 197);
+  auto wire = capture->take();
+  QVERIFY(wire.startsWith("DSEQ"));
+  auto decoded = decodeInputSequenceEnvelope(std::string_view(wire.constData() + 6, wire.size() - 6));
+  QVERIFY(decoded);
+  QCOMPARE(decoded->token, (InputSequenceToken{1, 1, decision->stamp}));
+  QCOMPARE(QByteArray::fromStdString(decoded->payload), "DMMV" + QByteArray::fromHex("006b 00c5"));
+
+  IPlatformComputer::KeyInfo key{'a', 0, 0x1e, 1, ""};
+  QVERIFY(dispatch(EventTypes::KeyStateKeyDown, &key));
+  capture->take();
+  routes->pop();
+  server.switchComputer(f.firstClient, 300, 400, false);
+  capture->take();
+  f.clear();
+  QVERIFY(dispatch(EventTypes::KeyStateKeyUp, &key));
+  decision = routes->pop();
+  QVERIFY(decision);
+  QCOMPARE(decision->recipient, server.m_inputRecipients.at(client)); // Press owner, not new selected peer.
+  wire = capture->take();
+  decoded = decodeInputSequenceEnvelope(std::string_view(wire.constData() + 6, wire.size() - 6));
+  QVERIFY(decoded);
+  QCOMPARE(decoded->token, (InputSequenceToken{1, 3, decision->stamp}));
+  QCOMPARE(QByteArray::fromStdString(decoded->payload), "DKUP" + QByteArray::fromHex("0061 0000 001e"));
+  QVERIFY(f.first->take().isEmpty());
+
+  routes->revoke();
+  server.switchComputer(client, 100, 200, false);
+  capture->take();
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion));
+  QCOMPARE(capture->take(), "DMMV" + QByteArray::fromHex("006b 00c5"));
+  server.sendOptions(client);
+  QVERIFY(!capture->take().contains("ISQ1"));
 }
 
 void ServerTests::originalCapture_motionCrossingUsesEnterDecision()

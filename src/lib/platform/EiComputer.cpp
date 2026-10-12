@@ -24,6 +24,9 @@
 #ifdef BUILD_WINDOWSHARE
 #include "windowshare/GnomeProviderClient.h"
 #endif
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputSequence.h"
+#endif
 
 #include <algorithm>
 #include <bit>
@@ -405,6 +408,9 @@ void EiComputer::fakeMouseButton(ButtonID button, bool press)
   ensureEmulating();
   ei_device_button_button(m_eiPointer, code, press);
   ei_device_frame(m_eiPointer, ei_now(m_ei));
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  windowshare::InputSequenceSubmissionScope::submitted();
+#endif
 }
 
 void EiComputer::fakeMouseMove(int32_t x, int32_t y)
@@ -424,6 +430,9 @@ void EiComputer::fakeMouseMove(int32_t x, int32_t y)
   ensureEmulating();
   ei_device_pointer_motion_absolute(m_eiAbs, x, y);
   ei_device_frame(m_eiAbs, ei_now(m_ei));
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  windowshare::InputSequenceSubmissionScope::submitted();
+#endif
 #ifdef BUILD_WINDOWSHARE
   // Observe the production viewer through the same owned EIS session. This
   // asynchronous request is not an EIS fence or attribution of this motion;
@@ -443,6 +452,9 @@ void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
   ensureEmulating();
   ei_device_pointer_motion(m_eiPointer, dx, dy);
   ei_device_frame(m_eiPointer, ei_now(m_ei));
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  windowshare::InputSequenceSubmissionScope::submitted();
+#endif
 }
 
 void EiComputer::fakeMouseWheel(ScrollDelta delta) const
@@ -459,6 +471,9 @@ void EiComputer::fakeMouseWheel(ScrollDelta delta) const
   ensureEmulating();
   ei_device_scroll_discrete(m_eiPointer, -delta.x, -delta.y);
   ei_device_frame(m_eiPointer, ei_now(m_ei));
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  windowshare::InputSequenceSubmissionScope::submitted();
+#endif
 }
 
 void EiComputer::fakeKey(uint32_t keycode, bool isDown) const
@@ -473,6 +488,9 @@ void EiComputer::fakeKey(uint32_t keycode, bool isDown) const
   ensureEmulating();
   ei_device_keyboard_key(m_eiKeyboard, keycode, isDown);
   ei_device_frame(m_eiKeyboard, ei_now(m_ei));
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  windowshare::InputSequenceSubmissionScope::submitted();
+#endif
 }
 
 void EiComputer::enable()

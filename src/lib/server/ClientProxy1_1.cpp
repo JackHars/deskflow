@@ -23,7 +23,7 @@ ClientProxy1_1::ClientProxy1_1(const std::string &name, deskflow::IStream *strea
 void ClientProxy1_1::keyDown(KeyID key, KeyModifierMask mask, KeyButton button, const std::string &)
 {
   LOG_VERBOSE("send key down to \"%s\" id=%d, mask=0x%04x, button=0x%04x", getName().c_str(), key, mask, button);
-  ProtocolUtil::writef(getStream(), kMsgDKeyDown1_1, key, mask, button);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyDown1_1, key, mask, button);
 }
 
 void ClientProxy1_1::keyRepeat(KeyID key, KeyModifierMask mask, int32_t count, KeyButton button, const std::string &)
@@ -32,11 +32,11 @@ void ClientProxy1_1::keyRepeat(KeyID key, KeyModifierMask mask, int32_t count, K
       "send key repeat to \"%s\" id=%d, mask=0x%04x, count=%d, button=0x%04x", getName().c_str(), key, mask, count,
       button
   );
-  ProtocolUtil::writef(getStream(), kMsgDKeyRepeat1_1, key, mask, count, button);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyRepeat1_1, key, mask, count, button);
 }
 
 void ClientProxy1_1::keyUp(KeyID key, KeyModifierMask mask, KeyButton button)
 {
   LOG_VERBOSE("send key up to \"%s\" id=%d, mask=0x%04x, button=0x%04x", getName().c_str(), key, mask, button);
-  ProtocolUtil::writef(getStream(), kMsgDKeyUp, key, mask, button);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyUp, key, mask, button);
 }

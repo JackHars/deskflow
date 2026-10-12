@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include "arch/Arch.h"
 #include "base/Log.h"
 
 #include <QObject>
@@ -19,7 +20,23 @@ private Q_SLOTS:
   void handleKeepAliveAlarm_timeout_queuesDisconnectRequest();
   void handleData_incompleteMessage_queuesDisconnectRequest();
   void parseHandshakeMessage_protocolError_queuesRefusalRequest();
+  void legacyInput_preservesCompressionLanguageAndModifiers();
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  void inputSequence_onlyAuthenticatedLatestProxyAcknowledges();
+  void inputSequence_generationResetAndWithdrawal();
+  void inputSequence_mixedMotionKeepsExactScopesAndReceipts();
+  void inputSequence_languageAndModifierSemantics();
+  void inputSequence_malformedPacketsHaveNoSideEffects_data();
+  void inputSequence_malformedPacketsHaveNoSideEffects();
+  void inputSequence_noncontiguousOrStaleMetadataDisconnects_data();
+  void inputSequence_noncontiguousOrStaleMetadataDisconnects();
+  void inputSequence_backendOutcomesAndFailure();
+  void inputSequence_revocationAndReentryCannotEmitSuccess();
+  void inputSequence_realPacketFilterPreservesEnvelopeBoundary();
+  void inputSequence_malformedOptionsCannotNegotiate();
+#endif
 
 private:
+  Arch m_arch;
   Log m_log;
 };

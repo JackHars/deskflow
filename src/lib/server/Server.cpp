@@ -1168,6 +1168,8 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(2 * options->size());
     for (auto [optionId, optionValue] : *options) {
+      if (optionId == kOptionInputSequenceTrace)
+        continue; // Reserved for the live capture route, never configuration.
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
     }
@@ -1179,6 +1181,8 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(optionsList.size() + 2 * options->size());
     for (auto [optionId, optionValue] : *options) {
+      if (optionId == kOptionInputSequenceTrace)
+        continue;
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
     }
@@ -1186,6 +1190,14 @@ void Server::sendOptions(BaseClientProxy *client) const
 
   // send the options
   client->resetOptions();
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (m_originalInputRoutes && m_originalInputRoutes->live()) {
+    if (const auto generation = client->requestInputSequenceTrace()) {
+      optionsList.push_back(kOptionInputSequenceTrace);
+      optionsList.push_back(*generation);
+    }
+  }
+#endif
   client->setOptions(optionsList);
 }
 
@@ -1703,6 +1715,11 @@ Server::OriginalRouteObservation::OriginalRouteObservation(
 )
     : server(owner),
       previous(owner.m_originalRouteObservation),
+      inputSequenceOrigin(
+          owner.m_originalInputRoutes && owner.m_originalInputRoutes->live()
+              ? event.originalInputStamp()
+              : deskflow::windowshare::OriginalInputStamp{}
+      ),
       exceptions(std::uncaught_exceptions())
 {
   decision.stamp = event.originalInputStamp();

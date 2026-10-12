@@ -53,6 +53,10 @@ ClientProxy1_0::~ClientProxy1_0()
 
 void ClientProxy1_0::disconnect()
 {
+  if (m_disconnected)
+    return;
+  m_disconnected = true;
+  stopInputSequenceTrace();
   removeHandlers();
   getStream()->close();
   m_events->addEvent(Event(EventTypes::ClientProxyDisconnected, getEventTarget()));
@@ -107,8 +111,12 @@ void ClientProxy1_0::setHeartbeatRate(double, double alarm)
 
 void ClientProxy1_0::handleData()
 {
+  if (m_disconnected)
+    return;
+  const auto alive = proxyLifetime();
   // handle messages until there are no more.  first read message code.
   uint8_t code[4];
+  m_messagePacketSize = getStream()->getSize();
   uint32_t n = getStream()->read(code, 4);
   while (n != 0) {
     // verify we got an entire code
@@ -121,7 +129,10 @@ void ClientProxy1_0::handleData()
     // parse message
     try {
       LOG_VERBOSE("msg from \"%s\": %c%c%c%c", getName().c_str(), code[0], code[1], code[2], code[3]);
-      if (!(this->*m_parser)(code)) {
+      const bool accepted = (this->*m_parser)(code);
+      if (!*alive || m_disconnected)
+        return;
+      if (!accepted) {
         LOG(
             (CLOG_ERR "invalid message from client \"%s\": %c%c%c%c", getName().c_str(), code[0], code[1], code[2],
              code[3])
@@ -132,12 +143,15 @@ void ClientProxy1_0::handleData()
           ;
       }
     } catch (const BadClientException &e) {
+      if (!*alive)
+        return;
       LOG_ERR("protocol error from client \"%s\": %s", getName().c_str(), e.what());
       disconnect();
       return;
     }
 
     // next message
+    m_messagePacketSize = getStream()->getSize();
     n = getStream()->read(code, 4);
   }
 
@@ -147,6 +161,8 @@ void ClientProxy1_0::handleData()
 
 bool ClientProxy1_0::parseHandshakeMessage(const uint8_t *code)
 {
+  if (memcmp(code, kMsgCInputSequenceAck, 4) == 0 || memcmp(code, kMsgCInputSequenceReceipt, 4) == 0)
+    throw BadClientException("Input sequence reply before client handshake");
   if (memcmp(code, kMsgCNoop, 4) == 0) {
     // discard no-ops
     LOG_VERBOSE("no-op from", getName().c_str());
@@ -165,7 +181,34 @@ bool ClientProxy1_0::parseHandshakeMessage(const uint8_t *code)
 
 bool ClientProxy1_0::parseMessage(const uint8_t *code)
 {
-  if (memcmp(code, kMsgDInfo, 4) == 0) {
+  if (memcmp(code, kMsgCInputSequenceAck, 4) == 0) {
+    // Save packet size before reading its code: after its last byte the packet
+    // filter may already expose the NEXT packet's size. Never borrow its body.
+    if (m_messagePacketSize != 8)
+      throw BadClientException("Incorrect input sequence acknowledgement packet size");
+    std::array<char, 4> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete input sequence acknowledgement");
+    std::size_t offset = 0;
+    receiveInputSequenceAck(
+        static_cast<std::uint32_t>(
+            deskflow::windowshare::inputSequenceDetail::read(std::string_view(body.data(), body.size()), offset, 4)
+        )
+    );
+    return true;
+  } else if (memcmp(code, kMsgCInputSequenceReceipt, 4) == 0) {
+    using namespace deskflow::windowshare;
+    if (m_messagePacketSize != 4 + inputSequenceReceiptBodyBytes)
+      throw BadClientException("Incorrect input sequence receipt packet size");
+    std::array<char, inputSequenceReceiptBodyBytes> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete input sequence receipt");
+    const auto receipt = decodeInputSequenceReceipt(std::string_view(body.data(), body.size()));
+    if (!receipt)
+      throw BadClientException("Malformed input sequence receipt");
+    receiveInputSequenceReceipt(*receipt);
+    return true;
+  } else if (memcmp(code, kMsgDInfo, 4) == 0) {
     if (recvInfo()) {
       m_events->addEvent(Event(EventTypes::ComputerShapeChanged, getEventTarget()));
       return true;
@@ -260,37 +303,37 @@ void ClientProxy1_0::setClipboardDirty(ClipboardID id, bool dirty)
 void ClientProxy1_0::keyDown(KeyID key, KeyModifierMask mask, KeyButton, const std::string &)
 {
   LOG_VERBOSE("send key down to \"%s\" id=%d, mask=0x%04x", getName().c_str(), key, mask);
-  ProtocolUtil::writef(getStream(), kMsgDKeyDown1_0, key, mask);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyDown1_0, key, mask);
 }
 
 void ClientProxy1_0::keyRepeat(KeyID key, KeyModifierMask mask, int32_t count, KeyButton, const std::string &)
 {
   LOG_VERBOSE("send key repeat to \"%s\" id=%d, mask=0x%04x, count=%d", getName().c_str(), key, mask, count);
-  ProtocolUtil::writef(getStream(), kMsgDKeyRepeat1_0, key, mask, count);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyRepeat1_0, key, mask, count);
 }
 
 void ClientProxy1_0::keyUp(KeyID key, KeyModifierMask mask, KeyButton)
 {
   LOG_VERBOSE("send key up to \"%s\" id=%d, mask=0x%04x", getName().c_str(), key, mask);
-  ProtocolUtil::writef(getStream(), kMsgDKeyUp1_0, key, mask);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyUp1_0, key, mask);
 }
 
 void ClientProxy1_0::mouseDown(ButtonID button)
 {
   LOG_VERBOSE("send mouse down to \"%s\" id=%d", getName().c_str(), button);
-  ProtocolUtil::writef(getStream(), kMsgDMouseDown, button);
+  ProtocolUtil::writef(inputStream(), kMsgDMouseDown, button);
 }
 
 void ClientProxy1_0::mouseUp(ButtonID button)
 {
   LOG_VERBOSE("send mouse up to \"%s\" id=%d", getName().c_str(), button);
-  ProtocolUtil::writef(getStream(), kMsgDMouseUp, button);
+  ProtocolUtil::writef(inputStream(), kMsgDMouseUp, button);
 }
 
 void ClientProxy1_0::mouseMove(int32_t xAbs, int32_t yAbs)
 {
   LOG_VERBOSE("send mouse move to \"%s\" %d,%d", getName().c_str(), xAbs, yAbs);
-  ProtocolUtil::writef(getStream(), kMsgDMouseMove, xAbs, yAbs);
+  ProtocolUtil::writef(inputStream(), kMsgDMouseMove, xAbs, yAbs);
 }
 
 void ClientProxy1_0::mouseRelativeMove(int32_t, int32_t)
@@ -302,7 +345,7 @@ void ClientProxy1_0::mouseWheel(int32_t, int32_t yDelta)
 {
   // clients prior to 1.3 only support the y axis
   LOG_VERBOSE("send mouse wheel to \"%s\" %+d", getName().c_str(), yDelta);
-  ProtocolUtil::writef(getStream(), kMsgDMouseWheel1_0, yDelta);
+  ProtocolUtil::writef(inputStream(), kMsgDMouseWheel1_0, yDelta);
 }
 
 void ClientProxy1_0::sendDragInfo(uint32_t, const char *, size_t)
@@ -338,6 +381,7 @@ void ClientProxy1_0::screensaver(bool on)
 
 void ClientProxy1_0::resetOptions()
 {
+  retireInputSequenceTrace();
   LOG_VERBOSE("send reset options to \"%s\"", getName().c_str());
   ProtocolUtil::writef(getStream(), kMsgCResetOptions);
 
@@ -355,7 +399,8 @@ void ClientProxy1_0::setOptions(const OptionsList &options)
     return;
   }
 
-  ProtocolUtil::writef(getStream(), kMsgDSetOptions, &options);
+  const auto outgoing = prepareInputSequenceOptions(options);
+  ProtocolUtil::writef(getStream(), kMsgDSetOptions, &outgoing);
 
   // check options
   for (uint32_t i = 0, n = (uint32_t)options.size(); i < n; i += 2) {

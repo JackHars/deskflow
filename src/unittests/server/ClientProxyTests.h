@@ -22,6 +22,20 @@ private Q_SLOTS:
   void keyRepeat();
   void keyUp_data();
   void keyUp();
+  void inputSequence_requiresAuthenticatedProtocol18();
+  void inputSequence_wrapsAllInputWriters_data();
+  void inputSequence_wrapsAllInputWriters();
+  void inputSequence_preservesControlsAndUnstampedInput();
+  void inputSequence_receiptRetainsExactOrigin();
+  void inputSequence_resetAndDuplicateNegotiation();
+  void inputSequence_rejectsMalformedAndUnsolicitedReplies_data();
+  void inputSequence_rejectsMalformedAndUnsolicitedReplies();
+  void inputSequence_packetBoundaries_data();
+  void inputSequence_packetBoundaries();
+  void inputSequence_boundsPreserveOrdinaryInput();
+  void inputSequence_tlsRevocationAndReplacement();
+  void inputSequence_counterExhaustion();
+  void inputSequence_callbackMayResetOrDestroy();
 
 private:
   Log m_log;

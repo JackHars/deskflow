@@ -22,6 +22,7 @@ private Q_SLOTS:
   void originalCapture_exactDispatchAndOwnership();
   void originalCapture_motionCrossingUsesEnterDecision();
   void originalCapture_filterAndAmbiguityDenials();
+  void originalCapture_negotiatedPacketsRetainRecipientAndStamp();
   void inputRoutes_keepPressRecipientAcrossSwitch();
   void inputRoutes_localPressDoesNotAcquireRemoteRecipient();
   void inputRoutes_disconnectDoesNotRetargetHeldInput();

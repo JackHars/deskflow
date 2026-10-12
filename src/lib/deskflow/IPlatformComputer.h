@@ -145,6 +145,15 @@ public:
   */
   virtual bool isPrimary() const = 0;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Whether this backend reports actual API submissions inside the current
+  // legacy-input sequence scope. This is not proof of native input delivery.
+  virtual bool supportsInputSequenceTrace() const noexcept
+  {
+    return false;
+  }
+#endif
+
   //@}
   // IKeyState overrides
   void fakeKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const std::string &lang) override = 0;

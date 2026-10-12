@@ -17,6 +17,7 @@
 #include "deskflow/MouseTypes.h"
 #include "server/Config.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputSequence.h"
 #include "windowshare/InputRouteState.h"
 #include "windowshare/OriginalInputRoute.h"
 #include "windowshare/SelectedPeer.h"
@@ -423,6 +424,7 @@ private:
     Server &server;
     OriginalRouteObservation *previous;
     deskflow::windowshare::OriginalInputRouteDecision decision;
+    deskflow::windowshare::InputSequenceOriginScope inputSequenceOrigin;
     unsigned sends = 0;
     int exceptions;
   };

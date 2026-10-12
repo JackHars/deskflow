@@ -8,6 +8,12 @@
 #pragma once
 
 #include <cstdint>
+
+// Optional ISQ1 extension; never send these to an unnegotiated peer. DSEQ and
+// CISR use the bounded codecs in InputSequence.h, not ProtocolUtil strings.
+extern const char *const kMsgCInputSequenceAck;     // CISA + generation:u32
+extern const char *const kMsgDInputSequence;        // DSEQ + body length:u16 + bounded body
+extern const char *const kMsgCInputSequenceReceipt; // CISR + fixed 15-byte body
 /**
  * @file ProtocolTypes.h
  * @brief Deskflow Network Protocol Specification and Implementation

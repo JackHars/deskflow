@@ -100,4 +100,6 @@ private:
   EventQueueTimer *m_heartbeatTimer = nullptr;
   MessageParser m_parser = &ClientProxy1_0::parseHandshakeMessage;
   IEventQueue *m_events;
+  std::uint32_t m_messagePacketSize = 0;
+  bool m_disconnected = false;
 };

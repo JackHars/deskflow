@@ -36,7 +36,7 @@ void ClientProxy1_8::keyDown(KeyID key, KeyModifierMask mask, KeyButton button, 
       "send key down to \"%s\" id=%d, mask=0x%04x, button=0x%04x, layout=%s", getName().c_str(), key, mask, button,
       language.c_str()
   );
-  ProtocolUtil::writef(getStream(), kMsgDKeyDown, key, mask, button, &language);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyDown, key, mask, button, &language);
 }
 
 void ClientProxy1_8::keyRepeat(
@@ -47,5 +47,5 @@ void ClientProxy1_8::keyRepeat(
       "send key repeat to \"%s\" id=%d, mask=0x%04x, count=%d, button=0x%04x, layout=%s", getName().c_str(), key, mask,
       count, button, language.c_str()
   );
-  ProtocolUtil::writef(getStream(), kMsgDKeyRepeat, key, mask, count, button, &language);
+  ProtocolUtil::writef(inputStream(), kMsgDKeyRepeat, key, mask, count, button, &language);
 }

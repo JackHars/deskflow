@@ -10,6 +10,10 @@
 #include "base/Log.h"
 #include "deskflow/IPlatformComputer.h"
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputSequence.h"
+#endif
+
 #include <QProcess>
 
 #ifdef Q_OS_WIN
@@ -20,6 +24,14 @@
 namespace deskflow {
 
 namespace {
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+void traceInputParticipation(const IPlatformComputer &computer) noexcept
+{
+  if (computer.supportsInputSequenceTrace())
+    windowshare::InputSequenceSubmissionScope::backendParticipated();
+}
+#endif
 
 bool runComputerCommand(const QString &commandLine)
 {
@@ -221,10 +233,19 @@ void Computer::screensaver(bool) const
 
 void Computer::keyDown(KeyID id, KeyModifierMask mask, KeyButton button, const std::string &lang)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   // check for ctrl+alt+del emulation
   if (id == kKeyDelete && (mask & (KeyModifierControl | KeyModifierAlt)) == (KeyModifierControl | KeyModifierAlt)) {
     LOG_DEBUG("emulating ctrl+alt+del press");
     if (m_computer->fakeCtrlAltDel()) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      // A platform-specific secure-attention operation is not an ordinary
+      // filtered key or a traceable EIS input submission.
+      if (m_computer->supportsInputSequenceTrace())
+        windowshare::InputSequenceSubmissionScope::fail();
+#endif
       return;
     }
   }
@@ -234,39 +255,60 @@ void Computer::keyDown(KeyID id, KeyModifierMask mask, KeyButton button, const s
 void Computer::keyRepeat(KeyID id, KeyModifierMask mask, int32_t count, KeyButton button, const std::string &lang)
 {
   assert(!m_isPrimary);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeKeyRepeat(id, mask, count, button, lang);
 }
 
 void Computer::keyUp(KeyID, KeyModifierMask, KeyButton button)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeKeyUp(button);
 }
 
 void Computer::mouseDown(ButtonID button)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeMouseButton(button, true);
 }
 
 void Computer::mouseUp(ButtonID button)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeMouseButton(button, false);
 }
 
 void Computer::mouseMove(int32_t x, int32_t y)
 {
   assert(!m_isPrimary);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeMouseMove(x, y);
 }
 
 void Computer::mouseRelativeMove(int32_t dx, int32_t dy) const
 {
   assert(!m_isPrimary);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeMouseRelativeMove(dx, dy);
 }
 
 void Computer::mouseWheel(int32_t xDelta, int32_t yDelta) const
 {
   assert(!m_isPrimary);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  traceInputParticipation(*m_computer);
+#endif
   m_computer->fakeMouseWheel({xDelta, yDelta});
 }
 

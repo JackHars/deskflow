@@ -22,6 +22,69 @@
 
 #include <cstring>
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputSequence.h"
+#include <QScopeGuard>
+#include <array>
+#include <limits>
+
+namespace {
+
+// One already validated legacy message. Reads never cross into the transport
+// or a following message, and the existing version-specific parsers remain the
+// only path that translates and executes input. Output always uses m_stream.
+class InputSequencePayloadStream final : public deskflow::IStream
+{
+public:
+  explicit InputSequencePayloadStream(std::string_view payload) : m_payload(payload)
+  {
+  }
+  uint32_t read(void *buffer, uint32_t size) override
+  {
+    const auto count = std::min<std::size_t>(size, m_payload.size());
+    if (buffer && count)
+      std::memcpy(buffer, m_payload.data(), count);
+    m_payload.remove_prefix(count);
+    return static_cast<uint32_t>(count);
+  }
+  bool isReady() const override
+  {
+    return !m_payload.empty();
+  }
+  uint32_t getSize() const override
+  {
+    return static_cast<uint32_t>(m_payload.size());
+  }
+  void *getEventTarget() const override
+  {
+    return nullptr;
+  }
+  void close() override
+  {
+    m_payload = {};
+  }
+  void write(const void *, uint32_t) override
+  {
+    throw BadClientException("Unexpected output to input sequence payload");
+  }
+  void flush() override
+  {
+  }
+  void shutdownInput() override
+  {
+    close();
+  }
+  void shutdownOutput() override
+  {
+  }
+
+private:
+  std::string_view m_payload;
+};
+
+} // namespace
+#endif
+
 //
 // ServerProxy
 //
@@ -78,6 +141,19 @@ void ServerProxy::setKeepAliveRate(double rate)
 
 void ServerProxy::handleData()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (m_sequenceProtocolFailed)
+    return;
+  if (m_sequenceDispatching) {
+    // Do not let a nested event dispatch read transport bytes through the
+    // temporary payload stream, or attribute its submissions to this input.
+    deskflow::windowshare::InputSequenceSubmissionScope::fail();
+    m_sequenceProtocolFailed = true;
+    revokeInputSequence();
+    return;
+  }
+  m_messageBytes = m_stream->getSize();
+#endif
   // handle messages until there are no more.  first read message code.
   uint8_t code[4];
   uint32_t n = m_stream->read(code, 4);
@@ -110,12 +186,19 @@ void ServerProxy::handleData()
       }
     } catch (const BadClientException &e) {
       LOG_ERR("protocol error from server: %s", e.what());
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      m_sequenceProtocolFailed = true;
+      revokeInputSequence();
+#endif
       ProtocolUtil::writef(m_stream, kMsgEBad);
       requestDisconnect("invalid message from server");
       return;
     }
 
     // next message
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    m_messageBytes = m_stream->getSize();
+#endif
     n = m_stream->read(code, 4);
   }
 
@@ -126,6 +209,11 @@ ServerProxy::ConnectionResult ServerProxy::parseHandshakeMessage(const uint8_t *
 {
   using enum ConnectionResult;
   using enum deskflow::core::ConnectionRefusal;
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (memcmp(code, kMsgDInputSequence, 4) == 0)
+    throw BadClientException("Input sequence before handshake completion");
+#endif
 
   if (memcmp(code, kMsgQInfo, 4) == 0) {
     queryInfo();
@@ -217,6 +305,13 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
 {
   using enum ConnectionResult;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (memcmp(code, kMsgDInputSequence, 4) == 0) {
+    inputSequence();
+    return Okay;
+  }
+#endif
+
   if (memcmp(code, kMsgDMouseMove, 4) == 0) {
     mouseMove();
   }
@@ -233,7 +328,7 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
     uint16_t id = 0;
     uint16_t mask = 0;
     uint16_t button = 0;
-    ProtocolUtil::readf(m_stream, kMsgDKeyDown1_1 + 4, &id, &mask, &button);
+    ProtocolUtil::readf(getStream(), kMsgDKeyDown1_1 + 4, &id, &mask, &button);
     LOG_VERBOSE("recv key down id=0x%08x, mask=0x%04x, button=0x%04x", id, mask, button);
 
     keyDown(id, mask, button, "");
@@ -256,7 +351,7 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
     uint16_t mask = 0;
     uint16_t count = 0;
     uint16_t button = 0;
-    ProtocolUtil::readf(m_stream, kMsgDKeyRepeat1_1 + 4, &id, &mask, &count, &button);
+    ProtocolUtil::readf(getStream(), kMsgDKeyRepeat1_1 + 4, &id, &mask, &count, &button);
     LOG_VERBOSE("recv key repeat id=0x%08x, mask=0x%04x, count=%d, button=0x%04x", id, mask, count, button);
 
     keyRepeat(id, mask, count, button, "");
@@ -607,7 +702,7 @@ void ServerProxy::keyUp()
   uint16_t id;
   uint16_t mask;
   uint16_t button;
-  ProtocolUtil::readf(m_stream, kMsgDKeyUp + 4, &id, &mask, &button);
+  ProtocolUtil::readf(getStream(), kMsgDKeyUp + 4, &id, &mask, &button);
   LOG_VERBOSE("recv key up id=0x%08x, mask=0x%04x, button=0x%04x", id, mask, button);
 
   // translate
@@ -627,7 +722,7 @@ void ServerProxy::mouseDown()
 
   // parse
   int8_t id;
-  ProtocolUtil::readf(m_stream, kMsgDMouseDown + 4, &id);
+  ProtocolUtil::readf(getStream(), kMsgDMouseDown + 4, &id);
   LOG_VERBOSE("recv mouse down id=%d", id);
 
   // forward
@@ -641,7 +736,7 @@ void ServerProxy::mouseUp()
 
   // parse
   int8_t id;
-  ProtocolUtil::readf(m_stream, kMsgDMouseUp + 4, &id);
+  ProtocolUtil::readf(getStream(), kMsgDMouseUp + 4, &id);
   LOG_VERBOSE("recv mouse up id=%d", id);
 
   // forward
@@ -654,13 +749,17 @@ void ServerProxy::mouseMove()
   bool ignore;
   int16_t x;
   int16_t y;
-  ProtocolUtil::readf(m_stream, kMsgDMouseMove + 4, &x, &y);
+  ProtocolUtil::readf(getStream(), kMsgDMouseMove + 4, &x, &y);
 
   // note if we should ignore the move
   ignore = m_ignoreMouse;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (ignore)
+    deskflow::windowshare::InputSequenceSubmissionScope::filtered();
+#endif
 
   // compress mouse motion events if more input follows
-  if (!ignore && !m_compressMouse && m_stream->isReady()) {
+  if (!ignore && !m_compressMouse && getStream()->isReady()) {
     m_compressMouse = true;
   }
 
@@ -687,13 +786,17 @@ void ServerProxy::mouseRelativeMove()
   bool ignore;
   int16_t dx;
   int16_t dy;
-  ProtocolUtil::readf(m_stream, kMsgDMouseRelMove + 4, &dx, &dy);
+  ProtocolUtil::readf(getStream(), kMsgDMouseRelMove + 4, &dx, &dy);
 
   // note if we should ignore the move
   ignore = m_ignoreMouse;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (ignore)
+    deskflow::windowshare::InputSequenceSubmissionScope::filtered();
+#endif
 
   // compress mouse motion events if more input follows
-  if (!ignore && !m_compressMouseRelative && m_stream->isReady()) {
+  if (!ignore && !m_compressMouseRelative && getStream()->isReady()) {
     m_compressMouseRelative = true;
   }
 
@@ -719,7 +822,7 @@ void ServerProxy::mouseWheel()
   // parse
   int16_t xDelta;
   int16_t yDelta;
-  ProtocolUtil::readf(m_stream, kMsgDMouseWheel + 4, &xDelta, &yDelta);
+  ProtocolUtil::readf(getStream(), kMsgDMouseWheel + 4, &xDelta, &yDelta);
   LOG_VERBOSE("recv mouse wheel %+d,%+d", xDelta, yDelta);
 
   // forward
@@ -739,6 +842,9 @@ void ServerProxy::screensaver()
 
 void ServerProxy::resetOptions()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  revokeInputSequence();
+#endif
   // parse
   LOG_VERBOSE("recv reset options");
 
@@ -758,13 +864,26 @@ void ServerProxy::setOptions()
 {
   // parse
   OptionsList options;
-  ProtocolUtil::readf(m_stream, kMsgDSetOptions + 4, &options);
+  if (!ProtocolUtil::readf(m_stream, kMsgDSetOptions + 4, &options)) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (supportsInputSequence())
+      throw BadClientException("Incomplete options for input sequence negotiation");
+#endif
+  }
   LOG_VERBOSE("recv set options size=%d", options.size());
 
   if (options.size() % 2 != 0) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (supportsInputSequence())
+      throw BadClientException("Malformed options for input sequence negotiation");
+#endif
     LOG_ERR("options are the incorrect size, can not process them");
     return;
   }
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  setInputSequenceOptions(options);
+#endif
 
   // forward
   m_client->setOptions(options);
@@ -795,6 +914,118 @@ void ServerProxy::setOptions()
     }
   }
 }
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+void ServerProxy::revokeInputSequence()
+{
+  m_sequenceGeneration = 0;
+  m_sequenceNext = 0;
+  m_sequencePeer.reset();
+}
+
+bool ServerProxy::inputSequenceConnectionLive() const
+{
+  const auto current = m_stream->authenticatedPeerTicket();
+  return m_sequencePeer && m_sequencePeer->live() && current && current->live() &&
+         current->incarnation() == m_sequencePeer->incarnation();
+}
+
+void ServerProxy::setInputSequenceOptions(const OptionsList &options)
+{
+  if (!supportsInputSequence())
+    return;
+  std::optional<uint32_t> advertised;
+  for (std::size_t index = 0; index < options.size(); index += 2) {
+    if (options[index] != kOptionInputSequenceTrace)
+      continue;
+    if (advertised)
+      throw BadClientException("Duplicate input sequence option");
+    advertised = options[index + 1];
+  }
+  if (!advertised)
+    return;
+  if (*advertised == 0) {
+    revokeInputSequence();
+    return;
+  }
+  if (*advertised == m_sequenceGeneration && inputSequenceConnectionLive()) {
+    // Retransmission is idempotent; it must not rewind the expected sequence.
+    ProtocolUtil::writef(m_stream, kMsgCInputSequenceAck, *advertised);
+    return;
+  }
+  if (*advertised <= m_sequenceGenerationHighWater)
+    throw BadClientException("Retired input sequence generation");
+  revokeInputSequence();
+  m_sequenceGenerationHighWater = *advertised;
+  const auto peer = m_stream->authenticatedPeerTicket();
+  if (!peer || !peer->live())
+    return;
+  m_sequencePeer = peer;
+  m_sequenceGeneration = *advertised;
+  m_sequenceNext = 1;
+  ProtocolUtil::writef(m_stream, kMsgCInputSequenceAck, *advertised);
+}
+
+void ServerProxy::inputSequence()
+{
+  using namespace deskflow::windowshare;
+  m_sequenceDispatching = true;
+  const auto dispatchGuard = qScopeGuard([this] { m_sequenceDispatching = false; });
+  if (!supportsInputSequence() || !m_sequenceGeneration || !inputSequenceConnectionLive()) {
+    revokeInputSequence();
+    throw BadClientException("Unnegotiated input sequence");
+  }
+  // m_messageBytes was captured before reading the message code. A four-byte
+  // malformed packet must not borrow its body from the next packet.
+  if (m_messageBytes < 6 + inputSequenceHeaderBytes + 4 || m_messageBytes > 6 + inputSequenceMaximumBody)
+    throw BadClientException("Invalid input sequence packet size");
+  std::array<char, 2 + inputSequenceMaximumBody> bytes{};
+  const auto remaining = m_messageBytes - 4;
+  if (m_stream->read(bytes.data(), remaining) != remaining)
+    throw BadClientException("Incomplete input sequence packet");
+  const auto bodySize =
+      static_cast<uint32_t>((static_cast<unsigned char>(bytes[0]) << 8) | static_cast<unsigned char>(bytes[1]));
+  if (bodySize != remaining - 2)
+    throw BadClientException("Input sequence packet length mismatch");
+  const auto envelope = decodeInputSequenceEnvelope(std::string_view(bytes.data() + 2, bodySize));
+  if (!envelope || envelope->token.generation != m_sequenceGeneration || !m_sequenceNext ||
+      envelope->token.wireSequence != m_sequenceNext)
+    throw BadClientException("Invalid input sequence metadata or payload");
+
+  // Previous unstamped motion belongs to its own dispatch, never this token.
+  flushCompressedMouse();
+  if (m_sequenceProtocolFailed || !inputSequenceConnectionLive()) {
+    revokeInputSequence();
+    throw BadClientException("Input sequence connection revoked");
+  }
+  m_sequenceNext = m_sequenceNext == std::numeric_limits<uint64_t>::max() ? 0 : m_sequenceNext + 1;
+  InputSequenceReceipt receipt;
+  bool dispatchFailed = false;
+  {
+    InputSequenceSubmissionScope scope(envelope->token);
+    InputSequencePayloadStream payload(std::string_view(envelope->payload).substr(4));
+    m_sequencePayloadStream = &payload;
+    const auto restore = qScopeGuard([this] { m_sequencePayloadStream = nullptr; });
+    try {
+      const auto result = parseMessage(reinterpret_cast<const uint8_t *>(envelope->payload.data()));
+      if (result != ConnectionResult::Okay || payload.isReady())
+        throw BadClientException("Input sequence payload not completely handled");
+    } catch (...) {
+      InputSequenceSubmissionScope::fail();
+      dispatchFailed = true;
+    }
+    receipt = scope.receipt();
+  }
+  if (m_sequenceProtocolFailed || !inputSequenceConnectionLive()) {
+    revokeInputSequence();
+    throw BadClientException("Input sequence connection or dispatch revoked");
+  }
+  const auto frame = encodeInputSequenceReceipt(receipt);
+  m_stream->write(frame.data(), static_cast<uint32_t>(frame.size()));
+  if (dispatchFailed)
+    throw BadClientException("Input sequence backend dispatch failed");
+}
+#endif
 
 void ServerProxy::queryInfo()
 {

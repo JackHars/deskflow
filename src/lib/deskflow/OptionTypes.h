@@ -57,6 +57,9 @@ static const OptionID kOptionDefaultLockToComputerState = OPTION_CODE("LTSS");
 static const OptionID kOptionDisableLockToComputer = OPTION_CODE("DLTS");
 static const OptionID kOptionClipboardSharing = OPTION_CODE("CLPS");
 static const OptionID kOptionClipboardSharingSize = OPTION_CODE("CLSZ");
+// Protocol 1.8 opt-in input trace version 1. Value is a nonzero negotiation
+// generation; zero withdraws it. Older peers ignore this ordinary option.
+static const OptionID kOptionInputSequenceTrace = OPTION_CODE("ISQ1");
 //@}
 
 //! @name Computer switch corner masks

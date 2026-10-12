@@ -15,3 +15,7 @@ add_library(client STATIC
 )
 
 target_link_libraries(client PUBLIC common)
+
+if(BUILD_WINDOWSHARE)
+  target_compile_definitions(client PUBLIC BUILD_WINDOWSHARE=1)
+endif()

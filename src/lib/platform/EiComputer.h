@@ -98,6 +98,12 @@ public:
   void setOptions(const OptionsList &options) override;
   void setSequenceNumber(std::uint32_t) override;
   bool isPrimary() const override;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool supportsInputSequenceTrace() const noexcept override
+  {
+    return true;
+  }
+#endif
 
   // Send clipboard event (needed by PortalInputCapture)
   void sendClipboardEvent(EventTypes type, ClipboardID id) const;

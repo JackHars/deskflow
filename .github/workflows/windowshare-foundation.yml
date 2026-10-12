@@ -25,10 +25,18 @@ on:
       - 'src/lib/net/**'
       - 'src/unittests/net/**'
       - 'src/lib/server/**'
+      - 'src/lib/client/**'
+      - 'src/lib/deskflow/InputSequence.h'
+      - 'src/lib/deskflow/Computer.*'
+      - 'src/lib/deskflow/IPlatformComputer.h'
+      - 'src/lib/deskflow/OptionTypes.h'
+      - 'src/lib/deskflow/ProtocolTypes.*'
       - 'src/lib/deskflow/ServerApp.*'
       - 'src/lib/deskflow/ClientApp.*'
       - 'src/lib/deskflow/CMakeLists.txt'
       - 'src/unittests/server/**'
+      - 'src/unittests/client/**'
+      - 'src/unittests/deskflow/**'
       - 'src/apps/CMakeLists.txt'
       - 'src/unittests/CMakeLists.txt'
       - 'CMakeLists.txt'
@@ -55,10 +63,18 @@ on:
       - 'src/lib/net/**'
       - 'src/unittests/net/**'
       - 'src/lib/server/**'
+      - 'src/lib/client/**'
+      - 'src/lib/deskflow/InputSequence.h'
+      - 'src/lib/deskflow/Computer.*'
+      - 'src/lib/deskflow/IPlatformComputer.h'
+      - 'src/lib/deskflow/OptionTypes.h'
+      - 'src/lib/deskflow/ProtocolTypes.*'
       - 'src/lib/deskflow/ServerApp.*'
       - 'src/lib/deskflow/ClientApp.*'
       - 'src/lib/deskflow/CMakeLists.txt'
       - 'src/unittests/server/**'
+      - 'src/unittests/client/**'
+      - 'src/unittests/deskflow/**'
       - 'src/apps/CMakeLists.txt'
       - 'src/unittests/CMakeLists.txt'
       - 'CMakeLists.txt'
@@ -110,7 +126,7 @@ jobs:
     container:
       image: debian:trixie
       options: --init
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - name: Install viewer, X11 fixture and core dependencies
         run: |
@@ -138,12 +154,17 @@ jobs:
       - name: Compile the real opt-in Linux injection backend
         run: |
           cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
-          cmake --build build/integrated --target deskflow-core windowshare-core-args-tests windowshare-x11-viewport-tests --parallel 2
-          ctest --test-dir build/integrated/src/unittests -R '^windowshare-(core-args|x11-viewport-.*)$' --output-on-failure
+          cmake --build build/integrated --target deskflow-core windowshare-core-args-tests windowshare-x11-viewport-tests InputSequenceTests ComputerInputSequenceTests ClientProxyTests ServerProxyTests ServerTests --parallel 2
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(InputSequenceTests|ComputerInputSequenceTests|ClientProxyTests|ServerProxyTests|ServerTests|windowshare-(core-args|x11-viewport-.*))$' --output-on-failure
       - name: Verify terminal GNOME provider absence on a private bus
         run: python3 deploy/windowshare/gnome-core-smoke.py build/integrated/bin/deskflow-core
       - name: Exercise the real core observer on a private Xvfb
         run: python3 deploy/windowshare/x11-core-smoke.py build/integrated/bin/deskflow-core
+      - name: Check ordinary protocol compatibility with window sharing disabled
+        run: |
+          cmake -S . -B build/legacy -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
+          cmake --build build/legacy --target ClientProxyTests ServerProxyTests --parallel 2
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(ClientProxyTests|ServerProxyTests)$' --output-on-failure
   gnome-provider:
     runs-on: ubuntu-24.04
     container:
@@ -190,8 +211,8 @@ jobs:
       - run: ctest --test-dir build/app --output-on-failure
       - name: Configure opt-in Deskflow integration
         run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-      - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests ServerTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
-      - run: ctest --test-dir build/integrated/src/unittests -R '^(ServerTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
+      - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
+      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
       - name: Verify Mac hotkey modifier mapping without posting input
         env:
           QT_QPA_PLATFORM: offscreen

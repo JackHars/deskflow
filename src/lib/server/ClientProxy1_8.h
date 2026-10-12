@@ -17,6 +17,16 @@ public:
   void keyDown(KeyID, KeyModifierMask, KeyButton, const std::string &) override;
   void keyRepeat(KeyID, KeyModifierMask, int32_t count, KeyButton, const std::string &) override;
 
+protected:
+  bool supportsInputSequenceTrace() const noexcept override
+  {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    return true;
+#else
+    return false;
+#endif
+  }
+
 private:
   void synchronizeLanguages() const;
 };

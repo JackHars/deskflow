@@ -13,6 +13,11 @@
 #include "deskflow/ClipboardTypes.h"
 #include "deskflow/KeyTypes.h"
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/OptionTypes.h"
+#include "io/AuthenticatedPeerTicket.h"
+#endif
+
 class Client;
 class ClientInfo;
 class EventQueueTimer;
@@ -66,8 +71,19 @@ protected:
   void keyDown(uint16_t id, uint16_t mask, uint16_t button, const std::string &lang);
   void keyRepeat(uint16_t id, uint16_t mask, uint16_t count, uint16_t button, const std::string &lang);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  virtual bool supportsInputSequence() const
+  {
+    return false;
+  }
+#endif
+
   deskflow::IStream *getStream() const
   {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (m_sequencePayloadStream)
+      return m_sequencePayloadStream;
+#endif
     return m_stream;
   }
 
@@ -108,11 +124,29 @@ private:
   void queryInfo();
   void infoAcknowledgment();
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  void inputSequence();
+  void setInputSequenceOptions(const OptionsList &options);
+  void revokeInputSequence();
+  bool inputSequenceConnectionLive() const;
+#endif
+
 private:
   using MessageParser = ConnectionResult (ServerProxy::*)(const uint8_t *);
 
   Client *m_client = nullptr;
   deskflow::IStream *m_stream = nullptr;
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  deskflow::IStream *m_sequencePayloadStream = nullptr;
+  std::optional<deskflow::AuthenticatedPeerTicket> m_sequencePeer;
+  uint32_t m_sequenceGeneration = 0;
+  uint32_t m_sequenceGenerationHighWater = 0;
+  uint64_t m_sequenceNext = 0;
+  uint32_t m_messageBytes = 0;
+  bool m_sequenceDispatching = false;
+  bool m_sequenceProtocolFailed = false;
+#endif
 
   uint32_t m_seqNum = 0;
 

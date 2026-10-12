@@ -7,7 +7,13 @@
 
 #pragma once
 
+#include "deskflow/InputSequence.h"
+#include "io/AuthenticatedPeerTicket.h"
 #include "server/BaseClientProxy.h"
+
+#include <array>
+#include <functional>
+#include <memory>
 
 namespace deskflow {
 class IStream;
@@ -35,7 +41,7 @@ public:
   /*!
   Ask the client to disconnect, using \p msg as the reason.
   */
-  void close(const char *msg) const;
+  void close(const char *msg);
 
   //@}
   //! @name accessors
@@ -46,6 +52,23 @@ public:
   Returns the original stream passed to the c'tor.
   */
   deskflow::IStream *getStream() const override;
+
+  std::optional<std::uint32_t> requestInputSequenceTrace() override;
+
+  struct InputSequenceStatistics
+  {
+    std::uint64_t enveloped = 0, receipts = 0, retiredReceipts = 0, unavailable = 0;
+    std::size_t outstanding = 0;
+  };
+  InputSequenceStatistics inputSequenceStatistics() const noexcept;
+
+  // Event-thread callback with the exact retained capture token. A receipt
+  // describes backend API submission only, not application delivery. The
+  // pending record is removed before calling out; reset/close/destruction from
+  // the callback is supported. Retired-generation receipts do not call out.
+  std::function<
+      void(const deskflow::windowshare::InputSequenceToken &, const deskflow::windowshare::InputSequenceReceipt &)>
+      onInputSequenceReceipt;
 
   //@}
 
@@ -76,6 +99,37 @@ public:
   void fileChunkSending(uint8_t mark, char *data, size_t dataSize) override = 0;
   void secureInputNotification(const std::string &app) const override = 0;
 
+protected:
+  virtual bool supportsInputSequenceTrace() const noexcept
+  {
+    return false;
+  }
+  deskflow::IStream *inputStream() const noexcept;
+  OptionsList prepareInputSequenceOptions(const OptionsList &options);
+  void retireInputSequenceTrace() noexcept;
+  void stopInputSequenceTrace() noexcept;
+  void receiveInputSequenceAck(std::uint32_t generation);
+  void receiveInputSequenceReceipt(const deskflow::windowshare::InputSequenceReceipt &receipt);
+  std::shared_ptr<const bool> proxyLifetime() const noexcept
+  {
+    return m_alive;
+  }
+
 private:
+  friend class ClientProxyTests;
+  class InputStream;
+  void writeInputPacket(const void *buffer, std::uint32_t size);
+  bool inputSequenceTlsLive() const;
+
   deskflow::IStream *m_stream;
+  std::unique_ptr<InputStream> m_inputStream;
+  std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
+  std::optional<deskflow::AuthenticatedPeerTicket> m_inputSequenceTicket;
+  std::uint32_t m_inputSequenceIssued = 0, m_inputSequenceRequested = 0, m_inputSequenceGeneration = 0;
+  std::uint64_t m_inputSequenceWire = 0;
+  bool m_inputSequenceAcknowledged = false, m_inputSequenceStopped = false;
+  std::array<
+      std::optional<deskflow::windowshare::InputSequenceToken>, deskflow::windowshare::inputSequenceMaximumOutstanding>
+      m_inputSequencePending;
+  InputSequenceStatistics m_inputSequenceStatistics;
 };
