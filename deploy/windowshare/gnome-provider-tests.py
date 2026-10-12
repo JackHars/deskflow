@@ -85,16 +85,19 @@ def private_environment(root):
 
 
 class Processes:
-    def __init__(self, output, env):
+    def __init__(self, output, env, *, lifetime_seconds=180):
+        require(type(lifetime_seconds) is int and 30 <= lifetime_seconds <= 600,
+                "Process lifetime must be an integer from 30 to 600 seconds")
         self.output = output
         self.env = env
         self.children = []
         self.files = []
-        self.deadline = time.monotonic() + 180
+        self.lifetime_seconds = lifetime_seconds
+        self.deadline = time.monotonic() + lifetime_seconds
         self.closed = False
 
     def check(self):
-        require(time.monotonic() < self.deadline, "Whole fixture exceeded 180 seconds")
+        require(time.monotonic() < self.deadline, f"Whole fixture exceeded {self.lifetime_seconds} seconds")
         for path in self.output.glob("*.log"):
             require(path.stat().st_size <= LOG_LIMIT, f"Log exceeded {LOG_LIMIT} bytes: {path.name}")
 

@@ -51,6 +51,12 @@ Configurations that worked around the previous reversal need their hotkey
 modifiers adjusted. The mapping regressions pass, but a complete physical input
 round trip remains unverified.
 
+The next manual test uses a visible Start/Stop control and instructions inside
+the disposable source window. Its countdown begins after connection readiness;
+the Linux preparation wait has a separate deadline. Fresh receipt, cancellation
+and cleanup checks remain separate from the human input verdict. See
+[`physical-macos.md`](../deploy/windowshare/physical-macos.md) for the procedure.
+
 ### Actual two-machine synthetic acceptance
 
 The coordinator exports only its own disposable Mac source window. A private

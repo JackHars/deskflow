@@ -3,6 +3,48 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Visible physical-test controls (2026-10-12)
+
+The reusable physical acceptance harness now starts from a button in its own
+disposable source window. Fixed instructions and a 120-second countdown appear
+only after the route is ready. Before Start, the Mac core and Linux native
+session remain unstarted. The old Option/Command mapping fails the setup check;
+both actual hotkey registrations must report the expected Option mask before
+the Linux session starts. Stop, close and status loss request bounded teardown.
+The source never synthesizes input or records typed text.
+
+The Mac coordinator retains gap-checked event history, rejects stale source
+publications, drains known late control replies during cancellation and checks
+fresh restoration both before and after host termination. A host shutdown
+timeout preserves a bounded stack sample and remains a failed run. Cleanup of
+one evidence stream cannot skip the other owned process cleanup.
+
+The Linux helper separates preparation, startup and running deadlines. It
+accepts Stop before preparation finishes and during startup. Its host supervisor
+audits ordinary Deskflow processes/settings without exposing the host desktop
+or process filesystem to the container. Lifecycle success remains explicitly
+separate from physical acceptance. The current source builds; all 11 Mac
+coordinator regressions and 20 Linux helper regressions pass without native
+input. CI runs the new control tests. Usage is in
+`deploy/windowshare/physical-macos.md` and `physical-linux.md`.
+
+The same candidate passed all 61 control tests on the home Ubuntu machine
+(20 Linux helper, 11 Mac coordinator, 10 relay, 11 startup-readiness and 9 viewer
+fixture tests), with no skips. One actual preparation-to-Stop run passed in
+2.05 seconds without receiving Start: its prepared container contained only
+`docker-init` and Python, with no native session or relays. All three command
+exits were zero, and the ordinary Deskflow process, settings and existing
+container inventory were unchanged. Independent local verification matched
+all 18 copied public artifacts and all 25 staged source files to their hashes.
+Evidence is `build/physical-fixture-agent/ubuntu-gate-20261012/evidence.json`
+and `independent-verification.json` in the same directory. Startup cancellation
+has control regressions; this actual smoke does not exercise native startup.
+
+No new Mac source window or physical route was launched for this change.
+The package permission and human physical acceptance remain open; the overall
+completion estimate remains about 50%. Local evidence is under
+`build/manual-acceptance-20261012/`.
+
 ## Physical input session preparation (2026-10-12)
 
 The first bounded human-test session authenticated an actual experimental Mac

@@ -9,8 +9,12 @@
 #include <CoreGraphics/CGWindow.h>
 #include <QAbstractNativeEventFilter>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QElapsedTimer>
 #include <QEvent>
+#include <QFile>
+#include <QFileInfo>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -19,14 +23,21 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPointer>
+#include <QPushButton>
 #include <QSaveFile>
 #include <QSet>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QWidget>
+#include <algorithm>
+#include <fcntl.h>
+#include <functional>
+#include <memory>
 #include <objc/message.h>
 #include <objc/runtime.h>
+#include <optional>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace {
@@ -52,6 +63,72 @@ id nativeApplication()
 {
   return nativeMessage<id>(reinterpret_cast<id>(objc_getClass("NSApplication")), "sharedApplication");
 }
+
+bool sameStatusFile(const struct stat &a, const struct stat &b)
+{
+  return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
+         a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
+         a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
+}
+
+struct ManualStatus
+{
+  QString state;
+  int remainingSeconds = 0;
+  struct stat file{};
+};
+
+std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &name)
+{
+  if (directory < 0)
+    return std::nullopt;
+  const int descriptor = openat(directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+  if (descriptor < 0)
+    return std::nullopt;
+  QFile file;
+  if (!file.open(descriptor, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
+    close(descriptor);
+    return std::nullopt;
+  }
+  struct stat before{}, after{};
+  if (fstat(descriptor, &before) != 0 || !S_ISREG(before.st_mode) || before.st_uid != getuid() ||
+      before.st_nlink != 1 || (before.st_mode & 0077) || before.st_size <= 0 || before.st_size > 512)
+    return std::nullopt;
+  const auto bytes = file.read(513);
+  if (bytes.size() != before.st_size || fstat(descriptor, &after) != 0 || !sameStatusFile(before, after))
+    return std::nullopt;
+  QJsonParseError error;
+  const auto document = QJsonDocument::fromJson(bytes, &error);
+  // All three allowed keys/values are simple scalars without colons. Counting
+  // member separators also rejects duplicate keys which QJsonObject collapses.
+  if (error.error != QJsonParseError::NoError || !document.isObject() || bytes.count(':') != 3)
+    return std::nullopt;
+  const auto value = document.object();
+  const auto state = value.value("state").toString();
+  const auto seconds = value.value("remainingSeconds");
+  if (value.size() != 3 || !value.value("version").isDouble() || value.value("version").toDouble() != 1 ||
+      !seconds.isDouble() || seconds.toDouble() != seconds.toInt(-1) || seconds.toInt(-1) < 0 ||
+      seconds.toInt() > 120 || (state != "preparing" && state != "ready" && state != "active" && state != "stopped") ||
+      (state == "active" ? seconds.toInt() == 0 : seconds.toInt() != 0))
+    return std::nullopt;
+  return ManualStatus{state, seconds.toInt(), after};
+}
+
+class AcceptanceWindow final : public QWidget
+{
+public:
+  std::function<bool()> onManualClose;
+
+protected:
+  void closeEvent(QCloseEvent *event) override
+  {
+    if (onManualClose && !onManualClose()) {
+      event->ignore();
+    } else {
+      QWidget::closeEvent(event);
+    }
+  }
+};
 } // namespace
 
 // This process is the only target of the opt-in native smoke test. It records
@@ -69,6 +146,11 @@ public:
   void watchWindow(QWidget *window)
   {
     m_window = window;
+    save();
+  }
+  void setManualMetadata(QJsonObject metadata)
+  {
+    m_manual = std::move(metadata);
     save();
   }
   bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *) override
@@ -206,39 +288,41 @@ private:
     // show animation. Latch only the requested Qt frame, not that transient.
     if (m_originalFrame.isEmpty() && settled)
       m_originalFrame = frame;
-    file.write(QJsonDocument(
-                   QJsonObject{
-                       {"keyDown", m_keyDown},
-                       {"keyUp", m_keyUp},
-                       {"mouseDown", m_mouseDown},
-                       {"mouseUp", m_mouseUp},
-                       {"scroll", m_scroll},
-                       {"heldKeys", m_keys.size()},
-                       {"heldButtons", m_buttons.size()},
-                       {"pid", qint64(getpid())},
-                       {"windowId", frame.isEmpty() ? 0 : qint64(ownId)},
-                       {"ready", !m_originalFrame.isEmpty() && settled},
-                       {"title", m_window ? m_window->windowTitle() : QString()},
-                       {"originalFrame", m_originalFrame},
-                       {"frame", frame},
-                       {"eventCount", m_eventCount},
-                       {"nativeEventCount", m_nativeEventCount},
-                       {"eventsDropped", m_eventCount - m_observed.size()},
-                       {"nativeEventsDropped", m_nativeEventCount - m_nativeObserved.size()},
-                       {"eventSequenceExhausted", m_eventCount == receiptSequenceLimit},
-                       {"nativeEventSequenceExhausted", m_nativeEventCount == receiptSequenceLimit},
-                       {"events", m_observed},
-                       {"nativeEvents", m_nativeObserved},
-                       {"nativeActive", bool(nativeMessage<BOOL>(application, "isActive"))},
-                       {"nativeKeyWindow", qint64(nativeMessage<long>(keyWindow, "windowNumber"))},
-                       {"nativeMainWindow", qint64(nativeMessage<long>(mainWindow, "windowNumber"))}
-                   }
-    ).toJson(QJsonDocument::Compact));
+    QJsonObject metadata{
+        {"keyDown", m_keyDown},
+        {"keyUp", m_keyUp},
+        {"mouseDown", m_mouseDown},
+        {"mouseUp", m_mouseUp},
+        {"scroll", m_scroll},
+        {"heldKeys", m_keys.size()},
+        {"heldButtons", m_buttons.size()},
+        {"pid", qint64(getpid())},
+        {"windowId", frame.isEmpty() ? 0 : qint64(ownId)},
+        {"ready", !m_originalFrame.isEmpty() && settled},
+        {"title", m_window ? m_window->windowTitle() : QString()},
+        {"originalFrame", m_originalFrame},
+        {"frame", frame},
+        {"eventCount", m_eventCount},
+        {"nativeEventCount", m_nativeEventCount},
+        {"eventsDropped", m_eventCount - m_observed.size()},
+        {"nativeEventsDropped", m_nativeEventCount - m_nativeObserved.size()},
+        {"eventSequenceExhausted", m_eventCount == receiptSequenceLimit},
+        {"nativeEventSequenceExhausted", m_nativeEventCount == receiptSequenceLimit},
+        {"events", m_observed},
+        {"nativeEvents", m_nativeObserved},
+        {"nativeActive", bool(nativeMessage<BOOL>(application, "isActive"))},
+        {"nativeKeyWindow", qint64(nativeMessage<long>(keyWindow, "windowNumber"))},
+        {"nativeMainWindow", qint64(nativeMessage<long>(mainWindow, "windowNumber"))}
+    };
+    if (!m_manual.isEmpty())
+      metadata["manual"] = m_manual;
+    file.write(QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     file.commit();
   }
   QString m_path;
   QPointer<QWidget> m_window;
   QJsonObject m_originalFrame;
+  QJsonObject m_manual;
   QSet<int> m_keys;
   QSet<int> m_buttons;
   QJsonArray m_observed;
@@ -248,21 +332,221 @@ private:
   QTimer m_stateTimer;
   int m_keyDown = 0, m_keyUp = 0, m_mouseDown = 0, m_mouseUp = 0, m_scroll = 0;
 };
+
+class ManualAcceptance final : public QObject
+{
+public:
+  ManualAcceptance(const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field)
+      : m_recorder(recorder),
+        m_field(field)
+  {
+    const QFileInfo location(path);
+    if (location.isAbsolute() && !location.fileName().isEmpty()) {
+      m_directory =
+          open(QFile::encodeName(location.absolutePath()).constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY);
+      struct stat info{};
+      if (m_directory >= 0 && (fstat(m_directory, &info) != 0 || !S_ISDIR(info.st_mode) || info.st_uid != getuid() ||
+                               (info.st_mode & 0077))) {
+        close(m_directory);
+        m_directory = -1;
+      }
+      m_name = QFile::encodeName(location.fileName());
+    }
+    m_status = new QLabel;
+    m_status->setTextFormat(Qt::PlainText);
+    m_status->setWordWrap(true);
+    layout.insertWidget(0, m_status);
+    m_instructions = new QLabel;
+    m_instructions->setTextFormat(Qt::PlainText);
+    m_instructions->setWordWrap(true);
+    layout.insertWidget(1, m_instructions);
+    auto *buttons = new QHBoxLayout;
+    m_start = new QPushButton("Start");
+    m_stop = new QPushButton("Stop");
+    m_start->setFocusPolicy(Qt::NoFocus);
+    m_stop->setFocusPolicy(Qt::NoFocus);
+    buttons->addWidget(m_start);
+    buttons->addWidget(m_stop);
+    layout.addLayout(buttons);
+    connect(m_start, &QPushButton::clicked, this, [this] {
+      poll();
+      if (m_valid && m_state == "ready" && m_request == "none" && !m_ended) {
+        m_request = "start";
+        ++m_requestSequence;
+        m_state = "preparing";
+        update();
+      }
+    });
+    connect(m_stop, &QPushButton::clicked, this, [this] { requestStop(); });
+    m_clock.start();
+    connect(&m_timer, &QTimer::timeout, this, [this] { poll(); });
+    m_timer.start(100);
+    poll();
+  }
+  ~ManualAcceptance() override
+  {
+    if (m_directory >= 0)
+      close(m_directory);
+  }
+  void requestStop()
+  {
+    if (m_request != "stop") {
+      m_request = "stop";
+      ++m_requestSequence;
+    }
+    m_ended = true;
+    m_state = "stopped";
+    m_remainingSeconds = 0;
+    update();
+  }
+  bool requestClose()
+  {
+    const bool stopWasRequested = m_request == "stop";
+    poll();
+    // Keep the source alive during ordinary restoration. If its coordinator
+    // died, a later close can exit after the collector's grace period; that
+    // premature source loss cannot count as a passing physical test.
+    if (stopWasRequested && coordinatorLost())
+      return true;
+    requestStop();
+    return false;
+  }
+
+private:
+  bool coordinatorLost() const
+  {
+    return !m_valid && m_clock.elapsed() - m_changedAt >= 15000;
+  }
+  void poll()
+  {
+    const auto status = readManualStatus(m_directory, m_name);
+    const auto now = m_clock.elapsed();
+    if (status) {
+      if (m_seenFile && !sameStatusFile(m_lastFile, status->file)) {
+        m_heartbeat = true;
+        m_changedAt = now;
+      }
+      m_lastFile = status->file;
+      m_seenFile = true;
+    }
+    // Require an actual fresh publication after our first observation. Merely
+    // rereading an unchanged old ready file never enables Start or renews it.
+    m_valid = status && m_heartbeat && now - m_changedAt < 2000;
+    if (m_ended) {
+      update();
+      return;
+    }
+    if (!m_valid) {
+      if (m_request == "start") {
+        requestStop();
+        return;
+      }
+      m_state = "preparing";
+    } else if (status->state == "stopped") {
+      m_ended = true;
+      m_state = "stopped";
+    } else if (status->state == "active") {
+      if (m_request != "start") {
+        requestStop();
+        return;
+      }
+      const auto proposed = now + status->remainingSeconds * 1000;
+      m_deadline = m_deadline ? std::min(m_deadline, proposed) : proposed;
+      m_state = "active";
+    } else if (m_deadline) {
+      // Once active, a coordinator rollback cannot silently rearm the test.
+      requestStop();
+      return;
+    } else {
+      m_state = m_request == "start" ? QStringLiteral("preparing") : status->state;
+    }
+    m_remainingSeconds = m_state == "active" ? int(std::max<qint64>(0, m_deadline - now + 999) / 1000) : 0;
+    if (m_state == "active" && !m_remainingSeconds) {
+      requestStop();
+      return;
+    }
+    update();
+  }
+  void update()
+  {
+    if (m_state == "active") {
+      m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
+      m_instructions->setText(
+          "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
+          "2. Press Escape once. Type a, then Shift+b, then c.\n"
+          "3. Hold x for 1 second, then release it.\n"
+          "4. Move, click and drag inside the test window. Scroll vertically and horizontally.\n"
+          "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+      );
+    } else if (m_state == "stopped") {
+      m_status->setText("Test stopped");
+      m_instructions->setText(
+          m_request == "stop" && coordinatorLost()
+              ? "The coordinator is not responding. You can close this window; the test remains incomplete."
+              : "Release all keys and buttons. The coordinator will finish cleanup and close this window."
+      );
+    } else if (m_state == "ready") {
+      m_status->setText("Ready — click Start when you are ready");
+      m_instructions->setText("The two-minute countdown starts only after the connection is ready.");
+    } else {
+      m_status->setText(
+          m_request == "start" ? "Start requested — preparing the connection" : "Preparing the input test"
+      );
+      m_instructions->setText("Please wait for Active before using the shortcut. You can click Stop at any time.");
+    }
+    m_start->setEnabled(m_valid && m_state == "ready" && m_request == "none" && !m_ended);
+    m_stop->setEnabled(!m_ended);
+    m_field.setReadOnly(m_state != "active");
+    m_recorder.setManualMetadata(
+        {{"state", m_state},
+         {"request", m_request},
+         {"requestSequence", m_requestSequence},
+         {"statusValid", m_valid},
+         {"remainingSeconds", m_remainingSeconds}}
+    );
+  }
+  Recorder &m_recorder;
+  QLineEdit &m_field;
+  QLabel *m_status = nullptr;
+  QLabel *m_instructions = nullptr;
+  QPushButton *m_start = nullptr;
+  QPushButton *m_stop = nullptr;
+  QElapsedTimer m_clock;
+  QTimer m_timer;
+  int m_directory = -1;
+  QByteArray m_name;
+  struct stat m_lastFile{};
+  QString m_state = "preparing", m_request = "none";
+  qint64 m_changedAt = 0, m_deadline = 0;
+  int m_requestSequence = 0, m_remainingSeconds = 0;
+  bool m_seenFile = false, m_heartbeat = false, m_valid = false, m_ended = false;
+};
+
 int main(int argc, char **argv)
 {
   QApplication app(argc, argv);
-  if (app.arguments().size() != 3)
+  const auto arguments = app.arguments();
+  const bool manualMode = arguments.size() == 5 && arguments.at(3) == "--manual-status";
+  if (arguments.size() != 3 && !manualMode)
     return 2;
-  Recorder recorder(app.arguments().at(2));
-  QWidget window;
-  window.setWindowTitle(app.arguments().at(1));
+  Recorder recorder(arguments.at(2));
+  AcceptanceWindow window;
+  window.setWindowTitle(arguments.at(1));
   window.resize(640, 420);
   auto *layout = new QVBoxLayout(&window);
-  layout->addWidget(
-      new QLabel("Deskflow native capture/input test\nThis temporary window closes automatically.", &window)
-  );
+  if (!manualMode)
+    layout->addWidget(
+        new QLabel("Deskflow native capture/input test\nThis temporary window closes automatically.", &window)
+    );
   auto *field = new QLineEdit(&window);
   layout->addWidget(field);
+  std::unique_ptr<ManualAcceptance> manual;
+  if (manualMode) {
+    manual = std::make_unique<ManualAcceptance>(arguments.at(4), recorder, *layout, *field);
+    window.onManualClose = [guard = QPointer<ManualAcceptance>(manual.get())] {
+      return !guard || guard->requestClose();
+    };
+  }
   app.installEventFilter(&recorder);
   app.installNativeEventFilter(&recorder);
   window.show();

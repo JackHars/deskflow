@@ -67,7 +67,10 @@ def isolated_linux():
 class UnixRelay:
     """One TCP client, bounded buffers, no TLS termination or payload logging."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, lifetime_seconds=180):
+        require(type(lifetime_seconds) is int and 30 <= lifetime_seconds <= 600,
+                "Relay lifetime must be an integer from 30 to 600 seconds")
+        self.lifetime_seconds = lifetime_seconds
         info = path.lstat()
         require(stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
                 "Forward endpoint must be an owned private Unix socket")
@@ -92,7 +95,7 @@ class UnixRelay:
         self.thread.start()
 
     def run(self):
-        deadline = time.monotonic() + 180
+        deadline = time.monotonic() + self.lifetime_seconds
         queues = None
         try:
             with contextlib.ExitStack() as cleanup:
@@ -215,7 +218,7 @@ class UnixRelay:
                             continue
                         queues[target].extend(data)
                         self.stats["maximumQueuedBytes"] = max(self.stats["maximumQueuedBytes"], len(queues[target]))
-                require(self.stopping.is_set(), "Relay lifetime exceeded 180 seconds")
+                require(self.stopping.is_set(), f"Relay lifetime exceeded {self.lifetime_seconds} seconds")
         except Exception:
             if not self.stopping.is_set():
                 self.failure = traceback.format_exc()
