@@ -39,6 +39,13 @@ CoreArgParser::CoreArgParser(const QStringList &args)
       m_error = "--windowshare-host-config requires server mode and a configuration file";
   }
 #endif
+#ifdef WINDOWSHARE_X11_OBSERVER
+  if (windowShareObserveX11()) {
+    const auto modes = m_parser.positionalArguments();
+    if (modes.size() != 1 || modes.front().compare("client", Qt::CaseInsensitive) != 0 || help() || version())
+      m_error = "--windowshare-observe-x11 requires client mode";
+  }
+#endif
 }
 
 void CoreArgParser::parse()
@@ -117,5 +124,12 @@ bool CoreArgParser::singleInstanceOnly() const
 QString CoreArgParser::windowShareHostConfig() const
 {
   return m_parser.value(CoreArgs::windowShareHostOption);
+}
+#endif
+
+#ifdef WINDOWSHARE_X11_OBSERVER
+bool CoreArgParser::windowShareObserveX11() const
+{
+  return m_parser.isSet(CoreArgs::windowShareX11Option);
 }
 #endif

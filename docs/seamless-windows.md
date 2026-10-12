@@ -400,8 +400,30 @@ have the same explicitly bound identity and layout; matching desktop dimensions
 do not suffice. Geometry calculation is separate from delivery permission.
 Delivery additionally needs exact-sample validation and already-owned press
 evidence for drag/release clamping. Only synthetic test fixtures can create that
-validation today. There is no native X11 provider, pointer-fence implementation,
-or Wayland global-coordinate provider, and cached rectangles never grant clicks.
+validation today. The opt-in X11 observer now reads each owner's actual native
+connection, root, client pointer, RandR topology and optional window geometry.
+It does not yet provide an authenticated shared coordinate-space binding, a
+pointer fence, or a Wayland coordinate provider; cached rectangles never grant
+clicks.
+
+On Linux, build with `BUILD_WINDOWSHARE=ON` and run the experimental client with
+`--windowshare-observe-x11` alongside its existing client settings to inspect the
+actual XWindowsComputer injection connection. This diagnostic is off by default
+and reports availability in the core log. It neither enables original input nor
+changes the ordinary client route. The viewer independently observes its own Qt
+xcb connection and native window. No new Deskflow wire message publishes or
+matches these observations yet.
+
+The observer borrows the owner's connection without dequeuing its events, polls
+bounded asynchronous replies, and compares two complete topology reads. Copies
+expire after 250 ms and are revoked on observed changes, invalidation or owner
+shutdown. Native root/output geometry, transforms and panning matter; matching
+`DISPLAY` strings or screen dimensions is insufficient. Linux Unix-socket peer
+credentials plus process birth/boot information record socket provenance, not a
+proved X-server incarnation: an inherited listener can identify its creator.
+The observer rejects TCP sockets and an advertised Xwayland extension, but an
+absent extension does not prove native Xorg. None of these observations is an
+atomic fence against other clients or later X-server changes.
 
 `LocalInputPeerTrust::inspectRestrictedLibraryAdmission` optionally inspects the
 live anchor, core and host against their existing exact process/code pins. It
@@ -445,6 +467,13 @@ to initiate this handoff, and the network protocol carries no original Mac keys.
 Bridge reservation now separates selecting an exact binding from requesting the
 viewer fence. It sends the request only after the private candidate can be sent,
 then independently rechecks quiescence and the same fixed reservation deadline.
+The local preflight must now explicitly activate that exact Bridge binding
+before the private Commit acknowledgment. Successful activation retires the
+setup deadline; abandoned reservations still expire. Active checks retain the
+native focus/geometry and legacy-input fence while permitting owned original
+presses to remain held. The channel's existing heartbeat rechecks active module
+and delivery providers and releases the owner on failure even without new input;
+it does not repeat the one-time physical-neutrality check.
 
 Activation still requires both live authenticated network connections, an
 explicit approved dual-pin mapping, a neutral capture boundary, a loaded-module
@@ -475,8 +504,10 @@ that a job passed.
 
 Automatic edge-drag export/return and transactional drag ownership are unfinished.
 Precise Wayland placement may need compositor cooperation; Qt screen selection
-does not guarantee coordinates under every compositor. The Ubuntu machine and its
-two physical monitors still require direct validation.
+does not guarantee coordinates under every compositor. Ubuntu builds, direct-host
+foundation/application checks and private-Xvfb viewport/core tests now pass. The
+actual GNOME Wayland desktop currently reports one active monitor; live window
+input and a two-monitor arrangement still require direct validation.
 
 Dialogs, popup menus, clipboard integration with exported-window focus, complete
 shortcut remapping, browser/Electron behavior, active-stream media

@@ -250,6 +250,10 @@ struct BridgeTestAccess
   {
     bridge.m_keyboardTimeoutMs = 40;
   }
+  static void deliverKeyboardTimeout(Bridge &bridge)
+  {
+    QMetaObject::invokeMethod(&bridge.m_keyboardTimeout, "timeout", Qt::DirectConnection);
+  }
   static void invalidateKeyboard(Bridge &bridge, KeyboardRouteReason reason)
   {
     bridge.m_native->onKeyboardRouteInvalidated(bridge.m_keyboardRoute->binding, reason);
@@ -1227,6 +1231,112 @@ void keyboardReservationDeadlineAndReentrancy(const Identity &hostIdentity, cons
   }
 }
 
+void keyboardActivation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    const auto reserved = fixture.host.reserveOriginalKeyboard();
+    check(reserved && !fixture.host.activateOriginalKeyboard(*reserved), "Reservation bypassed viewer quiescence");
+    check(!fixture.host.originalKeyboardActive(*reserved), "Reserved keyboard appeared active");
+    check(fixture.host.startOriginalKeyboard(*reserved), "Activation fixture did not start");
+    check(waitUntil([&] { return fixture.grants == 1; }), "Activation fixture did not quiesce");
+    auto wrong = *reserved;
+    ++wrong.generation;
+    check(!fixture.host.activateOriginalKeyboard(wrong), "Wrong binding activated the keyboard");
+    check(fixture.host.originalKeyboardQuiesced(*reserved), "Wrong activation consumed the current reservation");
+    bool nested = true;
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      nested = fixture.host.activateOriginalKeyboard(*reserved);
+    };
+    check(fixture.host.activateOriginalKeyboard(*reserved) && !nested, "Commit was lost or entered twice");
+    check(!fixture.host.activateOriginalKeyboard(*reserved), "Active binding committed twice");
+    check(!fixture.host.originalKeyboardQuiesced(*reserved), "Active binding retained setup admission");
+    check(fixture.host.originalKeyboardActive(*reserved), "Committed binding was not active");
+    runEvents(70);
+    BridgeTestAccess::deliverKeyboardTimeout(fixture.host);
+    check(
+        fixture.host.originalKeyboardActive(*reserved) && fixture.revokes == 0,
+        "Active ownership expired on its former setup deadline or queued timeout"
+    );
+    BridgeTestAccess::keyboardReply(
+        fixture.host,
+        {*reserved, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+    );
+    check(fixture.grants == 1, "Late Ready notified a committed route again");
+    fixture.key(QEvent::KeyPress, Qt::Key_B);
+    runEvents(10);
+    check(nativeHeldKeys.isEmpty(), "Active original owner reopened legacy key forwarding");
+    fixture.key(QEvent::KeyRelease, Qt::Key_B);
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(!fixture.host.originalKeyboardActive(*reserved) && fixture.revokes == 1, "Active owner did not revoke");
+    check(waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }), "Active revoke did not resume");
+    fixture.key(QEvent::KeyPress, Qt::Key_C);
+    check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_C); }), "Legacy keys did not resume after revoke");
+    fixture.key(QEvent::KeyRelease, Qt::Key_C);
+    check(waitUntil([&] { return nativeHeldKeys.isEmpty(); }), "Resumed key remained held");
+  }
+  for (const bool slowValidation : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    if (slowValidation)
+      nativeCandidateObserver = [] { QThread::msleep(70); };
+    else
+      QThread::msleep(70);
+    check(!fixture.host.activateOriginalKeyboard(binding), "Expired reservation committed");
+    nativeCandidateObserver = {};
+    check(
+        !fixture.host.originalKeyboardActive(binding) && fixture.revokes == 1 &&
+            fixture.reasons.contains(KeyboardRouteReason::Timeout),
+        "Commit expiry did not release the exact original owner"
+    );
+  }
+  for (const bool duringActivation : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    if (!duringActivation)
+      check(fixture.host.activateOriginalKeyboard(binding), "Active disconnect fixture failed to commit");
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      BridgeTestAccess::channel(fixture.host)->close("Connection lost in activation query", CloseCause::Network);
+    };
+    check(
+        !(duringActivation ? fixture.host.activateOriginalKeyboard(binding)
+                           : fixture.host.originalKeyboardActive(binding)),
+        "Native query reused a disconnected route"
+    );
+    check(fixture.revokes == 1 && !fixture.original, "Disconnected active owner was not released exactly once");
+  }
+  for (const bool geometry : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    check(fixture.host.activateOriginalKeyboard(binding), "Active native-change fixture failed to commit");
+    auto changed = binding;
+    if (geometry)
+      ++changed.geometry;
+    else
+      ++changed.focusRequest;
+    BridgeTestAccess::observedNativeFocus(fixture.host, changed);
+    check(!fixture.host.originalKeyboardActive(binding), "Active query ignored native focus/geometry change");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      fixture.host.stopSharing();
+    };
+    check(!fixture.host.activateOriginalKeyboard(binding), "Terminal shutdown committed original ownership");
+    check(BridgeTestAccess::stopped(fixture.host) && fixture.revokes == 1, "Shutdown during commit leaked ownership");
+  }
+}
+
 void keyboardCancellation(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   // Cancellation and Original Ready can cross on the two independent streams.
@@ -1842,6 +1952,7 @@ int main(int argc, char **argv)
     keyboardReservation(hostIdentity, viewerIdentity);
     keyboardReservationInvalidation(hostIdentity, viewerIdentity);
     keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);
+    keyboardActivation(hostIdentity, viewerIdentity);
     keyboardCancellation(hostIdentity, viewerIdentity);
     keyboardInvalidation(hostIdentity, viewerIdentity);
     keyboardReentrancyAndDeadlines(hostIdentity, viewerIdentity);

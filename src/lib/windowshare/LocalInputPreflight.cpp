@@ -115,6 +115,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     OriginalInputEpoch capture; // Core-local only; host retains its numeric attestation in offer.
     Clock::time_point deadline = Clock::now() + preflightTimeout;
     Phase phase = Phase::Offered;
+    bool hostActivationAttempted = false, hostActivated = false;
   };
   QPointer<LocalInputChannel> channel;
   LocalInputRole role;
@@ -296,6 +297,9 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   }
   void tick()
   {
+    // The channel already invokes permits(Deliver) on its bounded heartbeat,
+    // including with no input traffic. That rechecks active providers and
+    // revokes/releases on failure; this faster timer only checks retained life.
     if (attempt && !live())
       cancel(LocalInputRevocation::AuthorityLost, true);
   }
@@ -550,7 +554,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     highWater = offer.routeGeneration;
     captureHighWater = offer.captureEpoch;
     attempt = Attempt{offer, {}, {}, {}, {}};
-    if (!policy.permits(offer) || !host.connection || !host.reserve || !host.startQuiescence) {
+    if (!policy.permits(offer) || !host.connection || !host.reserve || !host.startQuiescence || !host.activate ||
+        !host.isActive) {
       cancel(LocalInputRevocation::AuthorityLost, true);
       return;
     }
@@ -634,8 +639,31 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       if (result && check != LocalInputCheck::Deliver)
         result = neutral && neutral(lease) && stillCurrent();
       if (result && role == LocalInputRole::Host) {
-        const auto query = host.isQuiesced;
-        result = query && query(keyboardBinding(lease)) && stillCurrent();
+        const auto binding = keyboardBinding(lease);
+        if (check == LocalInputCheck::Deliver) {
+          const auto query = host.isActive;
+          result = attempt->hostActivated && query && query(binding) && stillCurrent();
+        } else {
+          const auto query = host.isQuiesced;
+          result = query && query(binding) && stillCurrent();
+          if (result && check == LocalInputCheck::Commit) {
+            const auto activate = host.activate, active = host.isActive;
+            result = !attempt->hostActivationAttempted && channel && channel->phase() == LocalInputPhase::Prepared &&
+                     activate && active;
+            if (result) {
+              // Mark before callbacks: a reentrant check must never install
+              // the same host route twice, even if the first callback fails.
+              attempt->hostActivationAttempted = true;
+              // Activation can synchronously change provider state without
+              // changing the private lease. Recheck ongoing admission before
+              // allowing its acknowledgment; neutrality belongs before commit.
+              result = activate(binding) && stillCurrent() && integrity(lease) && stillCurrent() && route(lease) &&
+                       stillCurrent() && active(binding) && stillCurrent();
+              if (result)
+                attempt->hostActivated = true;
+            }
+          }
+        }
       }
     } catch (...) {
       result = false;

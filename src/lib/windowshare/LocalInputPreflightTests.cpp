@@ -101,10 +101,16 @@ int child(int descriptor, const QString &mode)
   const auto process = localInputProcess(getppid());
   check(process.has_value(), "Fixture parent unavailable");
   auto channel = LocalInputChannel::adoptHost(descriptor, *process);
-  bool closed = false, quiescent = false, reserved = false;
-  int releases = 0, reads = 0, originals = 0;
+  bool closed = false, quiescent = false, reserved = false, active = false, held = false, providerLost = false;
+  int releases = 0, reads = 0, originals = 0, activations = 0, neutralAfterActivation = 0,
+      quiescenceAfterActivation = 0;
   channel->onClosed = [&](QString) { closed = true; };
-  channel->onOriginal = [&](const auto &, const auto &) { ++originals; };
+  channel->onOriginal = [&](const auto &, const auto &) {
+    ++originals;
+    held = true;
+    if (mode.startsWith("host-watchdog-"))
+      QTimer::singleShot(25, QCoreApplication::instance(), [&] { providerLost = true; });
+  };
   AuthenticatedPeerIssuer issuer;
   const auto ticket = issuer.issue(pin(mode == "wrong-host-pin" ? 3 : 2));
   check(ticket.has_value(), "Fixture host ticket unavailable");
@@ -135,8 +141,67 @@ int child(int descriptor, const QString &mode)
     coordinator->quiesced(candidate);
     return true;
   };
-  host.isQuiesced = [&](const auto &candidate) { return quiescent && candidate == binding() && mode != "stale-focus"; };
+  host.isQuiesced = [&](const auto &candidate) {
+    quiescenceAfterActivation += active;
+    return !active && quiescent && candidate == binding() && mode != "stale-focus";
+  };
+  host.activate = [&](const auto &candidate) {
+    check(
+        candidate == binding() && quiescent && !active && channel->phase() == LocalInputPhase::Prepared &&
+            coordinator->phase() == Phase::Quiesced,
+        "Host activation preceded exact neutral Commit or followed its acknowledgment"
+    );
+    ++activations;
+    active = true;
+    if (mode == "reject-host-activation")
+      return false;
+    if (mode == "throw-host-activation")
+      throw std::runtime_error("Fixture activation failed after a partial transition");
+    if (mode.startsWith("activation-loses-"))
+      providerLost = true;
+    if (mode == "cancel-host-activation")
+      coordinator->cancel();
+    else if (mode == "stop-host-activation")
+      coordinator->stop();
+    else if (mode == "destroy-host-activation")
+      coordinator.reset();
+    else if (mode == "close-host-activation")
+      channel->close();
+    else if (mode == "destroy-channel-activation")
+      channel.reset();
+    else if (mode == "reentrant-host-activation") {
+      const auto lease = *coordinator->lease();
+      check(!channel->authorize(lease, LocalInputCheck::Commit), "Recursive activation acquired authority");
+    }
+    return true;
+  };
+  host.isActive = [&](const auto &candidate) {
+    check(candidate == binding(), "Active host query changed exact owner");
+    if (mode == "reject-host-active" || (providerLost && mode == "host-watchdog-active"))
+      return false;
+    if (mode == "throw-host-active")
+      throw std::runtime_error("Fixture active query failed");
+    if (mode == "cancel-host-active")
+      coordinator->cancel();
+    if (mode == "destroy-host-active")
+      coordinator.reset();
+    return active;
+  };
+  if (mode == "missing-host-activation")
+    host.activate = {};
+  if (mode == "missing-host-active")
+    host.isActive = {};
   auto checks = allow();
+  checks.moduleIntegrity = [&](const auto &) {
+    return !providerLost || (mode != "host-watchdog-integrity" && mode != "activation-loses-integrity");
+  };
+  checks.deliveryReady = [&](const auto &) {
+    return !providerLost || (mode != "host-watchdog-delivery" && mode != "activation-loses-delivery");
+  };
+  checks.neutralBoundary = [&](const auto &) {
+    neutralAfterActivation += active;
+    return !held;
+  };
   checks.release = [&](const auto &lease, auto) {
     check(
         lease.session == binding().owner.session && lease.keyboardRouteGeneration == binding().generation,
@@ -145,6 +210,8 @@ int child(int descriptor, const QString &mode)
     ++releases;
     reserved = false;
     quiescent = false;
+    active = false;
+    held = false;
     return mode != "release-failure";
   };
   if (mode == "missing-host-neutral")
@@ -153,8 +220,24 @@ int child(int descriptor, const QString &mode)
   check(until([&] { return closed; }, 12000), "Fixture child did not close");
   if (mode == "destroy-reserve")
     check(!reserved && releases == 1, "Destroyed reservation was not released exactly once");
-  if (mode != "normal")
+  if (mode.startsWith("host-watchdog-"))
+    check(
+        originals == 1 && activations == 1 && releases == 1 && !held && !active && providerLost,
+        "Idle host provider loss failed to release its held owner exactly once"
+    );
+  else if (mode != "normal")
     check(originals == 0, "Original input escaped failed preflight");
+  if (mode.endsWith("-activation") || mode.endsWith("-active") || mode.startsWith("activation-loses-")) {
+    const bool missing = mode.startsWith("missing-");
+    check(
+        activations == (missing ? 0 : 1) && releases == (missing ? 0 : 1) && !active,
+        "Host activation failure or stop did not release its exact partial owner once"
+    );
+  }
+  check(
+      neutralAfterActivation == 0 && quiescenceAfterActivation == 0,
+      "Active route rechecked one-time physical or quiesced admission"
+  );
   coordinator.reset();
   return 0;
 }
@@ -246,8 +329,10 @@ struct Fixture
   }
   void finish()
   {
-    coordinator->stop();
-    channel->close();
+    if (coordinator)
+      coordinator->stop();
+    if (channel)
+      channel->close();
     check(until([&] { return childProcess.state() == QProcess::NotRunning; }), "Fixture child failed to stop");
     if (childProcess.exitStatus() != QProcess::NormalExit || childProcess.exitCode() != 0)
       throw std::runtime_error("Fixture child failed: " + childProcess.readAllStandardError().toStdString());
@@ -387,6 +472,121 @@ void hostFailureCases()
         "Failed host authority activated route"
     );
     f.finish();
+  }
+}
+void hostActivation()
+{
+  for (const auto mode :
+       {"missing-host-activation", "missing-host-active", "reject-host-activation", "throw-host-activation",
+        "cancel-host-activation", "stop-host-activation", "destroy-host-activation", "close-host-activation",
+        "destroy-channel-activation", "reject-host-active", "throw-host-active", "cancel-host-active",
+        "destroy-host-active", "activation-loses-integrity", "activation-loses-delivery"}) {
+    Fixture f(mode);
+    int acknowledged = 0;
+    const auto activated = f.channel->onActivated;
+    f.channel->onActivated = [&](const auto &lease) {
+      ++acknowledged;
+      activated(lease);
+    };
+    f.begin();
+    check(
+        until([&] { return f.closed || f.coordinator->phase() == Phase::Idle; }) && acknowledged == 0 &&
+            f.channel->phase() == LocalInputPhase::Idle,
+        "Missing, failed or reentrant host activation emitted a Committed acknowledgment"
+    );
+    f.finish();
+  }
+  Fixture f("reentrant-host-activation");
+  f.active();
+  f.finish();
+}
+void activeProviderWatchdog()
+{
+  for (const auto mode : {"host-watchdog-integrity", "host-watchdog-delivery", "host-watchdog-active"}) {
+    Fixture f(mode);
+    f.active();
+    const auto lease = *f.coordinator->lease();
+    const int neutralChecks = f.preparedChecks;
+    const OriginalInputRecord down{lease.captureEpoch, 1, 100, 0, OriginalInputKey{40, 0}};
+    check(f.channel->sendOriginal(lease, down), "Host watchdog fixture could not acquire a held press");
+    // Host invalidates a provider after receiving this Down. No Up or further
+    // Original traffic is sent; the existing channel heartbeat must revoke.
+    check(
+        until([&] { return f.closed || f.coordinator->phase() == Phase::Idle; }, 1800) && !f.closed &&
+            f.channel->phase() == LocalInputPhase::Idle && f.releases == 1 && f.preparedChecks == neutralChecks,
+        "Idle host provider loss retained authority or rechecked physical neutrality"
+    );
+    f.finish();
+  }
+
+  enum class Failure
+  {
+    Integrity,
+    Delivery,
+    Throw,
+    Cancel,
+    DestroyCoordinator,
+    DestroyChannel
+  };
+  for (const auto failure :
+       {Failure::Integrity, Failure::Delivery, Failure::Throw, Failure::Cancel, Failure::DestroyCoordinator,
+        Failure::DestroyChannel}) {
+    Fixture *fixture = nullptr;
+    bool held = false, lost = false;
+    int healthyHeldChecks = 0, failedChecks = 0, released = 0;
+    auto checks = allow();
+    checks.neutralBoundary = [&](const auto &) { return !held; };
+    const auto query = [&](const LocalInputLease &) {
+      if (!held)
+        return true;
+      if (!lost) {
+        ++healthyHeldChecks;
+        return true;
+      }
+      ++failedChecks;
+      if (failure == Failure::Throw)
+        throw std::runtime_error("Fixture active provider failed");
+      if (failure == Failure::Cancel)
+        fixture->coordinator->cancel();
+      if (failure == Failure::DestroyCoordinator)
+        fixture->coordinator.reset();
+      if (failure == Failure::DestroyChannel)
+        fixture->channel.reset();
+      // A true result after reentrant cancellation/destruction must not undo
+      // revocation or allow the heartbeat to access its former owner.
+      return failure == Failure::Cancel || failure == Failure::DestroyCoordinator || failure == Failure::DestroyChannel;
+    };
+    if (failure == Failure::Delivery)
+      checks.deliveryReady = query;
+    else
+      checks.moduleIntegrity = query;
+    checks.release = [&](const auto &, auto) {
+      ++released;
+      held = false;
+      return true;
+    };
+    Fixture f("normal", std::move(checks));
+    fixture = &f;
+    f.active();
+    const auto lease = *f.coordinator->lease();
+    const int neutralChecks = f.preparedChecks;
+    const OriginalInputRecord down{lease.captureEpoch, 1, 100, 0, OriginalInputKey{40, 0}};
+    check(f.channel->sendOriginal(lease, down), "Core watchdog fixture could not acquire a held press");
+    held = true;
+    check(
+        until([&] { return f.closed || healthyHeldChecks >= 2; }, 1800) && !f.closed &&
+            f.coordinator->phase() == Phase::Active && f.preparedChecks == neutralChecks && released == 0,
+        "Healthy active heartbeat repeated neutral admission or rejected its held owner"
+    );
+    lost = true;
+    check(
+        until([&] { return f.closed || !f.coordinator || f.coordinator->phase() != Phase::Active; }, 1800) &&
+            failedChecks == 1 && f.releases == 1 && released == 1 && !held &&
+            (!f.channel || f.channel->phase() == LocalInputPhase::Idle) && f.preparedChecks == neutralChecks,
+        "Idle core provider loss failed to revoke/release exactly once after a reentrant callback"
+    );
+    f.finish();
+    check(released == 1, "Subsequent teardown repeated the retired owner's release");
   }
 }
 void selectionAndEvidence()
@@ -697,6 +897,8 @@ int main(int argc, char **argv)
     consecutiveControlAndOriginal();
     defaultDeny();
     hostFailureCases();
+    hostActivation();
+    activeProviderWatchdog();
     selectionAndEvidence();
     deadlineAndQueue();
     changedAndFutureBindings();

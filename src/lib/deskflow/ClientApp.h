@@ -28,6 +28,14 @@ class ClientApp : public App
 public:
   explicit ClientApp(IEventQueue *events, const QString &processName = QString());
   ~ClientApp() override = default;
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+  // Configure before the core thread starts. This observes the actual backend
+  // connection only; no viewport matching, fencing or original delivery.
+  void setWindowShareX11Observation(bool enabled)
+  {
+    m_windowShareX11Observation = enabled;
+  }
+#endif
 
   //
   // IApp overrides
@@ -85,6 +93,9 @@ public:
   double retryTime() const;
 
 private:
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+  bool m_windowShareX11Observation = false;
+#endif
   ISocketFactory *getSocketFactory() const;
   NetworkAddress &getCurrentServerAddress();
   void tryNextServer();

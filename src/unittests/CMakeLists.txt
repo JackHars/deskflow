@@ -89,6 +89,21 @@ if(BUILD_WINDOWSHARE)
   if(TARGET windowshare-bridge-tests)
     set_tests_properties(windowshare-bridge PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
   endif()
+  if(TARGET windowshare-x11-viewport-tests)
+    set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests windowshare-x11-viewport-tests)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    find_program(WS_XVFB Xvfb)
+    find_program(WS_XAUTH xauth)
+    if(WS_XVFB AND WS_XAUTH)
+      foreach(scale 1 1.25)
+        add_test(NAME windowshare-x11-viewport-${scale}
+          COMMAND "${Python3_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/src/apps/windowshare/X11ViewportTests.py"
+            --xvfb "${WS_XVFB}" --xauth "${WS_XAUTH}" --scale "${scale}"
+            $<TARGET_FILE:windowshare-x11-viewport-tests>)
+        set_tests_properties(windowshare-x11-viewport-${scale} PROPERTIES TIMEOUT 45)
+      endforeach()
+    endif()
+  endif()
 endif()
 
 #make sure to use CI only plugin on Unix

@@ -19,6 +19,10 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#ifdef WINDOWSHARE_X11
+#include <QAbstractNativeEventFilter>
+#include <QPlatformSurfaceEvent>
+#endif
 
 namespace deskflow::windowshare {
 namespace {
@@ -40,6 +44,170 @@ QJsonValue jsonNumber(std::uint64_t value)
   return QJsonValue(static_cast<qint64>(value));
 }
 } // namespace
+
+#ifdef WINDOWSHARE_X11
+class ViewerX11Observer final : public QAbstractNativeEventFilter
+{
+public:
+  explicit ViewerX11Observer(Viewer &viewer) : m_viewer(viewer)
+  {
+#if QT_CONFIG(xcb)
+    if (auto *native = qApp->nativeInterface<QNativeInterface::QX11Application>()) {
+      m_observer = std::make_unique<X11DisplayObserver>(native->connection());
+      qApp->installNativeEventFilter(this);
+      m_timer.setInterval(10);
+      QObject::connect(&m_timer, &QTimer::timeout, &viewer, [this] { poll(); });
+      m_timer.start();
+    }
+#endif
+  }
+  ~ViewerX11Observer() override
+  {
+    m_timer.stop();
+    if (qApp)
+      qApp->removeNativeEventFilter(this);
+    if (m_observer)
+      m_observer->close();
+  }
+  bool nativeEventFilter(const QByteArray &type, void *message, qintptr *) override
+  {
+    if (m_observer && type == "xcb_generic_event_t" && message)
+      m_observer->handleEvent(*static_cast<const xcb_generic_event_t *>(message));
+    return false;
+  }
+  void invalidate()
+  {
+    if (m_observer)
+      m_observer->invalidate();
+  }
+  std::optional<X11DisplayObservation> observe() const
+  {
+    return m_observer ? m_observer->observe() : std::nullopt;
+  }
+  QString reason() const
+  {
+    return m_observer ? QString::fromStdString(m_observer->unavailableReason())
+                      : QStringLiteral("Viewport observation requires the native Qt xcb plugin");
+  }
+
+private:
+  void poll()
+  {
+    const auto surface = m_viewer.internalWinId();
+    if (!m_viewer.m_connected || m_viewer.m_returned || m_viewer.m_failed || !m_viewer.isVisible() || surface == 0) {
+      if (m_lastSurface || m_observer->pending() || m_observer->observe())
+        invalidate();
+      m_lastSurface = 0;
+      return;
+    }
+    if (surface != m_lastSurface) {
+      m_viewer.invalidateViewport();
+      m_lastSurface = surface;
+      if (m_viewer.m_surfaceIncarnation == std::numeric_limits<std::uint64_t>::max()) {
+        m_viewer.m_viewportClosed = true;
+        m_observer->close();
+        return;
+      }
+      ++m_viewer.m_surfaceIncarnation;
+    }
+    m_observer->poll();
+    if (!m_observer->pending())
+      m_observer->refresh(static_cast<std::uint32_t>(surface));
+  }
+  Viewer &m_viewer;
+  std::unique_ptr<X11DisplayObserver> m_observer;
+  QTimer m_timer;
+  WId m_lastSurface = 0;
+};
+
+bool ViewerViewportObservation::live() const noexcept
+{
+  return m_snapshot && m_revoked && !m_revoked->load(std::memory_order_acquire) && m_snapshot->native.live();
+}
+const ViewerViewportSnapshot &ViewerViewportObservation::snapshot() const noexcept
+{
+  static const ViewerViewportSnapshot empty;
+  return m_snapshot ? *m_snapshot : empty;
+}
+void Viewer::invalidateViewport()
+{
+  m_viewportRevoked->store(true, std::memory_order_release);
+  if (m_viewportRevision == std::numeric_limits<std::uint64_t>::max())
+    m_viewportClosed = true;
+  else
+    ++m_viewportRevision;
+  m_viewportRevoked = std::make_shared<std::atomic_bool>(m_viewportClosed);
+  if (m_x11Observer)
+    m_x11Observer->invalidate();
+}
+
+std::optional<ViewerViewportObservation> Viewer::viewportObservation() const
+{
+  if (!viewportUnavailableReason().isEmpty())
+    return {};
+  const auto native = m_x11Observer->observe();
+  if (!native)
+    return {};
+  const auto &display = native->snapshot();
+  std::uint32_t output = 0;
+  for (const auto &candidate : display.outputs) {
+    const auto &r = candidate.native;
+    if (display.client.x >= r.x && display.client.y >= r.y &&
+        std::int64_t(display.client.x) + display.client.width <= std::int64_t(r.x) + r.width &&
+        std::int64_t(display.client.y) + display.client.height <= std::int64_t(r.y) + r.height)
+      output = candidate.output;
+  }
+  ViewerViewportObservation result;
+  result.m_snapshot = std::make_shared<ViewerViewportSnapshot>(ViewerViewportSnapshot{
+      *native, m_session, m_epoch, m_geometry, m_focusRequest, m_focusRevision, m_surfaceIncarnation,
+      m_viewportRevision, QSizeF(m_paintedClient), m_source, m_paintedImage, m_paintedVideo, m_paintedDpr, output
+  });
+  result.m_revoked = m_viewportRevoked;
+  return result.live() ? std::optional{std::move(result)} : std::nullopt;
+}
+#endif
+
+QString Viewer::viewportUnavailableReason() const
+{
+#ifdef WINDOWSHARE_X11
+  if (!m_x11Observer || m_viewportClosed)
+    return QStringLiteral("Native viewport observer is unavailable or closed");
+  if (!acceptsLocalInput() || !isVisible() || m_focusPending || m_focusRevision == 0 || m_focusRequest == 0)
+    return QStringLiteral("Viewport requires committed painted geometry and current acknowledged local focus");
+  const auto observed = m_x11Observer->observe();
+  if (!observed)
+    return m_x11Observer->reason();
+  const auto &display = observed->snapshot();
+  if (display.surface != internalWinId() || !display.viewable || !display.focusWithinSurface)
+    return QStringLiteral("Native X11 surface is not viewable and focused on this connection's master keyboard");
+  if (m_paintedClient != size() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty() || m_paintedDpr <= 0 ||
+      !std::isfinite(m_paintedDpr) || m_paintedDpr != devicePixelRatioF() ||
+      std::abs(m_paintedClient.width() * m_paintedDpr - display.client.width) > 1e-9 ||
+      std::abs(m_paintedClient.height() * m_paintedDpr - display.client.height) > 1e-9)
+    return QStringLiteral("Painted Qt logical geometry does not map exactly to the observed native pixel extent");
+  if (display.client.x < 0 || display.client.y < 0 ||
+      std::int64_t(display.client.x) + display.client.width > display.desktop.width ||
+      std::int64_t(display.client.y) + display.client.height > display.desktop.height)
+    return QStringLiteral("Native client rectangle extends outside the observed root");
+  unsigned containing = 0, intersecting = 0;
+  for (const auto &output : display.outputs) {
+    const auto &r = output.native;
+    const auto right = std::int64_t(r.x) + r.width, bottom = std::int64_t(r.y) + r.height;
+    const auto clientRight = std::int64_t(display.client.x) + display.client.width;
+    const auto clientBottom = std::int64_t(display.client.y) + display.client.height;
+    if (display.client.x < right && clientRight > r.x && display.client.y < bottom && clientBottom > r.y)
+      ++intersecting;
+    if (output.simpleMapping && display.client.x >= r.x && display.client.y >= r.y && clientRight <= right &&
+        clientBottom <= bottom)
+      ++containing;
+  }
+  if (containing != 1 || intersecting != 1)
+    return QStringLiteral("Viewport needs one unambiguous untransformed, unpanned output containing the whole client");
+  return {};
+#else
+  return QStringLiteral("Native viewport observation is available only on Linux with Qt xcb");
+#endif
+}
 
 Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &metadata, QWidget *parent)
     : QWidget(parent, Qt::Window),
@@ -89,10 +257,17 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
     fail(QStringLiteral("Invalid window session"));
   else
     applyMetadata(metadata);
+#ifdef WINDOWSHARE_X11
+  m_x11Observer = std::make_unique<ViewerX11Observer>(*this);
+#endif
 }
 
 Viewer::~Viewer()
 {
+#ifdef WINDOWSHARE_X11
+  invalidateViewport();
+  m_x11Observer.reset();
+#endif
   releaseInput(KeyboardRouteReason::Returned);
   m_connected = false;
   // Decoding never runs on the GUI/event-tap path. Wait only for the current
@@ -429,6 +604,29 @@ std::optional<QPointF> Viewer::mapToSource(QPointF position, bool clampDrag) con
 
 bool Viewer::event(QEvent *event)
 {
+#ifdef WINDOWSHARE_X11
+  switch (event->type()) {
+  case QEvent::Move:
+  case QEvent::Resize:
+  case QEvent::WinIdChange:
+  case QEvent::ScreenChangeInternal:
+  case QEvent::Show:
+  case QEvent::Hide:
+  case QEvent::WindowActivate:
+  case QEvent::WindowDeactivate:
+  case QEvent::WindowStateChange:
+  case QEvent::PlatformSurface:
+    invalidateViewport();
+    break;
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+  case QEvent::DevicePixelRatioChange:
+    invalidateViewport();
+    break;
+#endif
+  default:
+    break;
+  }
+#endif
   switch (event->type()) {
   case QEvent::WindowActivate:
     m_localActive = true;
@@ -483,6 +681,15 @@ void Viewer::paintEvent(QPaintEvent *)
   if (!m_image.isNull()) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.drawImage(videoRect(), m_image);
+#ifdef WINDOWSHARE_X11
+    if (m_paintedGeometry != m_frameGeometry || m_paintedClient != size() || m_paintedImage != m_image.size() ||
+        m_paintedVideo != videoRect() || m_paintedDpr != devicePixelRatioF())
+      invalidateViewport();
+    m_paintedClient = size();
+    m_paintedImage = m_image.size();
+    m_paintedVideo = videoRect();
+    m_paintedDpr = devicePixelRatioF();
+#endif
     m_paintedGeometry = m_frameGeometry;
   }
   if (m_image.isNull() || !m_error.isEmpty()) {
@@ -631,6 +838,9 @@ void Viewer::queueInput(QJsonObject input)
 
 void Viewer::releaseInput(KeyboardRouteReason reason)
 {
+#ifdef WINDOWSHARE_X11
+  invalidateViewport();
+#endif
   const QPointer<Viewer> guard(this);
   const bool wasHandling = m_keyboardRouteHandling;
   m_keyboardRouteHandling = true;

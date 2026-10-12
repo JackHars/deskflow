@@ -18,6 +18,11 @@
 
 #include <QString>
 
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+#include "windowshare/X11DisplayObserver.h"
+class EventQueueTimer;
+#endif
+
 #include <X11/Xlib.h>
 
 class XWindowsClipboard;
@@ -30,6 +35,12 @@ class XWindowsComputer : public PlatformComputer
 public:
   XWindowsComputer(const char *displayName, bool isPrimary, IEventQueue *events);
   ~XWindowsComputer() override;
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  // Explicit diagnostic opt-in on this backend's owning core thread. Borrow
+  // this exact injection connection, never an independently opened DISPLAY.
+  void setWindowShareObservationEnabled(bool enabled);
+  std::optional<deskflow::windowshare::X11DisplayObservation> windowShareObservation() const;
+#endif
 
   //! @name manipulators
   //@{
@@ -84,6 +95,14 @@ protected:
   IKeyState *getKeyState() const override;
 
 private:
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  void stopWindowShareObservation();
+  void pollWindowShareObservation();
+  std::unique_ptr<deskflow::windowshare::X11DisplayObserver> m_windowShareObserver;
+  EventQueueTimer *m_windowShareTimer = nullptr;
+  bool m_windowShareRequested = false;
+  std::string m_windowShareStatus;
+#endif
   // event sending
   void sendEvent(EventTypes, void * = nullptr);
   void sendClipboardEvent(EventTypes, ClipboardID);

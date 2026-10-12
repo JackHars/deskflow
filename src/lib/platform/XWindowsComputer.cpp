@@ -29,6 +29,9 @@
 
 #include <X11/X.h>
 #include <X11/Xutil.h>
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+#include <X11/Xlib-xcb.h>
+#endif
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -158,6 +161,9 @@ XWindowsComputer::~XWindowsComputer()
   assert(s_computer != nullptr);
   assert(m_display != nullptr);
 
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  stopWindowShareObservation();
+#endif
   m_events->adoptBuffer(nullptr);
   m_events->removeHandler(EventTypes::System, m_events->getSystemTarget());
   for (auto clipboard : m_clipboard) {
@@ -185,6 +191,10 @@ XWindowsComputer::~XWindowsComputer()
 
 void XWindowsComputer::enable()
 {
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  if (m_windowShareRequested)
+    setWindowShareObservationEnabled(true);
+#endif
   if (!m_isPrimary) {
     // get the keyboard control state
     XKeyboardState keyControl;
@@ -206,6 +216,9 @@ void XWindowsComputer::enable()
 
 void XWindowsComputer::disable()
 {
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  stopWindowShareObservation();
+#endif
   // release input context focus
   if (m_ic != nullptr) {
     XUnsetICFocus(m_ic);
@@ -220,6 +233,69 @@ void XWindowsComputer::disable()
     // XAutoRepeatOn(m_display);
   }
 }
+
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+void XWindowsComputer::setWindowShareObservationEnabled(bool enabled)
+{
+  m_windowShareRequested = enabled;
+  if (!enabled) {
+    stopWindowShareObservation();
+    return;
+  }
+  if (m_windowShareObserver || !m_display || m_isPrimary)
+    return;
+  m_windowShareObserver = std::make_unique<deskflow::windowshare::X11DisplayObserver>(
+      XGetXCBConnection(m_display), DefaultScreen(m_display)
+  );
+  m_events->addHandler(EventTypes::Timer, &m_windowShareObserver, [this](const auto &) {
+    pollWindowShareObservation();
+  });
+  m_windowShareTimer = m_events->newTimer(0.02, &m_windowShareObserver);
+  m_windowShareObserver->refresh();
+  LOG_INFO("experimental X11 coordinate observation enabled; original input routing remains disabled");
+}
+
+void XWindowsComputer::stopWindowShareObservation()
+{
+  if (m_windowShareTimer) {
+    m_events->deleteTimer(m_windowShareTimer);
+    m_windowShareTimer = nullptr;
+  }
+  m_events->removeHandler(EventTypes::Timer, &m_windowShareObserver);
+  // Invalidate retained snapshots before the Xlib owner closes its socket.
+  if (m_windowShareObserver)
+    m_windowShareObserver->close();
+  m_windowShareObserver.reset();
+  m_windowShareStatus.clear();
+}
+
+void XWindowsComputer::pollWindowShareObservation()
+{
+  if (!m_display || !m_windowShareObserver)
+    return;
+  m_windowShareObserver->poll();
+  const auto observation = m_windowShareObserver->observe();
+  const auto status = observation ? std::string("available") : m_windowShareObserver->unavailableReason();
+  if (status != m_windowShareStatus) {
+    m_windowShareStatus = status;
+    if (observation) {
+      const auto &snapshot = observation->snapshot();
+      LOG_INFO(
+          "experimental X11 observation: root=%u screen=%u pointer=%u outputs=%zu; local evidence only", snapshot.root,
+          snapshot.screen, snapshot.clientPointer, snapshot.outputs.size()
+      );
+    } else
+      LOG_DEBUG("experimental X11 observation unavailable: %s", status.c_str());
+  }
+  if (!m_windowShareObserver->pending())
+    m_windowShareObserver->refresh();
+}
+
+std::optional<deskflow::windowshare::X11DisplayObservation> XWindowsComputer::windowShareObservation() const
+{
+  return m_windowShareObserver ? m_windowShareObserver->observe() : std::nullopt;
+}
+#endif
 
 void XWindowsComputer::enter()
 {
@@ -1287,6 +1363,10 @@ void XWindowsComputer::handleSystemEvent(const Event &event)
     return;
 
   case ConfigureNotify:
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+    if (m_windowShareObserver && xevent->xconfigure.window == m_root)
+      m_windowShareObserver->invalidate();
+#endif
     if (!m_isPrimary && xevent->xconfigure.window == m_root) {
       setShape(xevent->xconfigure.width, xevent->xconfigure.height);
       sendEvent(EventTypes::ComputerShapeChanged);
@@ -1315,6 +1395,13 @@ void XWindowsComputer::handleSystemEvent(const Event &event)
 
 #if HAVE_X11_EXTENSIONS_XRANDR_H
     if (m_xrandr) {
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+      // Includes observer-window output/resource/property notifications, not
+      // just shape changes. Xlib remains the sole event-queue owner.
+      if (m_windowShareObserver &&
+          (xevent->type == m_xrandrEventBase + RRScreenChangeNotify || xevent->type == m_xrandrEventBase + RRNotify))
+        m_windowShareObserver->invalidate();
+#endif
       if (xevent->type == m_xrandrEventBase + RRScreenChangeNotify ||
           xevent->type == m_xrandrEventBase + RRNotify &&
               reinterpret_cast<XRRNotifyEvent *>(xevent)->subtype == RRNotify_CrtcChange) {
@@ -1605,6 +1692,9 @@ void XWindowsComputer::destroyClipboardRequest(Window requestor) const
 
 void XWindowsComputer::onError()
 {
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  stopWindowShareObservation();
+#endif
   // prevent further access to the X display
   m_events->adoptBuffer(nullptr);
   m_screensaver->destroy();

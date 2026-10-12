@@ -114,6 +114,10 @@ deskflow::Computer *ClientApp::createComputer()
   return new deskflow::Computer(new OSXComputer(getEvents(), false, languageSync), getEvents());
 #else
   if (deskflow::platform::isWayland()) {
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+    if (m_windowShareX11Observation)
+      LOG_WARN("window sharing X11 observation unavailable on the Wayland input backend");
+#endif
 #if WINAPI_LIBEI
     LOG_INFO("detected wayland platform");
     return new deskflow::Computer(new deskflow::EiComputer(false, getEvents(), true), getEvents());
@@ -123,10 +127,18 @@ deskflow::Computer *ClientApp::createComputer()
   }
 #if WINAPI_XWINDOWS
   LOG_INFO("detected X11 platform");
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+  auto platform = std::make_unique<XWindowsComputer>(
+      qPrintable(Settings::value(Settings::Core::Display).toString()), false, getEvents()
+  );
+  platform->setWindowShareObservationEnabled(m_windowShareX11Observation);
+  return new deskflow::Computer(platform.release(), getEvents());
+#else
   return new deskflow::Computer(
       new XWindowsComputer(qPrintable(Settings::value(Settings::Core::Display).toString()), false, getEvents()),
       getEvents()
   );
+#endif
 #endif
 #endif // end os check
 }

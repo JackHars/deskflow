@@ -177,6 +177,10 @@ public:
     });
     m_keyboardTimeout.setSingleShot(true);
     connect(&m_keyboardTimeout, &QTimer::timeout, this, [this] {
+      // A setup timeout already queued before commit must not revoke a route
+      // whose lifetime is now owned by the private channel's active checks.
+      if (!m_keyboardRoute || m_keyboardRoute->phase == KeyboardPhase::Active)
+        return;
       if (m_keyboardRoute && m_keyboardRoute->phase == KeyboardPhase::AwaitViewer) {
         if (m_channel)
           m_channel->close("Keyboard handoff resume timed out");
@@ -381,6 +385,60 @@ public:
     } catch (...) {
     }
     return alive && neutral && keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced);
+  }
+  // The local preflight calls this only after its other admission checks and
+  // before acknowledging Commit. Network acknowledgments cannot perform this
+  // transition. A setup reservation is bounded; active ownership is instead
+  // retained only while that controller revalidates its live providers.
+  bool activateOriginalKeyboard(KeyboardRouteBinding binding)
+  {
+    if (!m_keyboardRoute || m_keyboardRoute->binding != binding || m_keyboardRoute->phase != KeyboardPhase::Quiesced)
+      return false;
+    if (m_keyboardRoute->deadline.hasExpired()) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+      return false;
+    }
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced)) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+      return false;
+    }
+    const QPointer<Bridge> alive(this);
+    // Guard native callbacks and nested event loops against a second commit.
+    m_keyboardRoute->phase = KeyboardPhase::Activating;
+    bool quiesced = false;
+    try {
+      quiesced = m_native->keyboardRouteQuiesced(binding);
+    } catch (...) {
+    }
+    if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
+        m_keyboardRoute->phase != KeyboardPhase::Activating)
+      return false;
+    if (m_keyboardRoute->deadline.hasExpired()) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+      return false;
+    }
+    if (!quiesced || !keyboardAttemptCurrent(binding, KeyboardPhase::Activating)) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+      return false;
+    }
+    m_keyboardRoute->phase = KeyboardPhase::Active;
+    m_keyboardRoute->deadline = QDeadlineTimer(QDeadlineTimer::Forever);
+    m_keyboardTimeout.stop();
+    return true;
+  }
+  bool originalKeyboardActive(KeyboardRouteBinding binding) const
+  {
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Active))
+      return false;
+    const QPointer<const Bridge> alive(this);
+    bool fenced = false;
+    try {
+      // This checks the native focus and the legacy Qt-input fence/ledger.
+      // It does not require original-input presses to have been released.
+      fenced = m_native->keyboardRouteQuiesced(binding);
+    } catch (...) {
+    }
+    return alive && fenced && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
   bool requestOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
   {
@@ -593,6 +651,8 @@ private:
     Reserved,
     AwaitQuiescence,
     Quiesced,
+    Activating,
+    Active,
     Revoking,
     AwaitViewer
   };

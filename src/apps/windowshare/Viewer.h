@@ -18,9 +18,42 @@
 #include <QWidget>
 #include <functional>
 #include <memory>
+#ifdef WINDOWSHARE_X11
+#include "X11DisplayObserver.h"
+#endif
 
 namespace deskflow::windowshare {
 class VideoDecoder;
+#ifdef WINDOWSHARE_X11
+class ViewerX11Observer;
+struct ViewerViewportSnapshot
+{
+  X11DisplayObservation native;
+  std::uint64_t session = 0, epoch = 0, sourceGeometry = 0, focusRequest = 0, focusRevision = 0;
+  std::uint64_t surfaceIncarnation = 0, viewportRevision = 0;
+  QSizeF clientLogical, sourceLogical;
+  QSize imagePixels;
+  QRectF videoLogical;
+  double devicePixelRatio = 0;
+  std::uint32_t output = 0;
+};
+
+// This only describes the last painted, focused viewport. It neither suppresses
+// Qt pointer forwarding nor authorizes delivery of original input. A future
+// authenticated coordinate-space binding and ordered pointer fence are required.
+class ViewerViewportObservation
+{
+public:
+  ViewerViewportObservation() = default;
+  bool live() const noexcept;
+  const ViewerViewportSnapshot &snapshot() const noexcept;
+
+private:
+  friend class Viewer;
+  std::shared_ptr<const ViewerViewportSnapshot> m_snapshot;
+  std::shared_ptr<const std::atomic_bool> m_revoked;
+};
+#endif
 
 class Viewer final : public QWidget
 {
@@ -34,6 +67,12 @@ public:
   void keyboardRoute(const KeyboardRouteControl &control);
   void disconnected();
   bool placeOnScreen(int screenIndex);
+  // Unsupported platforms/plugins report unavailable. No Qt global-position
+  // fallback is used to manufacture a native desktop coordinate space.
+  QString viewportUnavailableReason() const;
+#ifdef WINDOWSHARE_X11
+  std::optional<ViewerViewportObservation> viewportObservation() const;
+#endif
 
   std::function<bool(MessageType, const QJsonObject &, std::uint64_t, std::uint64_t)> onSend;
   std::function<bool(const KeyboardRouteControl &)> onKeyboardRouteSend;
@@ -68,6 +107,17 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
+#ifdef WINDOWSHARE_X11
+  friend class ViewerX11Observer;
+  void invalidateViewport();
+  std::unique_ptr<ViewerX11Observer> m_x11Observer;
+  std::shared_ptr<std::atomic_bool> m_viewportRevoked = std::make_shared<std::atomic_bool>(false);
+  std::uint64_t m_surfaceIncarnation = 0, m_viewportRevision = 1;
+  QSize m_paintedClient, m_paintedImage;
+  QRectF m_paintedVideo;
+  double m_paintedDpr = 0;
+  bool m_viewportClosed = false;
+#endif
   void requestFocus();
   void releaseInput(KeyboardRouteReason reason = KeyboardRouteReason::FocusChanged);
   void handleKeyboardRoute(const KeyboardRouteControl &control);

@@ -37,6 +37,9 @@ public:
 #ifdef WINDOWSHARE_CORE_COMPANION
   QString windowShareHostConfig() const;
 #endif
+#ifdef WINDOWSHARE_X11_OBSERVER
+  bool windowShareObserveX11() const;
+#endif
 
 private:
   [[noreturn]] void showHelpText() const;

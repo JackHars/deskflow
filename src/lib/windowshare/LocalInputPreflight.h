@@ -64,6 +64,9 @@ public:
     // callback; none of these callbacks may supply peer-learned authority.
     // deliveryReady establishes the ordered keyboard/pointer owner route;
     // neutralBoundary additionally requires completed legacy/owner releases.
+    // Active delivery and the existing channel heartbeat recheck integrity and
+    // deliveryReady, never physical neutrality. Keep these checks bounded and
+    // lightweight; the heartbeat must release idle held owners on failure.
     std::function<bool(const LocalInputLease &)> moduleIntegrity, deliveryReady, neutralBoundary;
     // Disable local delivery and release this exact owner synchronously. False
     // or absence closes the channel; never resume the viewer on failed release.
@@ -74,6 +77,15 @@ public:
     std::function<std::optional<AuthenticatedPeerObservation>()> connection;
     std::function<std::optional<KeyboardRouteBinding>()> reserve;
     std::function<bool(const KeyboardRouteBinding &)> startQuiescence, isQuiesced;
+    // Required exact-binding transfer from the reservation deadline to active
+    // ownership. Called once during host Commit authorization, after neutral
+    // admission and before the private Committed acknowledgment can be sent.
+    // False/throw/cancellation denies that acknowledgment; release must undo
+    // any partial activation. This hook alone never permits input delivery.
+    std::function<bool(const KeyboardRouteBinding &)> activate;
+    // Current active fence/focus/geometry/owner validation, allowing that
+    // owner's held input. Never substitute the one-time neutral check here.
+    std::function<bool(const KeyboardRouteBinding &)> isActive;
   };
   static std::unique_ptr<LocalInputPreflight> core(
       LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
