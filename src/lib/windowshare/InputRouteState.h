@@ -44,6 +44,13 @@ public:
     Control control;
     std::uint32_t key = 0, mask = 0, button = 0;
     Recipients recipients;
+    // A local dispatcher's immutable owner, never a network-supplied value.
+    // Original presses have no legacy recipients. Zero plus no recipients is
+    // a local press or a revoked owner's tombstone, both held until physical up.
+    std::uint64_t originalOwner = 0;
+    // A control can be reused after its up. Retained capture mappings must
+    // identify this exact press, including after it becomes a tombstone.
+    std::uint64_t incarnation = 0;
   };
   struct ModifierRelease
   {
@@ -79,7 +86,7 @@ public:
     const auto existing = m_pressed.find(control);
     if (existing != m_pressed.end())
       return existing->second;
-    if (m_pressed.size() >= maxPresses)
+    if (m_pressed.size() >= maxPresses || m_nextPress == std::numeric_limits<std::uint64_t>::max())
       return std::nullopt;
     recipients.erase(
         std::remove_if(
@@ -90,9 +97,53 @@ public:
     );
     std::sort(recipients.begin(), recipients.end());
     recipients.erase(std::unique(recipients.begin(), recipients.end()), recipients.end());
-    Press press{control, key, mask, button, std::move(recipients)};
+    Press press{control, key, mask, button, std::move(recipients), 0, ++m_nextPress};
     m_pressed.emplace(control, press);
     return press;
+  }
+
+  // Call only after the dispatcher has reserved delivery capacity. Like a
+  // legacy down, this cannot replace the owner of an already-held control.
+  std::optional<Press>
+  downOriginal(Control control, std::uint32_t key, std::uint32_t mask, std::uint32_t button, std::uint64_t owner)
+  {
+    if (!owner || (control.kind != Kind::Key && control.kind != Kind::Button))
+      return std::nullopt;
+    const auto existing = m_pressed.find(control);
+    if (existing != m_pressed.end())
+      return existing->second;
+    if (m_pressed.size() >= maxPresses || m_nextPress == std::numeric_limits<std::uint64_t>::max())
+      return std::nullopt;
+    Press press{control, key, mask, button, {}, owner, ++m_nextPress};
+    m_pressed.emplace(control, press);
+    return press;
+  }
+
+  std::set<std::uint64_t> originalOwners() const
+  {
+    std::set<std::uint64_t> owners;
+    for (const auto &[control, press] : m_pressed)
+      if (press.originalOwner)
+        owners.insert(press.originalOwner);
+    return owners;
+  }
+
+  // Return exact cleanup ownership before converting to tombstones. Repeated
+  // revocation cannot generate duplicate releases or reacquire a legacy owner.
+  std::vector<Press> revokeOriginal(std::uint64_t owner)
+  {
+    std::vector<Press> released;
+    if (!owner)
+      return released;
+    released.reserve(m_pressed.size());
+    for (auto &[control, press] : m_pressed) {
+      if (press.originalOwner != owner)
+        continue;
+      released.push_back(press);
+      press.originalOwner = 0;
+      press.recipients.clear();
+    }
+    return released;
   }
 
   std::optional<Press> repeat(Control control) const
@@ -177,6 +228,7 @@ public:
 
 private:
   Recipient m_nextRecipient = 0;
+  std::uint64_t m_nextPress = 0;
   std::set<Recipient> m_live;
   std::map<Control, Press> m_pressed;
   std::map<Recipient, std::uint32_t> m_observedModifiers;

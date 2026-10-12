@@ -38,7 +38,10 @@ enum class OriginalInputRouteOutcome : std::uint8_t
   Relative,
   Ambiguous,
   Unauthenticated,
-  Failed
+  Failed,
+  // The local dispatcher committed its reserved original output. Historical
+  // routing evidence only; this is not proof of native application consumption.
+  Original
 };
 
 // A historical core routing decision, not a current selection or permission to
@@ -71,6 +74,10 @@ public:
   OriginalInputRoutes(const OriginalInputRoutes &) = delete;
   OriginalInputRoutes &operator=(const OriginalInputRoutes &) = delete;
   bool bind(std::uint64_t server) noexcept;
+  // Producer only, before deferring a Server action. Later immediate filter
+  // decisions must not overtake it. publish() resolves this exact slot; only
+  // the ready prefix reaches the existing diagnostic consumer.
+  bool defer(OriginalInputStamp stamp) noexcept;
   bool publish(OriginalInputRouteDecision decision) noexcept;
   std::optional<OriginalInputRouteDecision> pop() noexcept;
   void revoke() noexcept
@@ -87,7 +94,19 @@ public:
   }
 
 private:
+  bool writeReady(OriginalInputRouteDecision decision) noexcept;
+  bool flushDeferred() noexcept;
+  bool stageAvailable() noexcept;
+  struct Deferred
+  {
+    OriginalInputStamp stamp;
+    std::optional<OriginalInputRouteDecision> decision;
+  };
   std::array<OriginalInputRouteDecision, capacity> m_records;
+  // Only the core producer accesses staging. The Session sees m_records via
+  // the unchanged SPSC publication; it never reads unresolved staging slots.
+  std::array<Deferred, capacity> m_deferred;
+  std::uint64_t m_deferredWritten = 0, m_deferredRead = 0;
   std::shared_ptr<std::atomic_bool> m_revoked = std::make_shared<std::atomic_bool>(false);
   std::atomic<std::uint64_t> m_server{0}, m_written{0}, m_read{0};
 };
@@ -100,6 +119,35 @@ inline bool OriginalInputRoutes::bind(std::uint64_t server) noexcept
   revoke();
   return false;
 }
+inline bool OriginalInputRoutes::stageAvailable() noexcept
+{
+  if (m_deferredWritten == std::numeric_limits<std::uint64_t>::max() ||
+      m_deferredWritten - m_deferredRead >= capacity) {
+    revoke();
+    return false;
+  }
+  return true;
+}
+inline bool OriginalInputRoutes::defer(OriginalInputStamp stamp) noexcept
+{
+  if (!live())
+    return false;
+  if (!m_server.load(std::memory_order_acquire) || !stamp || !stamp.part || stamp.part > maximumOriginalInputParts) {
+    revoke();
+    return false;
+  }
+  for (auto index = m_deferredRead; index < m_deferredWritten; ++index) {
+    if (m_deferred[index % capacity].stamp == stamp) {
+      revoke();
+      return false;
+    }
+  }
+  if (!stageAvailable())
+    return false;
+  m_deferred[m_deferredWritten % capacity] = {stamp, std::nullopt};
+  ++m_deferredWritten;
+  return live();
+}
 inline bool OriginalInputRoutes::publish(OriginalInputRouteDecision decision) noexcept
 {
   if (!live())
@@ -111,6 +159,44 @@ inline bool OriginalInputRoutes::publish(OriginalInputRouteDecision decision) no
     return false;
   }
   decision.server = server;
+  if (m_deferredRead == m_deferredWritten)
+    return writeReady(std::move(decision));
+  for (auto index = m_deferredRead; index < m_deferredWritten; ++index) {
+    auto &entry = m_deferred[index % capacity];
+    if (entry.stamp != decision.stamp)
+      continue;
+    if (entry.decision) {
+      revoke();
+      return false;
+    }
+    entry.decision = std::move(decision);
+    return flushDeferred();
+  }
+  if (!stageAvailable())
+    return false;
+  const auto stamp = decision.stamp;
+  m_deferred[m_deferredWritten % capacity] = {stamp, std::move(decision)};
+  ++m_deferredWritten;
+  return flushDeferred();
+}
+inline bool OriginalInputRoutes::flushDeferred() noexcept
+{
+  while (m_deferredRead < m_deferredWritten) {
+    auto &entry = m_deferred[m_deferredRead % capacity];
+    if (!entry.decision)
+      break;
+    auto decision = std::move(*entry.decision);
+    entry = {};
+    ++m_deferredRead;
+    if (!writeReady(std::move(decision)))
+      return false;
+  }
+  return live();
+}
+inline bool OriginalInputRoutes::writeReady(OriginalInputRouteDecision decision) noexcept
+{
+  if (!live())
+    return false;
   const auto written = m_written.load(std::memory_order_relaxed);
   if (written == std::numeric_limits<std::uint64_t>::max() ||
       written - m_read.load(std::memory_order_acquire) >= capacity) {

@@ -537,6 +537,12 @@ void coreSessionOwnership()
 #ifdef __APPLE__
   const auto capture = session->captureSource();
   check(capture && !capture->epoch().live(), "Session exposed capture continuity before producer start");
+  const auto completed = capture->completedInput();
+  check(completed && !completed->bound() && completed->live(), "Session preallocates an unbound completion conduit");
+  const auto completedEvidence = completed->evidence();
+  check(completed->bind(91), "Server may bind the conduit before native producer startup");
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(completed->live(), "a pre-start timer tick cannot revoke the underlying unstarted capture epoch");
   // Simulate producer lifecycle only. No tap registration or native input.
   check(capture->start(), "Preallocated capture source could not start");
   const auto captureToken = capture->epoch();
@@ -563,7 +569,7 @@ void coreSessionOwnership()
     ++completions;
     mailboxClosedBeforeCallback = mailbox->read().closed;
 #ifdef __APPLE__
-    captureStoppedBeforeCallback = !captureToken.live();
+    captureStoppedBeforeCallback = !captureToken.live() && !completed->live() && completedEvidence->load();
 #endif
   };
   check(session->stop() && session->stop(), "Core session could not drain its stopped child");
@@ -580,6 +586,7 @@ void coreSessionOwnership()
 #ifdef __APPLE__
   check(captureStoppedBeforeCallback, "Session notified stop before revoking capture continuity");
   check(!captureToken.live() && !capture->start(), "Retained capture source revived after session destruction");
+  check(!completed->pop() && !completed->bind(92), "retained completion conduit cannot outlive its stopped Session");
 #endif
   check(mailbox->read().closed && !mailbox->clear(), "Retained mailbox reopened after session stop/destruction");
 
@@ -724,13 +731,23 @@ void coreSessionRouteJoin()
   auto session = LocalInputCoreSessionTestAccess::captureOnly();
   const auto source = session->captureSource();
   check(source->start() && source->routes()->bind(91), "session route fixture startup");
+  const auto completed = source->completedInput();
+  const auto completedEvidence = completed->evidence();
+  check(completed->bind(91), "session route fixture completion conduit binds");
   CaptureFixture fixture;
   deskflow::AuthenticatedPeerIssuer issuer;
   deskflow::AuthenticatedPeerTicket::Fingerprint fingerprint{};
   fingerprint.fill(0x76);
   const auto ticket = *issuer.issue(fingerprint);
   std::vector<OriginalInputRouted> joined;
-  session->onRoutedInput = [&](const auto &value) { joined.push_back(value); };
+  session->onRoutedInput = [&](const auto &value) {
+    const auto copied = completed->pop();
+    check(
+        copied && copied->input.record.sequence == value.input.record.sequence && copied->input.live(),
+        "completed capture publication precedes the reentrant diagnostic callback"
+    );
+    joined.push_back(value);
+  };
   const auto stamp = source->beginCapture(kCGEventMouseMoved, fixture.event);
   source->completeCapture({stamp, 1, false});
   LocalInputCoreSessionTestAccess::drain(*session);
@@ -770,14 +787,128 @@ void coreSessionRouteJoin()
   source->capture(kCGEventMouseMoved, fixture.event);
   session->onRoutedInput = [&](const auto &value) {
     check(value.live(), "callback entered with retained evidence");
+    const auto copied = completed->pop();
+    check(copied && copied->input.live(), "callback retains its previously published capture copy");
     session.reset();
-    check(!value.live(), "destroying session revokes callback-owned evidence");
+    check(
+        !value.live() && !copied->input.live() && completedEvidence->load() && !completed->live(),
+        "destroying session revokes callback-owned route, epoch and completed-conduit evidence"
+    );
   };
   LocalInputCoreSessionTestAccess::drain(*session);
   check(
       !session && !joined.front().live() && !source->epoch().live(),
       "callback destruction returns without accessing session and revokes retained joins"
   );
+}
+
+void coreSessionCompletedCaptures()
+{
+  auto session = LocalInputCoreSessionTestAccess::captureOnly();
+  const auto source = session->captureSource();
+  const auto completed = source->completedInput();
+  check(source->start() && source->routes()->bind(91), "completed Session capture fixture starts");
+  CaptureFixture fixture;
+  std::vector<OriginalInputRouted> joined;
+  session->onRoutedInput = [&](const auto &value) { joined.push_back(value); };
+  source->capture(kCGEventMouseMoved, fixture.event);
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      joined.size() == 1 && !completed->bound() && completed->live() && !completed->pop(),
+      "sole Session consumer drains diagnostics normally before a Server binds the copy conduit"
+  );
+  check(completed->bind(91), "late Server binding remains available after earlier raw captures");
+  const auto first = source->beginCapture(kCGEventMouseMoved, fixture.event);
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(!completed->pop(), "a begun but incomplete translation is never published to Server");
+  source->completeCapture({first, 0, true});
+  LocalInputCoreSessionTestAccess::drain(*session);
+  const auto zero = completed->pop();
+  check(
+      zero && zero->input.live() && zero->input.record.sequence == first.sequence && first.sequence > 1 &&
+          zero->translation.stamp == first && zero->translation.parts == 0 && zero->translation.uncertain &&
+          !completed->pop() && joined.size() == 2,
+      "Session publishes one exact zero-part completion after observing its barrier and diagnostic state"
+  );
+  const auto pending = source->beginCapture(kCGEventMouseMoved, fixture.event);
+  source->completeCapture({pending, 1, false});
+  LocalInputCoreSessionTestAccess::drain(*session);
+  const auto early = completed->pop();
+  check(
+      early && early->translation.stamp == pending && early->translation.parts == 1 && joined.size() == 2,
+      "completed capture reaches Server without waiting for the post-dispatch diagnostic join"
+  );
+  OriginalInputRouteDecision decision;
+  decision.stamp = {pending.epoch, pending.sequence, 1};
+  decision.server = 91;
+  decision.kind = OriginalInputRouteKind::Motion;
+  decision.outcome = OriginalInputRouteOutcome::NoSend;
+  check(source->routes()->publish(decision), "delayed diagnostic decision is published separately");
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(joined.size() == 3 && !completed->pop(), "late diagnostic join cannot republish an already completed capture");
+  source->routes()->revoke();
+  const auto afterDiagnosticFailure = source->beginCapture(kCGEventMouseMoved, fixture.event);
+  source->completeCapture({afterDiagnosticFailure, 2, true});
+  LocalInputCoreSessionTestAccess::drain(*session);
+  const auto independent = completed->pop();
+  check(
+      independent && independent->input.live() && independent->translation.stamp == afterDiagnosticFailure &&
+          independent->translation.parts == 2 && independent->translation.uncertain && completed->live() &&
+          LocalInputCoreSessionTestAccess::barrier(*session),
+      "failed route diagnostics cannot prevent the sole consumer from publishing completed captures"
+  );
+}
+
+void coreSessionCompletedCaptureOverflow()
+{
+  auto session = LocalInputCoreSessionTestAccess::captureOnly();
+  const auto source = session->captureSource();
+  const auto completed = source->completedInput();
+  const auto evidence = completed->evidence();
+  check(
+      source->start() && source->routes()->bind(91) && completed->bind(91),
+      "stalled Server fixture starts both independent conduits"
+  );
+  CaptureFixture fixture;
+  std::size_t observed = 0;
+  session->onRoutedInput = [&](const auto &value) {
+    check(value.live(), "stalled Server must not revoke the independent diagnostic join");
+    ++observed;
+  };
+  constexpr auto count = OriginalInputCapturedInbox::capacity + 3;
+  for (std::size_t index = 0; index < count; ++index) {
+    source->capture(kCGEventMouseMoved, fixture.event);
+    LocalInputCoreSessionTestAccess::drain(*session);
+  }
+  check(
+      observed == count && !completed->live() && evidence->load() && !completed->pop() && source->epoch().live() &&
+          source->routes()->live() && LocalInputCoreSessionTestAccess::barrier(*session),
+      "completed-copy overflow preserves ordinary raw draining, the barrier and diagnostic observations"
+  );
+  fixture.emergency(*source);
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      LocalInputCoreSessionTestAccess::emergencyStopped(*session) && source->emergencyRequested() &&
+          !source->epoch().live() && session->selectedPeerMailbox()->read().closed,
+      "a revoked completed-copy conduit cannot hide or stop a later raw emergency"
+  );
+}
+
+void coreSessionCompletedCaptureLifetime()
+{
+  for (const bool started : {false, true}) {
+    auto source = std::make_unique<OriginalInputCaptureSource>();
+    const auto completed = source->completedInput();
+    const auto evidence = completed->evidence();
+    check(completed->bind(91), "completion lifetime fixture binds its preallocated conduit");
+    if (started)
+      check(source->start(), "completion lifetime fixture starts only the constructed producer");
+    source.reset();
+    check(
+        evidence->load() && !completed->live() && !completed->pop() && !completed->bind(92),
+        "source destruction before or after producer startup revokes every retained completion conduit"
+    );
+  }
 }
 
 void coreSessionEmergency()
@@ -1009,6 +1140,9 @@ int main(int argc, char **argv)
     coreSessionCustomDrain();
 #ifdef __APPLE__
     coreSessionRouteJoin();
+    coreSessionCompletedCaptures();
+    coreSessionCompletedCaptureOverflow();
+    coreSessionCompletedCaptureLifetime();
     coreSessionEmergency();
     coreSessionEmergencyCallbacks();
     QTextStream(stdout) << "PASS: asynchronous capture emergency after overflow/barrier revocation, core continuation, "

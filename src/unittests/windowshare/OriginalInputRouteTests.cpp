@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "base/Event.h"
+#include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputRoute.h"
 #include <iostream>
 #include <stdexcept>
@@ -209,6 +210,390 @@ void concurrency()
   routes.reset();
   check(evidence->load(), "destruction revokes retained publication evidence");
 }
+void deferredRouteOrder()
+{
+  Fixture fixture;
+  for (unsigned index = 0; index < 3; ++index)
+    check(fixture.join.capture(fixture.capture(), fixture.now), "deferred route captures retain input order");
+  auto first = fixture.decision(1), filtered = fixture.decision(2), third = fixture.decision(3);
+  first.outcome = OriginalInputRouteOutcome::Original;
+  filtered.outcome = OriginalInputRouteOutcome::Filtered;
+  check(fixture.routes->defer(first.stamp), "first Server action is explicitly deferred");
+  check(
+      fixture.routes->publish(filtered) && fixture.routes->publish(third) && !fixture.routes->pop() &&
+          !fixture.join.pop(fixture.now),
+      "later filtered and immediate decisions cannot overtake the unresolved first action"
+  );
+  check(fixture.routes->publish(first), "exact first stamp resolves its registered slot");
+  for (const auto &expected : {first, filtered, third}) {
+    const auto decision = fixture.routes->pop();
+    check(
+        decision && decision->stamp == expected.stamp && decision->outcome == expected.outcome &&
+            decision->server == expected.server && decision->recipient == expected.recipient &&
+            decision->ticket.incarnation() == expected.ticket.incarnation() && decision->x == expected.x &&
+            decision->y == expected.y && decision->pointKnown == expected.pointKnown,
+        "deferred publication preserves exact decisions in registration order"
+    );
+    check(fixture.join.decision(*decision, fixture.now), "ordered decisions remain valid diagnostic join input");
+    const auto joined = fixture.join.pop(fixture.now);
+    check(
+        joined && joined->live() && joined->input.record.sequence == expected.stamp.sequence &&
+            joined->route.outcome == expected.outcome,
+        "the join retains original, filtered and dispatched outcomes without an ordering failure"
+    );
+  }
+  check(!fixture.routes->pop() && !fixture.join.pop(fixture.now), "resolved actions are emitted only once");
+
+  Fixture split;
+  const std::array decisions{split.decision(1, 1), split.decision(1, 2), split.decision(2), split.decision(3)};
+  for (const auto &decision : decisions)
+    check(split.routes->defer(decision.stamp), "distinct parts and captures register independent pending slots");
+  check(
+      split.routes->publish(decisions[3]) && split.routes->publish(decisions[1]) && !split.routes->pop(),
+      "out-of-order resolutions remain staged behind the earliest pending action"
+  );
+  check(split.routes->publish(decisions[0]), "resolving the head releases its ready prefix");
+  for (std::size_t index = 0; index < 2; ++index) {
+    const auto decision = split.routes->pop();
+    check(decision && decision->stamp == decisions[index].stamp, "parts retain their registered order");
+  }
+  check(!split.routes->pop(), "a second unresolved action still fences the later ready result");
+  check(split.routes->publish(decisions[2]), "resolving the next gap releases the remaining ready prefix");
+  for (std::size_t index = 2; index < decisions.size(); ++index) {
+    const auto decision = split.routes->pop();
+    check(decision && decision->stamp == decisions[index].stamp, "later capture resolutions retain event order");
+  }
+  check(!split.routes->pop() && split.routes->live(), "partial flush leaves no duplicate decisions");
+
+  Fixture reuse;
+  for (std::uint64_t round = 0; round < OriginalInputRoutes::capacity + 3; ++round) {
+    const auto head = reuse.decision(round * 2 + 1), tail = reuse.decision(round * 2 + 2);
+    check(
+        reuse.routes->defer(head.stamp) && reuse.routes->publish(tail) && !reuse.routes->pop() &&
+            reuse.routes->publish(head),
+        "pending and ready staging slots can be reused after their prefix drains"
+    );
+    const auto firstOut = reuse.routes->pop(), secondOut = reuse.routes->pop();
+    check(
+        firstOut && secondOut && firstOut->stamp == head.stamp && secondOut->stamp == tail.stamp &&
+            !reuse.routes->pop(),
+        "staging wraparound neither replays an old resolution nor drops a fresh decision"
+    );
+  }
+}
+void deferredRouteFailures()
+{
+  OriginalInputRoutes unbound;
+  check(!unbound.defer({1, 1, 1}) && !unbound.live(), "unbound diagnostic producer cannot stage actions");
+  for (const auto stamp :
+       {OriginalInputStamp{}, OriginalInputStamp{0, 1, 1}, OriginalInputStamp{1, 0, 1}, OriginalInputStamp{1, 1, 0},
+        OriginalInputStamp{1, 1, maximumOriginalInputParts + 1}}) {
+    Fixture fixture;
+    const auto evidence = fixture.routes->evidence();
+    check(
+        !fixture.routes->defer(stamp) && !fixture.routes->live() && evidence->load() && !fixture.routes->pop() &&
+            fixture.source.epoch().live() && fixture.capture().input.live(),
+        "malformed deferred stamps revoke only diagnostics and preserve ordinary capture"
+    );
+  }
+  for (unsigned duplicate = 0; duplicate < 3; ++duplicate) {
+    Fixture fixture;
+    const auto first = fixture.decision(1), second = fixture.decision(2);
+    check(fixture.routes->defer(first.stamp), "duplicate fixture registers its pending head");
+    bool rejected = false;
+    if (duplicate == 0)
+      rejected = !fixture.routes->defer(first.stamp);
+    else {
+      check(
+          fixture.routes->defer(second.stamp) && fixture.routes->publish(second) && !fixture.routes->pop(),
+          "duplicate fixture retains a resolved slot behind its pending head"
+      );
+      rejected = duplicate == 1 ? !fixture.routes->publish(second) : !fixture.routes->defer(second.stamp);
+    }
+    check(
+        rejected && !fixture.routes->live() && !fixture.routes->pop() && fixture.capture().input.live(),
+        "duplicate pending registration or staged resolution revokes diagnostics without replay or raw loss"
+    );
+  }
+  for (const bool readyTail : {false, true}) {
+    Fixture fixture;
+    check(fixture.routes->defer(fixture.decision(1).stamp), "staging overflow fixture registers its pending head");
+    for (std::uint64_t sequence = 2; sequence <= OriginalInputRoutes::capacity; ++sequence) {
+      const auto decision = fixture.decision(sequence);
+      check(
+          readyTail ? fixture.routes->publish(decision) : fixture.routes->defer(decision.stamp),
+          "all bounded staging slots are available for ready or pending actions"
+      );
+    }
+    check(!fixture.routes->pop(), "a full staging buffer still cannot bypass an unresolved head");
+    const auto extra = fixture.decision(OriginalInputRoutes::capacity + 1);
+    check(
+        !(readyTail ? fixture.routes->publish(extra) : fixture.routes->defer(extra.stamp)) && !fixture.routes->live() &&
+            fixture.routes->evidence()->load() && !fixture.routes->pop() && fixture.capture().input.live(),
+        "staging exhaustion revokes only diagnostics instead of overwriting or emitting unresolved actions"
+    );
+  }
+  Fixture blockedOutput;
+  for (std::uint64_t sequence = 1; sequence <= OriginalInputRoutes::capacity; ++sequence)
+    check(blockedOutput.routes->publish(blockedOutput.decision(sequence)), "fill diagnostic output before deferral");
+  const auto head = blockedOutput.decision(OriginalInputRoutes::capacity + 1);
+  check(
+      blockedOutput.routes->defer(head.stamp) &&
+          blockedOutput.routes->publish(blockedOutput.decision(OriginalInputRoutes::capacity + 2)) &&
+          !blockedOutput.routes->publish(head) && !blockedOutput.routes->live() && !blockedOutput.routes->pop() &&
+          blockedOutput.capture().input.live(),
+      "ready prefix output exhaustion remains terminal only for diagnostics"
+  );
+  Fixture revoked;
+  const auto pending = revoked.decision(1);
+  check(
+      revoked.routes->defer(pending.stamp) && revoked.routes->publish(revoked.decision(2)),
+      "revocation fixture has both pending and ready staged decisions"
+  );
+  const auto evidence = revoked.routes->evidence();
+  revoked.routes->revoke();
+  check(
+      evidence->load() && !revoked.routes->publish(pending) && !revoked.routes->defer(revoked.decision(3).stamp) &&
+          !revoked.routes->pop() && revoked.capture().input.live(),
+      "revocation cannot flush or revive staged actions and leaves raw capture independent"
+  );
+  auto destroyed = std::make_unique<OriginalInputRoutes>();
+  check(destroyed->bind(11) && destroyed->defer(pending.stamp), "destruction fixture retains a pending action");
+  const auto retained = destroyed->evidence();
+  destroyed.reset();
+  check(retained->load() && revoked.source.epoch().live(), "pending conduit destruction retains diagnostic revocation");
+}
+void originalRouteHistory()
+{
+  Fixture fixture;
+  auto decision = fixture.decision(1);
+  decision.outcome = OriginalInputRouteOutcome::Original;
+  check(
+      fixture.join.capture(fixture.capture(), fixture.now) && fixture.join.decision(decision, fixture.now),
+      "committed original result joins only its exact completed capture"
+  );
+  const auto joined = fixture.join.pop(fixture.now);
+  check(
+      joined && joined->live() && joined->route.outcome == OriginalInputRouteOutcome::Original &&
+          joined->route.ticket.incarnation() == fixture.ticket.incarnation(),
+      "authenticated original commit is retained as diagnostic history"
+  );
+  fixture.issuer.revoke();
+  check(
+      !joined->live() && fixture.source.epoch().live() && fixture.routes->live(),
+      "original history follows exact ticket revocation even while capture and route conduits stay live"
+  );
+  for (unsigned missing = 0; missing < 4; ++missing) {
+    Fixture unauthenticated;
+    auto result = unauthenticated.decision(1);
+    result.outcome = OriginalInputRouteOutcome::Original;
+    if (missing == 0)
+      result.server = 0;
+    else if (missing == 1)
+      result.recipient = 0;
+    else if (missing == 2)
+      result.ticket = {};
+    else
+      unauthenticated.issuer.revoke();
+    check(
+        unauthenticated.join.capture(unauthenticated.capture(), unauthenticated.now) &&
+            unauthenticated.join.decision(result, unauthenticated.now),
+        "unauthenticated original outcome still receives diagnostic accounting"
+    );
+    const auto denied = unauthenticated.join.pop(unauthenticated.now);
+    check(
+        denied && denied->route.outcome == OriginalInputRouteOutcome::Unauthenticated,
+        "an original outcome without its live authenticated recipient cannot claim committed history"
+    );
+  }
+}
+void completedCaptureInbox()
+{
+  Fixture fixture;
+  OriginalInputCapturedInbox inbox(fixture.source.epoch());
+  const auto evidence = inbox.evidence();
+  const auto beforeBind = fixture.capture(0);
+  check(!inbox.bound() && inbox.live() && !inbox.pop(), "completed capture conduit starts unbound and empty");
+  check(
+      !inbox.publish(beforeBind) && inbox.live() && !evidence->load() && !inbox.pop(),
+      "pre-bind capture is skipped without poisoning or filling the conduit"
+  );
+  check(inbox.bind(11) && inbox.bound(), "one Server binds the completed capture conduit");
+  auto captured = fixture.capture(maximumOriginalInputParts, true);
+  const auto first = captured.input.record.sequence;
+  check(first > 1 && inbox.publish(captured), "the first post-bind capture may begin after previously drained input");
+  captured.input.record.payload = OriginalInputMotion{999, 999};
+  captured.translation.parts = 0;
+  captured.translation.uncertain = false;
+  const auto retained = inbox.pop();
+  check(
+      retained && retained->input.live() && retained->input.epoch.sameEpoch(fixture.source.epoch()) &&
+          retained->input.record.sequence == first &&
+          std::get<OriginalInputMotion>(retained->input.record.payload).dx == 3 &&
+          retained->translation.stamp == OriginalInputStamp{fixture.source.epoch().id(), first, 0} &&
+          retained->translation.parts == maximumOriginalInputParts && retained->translation.uncertain && !inbox.pop(),
+      "inbox copies every completed field exactly once without borrowing mutable producer data"
+  );
+  const auto untranslated = fixture.capture(0);
+  check(inbox.publish(untranslated), "zero-part completions are still published");
+  const auto zero = inbox.pop();
+  check(zero && zero->translation.parts == 0 && !zero->translation.uncertain, "zero-part completion is not fabricated");
+  for (std::size_t count = 0; count < OriginalInputCapturedInbox::capacity; ++count)
+    check(inbox.publish(fixture.capture()), "all completed capture slots are available");
+  check(
+      !inbox.publish(fixture.capture()) && !inbox.live() && evidence->load() && !inbox.pop(),
+      "bounded completed capture overflow revokes without overwriting or returning stale slots"
+  );
+  check(
+      fixture.source.epoch().live() && fixture.routes->live() && retained->input.live() &&
+          fixture.capture().input.live(),
+      "conduit overflow never revokes raw capture, independent route diagnostics or retained epoch evidence"
+  );
+  check(!inbox.bind(12), "a revoked completed capture conduit cannot be rebound");
+}
+void completedCaptureValidation()
+{
+  for (int failure = 0; failure != 11; ++failure) {
+    Fixture fixture, other;
+    OriginalInputCapturedInbox inbox(fixture.source.epoch());
+    check(inbox.bind(11), "malformed completion fixture binds");
+    auto captured = fixture.capture();
+    switch (failure) {
+    case 0:
+      captured.input.record.sequence = 0;
+      break;
+    case 1:
+      captured.input.record.sourceTimestampNs = 0;
+      break;
+    case 2:
+      captured.input.record.payload = OriginalInputMotion{std::numeric_limits<std::int64_t>::max(), 0};
+      break;
+    case 3:
+      ++captured.input.record.epoch;
+      break;
+    case 4:
+      captured.input.epoch = {};
+      break;
+    case 5:
+      captured = other.capture();
+      break;
+    case 6:
+      ++captured.translation.stamp.epoch;
+      break;
+    case 7:
+      ++captured.translation.stamp.sequence;
+      break;
+    case 8:
+      captured.translation.stamp.part = 1;
+      break;
+    case 9:
+      captured.translation.parts = maximumOriginalInputParts + 1;
+      break;
+    case 10:
+      captured.translation.stamp = {};
+      break;
+    }
+    check(
+        !inbox.publish(captured) && !inbox.live() && inbox.evidence()->load() && !inbox.pop() &&
+            fixture.source.epoch().live() && fixture.routes->live(),
+        "malformed completion or wrong epoch revokes only the completed capture conduit"
+    );
+  }
+  for (int order = 0; order != 4; ++order) {
+    Fixture fixture;
+    OriginalInputCapturedInbox inbox(fixture.source.epoch());
+    check(inbox.bind(11), "capture order fixture binds");
+    auto first = fixture.capture();
+    if (order == 2)
+      first.input.record.sourceTimestampNs = 100;
+    if (order == 3)
+      first.translation.stamp.sequence = first.input.record.sequence = std::numeric_limits<std::uint64_t>::max();
+    check(inbox.publish(first) && inbox.pop().has_value(), "capture order fixture publishes first complete record");
+    auto next = fixture.capture();
+    if (order == 0)
+      next = first;
+    if (order == 1)
+      next = fixture.capture();
+    check(
+        !inbox.publish(next) && !inbox.live() && fixture.source.epoch().live(),
+        "duplicate, skipped, regressed or exhausted capture order is terminal only for the conduit"
+    );
+  }
+  for (const auto rebound : {0u, 11u, 12u}) {
+    Fixture fixture;
+    OriginalInputCapturedInbox inbox(fixture.source.epoch());
+    check(inbox.bind(11), "rebind fixture claims its single Server");
+    check(!inbox.bind(rebound) && !inbox.live(), "invalid, duplicate and replacement Server bindings fail closed");
+  }
+  Fixture fixture;
+  OriginalInputCapturedInbox invalidBind(fixture.source.epoch());
+  check(
+      !invalidBind.bind(0) && !invalidBind.bound() && !invalidBind.live() && !invalidBind.bind(11),
+      "initial invalid binding cannot be repaired into another Server lifetime"
+  );
+  OriginalInputCapturedInbox noEpoch({});
+  check(!noEpoch.bind(11) && !noEpoch.live(), "no completed capture conduit can bind without a live epoch");
+}
+void completedCaptureLifetime()
+{
+  Fixture fixture;
+  auto inbox = std::make_unique<OriginalInputCapturedInbox>(fixture.source.epoch());
+  check(inbox->bind(11) && inbox->publish(fixture.capture()), "conduit lifetime fixture publishes");
+  const auto evidence = inbox->evidence();
+  const auto retained = inbox->pop();
+  inbox.reset();
+  check(
+      evidence->load() && retained && retained->input.live() && fixture.source.epoch().live(),
+      "destruction revokes retained conduit evidence without revoking the independent capture epoch"
+  );
+  OriginalInputCapturedInbox epochLoss(fixture.source.epoch());
+  check(epochLoss.bind(12) && epochLoss.publish(fixture.capture()), "epoch loss fixture publishes");
+  const auto epochEvidence = epochLoss.evidence();
+  fixture.source.revoke(OriginalInputRevocation::Stopped);
+  check(
+      !epochLoss.pop() && !epochLoss.live() && epochEvidence->load() && !retained->input.live(),
+      "revoked original epoch cannot escape through queued completed copies or retained evidence"
+  );
+}
+void completedCaptureConcurrency()
+{
+  Fixture fixture;
+  OriginalInputCapturedInbox inbox(fixture.source.epoch());
+  check(inbox.bind(11), "completed capture stress binds");
+  constexpr std::uint64_t total = 20000;
+  std::atomic<std::uint64_t> consumed{0};
+  std::atomic_bool failed{false};
+  std::thread producer([&] {
+    try {
+      for (std::uint64_t sequence = 1; sequence <= total && !failed.load(std::memory_order_acquire); ++sequence) {
+        while (sequence - consumed.load(std::memory_order_acquire) > 32 && !failed.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        if (failed.load(std::memory_order_acquire))
+          break;
+        const auto captured = fixture.capture(static_cast<std::uint16_t>(sequence % 17), sequence % 2 == 0);
+        if (!inbox.publish(captured))
+          failed.store(true, std::memory_order_release);
+      }
+    } catch (...) {
+      failed.store(true, std::memory_order_release);
+    }
+  });
+  for (std::uint64_t sequence = 1; sequence <= total && !failed.load(std::memory_order_acquire);) {
+    if (const auto captured = inbox.pop()) {
+      if (!captured->input.live() || captured->input.record.sequence != sequence ||
+          captured->translation.stamp != OriginalInputStamp{fixture.source.epoch().id(), sequence, 0} ||
+          captured->translation.parts != sequence % 17 || captured->translation.uncertain != (sequence % 2 == 0))
+        failed.store(true, std::memory_order_release);
+      consumed.store(sequence++, std::memory_order_release);
+    } else
+      std::this_thread::yield();
+  }
+  producer.join();
+  check(
+      !failed && consumed == total && inbox.live() && !inbox.pop(),
+      "SPSC completed captures retain exact sequence, translation count and flags across repeated slot reuse"
+  );
+}
 } // namespace
 int main()
 {
@@ -217,6 +602,13 @@ int main()
     joinsAndDenials();
     expiryDiscontinuityAndRevocation();
     concurrency();
+    deferredRouteOrder();
+    deferredRouteFailures();
+    originalRouteHistory();
+    completedCaptureInbox();
+    completedCaptureValidation();
+    completedCaptureLifetime();
+    completedCaptureConcurrency();
     std::cout << "Original input route tests passed\n";
     return 0;
   } catch (const std::exception &e) {

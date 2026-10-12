@@ -60,8 +60,9 @@ does not yet install the pre-dispatch controller that invokes it. The existing
 private input lease represents keyboard scope only; it must not silently erase
 full scope or start an unrepresentable handoff.
 
-Before enabling original input, the implementation still needs an ordered
-Server decision, exact routed coordinates, native queue draining, physical
-neutrality, original press ownership, and delivery to the exact Mac source.
+The optional [Server dispatcher](original-input-dispatch.md) provides a decision
+before legacy dispatch and retains original press ownership. Before enabling
+it, the production controller still needs exact routed-coordinate validation,
+native queue draining, physical neutrality and delivery to the exact Mac source.
 Neither this acknowledgment nor an input-submission receipt proves that Mutter,
 Wayland, Qt or the Mac application consumed an event.

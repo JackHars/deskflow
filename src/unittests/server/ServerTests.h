@@ -23,6 +23,17 @@ private Q_SLOTS:
   void originalCapture_motionCrossingUsesEnterDecision();
   void originalCapture_filterAndAmbiguityDenials();
   void originalCapture_negotiatedPacketsRetainRecipientAndStamp();
+  void originalDispatch_captureRaceAndPackets();
+  void originalDispatch_denialExpansionAndFiltered();
+  void originalDispatch_ownersFocusAndReconnect();
+  void originalDispatch_mixedOrderingAndCoordinates();
+  void originalDispatch_timeoutOverflowAndFeatureDefault();
+  void originalDispatch_reentrantFailureAndDestruction();
+  void originalDispatch_missingUpsAndDragOwner();
+  void originalDispatch_transitionAndReentrantOrdering();
+  void originalDispatch_terminalAndPartialReleaseAccounting();
+  void originalDispatch_cleanupCannotEraseNewLegacyOwner();
+  void originalDispatch_flushDestructionAndDisconnect();
   void inputRoutes_keepPressRecipientAcrossSwitch();
   void inputRoutes_localPressDoesNotAcquireRemoteRecipient();
   void inputRoutes_disconnectDoesNotRetargetHeldInput();

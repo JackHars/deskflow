@@ -26,7 +26,8 @@ OriginalInputRouteKind kind(const OriginalInputRecord &record) noexcept
 bool OriginalInputRouted::live() const noexcept
 {
   return input.live() && routeRevoked && !routeRevoked->load(std::memory_order_acquire) &&
-         (route.outcome != OriginalInputRouteOutcome::Dispatched ||
+         ((route.outcome != OriginalInputRouteOutcome::Dispatched &&
+           route.outcome != OriginalInputRouteOutcome::Original) ||
           (route.server && route.recipient && route.ticket.live()));
 }
 OriginalInputRouteJoin::OriginalInputRouteJoin(OriginalInputEpoch epoch, std::shared_ptr<OriginalInputRoutes> routes)
@@ -138,7 +139,8 @@ std::optional<OriginalInputRouted> OriginalInputRouteJoin::pop(Clock::time_point
     result = *entry.decision;
     if (result.stamp.part != 1 || result.kind != kind(entry.captured->input.record))
       result.outcome = OriginalInputRouteOutcome::Uncorrelated;
-    if (result.outcome == OriginalInputRouteOutcome::Dispatched &&
+    if ((result.outcome == OriginalInputRouteOutcome::Dispatched ||
+         result.outcome == OriginalInputRouteOutcome::Original) &&
         (!result.server || !result.recipient || !result.ticket.live()))
       result.outcome = OriginalInputRouteOutcome::Unauthenticated;
   }

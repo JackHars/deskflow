@@ -79,7 +79,10 @@ the observer to reset or destroy the proxy safely.
 
 The post-dispatch `LocalInputSession.onRoutedInput` observation must not be wired
 directly to `sendOriginal`: it is too late to replace the legacy dispatch and
-would risk duplicate or reordered input. A future cutover must account for
-untraced packets, filtering, expansion and connection retirement, and obtain
-native ownership and consumption evidence separately. This trace provides no
-compositor fence and must never be treated as one.
+would risk duplicate or reordered input. The optional
+[Server dispatcher](original-input-dispatch.md) now makes that choice before
+the legacy write, but the production launcher does not install its native
+controller yet. Cutover still needs to account for untraced packets, filtering,
+expansion and connection retirement, and obtain native ownership and consumption
+evidence separately. This trace provides no compositor fence and must never be
+treated as one.

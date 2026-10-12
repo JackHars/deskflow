@@ -5,6 +5,7 @@
 #pragma once
 
 #include "OriginalInput_mac.h"
+#include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputRoute.h"
 
 namespace deskflow::windowshare {
@@ -37,6 +38,12 @@ public:
   {
     return m_routes;
   }
+  // Copies published by the existing Session consumer, never a second raw
+  // capture consumer. A retained inbox is revoked with this source's stop.
+  std::shared_ptr<OriginalInputCapturedInbox> completedInput() const noexcept
+  {
+    return m_completedInput;
+  }
   // Thread-safe. Empty until started, or once continuity is lost. Previously
   // returned tokens remain revoked even after this object is destroyed.
   OriginalInputEpoch epoch() const noexcept;
@@ -57,6 +64,8 @@ private:
   std::array<OriginalInputTranslation, OriginalInputStream::capacity> m_completed;
   std::atomic<std::uint64_t> m_completedWritten{0}, m_completedRead{0};
   std::shared_ptr<OriginalInputRoutes> m_routes = std::make_shared<OriginalInputRoutes>();
+  std::shared_ptr<OriginalInputCapturedInbox> m_completedInput =
+      std::make_shared<OriginalInputCapturedInbox>(m_stream.epoch());
 };
 
 } // namespace deskflow::windowshare

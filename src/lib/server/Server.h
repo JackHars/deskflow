@@ -19,11 +19,13 @@
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputSequence.h"
 #include "windowshare/InputRouteState.h"
+#include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputRoute.h"
 #include "windowshare/SelectedPeer.h"
 #endif
 
 #include <climits>
+#include <deque>
 #include <map>
 #include <set>
 #include <vector>
@@ -220,6 +222,35 @@ public:
   // Bind once on the core thread before dispatch; failure denies observation
   // without changing ordinary routing. Server shutdown revokes retained joins.
   bool setOriginalInputRoutes(std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> routes) noexcept;
+  bool setOriginalInputCapturedInbox(std::shared_ptr<deskflow::windowshare::OriginalInputCapturedInbox> inbox);
+
+  // Trusted, local, core-thread provider. reserve must retain the immutable
+  // record and reserve output capacity without delivering it. An accepted
+  // reservation is irrevocably original, including when commit fails. The
+  // provider must hold the exact native/coordinate authority and all-input
+  // forwarding fence; neither a route observation nor TLS identity supplies it.
+  class OriginalInputDispatcher
+  {
+  public:
+    struct Reservation
+    {
+      std::uint64_t owner = 0, nonce = 0;
+    };
+    virtual ~OriginalInputDispatcher() = default;
+    virtual std::optional<Reservation> reserve(
+        const deskflow::windowshare::OriginalInputCaptured &captured,
+        const deskflow::windowshare::OriginalInputRouteDecision &route,
+        const deskflow::windowshare::SelectedPeer &selected, std::uint64_t existingOwner
+    ) = 0;
+    virtual bool commit(const Reservation &reservation) = 0;
+    virtual void cancel(const Reservation &reservation) noexcept = 0;
+    virtual void release(std::uint64_t owner) noexcept = 0;
+    virtual bool live(std::uint64_t owner) const noexcept = 0;
+  };
+  // One-shot and deliberately absent in production until a native authorizer
+  // can implement the provider contract. Inbox registration alone changes no
+  // legacy packets or ownership.
+  bool setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher> dispatcher) noexcept;
 #endif
 
   //@}
@@ -427,13 +458,101 @@ private:
     deskflow::windowshare::InputSequenceOriginScope inputSequenceOrigin;
     unsigned sends = 0;
     int exceptions;
+    bool deferred = false;
+    std::shared_ptr<bool> lifetime;
   };
   void observeOriginalSend(BaseClientProxy *client, bool relative = false) noexcept;
+  using OriginalClock = std::chrono::steady_clock;
+  struct PendingKey
+  {
+    enum class Phase
+    {
+      Down,
+      Up,
+      Repeat
+    } phase;
+    KeyID id;
+    KeyModifierMask mask;
+    KeyButton button;
+    std::int32_t count = 0;
+    std::string language;
+  };
+  struct PendingButton
+  {
+    ButtonID id;
+    bool down;
+  };
+  struct PendingMotion
+  {
+    std::int32_t x, y;
+    bool relative = false;
+  };
+  struct PendingScroll
+  {
+    std::int32_t x, y;
+  };
+  using PendingOperation = std::variant<PendingKey, PendingButton, PendingMotion, PendingScroll>;
+  struct PendingInput
+  {
+    PendingOperation operation;
+    InputRoutes::Recipients recipients;
+    deskflow::windowshare::OriginalInputRouteDecision route;
+    std::optional<deskflow::windowshare::SelectedPeer> selected;
+    OriginalClock::time_point deadline;
+  };
+  struct CompletedInput
+  {
+    deskflow::windowshare::OriginalInputCaptured captured;
+    OriginalClock::time_point deadline;
+    std::uint32_t parts = 0;
+    bool upResolved = false;
+  };
+  static constexpr std::size_t originalPendingCapacity = 256;
+  static constexpr auto originalDispatchTimeout = std::chrono::milliseconds(100);
+  bool deferOriginalInput(PendingOperation operation, InputRoutes::Recipients recipients);
+  void drainOriginalInput(OriginalClock::time_point now = OriginalClock::now());
+  void executeOriginalInput(PendingInput pending, const deskflow::windowshare::OriginalInputCaptured *captured);
+  void executeLegacyInput(const PendingInput &pending);
+  void cancelOriginalDispatch() noexcept;
+  void cancelInFlightOriginal();
+  void flushOriginalBeforeSelection();
+  void retireOriginalCapture(const deskflow::windowshare::OriginalInputCaptured &captured);
+  std::optional<InputRoutes::Press> takeInputPress(InputRoutes::Control control);
+  void revokeOriginalOwner(std::uint64_t owner) noexcept;
+  void releaseRoutedModifiers(KeyID id, KeyModifierMask mask);
+  deskflow::windowshare::OriginalInputRouteDecision
+  originalDispatchRoute(const InputRoutes::Recipients &recipients, bool relative) const;
+  std::shared_ptr<bool> m_originalLifetime = std::make_shared<bool>(true);
+  std::shared_ptr<deskflow::windowshare::OriginalInputCapturedInbox> m_originalInputCaptured;
+  std::shared_ptr<OriginalInputDispatcher> m_originalDispatcher;
+  EventQueueTimer *m_originalDispatchTimer = nullptr;
+  std::deque<PendingInput> m_originalPending;
+  std::map<std::pair<std::uint64_t, std::uint64_t>, CompletedInput> m_originalCompleted;
+  std::set<std::uint64_t> m_originalReleases;
+  std::set<std::uint64_t> m_originalOwners;
+  std::set<std::uint64_t> m_originalRevokedOwners;
+  struct OriginalPhysicalPress
+  {
+    InputRoutes::Control control;
+    std::uint64_t incarnation;
+  };
+  std::map<std::uint8_t, OriginalPhysicalPress> m_originalButtonControls;
+  std::map<std::uint16_t, OriginalPhysicalPress> m_originalKeyControls;
+  struct OriginalReservationCall
+  {
+    const PendingInput &pending;
+    bool cancelled = false;
+  };
+  OriginalReservationCall *m_originalReservationCall = nullptr;
+  const PendingInput *m_originalExecuting = nullptr;
+  const OriginalRouteObservation *m_originalExecutingObservation = nullptr;
+  bool m_originalDraining = false, m_originalDispatchTerminal = false;
   OriginalRouteObservation *m_originalRouteObservation = nullptr;
   std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> m_originalInputRoutes;
   InputRoutes m_inputRoutes;
   std::map<BaseClientProxy *, InputRoutes::Recipient> m_inputRecipients;
   std::map<InputRoutes::Recipient, BaseClientProxy *> m_inputClients;
+  std::set<BaseClientProxy *> m_disconnectingInputClients;
   std::uint64_t m_serverIncarnation = 0;
   std::uint64_t m_selectionGeneration = 0;
   std::shared_ptr<std::atomic_bool> m_selectionRevoked;

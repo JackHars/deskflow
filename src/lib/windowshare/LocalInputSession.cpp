@@ -197,6 +197,9 @@ void LocalInputCoreSession::drainCapturedInput()
   }
   const auto epoch = source->epoch();
   if (!epoch.live()) {
+    // Source::epoch() is also empty before producer startup. The conduit owns
+    // the underlying epoch and can distinguish that state from continuity loss.
+    (void)source->completedInput()->live();
     m_captureBarrier.reset();
     return;
   }
@@ -221,10 +224,17 @@ void LocalInputCoreSession::drainCapturedInput()
       // Keep the native observer alive for a later raw emergency.
       m_captureBarrier.reset();
       m_captureJoin->revoke();
+      source->completedInput()->revoke();
       break;
     }
     if (m_captureJoin->live())
       m_captureJoin->capture(*captured);
+    // Keep the sole raw consumer and all continuity/diagnostic observations.
+    // A stalled Server revokes only this bounded copy conduit; capture draining
+    // and the independent sticky emergency path continue unchanged.
+    const auto completed = source->completedInput();
+    if (completed->bound())
+      completed->publish(*captured);
   }
   for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
     const auto joined = m_captureJoin->pop();

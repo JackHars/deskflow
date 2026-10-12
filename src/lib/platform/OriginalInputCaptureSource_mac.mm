@@ -149,6 +149,7 @@ void OriginalInputCaptureSource::stop() noexcept
 {
   // Revocation precedes terminal publication. A racing successful start cannot
   // revive continuity, and a consumer holding an older token sees the stop.
+  m_completedInput->revoke();
   m_routes->revoke();
   m_stream.revoke(OriginalInputRevocation::Stopped);
   m_state.store(State::Stopped, std::memory_order_release);
