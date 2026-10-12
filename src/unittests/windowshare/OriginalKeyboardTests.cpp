@@ -329,7 +329,7 @@ void testEmergency()
   Stream stream;
   OriginalKeyLedger ledger;
   std::uint64_t flags = 0;
-  for (const auto [code, mask] :
+  for (const auto &[code, mask] :
        {std::pair<std::uint16_t, std::uint64_t>{0x3b, leftControl}, {0x3d, rightOption}, {0x38, leftShift}}) {
     flags |= mask;
     ledger.route(stream.event(code, OriginalKeyKind::FlagsChanged, flags), 501);
