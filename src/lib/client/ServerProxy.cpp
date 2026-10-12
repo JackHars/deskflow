@@ -30,30 +30,42 @@
 
 namespace {
 
-// One already validated legacy message. Reads never cross into the transport
-// or a following message, and the existing version-specific parsers remain the
-// only path that translates and executes input. Output always uses m_stream.
-class InputSequencePayloadStream final : public deskflow::IStream
+// Read-only view of one message payload, either already validated input bytes
+// or a bounded portion of the current transport packet. Existing parsers can
+// never read the next message through this view. Output always uses m_stream.
+class BoundedMessageStream final : public deskflow::IStream
 {
 public:
-  explicit InputSequencePayloadStream(std::string_view payload) : m_payload(payload)
+  explicit BoundedMessageStream(std::string_view payload)
+      : m_payload(payload),
+        m_remaining(static_cast<uint32_t>(payload.size()))
+  {
+  }
+  BoundedMessageStream(deskflow::IStream &source, uint32_t remaining) : m_source(&source), m_remaining(remaining)
   {
   }
   uint32_t read(void *buffer, uint32_t size) override
   {
-    const auto count = std::min<std::size_t>(size, m_payload.size());
-    if (buffer && count)
-      std::memcpy(buffer, m_payload.data(), count);
-    m_payload.remove_prefix(count);
-    return static_cast<uint32_t>(count);
+    auto count = std::min(size, m_remaining);
+    if (!count)
+      return 0;
+    if (m_source) {
+      count = m_source->read(buffer, count);
+    } else {
+      if (buffer)
+        std::memcpy(buffer, m_payload.data(), count);
+      m_payload.remove_prefix(count);
+    }
+    m_remaining -= count;
+    return count;
   }
   bool isReady() const override
   {
-    return !m_payload.empty();
+    return m_remaining != 0;
   }
   uint32_t getSize() const override
   {
-    return static_cast<uint32_t>(m_payload.size());
+    return m_remaining;
   }
   void *getEventTarget() const override
   {
@@ -62,10 +74,11 @@ public:
   void close() override
   {
     m_payload = {};
+    m_remaining = 0;
   }
   void write(const void *, uint32_t) override
   {
-    throw BadClientException("Unexpected output to input sequence payload");
+    throw BadClientException("Unexpected output to bounded message payload");
   }
   void flush() override
   {
@@ -79,7 +92,9 @@ public:
   }
 
 private:
+  deskflow::IStream *m_source = nullptr;
   std::string_view m_payload;
+  uint32_t m_remaining = 0;
 };
 
 } // namespace
@@ -864,11 +879,20 @@ void ServerProxy::setOptions()
 {
   // parse
   OptionsList options;
-  if (!ProtocolUtil::readf(m_stream, kMsgDSetOptions + 4, &options)) {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
-    if (supportsInputSequence())
-      throw BadClientException("Incomplete options for input sequence negotiation");
+  if (supportsInputSequence()) {
+    // ProtocolUtil reads until its requested count is satisfied. Bound it to
+    // this saved packet length so a truncated option cannot borrow the next
+    // packet's bytes and become an acknowledged trace generation.
+    if (m_messageBytes < 8 || m_messageBytes > PROTOCOL_MAX_MESSAGE_LENGTH)
+      throw BadClientException("Invalid options packet size for input sequence negotiation");
+    BoundedMessageStream payload(*m_stream, m_messageBytes - 4);
+    if (!ProtocolUtil::readf(&payload, kMsgDSetOptions + 4, &options) || payload.isReady())
+      throw BadClientException("Incomplete or extra options for input sequence negotiation");
+  } else
 #endif
+  {
+    ProtocolUtil::readf(m_stream, kMsgDSetOptions + 4, &options);
   }
   LOG_VERBOSE("recv set options size=%d", options.size());
 
@@ -1003,7 +1027,7 @@ void ServerProxy::inputSequence()
   bool dispatchFailed = false;
   {
     InputSequenceSubmissionScope scope(envelope->token);
-    InputSequencePayloadStream payload(std::string_view(envelope->payload).substr(4));
+    BoundedMessageStream payload(std::string_view(envelope->payload).substr(4));
     m_sequencePayloadStream = &payload;
     const auto restore = qScopeGuard([this] { m_sequencePayloadStream = nullptr; });
     try {

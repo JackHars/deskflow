@@ -34,6 +34,7 @@ private Q_SLOTS:
   void inputSequence_revocationAndReentryCannotEmitSuccess();
   void inputSequence_realPacketFilterPreservesEnvelopeBoundary();
   void inputSequence_malformedOptionsCannotNegotiate();
+  void inputSequence_optionsCannotCrossPacketBoundary();
 #endif
 
 private:

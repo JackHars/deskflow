@@ -1114,8 +1114,11 @@ void ServerProxyTests::inputSequence_malformedOptionsCannotNegotiate()
   const OptionsList odd{kOptionInputSequenceTrace};
   const OptionsList valid{kOptionInputSequenceTrace, 7};
   const auto complete = wire(kMsgDSetOptions, &valid);
+  auto wrongCount = complete;
+  wrongCount[7] = 0;
   for (const auto &options :
-       {wire(kMsgDSetOptions, &duplicate), wire(kMsgDSetOptions, &odd), complete.substr(0, complete.size() - 1)}) {
+       {wire(kMsgDSetOptions, &duplicate), wire(kMsgDSetOptions, &odd), complete.substr(0, complete.size() - 1),
+        complete + "CNOP", wrongCount}) {
     InputFixture f;
     f.stream.authenticate();
     f.send(options);
@@ -1124,6 +1127,44 @@ void ServerProxyTests::inputSequence_malformedOptionsCannotNegotiate()
     QVERIFY(disconnectRequest(f.events));
     QCOMPARE(f.stream.writes, std::vector<std::string>{"EBAD"});
   }
+}
+
+void ServerProxyTests::inputSequence_optionsCannotCrossPacketBoundary()
+{
+  RecordingEventQueue events;
+  deskflow::Computer computer{new InputPlatform(&events), &events};
+  RecordingClient client{&events, &computer};
+  FakeStream transport;
+  transport.authenticate();
+  PacketStreamFilter packets(&events, &transport, false);
+  ServerProxy1_8 proxy(&client, &packets, &events);
+  const auto packet = [](const std::string &payload) {
+    std::string bytes;
+    inputSequenceDetail::append(bytes, payload.size(), 4);
+    bytes += payload;
+    return bytes;
+  };
+  const OptionsList options{kOptionInputSequenceTrace, 7};
+  const auto complete = wire(kMsgDSetOptions, &options);
+  const std::string next = kMsgCNoop;
+  // Remove only the advertised generation. The following packet's valid CNOP
+  // bytes must never complete that uint32 or activate the negotiation.
+  transport.push(packet(complete.substr(0, complete.size() - 4)) + packet(next));
+  QVERIFY(events.dispatchEvent(Event(EventTypes::StreamInputReady, transport.getEventTarget())));
+  QVERIFY2(
+      std::none_of(
+          transport.writes.begin(), transport.writes.end(), [](const auto &write) { return write.starts_with("CISA"); }
+      ),
+      "Truncated DSOP borrowed the following packet and acknowledged its bytes as an ISQ1 generation"
+  );
+  QCOMPARE(client.handshakes, 0U);
+  QCOMPARE(client.options, 0U);
+  QVERIFY(client.calls.empty());
+  QVERIFY(disconnectRequest(events));
+  QCOMPARE(packets.getSize(), uint32_t(next.size()));
+  std::string untouched(next.size(), '\0');
+  QCOMPARE(packets.read(untouched.data(), static_cast<uint32_t>(untouched.size())), uint32_t(next.size()));
+  QCOMPARE(untouched, next);
 }
 #endif
 
