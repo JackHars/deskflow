@@ -207,6 +207,11 @@ struct Fixture
     const auto identity = localInputProcess(child.processId());
     check(identity.has_value(), "Cannot inspect launched fixture process");
     core = pair.adoptCore(*identity, coreLimits);
+    // These codec/callback fixtures inject frames directly into read(). They
+    // consume sequence slots the real peer never sent, so neither side may
+    // interleave periodic heartbeats with those synthetic frames.
+    if (mode == "synthetic")
+      LocalInputChannelTestAccess::stopTimer(*core);
     core->authorize = [](const LocalInputLease &lease, LocalInputCheck) { return lease == fixtureLease(); };
     core->onAuthenticated = [&] { ready = true; };
     core->onPrepared = [&](const LocalInputLease &lease) {
@@ -386,6 +391,8 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   auto host =
       LocalInputChannel::adoptHost(descriptor, *expectedCore, mode == "patient" ? LocalInputLimits{20, 2000} : limits);
   check((fcntl(descriptor, F_GETFD) & FD_CLOEXEC) != 0, "Adopted child capability is inheritable");
+  if (mode == "synthetic")
+    LocalInputChannelTestAccess::stopTimer(*host);
   std::uint64_t originalEvents = 0;
   int callbackEvents = 0;
   bool retiredDelivered = false;
@@ -687,7 +694,7 @@ void preflightWireLayout()
 }
 void preflightDoesNotOwnLeaseState()
 {
-  Fixture fixture;
+  Fixture fixture("synthetic");
   fixture.establish();
   auto future = fixtureLease();
   future.routeGeneration = future.coreServerIncarnation = future.coreRecipient = future.coreSelectionGeneration =
@@ -720,7 +727,7 @@ void preflightDoesNotOwnLeaseState()
   // close before receiving real traffic on this codec-only fixture.
   fixture.core->close();
   fixture.childExitedCleanly();
-  Fixture active;
+  Fixture active("synthetic");
   active.activate();
   active.core->onOfferCancelled = [](const LocalInputOffer &, LocalInputRevocation) {};
   LocalInputChannelTestAccess::incoming(
@@ -737,7 +744,7 @@ void malformedPreflight()
 {
   for (const unsigned type : {12, 13, 14, 15}) {
     for (int fault = 0; fault < 3; ++fault) {
-      Fixture fixture;
+      Fixture fixture("synthetic");
       fixture.establish();
       int delivered = 0;
       fixture.core->onCandidate = [&](const LocalInputLease &) { ++delivered; };
@@ -762,7 +769,7 @@ void malformedPreflight()
     }
   }
   for (const unsigned type : {12, 13, 14}) {
-    Fixture fixture;
+    Fixture fixture("synthetic");
     fixture.establish();
     if (type == 12)
       LocalInputChannelTestAccess::incoming(*fixture.core, type, offerPayload(fixtureLease()));
@@ -777,7 +784,7 @@ void malformedPreflight()
     fixture.childExitedCleanly();
   }
   for (const char reason : {0, 4}) {
-    Fixture fixture;
+    Fixture fixture("synthetic");
     fixture.establish();
     LocalInputChannelTestAccess::incoming(*fixture.core, 15, offerPayload(fixtureLease()) + reason);
     check(fixture.closed, "Unknown offer cancellation reason was accepted");
@@ -785,7 +792,7 @@ void malformedPreflight()
   }
   // An otherwise valid lease with a host counter outside JSON precision is
   // malformed, even though core-owned counters retain all 64 bits.
-  Fixture bounds;
+  Fixture bounds("synthetic");
   bounds.establish();
   auto invalid = fixtureLease();
   invalid.focusRequest = std::uint64_t{1} << 53;
@@ -797,7 +804,7 @@ void preflightCallbacks()
 {
   for (const unsigned type : {13, 14, 15}) {
     for (const QString action : {"revoke", "close", "delete", "throw"}) {
-      Fixture fixture;
+      Fixture fixture("synthetic");
       fixture.activate();
       int callbacks = 0, nested = 0;
       const auto callback = [&, marker = QString(256, 'c')] {
@@ -837,7 +844,17 @@ void preflightCallbacks()
       LocalInputChannelTestAccess::incoming(*fixture.core, type, payload);
       check(callbacks == 1 && fixture.revoked == 1, "Preflight callback lost or duplicated lease release");
       if (action == "revoke") {
-        check(nested == 1 && !fixture.closed && !fixture.core->lease(), "Reentrant preflight notification failed");
+        if (nested != 1 || fixture.closed || fixture.core->lease())
+          throw std::runtime_error(QStringLiteral(
+                                       "Reentrant preflight notification failed: type=%1 action=%2 "
+                                       "nested=%3 closed=%4 reason=%5"
+          )
+                                       .arg(type)
+                                       .arg(action)
+                                       .arg(nested)
+                                       .arg(fixture.closed)
+                                       .arg(fixture.reason)
+                                       .toStdString());
         fixture.core->close();
       } else
         check(fixture.closed, "Failed/destructive preflight callback retained channel authority");
