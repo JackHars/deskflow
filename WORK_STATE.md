@@ -54,6 +54,14 @@ the Mac host subsequently exceeded the eight-second termination deadline and
 required SIGKILL. This shutdown needs follow-up and is not a graceful-stop pass.
 The actual exit statuses and joint evidence are retained under `session-3/`.
 
+A follow-up of the unchanged installed host passes idle timer and SIGTERM exits
+with status 0 (2.796 and 0.791 seconds including startup). No windows were
+exported and no input was injected. This does not reproduce or resolve the
+capture-session shutdown failure. The session's OS log records a system-stopped
+capture stream before restoration; no stack sample was taken during the hang.
+Evidence is `build/physical-input-20261012/idle-host-shutdown/` and
+`session-3-host-system.log` in the same parent directory.
+
 Packaging the hotkey fix stopped before signing: macOS explicitly denied
 `kTCCServiceSystemPolicyAppBundles` to `com.openai.codex`, whose responsible app
 was `/Applications/ChatGPT.app`. The user has been asked to enable App Management
@@ -63,6 +71,10 @@ launch check remain under `build/packages/hotkey-modifiers-20261012/` and
 `build/physical-input-20261012/package-*.log`; the existing installation is intact.
 A retry must use a fresh output directory and finish packaging/verification before
 running its launch tests. The source fix is committed as `f55fe8012`.
+That exact revision passed all six CI jobs in run `38306411263`, including the
+new Mac modifier regressions and actual GNOME integration. Complete metadata,
+logs and their hashes are retained under
+`build/physical-input-20261012/ci-38306411263/`.
 
 ## Actual Mac/Ubuntu synthetic round trip (2026-10-12)
 
