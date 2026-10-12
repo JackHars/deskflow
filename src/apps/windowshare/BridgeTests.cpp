@@ -8,6 +8,9 @@
 #include "main.cpp"
 #include <QCryptographicHash>
 #include <QEventLoop>
+#include <QFocusEvent>
+#include <QKeyEvent>
+#include <QSet>
 #include <QSslConfiguration>
 #include <QSslError>
 #include <QTemporaryDir>
@@ -16,6 +19,10 @@ namespace {
 QVector<std::uint32_t> exportedWindows;
 QVector<std::pair<std::uint64_t, std::uint64_t>> keyframeRequests;
 std::function<void(NativeHost &, std::uint64_t, std::uint64_t)> keyframeReply;
+bool automaticNative = false;
+int nativeRefreshes = 0, nativeReleases = 0, nativeRestores = 0;
+QVector<QJsonObject> nativeInputs;
+QSet<int> nativeHeldKeys;
 } // namespace
 
 namespace deskflow::windowshare {
@@ -43,16 +50,31 @@ void NativeHost::setHoldingDisplayEnabled(bool)
 // Enumeration completes only when the test invokes onCatalog.
 void NativeHost::refresh()
 {
+  ++nativeRefreshes;
+  if (automaticNative && onCatalog)
+    onCatalog({{123, "Reconnect fixture"}});
 }
 void NativeHost::exportWindow(std::uint32_t id)
 {
   exportedWindows.push_back(id);
 }
-void NativeHost::ready(std::uint64_t, std::uint64_t)
+void NativeHost::ready(std::uint64_t session, std::uint64_t epoch)
 {
+  if (automaticNative && onCommitted)
+    onCommitted(session, epoch);
 }
-void NativeHost::input(std::uint64_t, std::uint64_t, const QJsonObject &)
+void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event)
 {
+  nativeInputs.push_back(event);
+  if (event["kind"] == "key") {
+    const int code = event["code"].toInt();
+    if (event["down"].toBool())
+      nativeHeldKeys.insert(code);
+    else
+      nativeHeldKeys.remove(code);
+  }
+  if (automaticNative && event["kind"] == "focus" && onFocused)
+    onFocused(session, epoch, 1, event["request"].toInteger());
 }
 void NativeHost::resizeWindow(std::uint64_t, std::uint64_t, int, int, std::uint64_t)
 {
@@ -68,9 +90,12 @@ void NativeHost::restore(std::uint64_t)
 }
 void NativeHost::restoreAll()
 {
+  ++nativeRestores;
 }
 void NativeHost::releaseAll()
 {
+  ++nativeReleases;
+  nativeHeldKeys.clear();
 }
 struct ChannelTestAccess
 {
@@ -169,6 +194,55 @@ struct BridgeTestAccess
   {
     bridge.m_keyframeRetry.start();
   }
+  static void fastReconnect(Bridge &bridge)
+  {
+    bridge.m_retryDelays = {10, 20, 40, 80, 120, 160};
+    bridge.m_stableInterval = 100;
+  }
+  static bool reconnectWaiting(const Bridge &bridge)
+  {
+    return bridge.m_reconnectTimer.isActive();
+  }
+  static bool cleaning(const Bridge &bridge)
+  {
+    return bridge.m_cleaning;
+  }
+  static std::size_t retryStep(const Bridge &bridge)
+  {
+    return bridge.m_retryStep;
+  }
+  static int retryDelay(const Bridge &bridge)
+  {
+    return bridge.m_reconnectTimer.interval();
+  }
+  static std::uint64_t generation(const Bridge &bridge)
+  {
+    return bridge.m_connectionGeneration;
+  }
+  static void retry(Bridge &bridge)
+  {
+    bridge.m_retry->click();
+  }
+  static void cancel(Bridge &bridge)
+  {
+    bridge.m_cancel->click();
+  }
+  static bool openEnabled(const Bridge &bridge)
+  {
+    return bridge.m_open->isEnabled();
+  }
+  static QString status(const Bridge &bridge)
+  {
+    return bridge.m_status->text();
+  }
+  static void observeConnections(Bridge &bridge, std::function<void()> observer)
+  {
+    const auto accept = bridge.m_listener.incoming;
+    bridge.m_listener.incoming = [accept, observer = std::move(observer)](qintptr descriptor) {
+      observer();
+      accept(descriptor);
+    };
+  }
 };
 
 void check(bool condition, const char *message)
@@ -177,23 +251,60 @@ void check(bool condition, const char *message)
     throw std::runtime_error(message);
 }
 
-bool waitUntil(const std::function<bool()> &condition)
+bool waitUntil(const std::function<bool()> &condition, const std::function<void()> &onReady = {})
 {
-  if (condition())
+  const auto observe = [&] {
+    if (!condition())
+      return false;
+    if (onReady)
+      onReady();
     return true;
+  };
+  if (observe())
+    return true;
+  bool observed = false;
   QEventLoop loop;
   QTimer poll, timeout;
   poll.setInterval(5);
   timeout.setSingleShot(true);
   QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
-    if (condition())
+    if (!observed && observe()) {
+      observed = true;
       loop.quit();
+    }
   });
   QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
   poll.start();
   timeout.start(5000);
   loop.exec();
-  return condition();
+  // quit() does not stop other callbacks in the current event batch. Preserve
+  // the successful observation even if one of them queues another heartbeat.
+  return observed;
+}
+void runEvents(int milliseconds)
+{
+  QEventLoop loop;
+  QTimer::singleShot(milliseconds, &loop, &QEventLoop::quit);
+  loop.exec();
+}
+struct AutomaticNative
+{
+  AutomaticNative()
+  {
+    automaticNative = true;
+    nativeInputs.clear();
+    nativeHeldKeys.clear();
+  }
+  ~AutomaticNative()
+  {
+    automaticNative = false;
+  }
+};
+quint16 unusedPort()
+{
+  QTcpServer reservation;
+  check(reservation.listen(QHostAddress::LocalHost, 0), "Cannot reserve reconnect fixture port");
+  return reservation.serverPort();
 }
 
 void boundedPresentation()
@@ -366,15 +477,19 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   ChannelTestAccess::smallSendBuffer(*channel);
   BridgeTestAccess::opened(host, 41, 7);
   BridgeTestAccess::opened(host, 42, 8);
+  const QByteArray largeFrame(maxPayload - 8, 'A');
   check(
-      waitUntil([&] { return opened == 2 && channel && channel->readyForFrame(); }),
+      waitUntil(
+          [&] { return opened == 2 && channel && channel->readyForFrame(); },
+          [&] {
+            consume = false;
+            sink.setReadBufferSize(1);
+            BridgeTestAccess::frame(host, 41, 7, largeFrame);
+          }
+      ),
       "Congestion fixture setup did not drain"
   );
 
-  consume = false;
-  sink.setReadBufferSize(1);
-  const QByteArray largeFrame(maxPayload - 8, 'A');
-  BridgeTestAccess::frame(host, 41, 7, largeFrame);
   check(
       waitUntil([&] {
         return channel && ChannelTestAccess::plaintext(*channel) == 0 && ChannelTestAccess::encrypted(*channel) > 0;
@@ -417,7 +532,21 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   consume = true;
   sink.setReadBufferSize(0);
   read();
-  const bool drained = waitUntil([&] { return channel && channel->readyForFrame() && receivedFrames == "A"; });
+  const bool drained = waitUntil(
+      [&] { return channel && channel->readyForFrame() && receivedFrames == "A"; },
+      [&] {
+        // Check the GOP fence at the exact drained observation, before another
+        // heartbeat can make readyForFrame false again.
+        BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
+        check(
+            channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 1,
+            "Dependent frame escaped the pending recovery fence"
+        );
+        // Reproduce a timer queuing control output in the same event batch as
+        // waitUntil's successful poll. This must not invalidate that result.
+        check(channel->send(MessageType::Ping), "Cannot queue the post-drain heartbeat regression");
+      }
+  );
   if (!drained) {
     QTextStream diagnostic(stderr);
     diagnostic << "Drain diagnostic: connected=" << BridgeTestAccess::established(host)
@@ -428,11 +557,6 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
                << " sinkAvailable=" << sink.bytesAvailable() << " sinkState=" << sink.state() << '\n';
   }
   check(drained, "Congested media did not drain");
-  BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
-  check(
-      channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 1,
-      "Dependent frame escaped the pending recovery fence"
-  );
   bool clearedBeforeNative = false;
   keyframeReply = [&](NativeHost &native, std::uint64_t session, std::uint64_t epoch) {
     clearedBeforeNative = channel && channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 0;
@@ -447,12 +571,19 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
       "Recovery was not coalesced to one request for the live session"
   );
 
-  check(waitUntil([&] { return channel && channel->readyForFrame(); }), "Recovery output did not drain");
-  consume = false;
-  sink.setReadBufferSize(1);
-  ChannelTestAccess::smallSendBuffer(*channel);
-  BridgeTestAccess::frame(host, 41, 7, largeFrame);
-  BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
+  check(
+      waitUntil(
+          [&] { return channel && channel->readyForFrame(); },
+          [&] {
+            consume = false;
+            sink.setReadBufferSize(1);
+            ChannelTestAccess::smallSendBuffer(*channel);
+            BridgeTestAccess::frame(host, 41, 7, largeFrame);
+            BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
+          }
+      ),
+      "Recovery output did not drain"
+  );
   check(BridgeTestAccess::pendingKeyframes(host) == 1, "Disconnect fixture has no pending recovery");
   sink.abort();
   check(waitUntil([&] { return !BridgeTestAccess::established(host); }), "Peer disconnect did not close Bridge");
@@ -462,6 +593,297 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
           keyframeRequests.size() == 1,
       "Disconnect retained or recreated native recovery work"
   );
+}
+
+void reconnectRefusedThenAvailable(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  AutomaticNative native;
+  Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+  Bridge viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false);
+  BridgeTestAccess::fastReconnect(viewer);
+  const auto port = unusedPort();
+  viewer.connectTo("127.0.0.1", port);
+  check(
+      waitUntil([&] { return BridgeTestAccess::generation(viewer) >= 7 && BridgeTestAccess::reconnectWaiting(viewer); }
+      ),
+      "Refused connections did not keep retrying to the backoff cap"
+  );
+  check(
+      BridgeTestAccess::retryStep(viewer) == 5 && BridgeTestAccess::retryDelay(viewer) == 160 &&
+          !BridgeTestAccess::channel(viewer),
+      "Backoff did not cap, or timer overlapped an active attempt"
+  );
+  check(host.listen(QHostAddress::LocalHost, port), "Cannot start the previously unavailable host");
+  int connections = 0;
+  BridgeTestAccess::observeConnections(host, [&] { ++connections; });
+  check(
+      waitUntil([&] { return BridgeTestAccess::established(viewer) && BridgeTestAccess::catalogReady(viewer); }),
+      "Automatic reconnect did not reach the newly available pinned host"
+  );
+  check(
+      connections == 1 && !BridgeTestAccess::reconnectWaiting(viewer) && BridgeTestAccess::retryStep(viewer) == 5,
+      "Negotiation reset backoff prematurely or left a second attempt scheduled"
+  );
+  check(waitUntil([&] { return BridgeTestAccess::retryStep(viewer) == 0; }), "Stable connection did not reset backoff");
+  check(BridgeTestAccess::openEnabled(viewer), "Fresh catalog did not enable window selection");
+}
+
+void reconnectCleanupAndIsolation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  AutomaticNative native;
+  exportedWindows.clear();
+  int panelQuits = 0, connections = 0;
+  bool cleanupBeforeReconnect = true;
+  Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+  Bridge viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 123, false);
+  configureApplicationLifetime(*qApp, viewer, [&] { ++panelQuits; });
+  BridgeTestAccess::fastReconnect(viewer);
+  check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for reconnect cleanup fixture");
+  const int restoresBefore = nativeRestores, releasesBefore = nativeReleases;
+  BridgeTestAccess::observeConnections(host, [&] {
+    if (++connections > 1)
+      cleanupBeforeReconnect = cleanupBeforeReconnect && nativeRestores > restoresBefore &&
+                               nativeReleases > releasesBefore && nativeHeldKeys.isEmpty() &&
+                               BridgeTestAccess::count(viewer) == 0 && !BridgeTestAccess::cleaning(viewer);
+  });
+  viewer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+  check(
+      waitUntil([&] { return exportedWindows == QVector<std::uint32_t>{123}; }), "Initial requested export was not sent"
+  );
+  BridgeTestAccess::opened(host, 91, 2);
+  check(
+      waitUntil([&] { return BridgeTestAccess::viewer(viewer, 91) != nullptr; }), "No initial viewer for cleanup test"
+  );
+  QPointer<Viewer> old = BridgeTestAccess::viewer(viewer, 91);
+  const auto oldSend = old->onSend;
+  const auto oldError = old->onError;
+  const auto oldReturn = old->onReturned;
+  const auto oldPacket = BridgeTestAccess::channel(viewer)->onPacket;
+  const auto oldClose = BridgeTestAccess::channel(viewer)->onClosed;
+  check(
+      waitUntil([&] { return BridgeTestAccess::channel(host)->readyForFrame(); }), "Fixture media setup did not drain"
+  );
+  // The same generated solid-color SPS/PPS+IDR used by ViewerTests. Only Qt
+  // events on the offscreen widget reach the fake native input implementation.
+  BridgeTestAccess::frame(
+      host, 91, 2,
+      QByteArray::fromBase64("AAAAAWdCwAraEewEQAAAAwBAAAAPI8SJqAAAAAFozg/IAAAAAWWIhDoRigACGPHAAED2OAAIeUnJyddddddddeA=")
+  );
+  check(waitUntil([&] { return old && old->firstFramePainted(); }), "Reconnect fixture frame was not painted");
+  QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
+  QCoreApplication::sendEvent(old, &focus);
+  check(
+      waitUntil([&] {
+        return std::any_of(nativeInputs.begin(), nativeInputs.end(), [](const auto &event) {
+          return event["kind"] == "focus";
+        });
+      }),
+      "Reconnect fixture did not acquire focus"
+  );
+  QKeyEvent down(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, "a");
+  QCoreApplication::sendEvent(old, &down);
+  check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_A); }), "Reconnect fixture did not deliver held input");
+  const auto inputsBefore = nativeInputs.size();
+  const int refreshesBefore = nativeRefreshes;
+  BridgeTestAccess::channel(host)->close("Fixture network outage", CloseCause::Network);
+  check(
+      waitUntil([&] {
+        return connections == 2 && BridgeTestAccess::established(viewer) && BridgeTestAccess::catalogReady(viewer);
+      }),
+      "Established connection did not reconnect"
+  );
+  check(
+      cleanupBeforeReconnect && nativeHeldKeys.isEmpty() && BridgeTestAccess::count(viewer) == 0 &&
+          nativeInputs.size() == inputsBefore && exportedWindows == QVector<std::uint32_t>{123} &&
+          nativeRefreshes > refreshesBefore,
+      "Reconnect ran before cleanup, reused a catalog, or replayed input/export/session state"
+  );
+  check(!old, "Old viewer survived connection cleanup");
+  // Offscreen plugins may omit the native last-window notification. Exercise
+  // the application notification as well as the actual viewer destruction.
+  qApp->lastWindowClosed();
+  check(
+      panelQuits == 0 && !qApp->quitOnLastWindowClosed(), "Closing the last headless viewer requested application exit"
+  );
+
+  const QJsonObject metadata{
+      {"title", "Stale callback"}, {"width", 640}, {"height", 480}, {"geometry", 1}, {"codec", "h264"}
+  };
+  oldPacket(Packet{MessageType::Opened, 91, 2, 1, jsonBytes(metadata)});
+  check(BridgeTestAccess::count(viewer) == 0, "Old channel callback created a viewer in the new connection");
+  BridgeTestAccess::opened(host, 91, 2);
+  check(waitUntil([&] { return BridgeTestAccess::viewer(viewer, 91) != nullptr; }), "No replacement viewer");
+  auto *replacement = BridgeTestAccess::viewer(viewer, 91);
+  const auto status = BridgeTestAccess::status(viewer);
+  check(
+      !oldSend(MessageType::Input, {{"kind", "key"}, {"code", Qt::Key_A}, {"down", false}}, 91, 2),
+      "Old viewer callback sent input into the new connection"
+  );
+  oldReturn();
+  oldError("stale error");
+  oldClose("stale disconnect", CloseCause::Network);
+  check(
+      BridgeTestAccess::viewer(viewer, 91) == replacement && BridgeTestAccess::established(viewer) &&
+          BridgeTestAccess::status(viewer) == status,
+      "Old callbacks changed replacement connection state"
+  );
+  viewer.close();
+  check(
+      panelQuits == 1 && !BridgeTestAccess::reconnectWaiting(viewer),
+      "Explicit panel close did not stop reconnect and request exit"
+  );
+  check(waitUntil([&] { return !BridgeTestAccess::cleaning(viewer); }), "Panel-close cleanup did not finish");
+}
+
+void terminalReconnectFailures(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (int scenario = 0; scenario != 3; ++scenario) {
+    Listener listener;
+    std::vector<std::unique_ptr<Channel>> peers;
+    int connections = 0;
+    listener.incoming = [&](qintptr descriptor) {
+      ++connections;
+      if (scenario == 1) {
+        QTcpSocket socket;
+        socket.setSocketDescriptor(descriptor);
+        socket.abort();
+        return;
+      }
+      auto peer = std::make_unique<Channel>(hostIdentity, parseFingerprint(viewerIdentity.fingerprint()));
+      auto *server = peer.get();
+      server->onPacket = [server, scenario](Packet) {
+        server->send(
+            MessageType::Accepted,
+            {{"version", scenario == 2 ? 99 : static_cast<int>(protocolVersion)}, {"role", "host"}, {"codec", "h264"}}
+        );
+      };
+      peers.push_back(std::move(peer));
+      server->accept(descriptor);
+    };
+    check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for terminal reconnect fixture");
+    auto pin = parseFingerprint(hostIdentity.fingerprint());
+    if (scenario == 0)
+      pin[0] ^= 1;
+    Bridge viewer(false, viewerIdentity, pin, QString{}, 0, 0, false);
+    BridgeTestAccess::fastReconnect(viewer);
+    viewer.connectTo("127.0.0.1", listener.serverPort());
+    check(
+        waitUntil([&] {
+          return connections == 1 && !BridgeTestAccess::channel(viewer) && !BridgeTestAccess::cleaning(viewer);
+        }),
+        "Terminal failure did not close and clean up the connection"
+    );
+    runEvents(60);
+    check(
+        connections == 1 && !BridgeTestAccess::reconnectWaiting(viewer),
+        "Authentication, pre-auth EOF, or protocol failure automatically retried"
+    );
+    if (scenario == 0) {
+      BridgeTestAccess::retry(viewer);
+      check(
+          waitUntil([&] {
+            return connections == 2 && !BridgeTestAccess::channel(viewer) && !BridgeTestAccess::cleaning(viewer);
+          }),
+          "Manual retry did not retain the explicit, still-mismatched pin"
+      );
+      check(
+          !BridgeTestAccess::established(viewer) && !BridgeTestAccess::reconnectWaiting(viewer),
+          "Manual retry changed trust policy"
+      );
+    }
+  }
+}
+
+void reconnectWaitsForHostCleanup(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  AutomaticNative native;
+  Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+  Bridge first(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false);
+  Bridge replacement(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false);
+  check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for host-cleanup handoff");
+  const int restoresBefore = nativeRestores;
+  int connections = 0;
+  bool cleanedBeforeAccept = false;
+  BridgeTestAccess::observeConnections(host, [&] {
+    if (++connections == 2)
+      cleanedBeforeAccept = nativeRestores > restoresBefore && !BridgeTestAccess::cleaning(host);
+  });
+  first.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+  check(waitUntil([&] { return BridgeTestAccess::established(first); }), "First peer did not establish");
+  replacement.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+  runEvents(50);
+  check(
+      connections == 1 && BridgeTestAccess::channel(replacement) && !BridgeTestAccess::established(replacement),
+      "Busy host rejected or authenticated replacement before cleanup"
+  );
+  BridgeTestAccess::cancel(first);
+  check(
+      waitUntil([&] {
+        return BridgeTestAccess::established(replacement) && BridgeTestAccess::catalogReady(replacement);
+      }),
+      "Waiting replacement did not connect after host cleanup"
+  );
+  check(
+      connections == 2 && cleanedBeforeAccept && BridgeTestAccess::generation(replacement) == 1,
+      "Replacement required a retry or was accepted before source cleanup"
+  );
+}
+
+void cancelRetryAndDestroy(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  const auto port = unusedPort();
+  Bridge viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false);
+  BridgeTestAccess::fastReconnect(viewer);
+  viewer.connectTo("127.0.0.1", port);
+  check(waitUntil([&] { return BridgeTestAccess::reconnectWaiting(viewer); }), "No pending retry to cancel");
+  auto generation = BridgeTestAccess::generation(viewer);
+  BridgeTestAccess::cancel(viewer);
+  runEvents(60);
+  check(
+      BridgeTestAccess::generation(viewer) == generation && !BridgeTestAccess::channel(viewer) &&
+          !BridgeTestAccess::reconnectWaiting(viewer),
+      "Cancel left a reconnect timer running"
+  );
+  BridgeTestAccess::retry(viewer);
+  ++generation;
+  check(
+      BridgeTestAccess::generation(viewer) == generation && BridgeTestAccess::channel(viewer),
+      "Manual Retry did not start exactly one attempt"
+  );
+  BridgeTestAccess::retry(viewer);
+  check(BridgeTestAccess::generation(viewer) == generation, "Retry overlapped an active attempt");
+  BridgeTestAccess::cancel(viewer);
+  check(BridgeTestAccess::cleaning(viewer), "Canceled attempt skipped deferred cleanup");
+  BridgeTestAccess::retry(viewer);
+  check(!BridgeTestAccess::channel(viewer), "Retry started before cleanup completed");
+  BridgeTestAccess::cancel(viewer);
+  runEvents(60);
+  check(
+      BridgeTestAccess::generation(viewer) == generation && !BridgeTestAccess::cleaning(viewer) &&
+          !BridgeTestAccess::reconnectWaiting(viewer),
+      "Cancel during cleanup failed to discard queued manual retry"
+  );
+
+  auto doomed = std::make_unique<Bridge>(
+      false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false
+  );
+  BridgeTestAccess::fastReconnect(*doomed);
+  doomed->connectTo("127.0.0.1", port);
+  check(
+      waitUntil([&] { return BridgeTestAccess::reconnectWaiting(*doomed); }), "No pending retry for destruction fixture"
+  );
+  doomed.reset();
+  Listener listener;
+  int connections = 0;
+  listener.incoming = [&](qintptr descriptor) {
+    ++connections;
+    QTcpSocket socket;
+    socket.setSocketDescriptor(descriptor);
+    socket.abort();
+  };
+  check(listener.listen(QHostAddress::LocalHost, port), "Cannot listen after destroying retry owner");
+  runEvents(80);
+  check(connections == 0, "Destroyed Bridge left a retry callback running");
 }
 } // namespace
 
@@ -489,10 +911,14 @@ int main(int argc, char **argv)
     const auto viewerIdentity = Identity::load(directory.filePath("viewer"));
     initialExportWaitsForCatalog(hostIdentity, viewerIdentity);
     congestionRecovery(hostIdentity, viewerIdentity);
-    QTextStream(
-        stdout
-    ) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
-         "initial export waits for catalog completion, coalesced congestion recovery and disconnect\n";
+    reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
+    reconnectCleanupAndIsolation(hostIdentity, viewerIdentity);
+    terminalReconnectFailures(hostIdentity, viewerIdentity);
+    reconnectWaitsForHostCleanup(hostIdentity, viewerIdentity);
+    cancelRetryAndDestroy(hostIdentity, viewerIdentity);
+    QTextStream(stdout) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
+                           "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
+                           "failures, cancellation and panel lifetime\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

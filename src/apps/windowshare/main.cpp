@@ -6,6 +6,7 @@
 #include "Transport.h"
 #include "Viewer.h"
 #include <QApplication>
+#include <QCloseEvent>
 #include <QCommandLineParser>
 #include <QDir>
 #include <QFileInfo>
@@ -22,6 +23,8 @@
 #include <QTcpSocket>
 #include <QTextStream>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <csignal>
 #include <map>
@@ -129,16 +132,24 @@ public:
     layout->addWidget(m_status);
     m_catalog = new QListWidget(this);
     layout->addWidget(m_catalog);
-    auto *open = new QPushButton(hosting ? "Share selected window" : "Open selected window", this);
-    auto *refresh = new QPushButton("Refresh windows", this);
+    m_open = new QPushButton(hosting ? "Share selected window" : "Open selected window", this);
+    m_refresh = new QPushButton("Refresh windows", this);
     auto *restore = new QPushButton("Return all windows to Mac", this);
-    layout->addWidget(open);
-    layout->addWidget(refresh);
+    layout->addWidget(m_open);
+    layout->addWidget(m_refresh);
     layout->addWidget(restore);
+    if (!hosting) {
+      m_retry = new QPushButton("Retry connection", this);
+      m_cancel = new QPushButton("Cancel connection", this);
+      layout->addWidget(m_retry);
+      layout->addWidget(m_cancel);
+      connect(m_retry, &QPushButton::clicked, this, [this] { retryConnection(); });
+      connect(m_cancel, &QPushButton::clicked, this, [this] { cancelConnection(); });
+    }
     resize(480, 440);
-    connect(open, &QPushButton::clicked, this, [this] { openSelected(); });
+    connect(m_open, &QPushButton::clicked, this, [this] { openSelected(); });
     connect(m_catalog, &QListWidget::itemDoubleClicked, this, [this] { openSelected(); });
-    connect(refresh, &QPushButton::clicked, this, [this] {
+    connect(m_refresh, &QPushButton::clicked, this, [this] {
       if (m_native)
         m_native->refresh();
       else
@@ -147,6 +158,13 @@ public:
     connect(restore, &QPushButton::clicked, this, [this] { returnAll(); });
     m_keyframeRetry.setInterval(25);
     connect(&m_keyframeRetry, &QTimer::timeout, this, [this] { retryKeyframe(); });
+    m_reconnectTimer.setSingleShot(true);
+    connect(&m_reconnectTimer, &QTimer::timeout, this, [this] { startConnection(); });
+    m_stableTimer.setSingleShot(true);
+    connect(&m_stableTimer, &QTimer::timeout, this, [this] {
+      if (m_established && m_catalogReady && !m_shuttingDown)
+        m_retryStep = 0;
+    });
     if (m_hosting) {
       m_native = std::make_unique<NativeHost>(std::move(journal));
       m_native->setHoldingDisplayEnabled(holding);
@@ -159,6 +177,7 @@ public:
         m_lastCatalog = catalog;
         m_catalogReady = true;
         displayCatalog(catalog);
+        updateControls();
         if (m_established)
           send(MessageType::Catalog, {{"windows", catalog}});
         maybeInitialExport();
@@ -206,9 +225,15 @@ public:
       };
       m_native->refresh();
     }
+    updateControls();
   }
+  std::function<void()> onQuitRequested;
   ~Bridge() override
   {
+    m_shuttingDown = true;
+    m_reconnectEnabled = false;
+    m_reconnectTimer.stop();
+    m_stableTimer.stop();
     clearKeyframeRetries();
     if (m_channel) {
       m_channel->onClosed = {};
@@ -231,6 +256,10 @@ public:
         return;
       }
       prepareChannel();
+      // A reconnect may arrive before the old peer's disconnect is observed.
+      // Keep it in the bounded listen backlog until cleanup, rather than
+      // sending an unauthenticated EOF that must be treated as terminal.
+      m_listener.pauseAccepting();
       m_channel->accept(descriptor);
     };
     if (!m_listener.listen(address, port)) {
@@ -242,12 +271,92 @@ public:
   }
   void connectTo(const QString &host, quint16 port)
   {
-    prepareChannel();
-    status("Connecting to approved Mac host…");
-    m_channel->connectTo(host, port);
+    if (m_hosting || m_channel || m_cleaning || m_shuttingDown)
+      return;
+    m_connectHost = host;
+    m_connectPort = port;
+    retryConnection();
+  }
+
+protected:
+  void closeEvent(QCloseEvent *event) override
+  {
+    m_shuttingDown = true;
+    cancelConnection();
+    m_listener.close();
+    event->accept();
+    if (onQuitRequested)
+      onQuitRequested();
   }
 
 private:
+  void updateControls()
+  {
+    m_open->setEnabled(m_established && m_catalogReady && !m_cleaning && !m_shuttingDown);
+    m_refresh->setEnabled(!m_cleaning && !m_shuttingDown && (m_hosting || m_established));
+    if (m_retry)
+      m_retry->setEnabled(!m_shuttingDown && !m_channel && !m_connectHost.isEmpty() && !m_retryRequested);
+    if (m_cancel)
+      m_cancel->setEnabled(!m_shuttingDown && (m_channel || m_cleaning || m_reconnectTimer.isActive()));
+  }
+  void clearCatalog()
+  {
+    m_catalogReady = false;
+    m_lastCatalog = {};
+    m_catalog->clear();
+    updateControls();
+  }
+  void retryConnection()
+  {
+    if (m_hosting || m_shuttingDown || m_channel || m_connectHost.isEmpty())
+      return;
+    m_reconnectEnabled = true;
+    m_retryStep = 0;
+    m_reconnectTimer.stop();
+    m_retryRequested = true;
+    if (!m_cleaning)
+      startConnection();
+    updateControls();
+  }
+  void cancelConnection()
+  {
+    m_reconnectEnabled = false;
+    m_retryRequested = false;
+    m_initialWindow = 0;
+    m_reconnectTimer.stop();
+    m_stableTimer.stop();
+    if (m_channel)
+      m_channel->close("Connection canceled", CloseCause::Local);
+    else if (!m_cleaning && !m_shuttingDown)
+      status("Connection canceled. Retry to connect again.");
+    updateControls();
+  }
+  void startConnection()
+  {
+    if (m_hosting || m_shuttingDown || !m_reconnectEnabled || m_cleaning || m_channel || m_connectHost.isEmpty())
+      return;
+    m_reconnectTimer.stop();
+    m_retryRequested = false;
+    try {
+      prepareChannel();
+      status("Connecting to approved Mac host…");
+      m_channel->connectTo(m_connectHost, m_connectPort);
+    } catch (const std::exception &error) {
+      m_reconnectEnabled = false;
+      status("Cannot connect: " + QString::fromUtf8(error.what()));
+    }
+    updateControls();
+  }
+  void scheduleReconnect()
+  {
+    if (m_hosting || m_shuttingDown || !m_reconnectEnabled || m_cleaning || m_channel || m_reconnectTimer.isActive())
+      return;
+    const int delay = m_retryDelays[m_retryStep];
+    m_retryStep = std::min(m_retryStep + 1, m_retryDelays.size() - 1);
+    m_reconnectTimer.start(delay);
+    status(QString("Disconnected: %1\nRetrying in %2 seconds…").arg(m_disconnectReason).arg(delay / 1000.0));
+    updateControls();
+  }
   void status(const QString &message)
   {
     m_status->setText(message);
@@ -288,42 +397,58 @@ private:
   void prepareChannel()
   {
     m_established = false;
+    m_negotiating = false;
+    m_stableTimer.stop();
     clearKeyframeRetries();
-    if (!m_hosting)
-      m_catalogReady = false;
+    clearCatalog();
     auto *channel = new Channel(m_identity, m_pin, this);
     m_channel = channel;
-    channel->onAuthenticated = [this, channel] {
-      if (m_channel != channel)
+    const auto generation = ++m_connectionGeneration;
+    channel->onAuthenticated = [this, channel, generation] {
+      if (m_channel != channel || m_connectionGeneration != generation || m_shuttingDown)
         return;
+      m_negotiating = true;
       if (!m_hosting)
         channel->send(
             MessageType::Hello, {{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"}}
         );
-      QTimer::singleShot(5000, channel, [this, channel] {
-        if (m_channel == channel && !m_established)
-          channel->close("Window sharing negotiation timed out");
+      QTimer::singleShot(5000, channel, [this, channel, generation] {
+        if (m_channel == channel && m_connectionGeneration == generation && !m_established)
+          channel->close("Window sharing negotiation timed out", CloseCause::Protocol);
       });
     };
-    channel->onPacket = [this, channel](Packet packet) {
-      if (m_channel != channel)
+    channel->onPacket = [this, channel, generation](Packet packet) {
+      if (m_channel != channel || m_connectionGeneration != generation || m_shuttingDown)
         return;
       try {
         receive(packet);
       } catch (const std::exception &error) {
-        channel->close(QString::fromUtf8(error.what()));
+        channel->close(QString::fromUtf8(error.what()), CloseCause::Protocol);
       }
     };
-    channel->onClosed = [this, channel](QString reason) {
-      if (m_channel != channel)
+    channel->onClosed = [this, channel, generation](QString reason, CloseCause cause) {
+      if (m_channel != channel || m_connectionGeneration != generation)
         return;
+      // A peer that drops TLS while rejecting Hello may be rejecting our
+      // identity or protocol. Only a fully negotiated loss is retryable there.
+      const bool retryable = cause == CloseCause::Network && (!m_negotiating || m_established);
+      if (!retryable)
+        m_reconnectEnabled = false;
+      if (m_established)
+        m_initialWindow = 0;
       m_established = false;
+      m_negotiating = false;
       m_channel = nullptr;
+      m_stableTimer.stop();
+      m_reconnectTimer.stop();
       clearKeyframeRetries();
       // send() may fail inside a NativeHost callback. Never destroy its entries
       // reentrantly while capture/geometry code is still using them.
       m_cleaning = true;
-      QTimer::singleShot(0, this, [this] {
+      clearCatalog();
+      QTimer::singleShot(0, this, [this, generation, retryable] {
+        if (m_connectionGeneration != generation)
+          return;
         stopViewers();
         if (m_native) {
           m_native->releaseAll();
@@ -331,7 +456,15 @@ private:
         }
         m_hostSessions.clear();
         m_cleaning = false;
+        if (m_hosting && !m_shuttingDown)
+          m_listener.resumeAccepting();
+        updateControls();
+        if (m_retryRequested)
+          startConnection();
+        else if (retryable)
+          scheduleReconnect();
       });
+      m_disconnectReason = reason;
       status("Disconnected: " + reason);
       channel->deleteLater();
     };
@@ -348,17 +481,22 @@ private:
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
-        send(
-            MessageType::Accepted, {{"version", static_cast<int>(protocolVersion)}, {"role", "host"}, {"codec", "h264"}}
-        );
-        if (m_catalogReady)
-          send(MessageType::Catalog, {{"windows", m_lastCatalog}});
+        if (!send(
+                MessageType::Accepted,
+                {{"version", static_cast<int>(protocolVersion)}, {"role", "host"}, {"codec", "h264"}}
+            ))
+          return;
+        // Every new connection waits for enumeration rather than publishing a
+        // prior peer's catalog. NativeHost revalidates identity again on export.
+        clearCatalog();
         m_native->refresh();
         maybeInitialExport();
       } else {
         require(packet.type == MessageType::Accepted && object["role"] == "host", "Expected host negotiation");
         m_established = true;
       }
+      m_negotiating = false;
+      updateControls();
       status("Connected to approved peer — window sharing enabled");
       return;
     }
@@ -422,7 +560,11 @@ private:
       const auto windows = value.toArray();
       require(windows.size() <= 4096, "Catalog too large");
       displayCatalog(windows);
+      const bool firstCatalog = !m_catalogReady;
       m_catalogReady = true;
+      if (firstCatalog && m_established)
+        m_stableTimer.start(m_stableInterval);
+      updateControls();
       maybeInitialExport();
       return;
     }
@@ -439,13 +581,23 @@ private:
       auto *viewer = new Viewer(packet.session, packet.epoch, metadata);
       viewer->setAttribute(Qt::WA_DeleteOnClose);
       const auto id = packet.session;
-      viewer->onSend = [this](MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch) {
+      const auto generation = m_connectionGeneration;
+      viewer->onSend = [this, viewer, generation](
+                           MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch
+                       ) {
+        if (!currentViewer(session, epoch, viewer, generation))
+          return false;
         return send(type, object, session, epoch);
       };
-      viewer->onError = [this](QString error) { status(error); };
-      viewer->onReturned = [this, id, epoch = packet.epoch, viewer] { forgetViewer(id, epoch, viewer); };
-      connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer] {
-        forgetViewer(id, epoch, viewer);
+      viewer->onError = [this, id, epoch = packet.epoch, viewer, generation](QString error) {
+        if (currentViewer(id, epoch, viewer, generation))
+          status(error);
+      };
+      viewer->onReturned = [this, id, epoch = packet.epoch, viewer, generation] {
+        forgetViewer(id, epoch, viewer, generation);
+      };
+      connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer, generation] {
+        forgetViewer(id, epoch, viewer, generation);
       });
       m_viewers.emplace(id, View{packet.epoch, viewer, viewer});
       viewer->placeOnScreen(m_screen);
@@ -504,7 +656,7 @@ private:
   }
   void openSelected()
   {
-    if (!m_established) {
+    if (!m_established || !m_catalogReady || m_cleaning) {
       status("Connect an approved peer before sharing a window.");
       return;
     }
@@ -535,15 +687,22 @@ private:
     for (auto &[id, view] : viewers)
       if (view.window) {
         view.window->onReturned = {};
+        view.window->onSend = {};
+        view.window->onError = {};
         view.window->disconnected();
         view.window->close();
       }
   }
-  void forgetViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window)
+  bool currentViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation) const
   {
     const auto found = m_viewers.find(session);
-    if (found != m_viewers.end() && found->second.epoch == epoch && found->second.identity == window)
-      m_viewers.erase(found);
+    return m_connectionGeneration == generation && found != m_viewers.end() && found->second.epoch == epoch &&
+           found->second.identity == window;
+  }
+  void forgetViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation)
+  {
+    if (currentViewer(session, epoch, window, generation))
+      m_viewers.erase(session);
   }
   struct View
   {
@@ -554,21 +713,35 @@ private:
     const Viewer *identity;
   };
   bool m_hosting, m_established = false, m_cleaning = false, m_catalogReady = false;
+  bool m_negotiating = false, m_reconnectEnabled = false, m_retryRequested = false, m_shuttingDown = false;
   Identity m_identity;
   QByteArray m_pin;
   int m_screen;
   std::uint32_t m_initialWindow;
   QLabel *m_status = nullptr;
   QListWidget *m_catalog = nullptr;
+  QPushButton *m_open = nullptr, *m_refresh = nullptr, *m_retry = nullptr, *m_cancel = nullptr;
   Listener m_listener;
   QPointer<Channel> m_channel;
   QTimer m_keyframeRetry;
+  QTimer m_reconnectTimer, m_stableTimer;
+  QString m_connectHost, m_disconnectReason;
+  quint16 m_connectPort = 0;
+  std::uint64_t m_connectionGeneration = 0;
+  std::size_t m_retryStep = 0;
+  std::array<int, 6> m_retryDelays{1000, 2000, 4000, 8000, 16000, 30000};
+  int m_stableInterval = 30000;
   std::unique_ptr<NativeHost> m_native;
   std::map<std::uint64_t, std::uint64_t> m_hostSessions;
   std::map<std::uint64_t, std::uint64_t> m_pendingKeyframes;
   std::map<std::uint64_t, View> m_viewers;
   QJsonArray m_lastCatalog;
 };
+void configureApplicationLifetime(QApplication &application, Bridge &bridge, std::function<void()> quit)
+{
+  application.setQuitOnLastWindowClosed(false);
+  bridge.onQuitRequested = std::move(quit);
+}
 } // namespace
 
 #ifndef WINDOWSHARE_BRIDGE_TEST
@@ -578,7 +751,6 @@ int main(int argc, char **argv)
   app.setApplicationName("DeskflowWindowShare");
   app.setOrganizationName("Deskflow");
   app.setApplicationVersion("0.1-experimental");
-  app.setQuitOnLastWindowClosed(false);
   QCommandLineParser parser;
   parser.addHelpOption();
   parser.addVersionOption();
@@ -649,6 +821,7 @@ int main(int argc, char **argv)
         hosting, Identity::load(parser.value("identity")), parseFingerprint(parser.value("peer-pin")),
         parser.value("journal"), screen, window, parser.isSet("holding-display")
     );
+    configureApplicationLifetime(app, bridge, [&app] { app.quit(); });
     if (hosting) {
       QHostAddress address;
       require(address.setAddress(parser.value("listen")), "Listen address must be an explicit IP address");
@@ -668,7 +841,6 @@ int main(int argc, char **argv)
         app.quit();
     });
     signals.start(100);
-    QObject::connect(&app, &QApplication::lastWindowClosed, &app, [&app] { app.quit(); });
     return app.exec();
   } catch (const std::exception &error) {
     QTextStream(stderr) << "Window sharing: " << error.what() << '\n';

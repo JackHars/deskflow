@@ -19,6 +19,7 @@
 #include "net/TSocketMultiplexerMethodJob.h"
 #include <net/SslLogger.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -77,6 +78,11 @@ void SecureSocket::close()
 
 void SecureSocket::connect(const NetworkAddress &addr)
 {
+  {
+    std::scoped_lock ssl_lock{ssl_mutex_};
+    m_peerIdentityLive = false;
+    m_verifiedPeerFingerprint.reset();
+  }
   getEvents()->addHandler(EventTypes::DataSocketConnected, getEventTarget(), [this](const auto &e) {
     handleTCPConnected(e);
   });
@@ -85,6 +91,12 @@ void SecureSocket::connect(const NetworkAddress &addr)
 
 ISocketMultiplexerJob *SecureSocket::newJob()
 {
+  // Also protects socket capture against close: TLS is quiesced and destroyed
+  // under this lock before TCPSocket closes its underlying socket.
+  std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing)
+    return nullptr;
+
   // after TCP connection is established, SecureSocket will pick up
   // connected event and do secureConnect. However, we must ensure
   // that the multiplexer has a job to actually detect that connection.
@@ -103,16 +115,30 @@ ISocketMultiplexerJob *SecureSocket::newJob()
 
 void SecureSocket::secureConnect()
 {
-  setJob(new TSocketMultiplexerMethodJob<SecureSocket>(
-      this, &SecureSocket::serviceConnect, getSocket(), isReadable(), isWritable()
-  ));
+  ISocketMultiplexerJob *job;
+  {
+    std::scoped_lock ssl_lock{ssl_mutex_};
+    if (m_closing || !getSocket())
+      return;
+    job = new TSocketMultiplexerMethodJob<SecureSocket>(
+        this, &SecureSocket::serviceConnect, getSocket(), isReadable(), isWritable()
+    );
+  }
+  setJob(job);
 }
 
 void SecureSocket::secureAccept()
 {
-  setJob(new TSocketMultiplexerMethodJob<SecureSocket>(
-      this, &SecureSocket::serviceAccept, getSocket(), isReadable(), isWritable()
-  ));
+  ISocketMultiplexerJob *job;
+  {
+    std::scoped_lock ssl_lock{ssl_mutex_};
+    if (m_closing || !getSocket())
+      return;
+    job = new TSocketMultiplexerMethodJob<SecureSocket>(
+        this, &SecureSocket::serviceAccept, getSocket(), isReadable(), isWritable()
+    );
+  }
+  setJob(job);
 }
 
 TCPSocket::JobResult SecureSocket::doRead()
@@ -224,6 +250,8 @@ TCPSocket::JobResult SecureSocket::doWrite()
 int SecureSocket::secureRead(void *buffer, int size, int &read)
 {
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_ssl || !m_ssl->m_ssl)
+    return -1;
 
   if (m_ssl->m_ssl != nullptr) {
     LOG_VERBOSE("reading secure socket");
@@ -251,6 +279,8 @@ int SecureSocket::secureRead(void *buffer, int size, int &read)
 int SecureSocket::secureWrite(const void *buffer, int size, int &wrote)
 {
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_ssl || !m_ssl->m_ssl)
+    return -1;
 
   if (m_ssl->m_ssl != nullptr) {
     LOG_VERBOSE("writing secure socket: %p", this);
@@ -278,13 +308,25 @@ int SecureSocket::secureWrite(const void *buffer, int size, int &wrote)
 
 bool SecureSocket::isSecureReady() const
 {
-  return m_secureReady;
+  return !m_closing && m_secureReady;
+}
+
+std::optional<deskflow::IStream::PeerFingerprint> SecureSocket::authenticatedPeerFingerprint() const
+{
+  std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_peerIdentityLive || !m_secureReady || m_fatal || !m_ssl || !m_ssl->m_ssl)
+    return std::nullopt;
+  return m_verifiedPeerFingerprint;
 }
 
 void SecureSocket::initSsl(bool server)
 {
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing)
+    return;
 
+  m_peerIdentityLive = false;
+  m_verifiedPeerFingerprint.reset();
   m_ssl = std::make_unique<Ssl>();
 
   initContext(server);
@@ -293,6 +335,8 @@ void SecureSocket::initSsl(bool server)
 bool SecureSocket::loadCertificate(const QString &filename)
 {
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_ssl)
+    return false;
 
   if (filename.isEmpty()) {
     SslLogger::logError("tls certificate is not specified");
@@ -380,13 +424,18 @@ void SecureSocket::createSSL()
 
 void SecureSocket::freeSSL()
 {
-  std::scoped_lock ssl_lock{ssl_mutex_};
-
+  m_closing = true;
+  m_peerIdentityLive = false;
   isFatal(true);
-  // take socket from multiplexer ASAP otherwise the race condition
-  // could cause events to get called on a dead object. TCPSocket
-  // will do this, too, but the double-call is harmless
+  // Removal waits for active callbacks, which may still need ssl_mutex_. Never
+  // hold that mutex while waiting for the multiplexer to release its job list.
+  // setJob rejects delayed submissions once m_closing is set.
   setJob(nullptr);
+
+  std::scoped_lock ssl_lock{ssl_mutex_};
+  m_verifiedPeerFingerprint.reset();
+  m_peerIdentityLive = false;
+  m_secureReady = false;
   if (m_ssl) {
     if (m_ssl->m_ssl != nullptr) {
       SSL_set_quiet_shutdown(m_ssl->m_ssl, 1);
@@ -406,6 +455,8 @@ void SecureSocket::freeSSL()
 int SecureSocket::secureAccept(int socket)
 {
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_ssl)
+    return -1;
 
   createSSL();
 
@@ -463,6 +514,8 @@ int SecureSocket::secureConnect(int socket)
   }
 
   std::scoped_lock ssl_lock{ssl_mutex_};
+  if (m_closing || !m_ssl)
+    return -1;
 
   createSSL();
 
@@ -613,13 +666,16 @@ void SecureSocket::disconnect()
   sendEvent(StreamInputShutdown);
 }
 
-bool SecureSocket::verifyCertFingerprint(const QString &FingerprintDatabasePath) const
+bool SecureSocket::verifyCertFingerprint(const QString &FingerprintDatabasePath)
 {
-  const auto cert = SSL_get_peer_certificate(m_ssl->m_ssl);
-  const auto sha256 = deskflow::sslCertFingerprint(cert, QCryptographicHash::Sha256);
-
-  if (cert)
-    X509_free(cert);
+  // Called with ssl_mutex_ held by the handshake. Cache proof only after the
+  // exact leaf has passed the existing trusted-fingerprint database check.
+  m_peerIdentityLive = false;
+  m_verifiedPeerFingerprint.reset();
+  const std::unique_ptr<X509, decltype(&X509_free)> cert(SSL_get_peer_certificate(m_ssl->m_ssl), X509_free);
+  if (!cert)
+    return false;
+  const auto sha256 = deskflow::sslCertFingerprint(cert.get(), QCryptographicHash::Sha256);
 
   if (!sha256.isValid())
     return false;
@@ -650,7 +706,32 @@ bool SecureSocket::verifyCertFingerprint(const QString &FingerprintDatabasePath)
   }
 
   LOG_DEBUG("fingerprint matches trusted fingerprint");
+  PeerFingerprint verified{};
+  std::copy(sha256.data.cbegin(), sha256.data.cend(), verified.begin());
+  m_verifiedPeerFingerprint = verified;
+  m_peerIdentityLive = true;
   return true;
+}
+
+void SecureSocket::sendEvent(EventTypes type)
+{
+  // Revoke before publishing failure, including plain TCP poll errors that do
+  // not pass through SSL_get_error(). This can run with ssl_mutex_ held, so the
+  // live flag is atomic rather than taking the TLS mutex recursively.
+  if (type == EventTypes::SocketDisconnected || type == EventTypes::StreamInputShutdown ||
+      type == EventTypes::StreamOutputShutdown || type == EventTypes::StreamOutputError)
+    m_peerIdentityLive = false;
+  TCPSocket::sendEvent(type);
+}
+
+void SecureSocket::setJob(ISocketMultiplexerJob *job)
+{
+  std::scoped_lock job_lock{m_jobMutex};
+  if (m_closing && job) {
+    delete job;
+    return;
+  }
+  TCPSocket::setJob(job);
 }
 
 ISocketMultiplexerJob *SecureSocket::serviceConnect(ISocketMultiplexerJob *const, bool, bool, bool)

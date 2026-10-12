@@ -34,6 +34,13 @@ struct FramePayload
 };
 QByteArray encodeFramePayload(std::uint64_t geometry, const QByteArray &accessUnit);
 FramePayload parseFramePayload(const Packet &packet);
+enum class CloseCause
+{
+  Network,
+  Authentication,
+  Protocol,
+  Local
+};
 // Exact leaf-certificate pinning in BOTH directions. Application messages are
 // unavailable until TLS completed and the expected fingerprint was checked.
 class Channel final : public QObject
@@ -51,10 +58,10 @@ public:
   {
     return m_authenticated;
   }
-  void close(const QString &reason = QStringLiteral("Disconnected"));
+  void close(const QString &reason = QStringLiteral("Disconnected"), CloseCause cause = CloseCause::Local);
   std::function<void()> onAuthenticated;
   std::function<void(Packet)> onPacket;
-  std::function<void(QString)> onClosed;
+  std::function<void(QString, CloseCause)> onClosed;
 
 private:
   bool sendPacket(Packet packet);

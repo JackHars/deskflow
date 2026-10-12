@@ -10,6 +10,7 @@
 #include "net/SecurityLevel.h"
 #include "net/TCPSocket.h"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 
@@ -59,6 +60,7 @@ public:
     m_fatal = b;
   }
   bool isSecureReady() const;
+  std::optional<PeerFingerprint> authenticatedPeerFingerprint() const override;
   void secureConnect();
   void secureAccept();
   int secureRead(void *buffer, int size, int &read);
@@ -78,23 +80,33 @@ private:
   bool showCertificate() const;
   void checkResult(int n, int &retry);
   void disconnect();
-  bool verifyCertFingerprint(const QString &FingerprintDatabasePath) const;
+  bool verifyCertFingerprint(const QString &FingerprintDatabasePath);
 
   ISocketMultiplexerJob *serviceConnect(ISocketMultiplexerJob *const socket, bool, bool, bool);
 
   ISocketMultiplexerJob *serviceAccept(ISocketMultiplexerJob *const socket, bool, bool, bool);
 
   void handleTCPConnected(const Event &event);
+  void sendEvent(EventTypes) override;
+  void setJob(ISocketMultiplexerJob *) override;
 
 private:
-  // all accesses to m_ssl must be protected by this mutex. The only function that is called
-  // from outside SocketMultiplexer thread is close(), so we mostly care about things accessed
-  // by it.
-  std::mutex ssl_mutex_;
+  friend class SecurePeerIdentityTests;
+
+  // External job submissions must finish before close removes the last job.
+  // Multiplexer callbacks never take this mutex; they return their next job.
+  std::mutex m_jobMutex;
+  std::atomic_bool m_closing = false;
+
+  // Protect TLS state and verified identity across the multiplexer thread,
+  // close(), and callers checking the identity of an active stream.
+  mutable std::mutex ssl_mutex_;
 
   std::unique_ptr<Ssl> m_ssl;
-  bool m_secureReady = false;
-  bool m_fatal = false;
+  std::optional<PeerFingerprint> m_verifiedPeerFingerprint;
+  std::atomic_bool m_peerIdentityLive = false;
+  std::atomic_bool m_secureReady = false;
+  std::atomic_bool m_fatal = false;
   SecurityLevel m_securityLevel = SecurityLevel::Encrypted;
 
   bool m_writeRetry = false;

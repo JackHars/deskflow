@@ -8,7 +8,9 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 
 class IEventQueue;
 
@@ -21,6 +23,7 @@ Defines the interface for all streams.
 class IStream
 {
 public:
+  using PeerFingerprint = std::array<std::uint8_t, 32>;
   IStream() = default;
   virtual ~IStream() = default;
   //! @name manipulators
@@ -101,6 +104,14 @@ public:
   return zero.
   */
   virtual uint32_t getSize() const = 0;
+
+  // An authenticated leaf fingerprint for this live stream, when available.
+  // Encryption alone, a claimed computer name, and a presented certificate do
+  // not establish this identity. Plain streams deliberately return no proof.
+  virtual std::optional<PeerFingerprint> authenticatedPeerFingerprint() const
+  {
+    return std::nullopt;
+  }
 
   //@}
 };

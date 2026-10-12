@@ -76,6 +76,11 @@ uint32_t StreamFilter::getSize() const
   return getStream()->getSize();
 }
 
+std::optional<deskflow::IStream::PeerFingerprint> StreamFilter::authenticatedPeerFingerprint() const
+{
+  return getStream()->authenticatedPeerFingerprint();
+}
+
 deskflow::IStream *StreamFilter::getStream() const
 {
   return m_stream;

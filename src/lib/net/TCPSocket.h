@@ -78,7 +78,7 @@ protected:
   virtual JobResult doRead();
   virtual JobResult doWrite();
 
-  void setJob(ISocketMultiplexerJob *);
+  virtual void setJob(ISocketMultiplexerJob *);
 
   bool isConnected() const
   {
@@ -121,7 +121,7 @@ protected:
     return m_mutex;
   }
 
-  void sendEvent(EventTypes);
+  virtual void sendEvent(EventTypes);
   void discardWrittenData(int bytesWrote);
 
   StreamBuffer m_inputBuffer;

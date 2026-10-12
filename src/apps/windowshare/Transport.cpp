@@ -209,7 +209,7 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   connect(&m_socket, &QSslSocket::sslErrors, this, [this](const QList<QSslError> &errors) {
     const auto certificateError = peerCertificateError();
     if (!certificateError.isEmpty()) {
-      close(certificateError);
+      close(certificateError, CloseCause::Authentication);
       return;
     }
     // The exact leaf pin replaces public CA and DNS-name trust. Every other
@@ -233,10 +233,13 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
       }
 #endif
       if (!allowed) {
-        close(QStringLiteral("TLS certificate validation failed (%1, error %2): %3")
-                  .arg(QSslSocket::activeBackend())
-                  .arg(static_cast<int>(error.error()))
-                  .arg(detail.isEmpty() ? error.errorString() : detail));
+        close(
+            QStringLiteral("TLS certificate validation failed (%1, error %2): %3")
+                .arg(QSslSocket::activeBackend())
+                .arg(static_cast<int>(error.error()))
+                .arg(detail.isEmpty() ? error.errorString() : detail),
+            CloseCause::Authentication
+        );
         return;
       }
     }
@@ -245,7 +248,7 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   connect(&m_socket, &QSslSocket::encrypted, this, [this] {
     const auto certificateError = peerCertificateError();
     if (m_closed || !certificateError.isEmpty()) {
-      close(certificateError);
+      close(certificateError, CloseCause::Authentication);
       return;
     }
     m_authenticated = true;
@@ -255,7 +258,7 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   });
   connect(&m_socket, &QSslSocket::readyRead, this, [this] {
     if (!m_authenticated || m_closed) {
-      close("Data before authenticated TLS");
+      close("Data before authenticated TLS", CloseCause::Protocol);
       return;
     }
     m_lastRead.restart();
@@ -277,19 +280,45 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
           }
       );
     } catch (const std::exception &error) {
-      close(QString::fromUtf8(error.what()));
+      close(QString::fromUtf8(error.what()), CloseCause::Protocol);
     }
   });
-  connect(&m_socket, &QSslSocket::disconnected, this, [this] { close(); });
-  connect(&m_socket, &QSslSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
-    close(m_socket.errorString());
+  connect(&m_socket, &QSslSocket::disconnected, this, [this] {
+    close("Peer disconnected", m_authenticated ? CloseCause::Network : CloseCause::Authentication);
+  });
+  connect(&m_socket, &QSslSocket::errorOccurred, this, [this](QAbstractSocket::SocketError error) {
+    auto cause = CloseCause::Local;
+    switch (error) {
+    case QAbstractSocket::ConnectionRefusedError:
+    case QAbstractSocket::HostNotFoundError:
+    case QAbstractSocket::SocketTimeoutError:
+    case QAbstractSocket::NetworkError:
+    case QAbstractSocket::TemporaryError:
+      cause = CloseCause::Network;
+      break;
+    case QAbstractSocket::RemoteHostClosedError:
+      // An EOF before peer authentication may be a rejected TLS identity.
+      cause = m_authenticated ? CloseCause::Network : CloseCause::Authentication;
+      break;
+    case QAbstractSocket::SslHandshakeFailedError:
+      cause = CloseCause::Authentication;
+      break;
+    default:
+      break;
+    }
+    close(m_socket.errorString(), cause);
   });
   m_lastRead.start();
   m_watchdog.setInterval(1000);
   connect(&m_watchdog, &QTimer::timeout, this, [this] {
-    if (m_lastRead.elapsed() > 6000)
-      close("Peer heartbeat timed out");
-    else if (m_authenticated && pendingOutput() == 0)
+    if (m_lastRead.elapsed() > 6000) {
+      const bool connecting =
+          m_socket.state() == QAbstractSocket::HostLookupState || m_socket.state() == QAbstractSocket::ConnectingState;
+      close(
+          m_authenticated ? "Peer heartbeat timed out" : "Connection or TLS handshake timed out",
+          m_authenticated || connecting ? CloseCause::Network : CloseCause::Authentication
+      );
+    } else if (m_authenticated && pendingOutput() == 0)
       send(MessageType::Ping);
   });
   m_watchdog.start();
@@ -393,7 +422,7 @@ bool Channel::sendFrame(std::uint64_t session, std::uint64_t epoch, std::uint64_
     return false;
   }
 }
-void Channel::close(const QString &reason)
+void Channel::close(const QString &reason, CloseCause cause)
 {
   if (m_closed)
     return;
@@ -402,6 +431,6 @@ void Channel::close(const QString &reason)
   m_watchdog.stop();
   m_socket.abort();
   if (onClosed)
-    onClosed(reason);
+    onClosed(reason, cause);
 }
 } // namespace deskflow::windowshare

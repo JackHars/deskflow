@@ -25,9 +25,21 @@ is bookkeeping, never peer authentication.
 
 Closing a viewer returns its source window; it does not close the Mac application.
 The host also restores on disconnect, sleep, session deactivation and normal exit.
-Control–Option–Shift–Escape restores all exported windows. An owner-only restore
-journal is written before relocation. `--recover` retries restoration after a
-crash, preserving unresolved or malformed records rather than discarding them.
+The host listens for Control–Option–Shift–Escape to restore all exported windows.
+That chord still needs integration before the core's HID tap consumes events
+while controlling another computer. An owner-only restore journal is written
+before relocation. `--recover` retries restoration after a crash, preserving
+unresolved or malformed records rather than discarding them.
+
+After a transient network failure, the viewer retries the same address and
+approved fingerprint after 1, 2, 4, 8, 16 and then 30 seconds, continuing at the
+30-second interval until canceled. Authentication and protocol failures stop
+automatic retries. The panel provides Retry and Cancel; closing the panel exits
+the application. Closing the last viewer does not stop a headless connection.
+Each lost connection releases input and returns exported sources before a fresh
+connection can open windows. Reconnection requests a new catalog and does not
+replay sessions or input. The backoff resets after 30 seconds with an established
+connection and received catalog, or when Retry is selected.
 
 ## Build
 
@@ -150,7 +162,17 @@ status means some records still need attention.
 Automated tests cover protocol bounds and replay rejection, session and geometry
 fences, input ownership, exact display/event markers, mutually pinned TLS sockets,
 video framing/backpressure, viewer focus/resize/return behavior, decoder operation,
-private display API availability, and recovery-journal handling.
+private display API availability, recovery-journal handling, and reconnect cleanup.
+
+The original Mac keyboard route is still under development. Its isolated helpers
+track left/right modifiers, press ownership, revocation, and the emergency chord;
+the Mac adapter only constructs events in memory. A private inherited socketpair
+provides bounded, versioned core/host messages and revocable input leases. These
+helpers do not launch a companion, register an input tap, or enable OS input.
+The eventual route must bind the current Deskflow client and window-share client
+to an explicit pair of approved fingerprints and connection incarnations. The
+core exposes a fingerprint only after its existing trusted-peer check succeeds;
+ordinary encryption-only clients provide no authentication proof for this route.
 
 The manual `windowshare-native-smoke` executable opens its own disposable test
 window and verifies real capture, decoding, targeted input and restoration. It
@@ -174,7 +196,7 @@ does not guarantee coordinates under every compositor. The Ubuntu machine and it
 two physical monitors still require direct validation.
 
 Dialogs, popup menus, clipboard integration with exported-window focus, complete
-shortcut remapping, browser/Electron behavior, reconnect UX, active-stream media
+shortcut remapping, browser/Electron behavior, active-stream media
 scheduling, crash-watchdog recovery, and packaged cross-machine performance tests
 remain development work. Do not treat this application as a replacement for the
 working Deskflow installation yet.

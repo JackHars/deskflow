@@ -37,6 +37,10 @@ struct ChannelTestAccess
   {
     channel.m_socket.sslErrors({QSslError(error, channel.m_socket.peerCertificate())});
   }
+  static void malformedPacket(Channel &channel)
+  {
+    channel.m_socket.write(QByteArray(headerSize, '\0'));
+  }
 };
 } // namespace deskflow::windowshare
 namespace {
@@ -111,7 +115,7 @@ void exercise(const Identity &host, const Identity &client, QByteArray hostPin, 
   QStringList closeReasons;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, clientPin);
-    server->onClosed = [&](QString reason) {
+    server->onClosed = [&](QString reason, CloseCause) {
       closeReasons.append("server: " + reason);
       ++closed;
       loop.quit();
@@ -132,7 +136,7 @@ void exercise(const Identity &host, const Identity &client, QByteArray hostPin, 
     accepted = packet.type == MessageType::Accepted && parseObject(packet)["proof"].toInt() == 73;
     loop.quit();
   };
-  peer.onClosed = [&](QString reason) {
+  peer.onClosed = [&](QString reason, CloseCause) {
     closeReasons.append("client: " + reason);
     ++closed;
     loop.quit();
@@ -176,7 +180,7 @@ void mediaAndControl(const Identity &host, const Identity &client)
       check(!server->sendFrame(7, 2, 19, accessUnit), "video backlog not queued");
       check(server->send(MessageType::Focus, {{"focusRevision", 3}}, 7, 2), "control survives large queued IDR");
     };
-    server->onClosed = [&](QString) { loop.quit(); };
+    server->onClosed = [&](QString, CloseCause) { loop.quit(); };
     server->accept(descriptor);
   };
   check(listener.listen(QHostAddress::LocalHost, 0), "media listener failed");
@@ -190,7 +194,7 @@ void mediaAndControl(const Identity &host, const Identity &client)
       loop.quit();
     }
   };
-  peer.onClosed = [&](QString) { loop.quit(); };
+  peer.onClosed = [&](QString, CloseCause) { loop.quit(); };
   QTimer timeout;
   timeout.setSingleShot(true);
   QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
@@ -219,6 +223,7 @@ void explicitCertificateErrors(const Identity &host, const Identity &client, QSs
   int packets = 0, closed = 0;
   bool sent = false, timedOut = false;
   QString closeReason;
+  CloseCause closeCause = CloseCause::Local;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
     server->onPacket = [&](Packet) { ++packets; };
@@ -232,9 +237,10 @@ void explicitCertificateErrors(const Identity &host, const Identity &client, QSs
     ChannelTestAccess::reportCertificateError(peer, error);
     sent = peer.send(MessageType::Hello);
   };
-  peer.onClosed = [&](QString reason) {
+  peer.onClosed = [&](QString reason, CloseCause cause) {
     ++closed;
     closeReason = reason;
+    closeCause = cause;
     loop.quit();
   };
   QTimer timeout;
@@ -252,6 +258,7 @@ void explicitCertificateErrors(const Identity &host, const Identity &client, QSs
     server->onPacket = {};
   check(
       !timedOut && !sent && packets == 0 && closed == 1 && !peer.authenticated() &&
+          closeCause == CloseCause::Authentication &&
           closeReason.contains(QStringLiteral("error %1").arg(static_cast<int>(error))),
       "An explicit certificate validation error must close the pinned channel"
   );
@@ -264,6 +271,7 @@ void serializationFailure(const Identity &host, const Identity &client, int inva
   std::unique_ptr<Channel> server;
   Channel peer(client, parseFingerprint(host.fingerprint()));
   bool rejected = false, threw = false, timedOut = false;
+  CloseCause closeCause = CloseCause::Network;
   int closed = 0, packets = 0;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
@@ -281,8 +289,9 @@ void serializationFailure(const Identity &host, const Identity &client, int inva
       loop.quit();
     }
   };
-  peer.onClosed = [&](QString) {
+  peer.onClosed = [&](QString, CloseCause cause) {
     ++closed;
+    closeCause = cause;
     loop.quit();
   };
   QTimer timeout;
@@ -299,7 +308,8 @@ void serializationFailure(const Identity &host, const Identity &client, int inva
   if (server)
     server->onPacket = {};
   check(
-      !timedOut && !threw && rejected && closed == 1 && packets == 0 && !peer.authenticated(),
+      !timedOut && !threw && rejected && closed == 1 && packets == 0 && !peer.authenticated() &&
+          closeCause == CloseCause::Local,
       "Serialization validation must close once without throwing or sending malformed bytes"
   );
 }
@@ -326,7 +336,7 @@ void encryptedBackpressure(const Identity &host, const Identity &client)
   QString closeReason;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
-    server->onClosed = [&](QString reason) {
+    server->onClosed = [&](QString reason, CloseCause) {
       closeReason = reason;
       loop.quit();
     };
@@ -392,6 +402,78 @@ void encryptedBackpressure(const Identity &host, const Identity &client)
                                  .arg(closeReason)
                                  .toStdString());
 }
+void closeCauseTests(const Identity &host, const Identity &client)
+{
+  Channel first(client, parseFingerprint(host.fingerprint()));
+  int firstCloses = 0;
+  CloseCause firstCause = CloseCause::Network;
+  QString firstReason;
+  first.onClosed = [&](QString reason, CloseCause cause) {
+    ++firstCloses;
+    firstCause = cause;
+    firstReason = reason;
+  };
+  first.close("protocol failure", CloseCause::Protocol);
+  first.close("later network error", CloseCause::Network);
+  check(
+      firstCloses == 1 && firstCause == CloseCause::Protocol && firstReason == "protocol failure",
+      "A later close replaced the first terminal cause"
+  );
+
+  for (int scenario = 0; scenario != 3; ++scenario) {
+    Listener listener;
+    QEventLoop loop;
+    Channel peer(client, parseFingerprint(host.fingerprint()));
+    std::unique_ptr<Channel> server;
+    bool closed = false;
+    CloseCause cause = CloseCause::Local;
+    auto record = [&](QString, CloseCause result) {
+      cause = result;
+      closed = true;
+      loop.quit();
+    };
+    peer.onClosed = [&](QString reason, CloseCause result) {
+      if (scenario != 2)
+        record(reason, result);
+    };
+    peer.onAuthenticated = [&] {
+      if (scenario == 2)
+        ChannelTestAccess::malformedPacket(peer);
+    };
+    listener.incoming = [&](qintptr descriptor) {
+      if (scenario == 1) {
+        QTcpSocket socket;
+        socket.setSocketDescriptor(descriptor);
+        socket.abort();
+      } else {
+        server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
+        server->onClosed = record;
+        server->accept(descriptor);
+      }
+    };
+    check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for typed close fixture");
+    const auto port = listener.serverPort();
+    if (scenario == 0)
+      listener.close();
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    timeout.start(5000);
+    peer.connectTo("127.0.0.1", port);
+    loop.exec();
+    peer.onAuthenticated = {};
+    peer.onClosed = {};
+    if (server)
+      server->onClosed = {};
+    const auto expected = scenario == 0   ? CloseCause::Network
+                          : scenario == 1 ? CloseCause::Authentication
+                                          : CloseCause::Protocol;
+    check(
+        closed && cause == expected,
+        "Refused connection, pre-auth EOF, or malformed TLS payload has the wrong close policy"
+    );
+  }
+}
 } // namespace
 int main(int argc, char **argv)
 {
@@ -446,6 +528,7 @@ int main(int argc, char **argv)
           QSslError::UnableToVerifyFirstCertificate})
       explicitCertificateErrors(host, client, error);
     mediaAndControl(host, client);
+    closeCauseTests(host, client);
     for (int invalid = 0; invalid < 3; ++invalid)
       serializationFailure(host, client, invalid);
     encryptedBackpressure(host, client);
