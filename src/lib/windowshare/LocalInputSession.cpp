@@ -112,9 +112,12 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   // the producer to revoke on overflow, never silently overwrite or coalesce.
   result->m_captureTimer.setTimerType(Qt::PreciseTimer);
   result->m_captureTimer.setInterval(4);
-  QObject::connect(&result->m_captureTimer, &QTimer::timeout, &result->m_captureTimer, [self] {
-    self->drainCapturedInput();
-  });
+  // Stopping the companion can synchronously close a channel whose callback
+  // destroys this session. Keep that callback off the timer's signal stack.
+  QObject::connect(
+      &result->m_captureTimer, &QTimer::timeout, &result->m_captureTimer, [self] { self->drainCapturedInput(); },
+      Qt::QueuedConnection
+  );
   result->m_captureTimer.start();
 #endif
   return result;
@@ -172,7 +175,24 @@ std::shared_ptr<OriginalInputCaptureSource> LocalInputCoreSession::captureSource
 }
 void LocalInputCoreSession::drainCapturedInput()
 {
+  if (m_captureEmergencyHandled)
+    return;
   const auto source = m_captureSource;
+  // Emergency is sticky independently of epoch liveness: a running producer
+  // still observes the raw chord after an overflow or continuity failure.
+  if (source->emergencyRequested()) {
+    m_captureEmergencyHandled = true;
+    m_captureTimer.stop();
+    m_captureBarrier.reset();
+    m_selectedPeerMailbox->close();
+    source->stop();
+    const QPointer<LocalInputCompanion> companion(m_companion.get());
+    // This nonblocking, terminal stop closes only the owned companion. A
+    // channel callback can destroy this session, so use no members afterward.
+    if (companion)
+      companion->stop();
+    return;
+  }
   const auto epoch = source->epoch();
   if (!epoch.live()) {
     m_captureBarrier.reset();
@@ -185,7 +205,9 @@ void LocalInputCoreSession::drainCapturedInput()
     if (!input)
       break;
     if (!m_captureBarrier->observe(*input)) {
-      source->stop();
+      // Revoke delivery continuity, but leave the producer running so a later
+      // raw emergency can still shut down the companion.
+      m_captureBarrier.reset();
       break;
     }
   }

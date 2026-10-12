@@ -3,7 +3,45 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
-## Latest mixed-input milestone (2026-10-12)
+## Latest emergency-restore integration (2026-10-12)
+
+The companion-enabled core now turns a captured Control–Option–Shift–Escape press
+into terminal companion shutdown. The Qt consumer checks the sticky emergency
+before epoch liveness, closes selected-peer publication and stops the owned
+companion without a nested wait. Barrier failure revokes continuity without
+turning off the observer, so a later emergency remains visible. Ordinary
+Deskflow keeps running and retains its existing press/release handling; the
+observer does not consume the chord or synthesize releases into that route.
+
+The host latches private-channel closure across startup. Terminal shutdown blocks
+new exports, packets, listener admission and reconnects before releasing owned
+input and attempting restore-all. Startup closure cannot be lost by calling quit
+before the application event loop. This uses the existing authenticated socket
+EOF and needs no new private protocol message. Failed native restores remain in
+the journal; a clean child exit is not proof every window was restored.
+
+This requires an active core tap and a fresh Escape press. Original input delivery
+and physical-neutral/viewport authority remain disabled or unfinished. Starting
+sharing again requires a new core session. The Mac lid remains closed and Ubuntu
+SSH timed out, so live desktop restoration remains unverified.
+
+Recorded checks for this source state:
+
+- The full opt-in build and all 55 integrated CTest suites passed.
+- The standalone app build and all 12 CTest suites passed.
+- Capture recognition, companion lifecycle and both Bridge TLS backends passed
+  strict and ASan/UBSan runs. Regressions cover non-emergency lookalikes, rescue
+  after overflow or barrier failure, nonblocking child shutdown, continued core
+  event processing, destructive callbacks, pre-exec closure, terminal admission
+  and release/restore ordering through nested revocation.
+- Read-only review of the Session and host lifetime changes found no actionable
+  defects. Formatting, diff and REUSE checks passed (941/941 licensed files).
+
+These checks use constructed private events, fake native hosts and loopback TLS.
+They do not establish live AX restoration, physical hotkey behavior or the full
+seamless-window goal, which remains incomplete.
+
+## Previous mixed-input milestone (2026-10-12)
 
 The companion-enabled Mac core now attaches a preallocated, single-use capture
 source to its existing event tap before Deskflow translation. Keys, motion,
@@ -39,9 +77,10 @@ Recorded checks for this source state:
 Physical neutrality remains Unknown: no complete physical-device/scroll provider
 or fence against queued native events exists. Observer checkpoints and HID state
 reads cannot substitute for that provider. Original input delivery, viewport
-authority and core-triggered restore-all remain unfinished. The Mac lid was
-closed and Ubuntu SSH timed out again; no interactive native, tap, posting or
-display tests ran during this milestone. The full goal remains incomplete.
+authority and, at that milestone, core-triggered restore-all remained unfinished.
+The Mac lid was closed and Ubuntu SSH timed out again; no interactive native,
+tap, posting or display tests ran during this milestone. The full goal remains
+incomplete.
 
 ## Implemented in this milestone
 
@@ -329,18 +368,18 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
 ## Local package
 
 The new signed core-main bundle is
-`build/packages/mixed-input-20261012/DeskflowSeamless-Core-Experimental.app`,
+`build/packages/emergency-restore-20261012/DeskflowSeamless-Core-Experimental.app`,
 with its ZIP beside it. The dependency/signature audit and exact permitted-library
 audit pass for signing Team `MM5PBJ9D4Y`: 77 library records, slices and allowed
 CDHashes, sealed by the fixed executables' same-Team/CDHash constraints.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`4f037853f8aec15ff79928ad9609780780cc5329e2204bdb6489ac228ee62290`.
+`879778729e60944e45bb3f03261455928fe2ccaf2fea63bd61e4b8bf335ad85b`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
 The package and installed copy passed recursive dependency/signature verification,
 the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
-smoke, with original input delivery disabled. The preceding exact-library
-installation is preserved in `build/packages/mixed-input-installed-backup-20261012/`.
+smoke, with original input delivery disabled. The preceding mixed-input
+installation is preserved in `build/packages/emergency-restore-installed-backup-20261012/`.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 
@@ -374,7 +413,8 @@ cross-machine input behavior has been verified in this environment.
 2. Build and deploy the viewer to Ubuntu; test X11/Wayland, both monitors,
    focus changes, shortcuts and loop-free input using the Mac keyboard/trackpad.
 3. Integrate the private original-keyboard route, dual-connection authentication,
-   viewer quiescence, authoritative pointer modifiers and core emergency chord.
+   viewer quiescence and authoritative pointer modifiers; validate the integrated
+   core emergency chord on the live desktop.
 4. Implement transactional edge-drag export and drag-back using Deskflow topology.
 5. Handle associated dialogs, menus, clipboard and browser/Electron behavior.
 6. Complete automatic crash recovery, scheduling and performance work.

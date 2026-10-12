@@ -26,10 +26,15 @@ is bookkeeping, never peer authentication.
 Closing a viewer returns its source window; it does not close the Mac application.
 The host also restores on disconnect, sleep, session deactivation and normal exit.
 The host listens for Control–Option–Shift–Escape to restore all exported windows.
-That chord still needs integration before the core's HID tap consumes events
-while controlling another computer. An owner-only restore journal is written
-before relocation. `--recover` retries restoration after a crash, preserving
-unresolved or malformed records rather than discarding them.
+When launched by the core with `--windowshare-host-config`, the core observes that
+chord before ordinary Deskflow translation, including while controlling another
+computer. It closes the private companion connection, causing the host to stop
+accepting work, release input, attempt restore-all and exit. Ordinary Deskflow
+continues running. Starting sharing again requires a new core session. The
+observer does not consume the chord: its keys still follow ordinary Deskflow
+routing. An owner-only restore journal is written before relocation. `--recover`
+retries restoration after a crash or a failed restore, preserving unresolved or
+malformed records rather than discarding them.
 
 After a transient network failure, the viewer retries the same address and
 approved fingerprint after 1, 2, 4, 8, 16 and then 30 seconds, continuing at the
@@ -377,10 +382,17 @@ tap disable, companion loss, server stop or source destruction. Restarting or
 resuming the ordinary core cannot revive it; a new core session is needed until
 a validated rearm provider exists. Qt drains every record into the neutral
 barrier, which has no trusted physical observation and cannot authorize input.
-The reserved emergency chord revokes even after queue overflow; integration with
-the host's restore-all action remains outstanding. Accessibility checks and tap
-re-enabling run on the core owner thread, avoiding a tap-thread self-join. A
-queued run-loop stop also survives shutdown before the first run begins.
+The emergency chord remains observable after queue overflow or barrier failure.
+The Qt consumer checks its sticky flag before continuity evidence and starts
+nonblocking companion shutdown. Closing the authenticated private connection
+requests restoration even when no input lease exists. The host latches that
+closure across startup and blocks new exports and reconnects before releasing
+input and attempting restore-all. This is a terminal sharing stop, not a success
+acknowledgement for every window restoration; failed restores remain journaled.
+Key events marked as repeats, releases, incomplete chords and our tagged synthetic
+events do not trigger it. Accessibility checks and tap re-enabling run on the
+core owner thread, avoiding a tap-thread self-join. A queued run-loop stop also
+survives shutdown before the first run begins.
 
 `ViewportLease` validates one-output, axis-aligned X11 coordinate mappings and
 host-request-based freshness. The Deskflow injection space and viewer space must

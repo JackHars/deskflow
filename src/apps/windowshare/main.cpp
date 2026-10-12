@@ -24,6 +24,7 @@
 #include <QLockFile>
 #include <QPointer>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -111,6 +112,7 @@ private:
 class Bridge final : public QWidget
 {
   friend struct BridgeTestAccess;
+  friend class HostShutdownGuard;
 
 public:
   Bridge(
@@ -156,6 +158,8 @@ public:
     connect(m_open, &QPushButton::clicked, this, [this] { openSelected(); });
     connect(m_catalog, &QListWidget::itemDoubleClicked, this, [this] { openSelected(); });
     connect(m_refresh, &QPushButton::clicked, this, [this] {
+      if (m_shuttingDown)
+        return;
       if (m_native)
         m_native->refresh();
       else
@@ -187,6 +191,8 @@ public:
         send(MessageType::Error, {{"message", error.left(2048)}});
       };
       m_native->onCatalog = [this](const QVector<Candidate> &windows) {
+        if (m_shuttingDown)
+          return;
         const auto catalog = catalogForWire(windows);
         m_lastCatalog = catalog;
         m_catalogReady = true;
@@ -197,12 +203,19 @@ public:
         maybeInitialExport();
       };
       m_native->onOpened = [this](std::uint64_t session, std::uint64_t epoch, const QJsonObject &metadata) {
+        if (m_shuttingDown)
+          return;
         if (m_keyboardRoute && m_keyboardRoute->binding.owner == Owner{session, epoch} &&
             m_keyboardRoute->binding.geometry != integer(metadata, "geometry"))
           withdrawOriginalKeyboard(KeyboardRouteReason::GeometryChanged);
+        if (m_shuttingDown)
+          return;
         m_hostSessions[session] = epoch;
         if (!send(MessageType::Opened, windowMetadataForWire(metadata), session, epoch))
-          QTimer::singleShot(0, this, [this, session] { m_native->restore(session); });
+          QTimer::singleShot(0, this, [this, session] {
+            if (!m_shuttingDown)
+              m_native->restore(session);
+          });
       };
       m_native->onFrame =
           [this](std::uint64_t session, std::uint64_t epoch, std::uint64_t geometry, const QByteArray &frame) {
@@ -379,6 +392,12 @@ public:
     if (!m_keyboardRoute)
       return;
     const QPointer<Bridge> alive(this);
+    // A revocation callback may request terminal shutdown or enter a nested
+    // event loop. Complete restoration only after that callback has returned.
+    const auto shutdown = qScopeGuard([this, alive] {
+      if (alive)
+        finishShutdown();
+    });
     const auto binding = m_keyboardRoute->binding;
     if (m_keyboardRoute->phase == KeyboardPhase::Revoking) {
       m_keyboardRoute->resumeViewer = m_keyboardRoute->resumeViewer && resumeViewer;
@@ -397,6 +416,10 @@ public:
       }
       if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding)
         return;
+      if (m_shuttingDown) {
+        retireKeyboardRoute();
+        return;
+      }
       if (!released) {
         m_keyboardTimeout.stop();
         retireKeyboardRoute();
@@ -427,27 +450,58 @@ public:
   }
   ~Bridge() override
   {
+    stopSharing();
+    // Native teardown can retry journal restoration after our maps are gone.
+    // It must not call a controller whose members are being destroyed.
+    if (m_native) {
+      m_native->onError = {};
+      m_native->onCatalog = {};
+      m_native->onOpened = {};
+      m_native->onFrame = {};
+      m_native->onCommitted = {};
+      m_native->onFocused = {};
+      m_native->onKeyboardRouteInvalidated = {};
+      m_native->onClosed = {};
+    }
+  }
+  // Terminal for this controller. This blocks admission synchronously even
+  // when an outstanding revocation callback must unwind before restoration.
+  // Like the authority callbacks, callers must use deleteLater for destruction
+  // from a callback stack. Quitting is a separate lifetime-owner decision.
+  void stopSharing()
+  {
+    if (m_shuttingDown) {
+      finishShutdown();
+      return;
+    }
     m_shuttingDown = true;
+    m_established = false;
+    m_negotiating = false;
     m_reconnectEnabled = false;
+    m_retryRequested = false;
+    m_initialWindow = 0;
+    m_listener.close();
     m_reconnectTimer.stop();
     m_stableTimer.stop();
+    m_keyboardTimeout.stop();
     clearKeyframeRetries();
+    clearCatalog();
     if (m_channel) {
+      m_channel->onAuthenticated = {};
       m_channel->onClosed = {};
       m_channel->onPacket = {};
-      m_channel->close();
     }
-    withdrawOriginalKeyboard(KeyboardRouteReason::Disconnected, false);
-    stopViewers();
-    if (m_native) {
-      m_native->releaseAll();
-      m_native->restoreAll();
-    }
+    const QPointer<Bridge> alive(this);
+    withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost, false);
+    if (alive)
+      finishShutdown();
   }
   bool listen(const QHostAddress &address, quint16 port)
   {
+    if (m_shuttingDown)
+      return false;
     m_listener.incoming = [this](qintptr descriptor) {
-      if (m_channel || m_cleaning) {
+      if (m_shuttingDown || m_channel || m_cleaning) {
         QTcpSocket socket;
         socket.setSocketDescriptor(descriptor);
         socket.abort();
@@ -479,15 +533,61 @@ public:
 protected:
   void closeEvent(QCloseEvent *event) override
   {
-    m_shuttingDown = true;
-    cancelConnection();
-    m_listener.close();
     event->accept();
-    if (onQuitRequested)
-      onQuitRequested();
+    m_quitAfterShutdown = true;
+    const QPointer<Bridge> alive(this);
+    stopSharing();
+    if (alive)
+      notifyQuit();
   }
 
 private:
+  void notifyQuit()
+  {
+    if (!m_shutdownComplete || !m_quitAfterShutdown || m_quitNotified)
+      return;
+    m_quitNotified = true;
+    const auto quit = onQuitRequested;
+    if (quit)
+      quit();
+  }
+  void finishShutdown()
+  {
+    if (!m_shuttingDown || m_shutdownFinishing || m_shutdownComplete ||
+        (m_keyboardRoute && m_keyboardRoute->phase == KeyboardPhase::Revoking))
+      return;
+    m_shutdownFinishing = true;
+    const QPointer<Bridge> alive(this);
+    const auto channel = m_channel;
+    m_channel = nullptr;
+    if (channel) {
+      channel->onAuthenticated = {};
+      channel->onClosed = {};
+      channel->onPacket = {};
+      channel->close();
+      channel->deleteLater();
+    }
+    stopViewers();
+    if (!alive)
+      return;
+    if (m_native) {
+      m_native->releaseAll();
+      if (!alive)
+        return;
+      m_native->restoreAll();
+      if (!alive)
+        return;
+    }
+    m_hostSessions.clear();
+    m_cleaning = false;
+    m_shutdownComplete = true;
+    m_shutdownFinishing = false;
+    const auto stopped = m_onSharingStopped;
+    if (stopped)
+      stopped();
+    if (alive)
+      notifyQuit();
+  }
   enum class KeyboardPhase
   {
     Reserved,
@@ -529,6 +629,8 @@ private:
   }
   void receiveKeyboardRoute(const Packet &packet)
   {
+    if (m_shuttingDown)
+      return;
     require(m_keyboardCapable, "Keyboard route capability was not negotiated");
     const auto control = parseKeyboardRouteControl(packet);
     if (!m_hosting) {
@@ -695,7 +797,7 @@ private:
   }
   bool send(MessageType type, const QJsonObject &object = {}, std::uint64_t session = 0, std::uint64_t epoch = 0)
   {
-    return m_established && m_channel && m_channel->send(type, object, session, epoch);
+    return !m_shuttingDown && m_established && m_channel && m_channel->send(type, object, session, epoch);
   }
   void clearKeyframeRetries()
   {
@@ -704,7 +806,7 @@ private:
   }
   void retryKeyframe()
   {
-    if (!m_channel || !m_established || !m_native) {
+    if (m_shuttingDown || !m_channel || !m_established || !m_native) {
       clearKeyframeRetries();
       return;
     }
@@ -762,7 +864,7 @@ private:
       }
     };
     channel->onClosed = [this, channel, generation](QString reason, CloseCause cause) {
-      if (m_channel != channel || m_connectionGeneration != generation)
+      if (m_shuttingDown || m_channel != channel || m_connectionGeneration != generation)
         return;
       // A peer that drops TLS while rejecting Hello may be rejecting our
       // identity or protocol. Only a fully negotiated loss is retryable there.
@@ -783,7 +885,7 @@ private:
       withdrawOriginalKeyboard(KeyboardRouteReason::Disconnected, false);
       clearCatalog();
       QTimer::singleShot(0, this, [this, generation, retryable] {
-        if (m_connectionGeneration != generation)
+        if (m_shuttingDown || m_connectionGeneration != generation)
           return;
         stopViewers();
         if (m_native) {
@@ -807,6 +909,8 @@ private:
   }
   void receive(const Packet &packet)
   {
+    if (m_shuttingDown)
+      return;
     if (!m_established) {
       const auto object = parseObject(packet);
       require(packet.session == 0 && packet.epoch == 0, "Negotiation requires connection scope");
@@ -855,6 +959,8 @@ private:
   }
   void receiveHost(const Packet &packet)
   {
+    if (m_shuttingDown)
+      return;
     const auto object = parseObject(packet);
     if (packet.type == MessageType::Catalog || packet.type == MessageType::Export ||
         packet.type == MessageType::ReleaseAll) {
@@ -897,6 +1003,8 @@ private:
   }
   void receiveViewer(const Packet &packet)
   {
+    if (m_shuttingDown)
+      return;
     if (packet.type == MessageType::Catalog) {
       require(packet.session == 0 && packet.epoch == 0, "Expected catalog connection scope");
       const auto value = parseObject(packet).value("windows");
@@ -993,7 +1101,7 @@ private:
   }
   void maybeInitialExport()
   {
-    if (!m_established || !m_catalogReady || m_initialWindow == 0)
+    if (m_shuttingDown || !m_established || !m_catalogReady || m_initialWindow == 0)
       return;
     const auto id = m_initialWindow;
     m_initialWindow = 0;
@@ -1004,7 +1112,7 @@ private:
   }
   void openSelected()
   {
-    if (!m_established || !m_catalogReady || m_cleaning) {
+    if (m_shuttingDown || !m_established || !m_catalogReady || m_cleaning) {
       status("Connect an approved peer before sharing a window.");
       return;
     }
@@ -1019,6 +1127,8 @@ private:
   }
   void returnAll()
   {
+    if (m_shuttingDown)
+      return;
     if (m_native) {
       clearKeyframeRetries();
       m_native->releaseAll();
@@ -1045,8 +1155,8 @@ private:
   bool currentViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation) const
   {
     const auto found = m_viewers.find(session);
-    return m_connectionGeneration == generation && found != m_viewers.end() && found->second.epoch == epoch &&
-           found->second.identity == window;
+    return !m_shuttingDown && m_connectionGeneration == generation && found != m_viewers.end() &&
+           found->second.epoch == epoch && found->second.identity == window;
   }
   void forgetViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation)
   {
@@ -1063,6 +1173,8 @@ private:
   };
   bool m_hosting, m_established = false, m_cleaning = false, m_catalogReady = false;
   bool m_negotiating = false, m_reconnectEnabled = false, m_retryRequested = false, m_shuttingDown = false;
+  bool m_shutdownFinishing = false, m_shutdownComplete = false, m_quitAfterShutdown = false, m_quitNotified = false;
+  std::function<void()> m_onSharingStopped;
   Identity m_identity;
   QByteArray m_pin;
   int m_screen;
@@ -1093,6 +1205,66 @@ private:
   std::map<std::uint64_t, View> m_viewers;
   QJsonArray m_lastCatalog;
 };
+
+// Private-channel loss is terminal, including when observed before exec(). The
+// latch guards startup; the queued quit survives the usual pre-exec quit race.
+// An EOF still waiting in Qt's event queue is not yet an observed cancellation.
+class HostShutdownGuard final : public QObject
+{
+public:
+  explicit HostShutdownGuard(std::function<void()> quit) : m_quit(std::move(quit))
+  {
+  }
+  bool requested() const
+  {
+    return m_requested;
+  }
+  void attach(Bridge &bridge)
+  {
+    m_bridge = &bridge;
+    const QPointer<HostShutdownGuard> alive(this);
+    bridge.m_onSharingStopped = [alive] {
+      if (alive && alive->m_requested)
+        alive->queueQuit();
+    };
+    if (m_requested)
+      bridge.stopSharing();
+  }
+  void request()
+  {
+    if (m_requested)
+      return;
+    m_requested = true;
+    const QPointer<HostShutdownGuard> alive(this);
+    if (m_bridge)
+      m_bridge->stopSharing();
+    if (alive)
+      queueQuit();
+  }
+
+private:
+  void queueQuit()
+  {
+    if (m_quitQueued || m_quitDelivered)
+      return;
+    m_quitQueued = true;
+    QTimer::singleShot(0, this, [this] {
+      m_quitQueued = false;
+      // A nested event loop inside revocation must not make quit overtake
+      // release/restore. Completion calls queueQuit again after it unwinds.
+      if (m_bridge && !m_bridge->m_shutdownComplete)
+        return;
+      m_quitDelivered = true;
+      const auto quit = m_quit;
+      if (quit)
+        quit();
+    });
+  }
+  QPointer<Bridge> m_bridge;
+  std::function<void()> m_quit;
+  bool m_requested = false, m_quitQueued = false, m_quitDelivered = false;
+};
+
 void configureApplicationLifetime(QApplication &application, Bridge &bridge, std::function<void()> quit)
 {
   application.setQuitOnLastWindowClosed(false);
@@ -1108,6 +1280,9 @@ int main(int argc, char **argv)
     auto inputBootstrap = LocalInputHostBootstrap::inspect(argc, argv);
 #endif
     QApplication app(argc, argv);
+    // Declared before coreInput and Bridge: its callbacks remain valid through
+    // both destructors, and the attached controller is held only by QPointer.
+    HostShutdownGuard shutdown([&app] { app.quit(); });
     app.setApplicationName("DeskflowWindowShare");
     app.setOrganizationName("Deskflow");
     app.setApplicationVersion("0.1-experimental");
@@ -1154,7 +1329,7 @@ int main(int argc, char **argv)
       coreInput = inputBootstrap.adopt();
       if (inputBootstrap.probe())
         return localInputHostProbe(std::move(coreInput));
-      coreInput->onClosed = [&app](const QString &) { app.quit(); };
+      coreInput->onClosed = [&shutdown](const QString &) { shutdown.request(); };
     }
 #endif
     parser.process(app);
@@ -1201,11 +1376,20 @@ int main(int argc, char **argv)
     require(valid, "Invalid window ID");
     const auto seconds = parser.value("quit-after").toInt(&valid);
     require(valid && seconds >= 0 && seconds <= 86400, "Invalid exit timer");
+    if (interrupted)
+      shutdown.request();
+    if (shutdown.requested())
+      return 0;
     Bridge bridge(
         hosting, Identity::load(parser.value("identity")), parseFingerprint(parser.value("peer-pin")),
         parser.value("journal"), screen, window, parser.isSet("holding-display")
     );
-    configureApplicationLifetime(app, bridge, [&app] { app.quit(); });
+    configureApplicationLifetime(app, bridge, [&shutdown] { shutdown.request(); });
+    shutdown.attach(bridge);
+    if (interrupted)
+      shutdown.request();
+    if (shutdown.requested())
+      return 0;
     if (hosting) {
       QHostAddress address;
       require(address.setAddress(parser.value("listen")), "Listen address must be an explicit IP address");
@@ -1213,16 +1397,22 @@ int main(int argc, char **argv)
         return 1;
     } else
       bridge.connectTo(parser.value("connect"), static_cast<quint16>(port));
+    if (shutdown.requested())
+      return 0;
     if (!parser.isSet("headless"))
       bridge.show();
     if (seconds)
-      QTimer::singleShot(seconds * 1000, &app, &QApplication::quit);
+      QTimer::singleShot(seconds * 1000, &shutdown, [&shutdown] { shutdown.request(); });
     QTimer signals;
-    QObject::connect(&signals, &QTimer::timeout, &app, [&app] {
+    QObject::connect(&signals, &QTimer::timeout, &shutdown, [&shutdown] {
       if (interrupted)
-        app.quit();
+        shutdown.request();
     });
     signals.start(100);
+    if (interrupted)
+      shutdown.request();
+    if (shutdown.requested())
+      return 0;
     return app.exec();
   } catch (const std::exception &error) {
     QTextStream(stderr) << "Window sharing: " << error.what() << '\n';

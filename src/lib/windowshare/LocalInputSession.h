@@ -17,6 +17,8 @@ class OriginalInputCaptureSource;
 // ordinary core startup and after core shutdown. No input authorizer is set.
 class LocalInputCoreSession final
 {
+  friend struct LocalInputCoreSessionTestAccess;
+
 public:
   static std::unique_ptr<LocalInputCoreSession> start(
       LocalInputSocketPair pair, const QStringList &arguments, QString *error = nullptr,
@@ -41,6 +43,9 @@ private:
   int m_stopWaitMs = 2000;
 #ifdef __APPLE__
   void drainCapturedInput();
+  // Terminal even if the underlying epoch was already revoked by overflow or
+  // discontinuity. Capture-timer shutdown never enters stop()'s bounded wait.
+  bool m_captureEmergencyHandled = false;
   std::shared_ptr<OriginalInputCaptureSource> m_captureSource;
   std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;
   QTimer m_captureTimer;

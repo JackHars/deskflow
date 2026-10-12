@@ -151,6 +151,52 @@ void discontinuitiesAndEmergency()
   );
 }
 
+void emergencyRecognition()
+{
+  constexpr auto chord = originalKey::controlFlag | originalKey::optionFlag | originalKey::shiftFlag;
+  // These events now decide whether a running companion is terminated. A
+  // release, repeat or incomplete chord must never be mistaken for the escape
+  // press, even if its record invalidates ordinary capture continuity.
+  struct Lookalike
+  {
+    CGEventType callbackType;
+    CGEventType eventType;
+    std::uint16_t code;
+    std::uint64_t flags;
+    bool repeat;
+  };
+  for (const auto &lookalike : {
+           Lookalike{kCGEventKeyUp, kCGEventKeyUp, originalKey::escape, chord, false},
+           Lookalike{kCGEventKeyDown, kCGEventKeyDown, originalKey::escape, chord, true},
+           Lookalike{kCGEventKeyDown, kCGEventKeyDown, originalKey::escape, chord & ~originalKey::controlFlag, false},
+           Lookalike{kCGEventKeyDown, kCGEventKeyDown, originalKey::escape, chord & ~originalKey::optionFlag, false},
+           Lookalike{kCGEventKeyDown, kCGEventKeyDown, originalKey::escape, chord & ~originalKey::shiftFlag, false},
+           Lookalike{kCGEventKeyDown, kCGEventKeyDown, 0, chord, false},
+           Lookalike{kCGEventKeyUp, kCGEventKeyDown, originalKey::escape, chord, false},
+       }) {
+    OriginalInputCaptureSource source;
+    check(source.start(), "lookalike fixture started");
+    EventFixture event;
+    event.key(lookalike.code, lookalike.flags);
+    CGEventSetType(event.event, lookalike.eventType);
+    CGEventSetIntegerValueField(event.event, kCGKeyboardEventAutorepeat, lookalike.repeat);
+    source.capture(lookalike.callbackType, event.event);
+    check(!source.emergencyRequested(), "lookalike must not terminate companion");
+    event.key(originalKey::escape, chord);
+    source.capture(kCGEventKeyDown, event.event);
+    check(source.emergencyRequested(), "later genuine escape survives any continuity failure");
+  }
+
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  event.key(originalKey::escape, chord);
+  source.capture(kCGEventKeyDown, event.event);
+  check(!source.emergencyRequested() && source.start(), "pre-start escape cannot stop a new companion");
+  source.stop();
+  source.capture(kCGEventKeyDown, event.event);
+  check(!source.emergencyRequested(), "stopped source observes no further physical presses");
+}
+
 void concurrentStartStop()
 {
   for (int iteration = 0; iteration < 200; ++iteration) {
@@ -257,6 +303,7 @@ int main()
   try {
     lifecycleAndOrdering();
     discontinuitiesAndEmergency();
+    emergencyRecognition();
     concurrentStartStop();
     concurrentCaptureDrain();
     stopBeforeRunStarts();

@@ -12,6 +12,8 @@
 #include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QSet>
 #include <QSslConfiguration>
 #include <QSslError>
@@ -29,6 +31,7 @@ QSet<int> nativeHeldButtons;
 std::function<void()> nativeResumeObserver;
 std::function<void()> nativeQuiesceObserver;
 std::function<void()> nativeCandidateObserver;
+std::function<void()> nativeConstructObserver, nativeReleaseObserver, nativeRestoreObserver;
 bool nativeResumeSucceeds = true;
 } // namespace
 
@@ -40,6 +43,9 @@ struct NativeHost::Impl
 };
 NativeHost::NativeHost(QString, QObject *parent) : QObject(parent), m_impl(std::make_unique<Impl>())
 {
+  const auto observer = nativeConstructObserver;
+  if (observer)
+    observer();
 }
 NativeHost::~NativeHost() = default;
 QJsonObject NativeHost::permissions()
@@ -155,6 +161,9 @@ void NativeHost::restore(std::uint64_t)
 void NativeHost::restoreAll()
 {
   ++nativeRestores;
+  const auto observer = nativeRestoreObserver;
+  if (observer)
+    observer();
 }
 void NativeHost::releaseAll()
 {
@@ -162,6 +171,9 @@ void NativeHost::releaseAll()
   nativeHeldKeys.clear();
   nativeHeldButtons.clear();
   m_impl->focus.reset();
+  const auto observer = nativeReleaseObserver;
+  if (observer)
+    observer();
 }
 struct ChannelTestAccess
 {
@@ -192,6 +204,18 @@ struct ChannelTestAccess
 namespace {
 struct BridgeTestAccess
 {
+  static bool stopped(const Bridge &bridge)
+  {
+    return bridge.m_shutdownComplete;
+  }
+  static bool stopping(const Bridge &bridge)
+  {
+    return bridge.m_shuttingDown;
+  }
+  static bool listening(const Bridge &bridge)
+  {
+    return bridge.m_listener.isListening();
+  }
   static std::optional<KeyboardRouteBinding> keyboardBinding(const Bridge &bridge)
   {
     return bridge.m_keyboardRoute ? std::optional(bridge.m_keyboardRoute->binding) : std::nullopt;
@@ -406,6 +430,9 @@ struct AutomaticNative
     nativeResumeObserver = {};
     nativeQuiesceObserver = {};
     nativeCandidateObserver = {};
+    nativeConstructObserver = {};
+    nativeReleaseObserver = {};
+    nativeRestoreObserver = {};
     nativeResumeSucceeds = true;
   }
   ~AutomaticNative()
@@ -414,6 +441,9 @@ struct AutomaticNative
     nativeResumeObserver = {};
     nativeQuiesceObserver = {};
     nativeCandidateObserver = {};
+    nativeConstructObserver = {};
+    nativeReleaseObserver = {};
+    nativeRestoreObserver = {};
     nativeResumeSucceeds = true;
   }
 };
@@ -1595,6 +1625,175 @@ void cancelRetryAndDestroy(const Identity &hostIdentity, const Identity &viewerI
   runEvents(80);
   check(connections == 0, "Destroyed Bridge left a retry callback running");
 }
+
+void shutdownBeforeExec()
+{
+  QProcess process;
+  auto environment = QProcessEnvironment::systemEnvironment();
+  environment.insert("QT_QPA_PLATFORM", "offscreen");
+  process.setProcessEnvironment(environment);
+  process.start(QCoreApplication::applicationFilePath(), {"--shutdown-before-exec"});
+  check(process.waitForStarted(3000), "Cannot start pre-exec shutdown fixture");
+  check(process.waitForFinished(5000), "Pre-exec shutdown was lost before QApplication::exec");
+  check(
+      process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0,
+      "Pre-exec shutdown did not deliver exactly one queued quit"
+  );
+}
+
+void startupShutdownLifetime(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  AutomaticNative native;
+  int quits = 0;
+  {
+    HostShutdownGuard shutdown([&] { ++quits; });
+    shutdown.request();
+    shutdown.request();
+    check(shutdown.requested() && quits == 0, "Startup closure was not latched before queued quit");
+    // main consults this latch before constructing NativeHost or listening.
+  }
+  runEvents(10);
+  check(quits == 0, "Destroyed shutdown guard left a queued callback");
+
+  {
+    HostShutdownGuard shutdown([&] { ++quits; });
+    const auto releases = nativeReleases, restores = nativeRestores;
+    nativeConstructObserver = [&] { shutdown.request(); };
+    Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+    nativeConstructObserver = {};
+    check(shutdown.requested(), "Closure during native construction was lost");
+    shutdown.attach(host);
+    check(
+        BridgeTestAccess::stopped(host) && nativeReleases == releases + 1 && nativeRestores == restores + 1,
+        "Attaching an already canceled startup did not restore exactly once"
+    );
+    check(!host.listen(QHostAddress::LocalHost, 0), "Canceled startup opened a listener");
+    check(quits == 0, "Startup quit ran before its queued delivery");
+    runEvents(10);
+    check(quits == 1, "Canceled startup did not quit");
+    shutdown.request();
+    host.stopSharing();
+    check(nativeRestores == restores + 1, "Repeated startup closure restored twice");
+  }
+
+  {
+    HostShutdownGuard shutdown([&] { ++quits; });
+    const auto restores = nativeRestores;
+    {
+      Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+      shutdown.attach(host);
+    }
+    check(nativeRestores == restores + 1, "Destructor fallback did not restore");
+    // main's private channel outlives the stack Bridge. Its final close must
+    // neither call the destroyed controller nor leave an unguarded callback.
+    shutdown.request();
+    runEvents(10);
+    check(quits == 2 && nativeRestores == restores + 1, "Late private closure used a destroyed Bridge");
+  }
+}
+
+void terminalShutdownOrdering(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  // Cover a direct shutdown and one nested inside an already running revoke.
+  for (const bool nested : {false, true}) {
+    const auto restoresBefore = nativeRestores;
+    {
+      KeyboardFixture fixture(hostIdentity, viewerIdentity);
+      fixture.quiesce();
+      auto &host = fixture.host;
+      const auto proof = host.authenticatedPeerObservation();
+      check(proof && proof->live(), "Shutdown fixture has no authenticated proof");
+      const auto stalePacket = BridgeTestAccess::channel(host)->onPacket;
+      const auto staleClose = BridgeTestAccess::channel(host)->onClosed;
+      const auto exported = exportedWindows.size(), inputs = nativeInputs.size();
+      const auto releases = nativeReleases, restores = nativeRestores;
+      QVector<QString> order;
+      int quits = 0;
+      HostShutdownGuard shutdown([&] {
+        check(BridgeTestAccess::stopped(host), "Quit preceded terminal cleanup");
+        order.push_back("quit");
+        ++quits;
+      });
+      shutdown.attach(host);
+      nativeReleaseObserver = [&] {
+        check(!fixture.original, "Native release preceded original authority revocation");
+        check(!BridgeTestAccess::channel(host) && !proof->live(), "Native release preceded transport revocation");
+        order.push_back("release");
+        host.stopSharing();
+      };
+      nativeRestoreObserver = [&] {
+        check(order.last() == "release", "Restore preceded native release");
+        order.push_back("restore");
+        shutdown.request();
+      };
+      host.revokeOriginalKeyboard = [&](const auto &, auto) {
+        ++fixture.revokes;
+        order.push_back("revoke");
+        if (nested)
+          shutdown.request();
+        check(BridgeTestAccess::stopping(host), "Revocation preceded terminal admission fence");
+        check(!BridgeTestAccess::listening(host), "Listener remained open during terminal revoke");
+        check(!host.authenticatedPeerObservation(), "Terminal controller still exposed authority");
+        check(!host.listen(QHostAddress::LocalHost, 0), "Reentrant listen reopened terminal controller");
+        host.stopSharing();
+        stalePacket(Packet{MessageType::Export, 0, 0, 1, jsonBytes({{"windowId", 555}})});
+        stalePacket(
+            Packet{
+                MessageType::Input, 91, 2, 2,
+                jsonBytes({{"kind", "key"}, {"code", Qt::Key_A}, {"down", true}, {"geometry", 1}, {"focusRevision", 1}})
+            }
+        );
+        staleClose("Obsolete network callback", CloseCause::Network);
+        check(exportedWindows.size() == exported && nativeInputs.size() == inputs, "Late packet passed stop fence");
+        runEvents(10);
+        check(
+            quits == 0 && nativeReleases == releases && nativeRestores == restores,
+            "Nested event loop allowed cleanup or quit before revoke returned"
+        );
+        fixture.original = false;
+        return true;
+      };
+      if (nested)
+        host.withdrawOriginalKeyboard(KeyboardRouteReason::FocusChanged);
+      else
+        shutdown.request();
+      check(
+          BridgeTestAccess::stopped(host) && fixture.revokes == 1 && !BridgeTestAccess::keyboardBinding(host) &&
+              nativeReleases == releases + 1 && nativeRestores == restores + 1 &&
+              order == QVector<QString>{"revoke", "release", "restore"},
+          "Terminal cleanup did not execute once in authority/transport/release/restore order"
+      );
+      host.stopSharing();
+      shutdown.request();
+      stalePacket(Packet{MessageType::Export, 0, 0, 3, jsonBytes({{"windowId", 556}})});
+      staleClose("Late close after restore", CloseCause::Network);
+      runEvents(10);
+      check(quits == 1 && order.last() == "quit", "Terminal shutdown quit was not one-shot");
+      check(nativeRestores == restores + 1 && exportedWindows.size() == exported, "Late callback restarted sharing");
+      nativeReleaseObserver = {};
+      nativeRestoreObserver = {};
+    }
+    // Both fixture controllers are destroyed here. Only the host has native
+    // cleanup, and its destructor must not repeat the explicit stop.
+    check(nativeRestores == restoresBefore + 1, "Destructor repeated completed terminal restoration");
+  }
+}
+
+void shutdownSupersedesDeferredCleanup(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  const auto releases = nativeReleases, restores = nativeRestores;
+  BridgeTestAccess::channel(fixture.host)->close("Pending ordinary disconnect", CloseCause::Network);
+  check(BridgeTestAccess::cleaning(fixture.host), "Fixture did not queue ordinary disconnect cleanup");
+  fixture.host.stopSharing();
+  check(nativeReleases == releases + 1 && nativeRestores == restores + 1, "Terminal cleanup was deferred");
+  runEvents(20);
+  check(
+      nativeReleases == releases + 1 && nativeRestores == restores + 1 && !BridgeTestAccess::listening(fixture.host) &&
+          !BridgeTestAccess::reconnectWaiting(fixture.host),
+      "Queued disconnect cleanup repeated restoration or reopened admission"
+  );
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -1603,6 +1802,20 @@ int main(int argc, char **argv)
   application.setQuitOnLastWindowClosed(false);
   try {
     const auto arguments = application.arguments();
+    if (arguments.size() == 2 && arguments[1] == "--shutdown-before-exec") {
+      int quits = 0;
+      HostShutdownGuard shutdown([&] {
+        ++quits;
+        application.quit();
+      });
+      shutdown.request();
+      shutdown.request();
+      check(shutdown.requested() && quits == 0, "Pre-exec stop was not deferred");
+      QTimer::singleShot(1500, &application, [&] { application.exit(9); });
+      const int result = application.exec();
+      check(result == 0 && quits == 1, "Pre-exec quit was lost or repeated");
+      return 0;
+    }
     if (arguments.size() > 1) {
       check(
           arguments.size() == 2 && arguments[1].startsWith("--tls-backend="),
@@ -1619,6 +1832,8 @@ int main(int argc, char **argv)
     initializeIdentity(directory.filePath("viewer"));
     const auto hostIdentity = Identity::load(directory.filePath("host"));
     const auto viewerIdentity = Identity::load(directory.filePath("viewer"));
+    shutdownBeforeExec();
+    startupShutdownLifetime(hostIdentity, viewerIdentity);
     initialExportWaitsForCatalog(hostIdentity, viewerIdentity);
     congestionRecovery(hostIdentity, viewerIdentity);
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
@@ -1633,9 +1848,12 @@ int main(int argc, char **argv)
     terminalReconnectFailures(hostIdentity, viewerIdentity);
     reconnectWaitsForHostCleanup(hostIdentity, viewerIdentity);
     cancelRetryAndDestroy(hostIdentity, viewerIdentity);
+    terminalShutdownOrdering(hostIdentity, viewerIdentity);
+    shutdownSupersedesDeferredCleanup(hostIdentity, viewerIdentity);
     QTextStream(stdout) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
                            "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
-                           "failures, cancellation, keyboard fencing/revocation and panel lifetime\n";
+                           "failures, cancellation, keyboard fencing/revocation, panel lifetime and terminal "
+                           "private-channel shutdown ordering\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

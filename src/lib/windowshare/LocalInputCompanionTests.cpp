@@ -71,6 +71,27 @@ bool LocalInputPeerTrust::verify(LocalInputProcess expected) const
     QThread::msleep(trust.delayMs);
   return trust.verify && localInputProcess(expected.pid) == expected;
 }
+#ifdef __APPLE__
+struct LocalInputCoreSessionTestAccess
+{
+  static void drain(LocalInputCoreSession &session)
+  {
+    session.drainCapturedInput();
+  }
+  static bool barrier(const LocalInputCoreSession &session)
+  {
+    return bool(session.m_captureBarrier);
+  }
+  static bool emergencyStopped(const LocalInputCoreSession &session)
+  {
+    return session.m_captureEmergencyHandled && !session.m_captureTimer.isActive() && !session.m_captureBarrier;
+  }
+  static QPointer<LocalInputCompanion> companion(const LocalInputCoreSession &session)
+  {
+    return session.m_companion.get();
+  }
+};
+#endif
 } // namespace deskflow::windowshare
 
 namespace {
@@ -599,6 +620,198 @@ void coreSessionCustomDrain()
   );
 }
 
+#ifdef __APPLE__
+// Private constructed events only: no event tap, host, posting or OS input.
+struct CaptureFixture
+{
+  CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  CGEventRef event = source ? CGEventCreate(source) : nullptr;
+  CaptureFixture()
+  {
+    check(event, "Cannot construct private capture fixture");
+    CGEventSetType(event, kCGEventMouseMoved);
+    CGEventSetFlags(event, 0);
+    CGEventSetTimestamp(event, 100);
+    CGEventSetIntegerValueField(event, kCGMouseEventSubtype, kCGEventMouseSubtypeDefault);
+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, 1);
+    CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, -1);
+  }
+  ~CaptureFixture()
+  {
+    if (event)
+      CFRelease(event);
+    if (source)
+      CFRelease(source);
+  }
+  void key(std::uint16_t code, std::uint64_t flags = 0)
+  {
+    CGEventSetType(event, kCGEventKeyDown);
+    CGEventSetIntegerValueField(event, kCGKeyboardEventKeycode, code);
+    CGEventSetIntegerValueField(event, kCGKeyboardEventKeyboardType, 41);
+    CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, 0);
+    CGEventSetFlags(event, flags);
+  }
+  void emergency(OriginalInputCaptureSource &capture)
+  {
+    key(originalKey::escape, originalKey::controlFlag | originalKey::optionFlag | originalKey::shiftFlag);
+    capture.capture(kCGEventKeyDown, event);
+    check(capture.emergencyRequested(), "Constructed emergency was not retained");
+  }
+};
+
+void coreSessionEmergency()
+{
+  enum class Before
+  {
+    Live,
+    Overflow,
+    BarrierFailure
+  };
+  for (const auto before : {Before::Live, Before::Overflow, Before::BarrierFailure}) {
+    resetTrust();
+    auto deadlines = limits;
+    deadlines.gracefulMs = 1200;
+    QString error;
+    auto session = LocalInputCoreSession::start(pair(), {"--fixture=ignore-term"}, &error, deadlines);
+    check(bool(session), qPrintable(error));
+    const auto capture = session->captureSource();
+    const auto mailbox = session->selectedPeerMailbox();
+    const auto companion = LocalInputCoreSessionTestAccess::companion(*session);
+    const auto child = trust.observed;
+    check(child && capture->start(), "Emergency fixture could not start its producer");
+    const auto epoch = capture->epoch();
+    CaptureFixture fixture;
+    capture->capture(kCGEventMouseMoved, fixture.event);
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(LocalInputCoreSessionTestAccess::barrier(*session), "Initial drain did not retain a barrier");
+    if (before == Before::Overflow) {
+      for (std::size_t i = 0; i <= OriginalInputStream::capacity; ++i)
+        capture->capture(kCGEventMouseMoved, fixture.event);
+      check(!epoch.live() && epoch.reason() == OriginalInputRevocation::Overflow, "Fixture did not overflow");
+    } else if (before == Before::BarrierFailure) {
+      fixture.key(0);
+      capture->capture(kCGEventKeyDown, fixture.event);
+      capture->capture(kCGEventKeyDown, fixture.event);
+      check(epoch.live(), "Duplicate downs must reach the consumer barrier before continuity revocation");
+      LocalInputCoreSessionTestAccess::drain(*session);
+      check(
+          !epoch.live() && epoch.reason() == OriginalInputRevocation::Discontinuity,
+          "Contradictory downs did not invalidate the consumer barrier"
+      );
+    }
+    if (before != Before::Live) {
+      LocalInputCoreSessionTestAccess::drain(*session);
+      check(
+          !capture->epoch().live() && session->channel()->authenticated() && !mailbox->read().closed,
+          "Continuity loss alone stopped the companion or invented a new epoch"
+      );
+    }
+    int closures = 0, completions = 0;
+    const auto previousClosed = session->channel()->onClosed;
+    session->channel()->onClosed = [&, previousClosed](QString reason) {
+      ++closures;
+      if (previousClosed)
+        previousClosed(std::move(reason));
+    };
+    session->onStopped = [&](QString) { ++completions; };
+    fixture.emergency(*capture);
+    QElapsedTimer elapsed;
+    elapsed.start();
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(
+        elapsed.elapsed() < 600 && companion && companion->state() == LocalInputCompanion::State::Stopping &&
+            !companion->exitResult() && localInputProcess(child->pid) == child,
+        "Capture drain synchronously waited for companion shutdown"
+    );
+    check(
+        LocalInputCoreSessionTestAccess::emergencyStopped(*session) && mailbox->read().closed &&
+            !session->channel()->authenticated() && !epoch.live() && !capture->start() && closures == 1,
+        "Emergency did not synchronously revoke all session authority before asynchronous child cleanup"
+    );
+    for (int i = 0; i < 3; ++i)
+      LocalInputCoreSessionTestAccess::drain(*session);
+    bool coreContinued = false;
+    QTimer::singleShot(0, QCoreApplication::instance(), [&] {
+      coreContinued = companion && companion->state() == LocalInputCompanion::State::Stopping;
+    });
+    check(until([&] { return coreContinued; }, 300), "Core event loop did not continue during companion cleanup");
+    check(
+        until([&] { return completions == 1; }) && closures == 1 &&
+            companion->state() == LocalInputCompanion::State::Stopped && localInputProcess(child->pid) != child,
+        "Emergency did not complete its terminal companion stop exactly once"
+    );
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(completions == 1 && closures == 1 && !mailbox->clear(), "Emergency shutdown was not terminal");
+  }
+}
+
+void coreSessionEmergencyCallbacks()
+{
+  enum class Action
+  {
+    Reenter,
+    DestroyOnClose,
+    DestroyOnCompletion
+  };
+  for (const auto action : {Action::Reenter, Action::DestroyOnClose, Action::DestroyOnCompletion}) {
+    resetTrust();
+    QString error;
+    auto session = LocalInputCoreSession::start(pair(), {"--fixture=ignore-term"}, &error, limits);
+    check(bool(session), qPrintable(error));
+    const auto capture = session->captureSource();
+    const auto mailbox = session->selectedPeerMailbox();
+    const auto child = trust.observed;
+    check(child && capture->start(), "Emergency callback fixture did not start");
+    int closures = 0, completions = 0, afterDeletion = 0;
+    bool closedBeforeNotification = false, reentrantStopDrained = false;
+    session->onStopped = [&, keepCapture = capture](QString) {
+      ++completions;
+      if (action == Action::DestroyOnCompletion) {
+        session.reset();
+        // Access the callback's own captures after its owner has gone.
+        afterDeletion += keepCapture->emergencyRequested() && mailbox->read().closed;
+      } else {
+        LocalInputCoreSessionTestAccess::drain(*session);
+      }
+    };
+    const auto previousClosed = session->channel()->onClosed;
+    session->channel()->onClosed = [&, previousClosed, keepCapture = capture](QString reason) {
+      ++closures;
+      closedBeforeNotification = LocalInputCoreSessionTestAccess::emergencyStopped(*session) &&
+                                 mailbox->read().closed && !keepCapture->epoch().live();
+      if (previousClosed)
+        previousClosed(std::move(reason));
+      if (action == Action::DestroyOnClose) {
+        session.reset();
+        afterDeletion += keepCapture->emergencyRequested() && mailbox->read().closed;
+      } else if (action == Action::Reenter) {
+        LocalInputCoreSessionTestAccess::drain(*session);
+        LocalInputCoreSessionTestAccess::companion(*session)->stop();
+        reentrantStopDrained = until([&] { return completions == 1; });
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+      }
+    };
+    CaptureFixture fixture;
+    fixture.emergency(*capture);
+    // Exercise the actual queued capture timer, including deletion of the
+    // session that owns its receiver and timer while the drain is active.
+    check(
+        until([&] { return closures == 1 && (action == Action::DestroyOnClose || completions == 1); }),
+        "Queued emergency callback did not close/reap its companion"
+    );
+    check(
+        closedBeforeNotification && closures == 1 && completions == (action == Action::DestroyOnClose ? 0 : 1) &&
+            (action == Action::Reenter ? reentrantStopDrained : !session && afterDeletion == 1),
+        "Emergency callback reentrancy or destruction violated terminal session ownership"
+    );
+    check(
+        until([&] { return localInputProcess(child->pid) != child; }) && mailbox->read().closed && !capture->start(),
+        "Destructive emergency callback lost child cleanup or revived capture authority"
+    );
+  }
+}
+#endif
+
 void environmentIsolation()
 {
   resetTrust();
@@ -650,7 +863,7 @@ int main(int argc, char **argv)
   }
   // Every pair used by this suite exists before Qt starts any helper thread.
   if (descriptor < 0)
-    for (int i = 0; i < 32; ++i)
+    for (int i = 0; i < 40; ++i)
       pairs.push_back(LocalInputSocketPair::create());
   QCoreApplication application(argc, argv);
   try {
@@ -672,6 +885,12 @@ int main(int argc, char **argv)
     coreSessionOwnership();
     coreSessionMailboxClosure();
     coreSessionCustomDrain();
+#ifdef __APPLE__
+    coreSessionEmergency();
+    coreSessionEmergencyCallbacks();
+    QTextStream(stdout) << "PASS: asynchronous capture emergency after overflow/barrier revocation, core continuation, "
+                           "terminal and destructive emergency callbacks\n";
+#endif
     childExitEvidence();
     eventLoopExit();
     QTextStream(stdout) << "PASS: fixed verified companion, exclusive inheritance, handshake deadline, child death, "
