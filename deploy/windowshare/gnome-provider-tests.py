@@ -163,6 +163,48 @@ def wait_for(processes, predicate, description, timeout=12, retry_errors=True):
     raise RuntimeError(f"Timed out waiting for {description}: {last_error}")
 
 
+def wait_for_disabled_extension(processes, shell, provider, timeout=40):
+    responded = False
+
+    def initialized():
+        nonlocal responded
+        require(shell.poll() is None, f"GNOME Shell exited {shell.returncode}")
+        if provider.bus("NameHasOwner", "(s)", ("org.gnome.Shell",)) == (False,):
+            require(not responded, "Shell D-Bus owner vanished during extension discovery")
+            return None
+        try:
+            info, = provider.call(
+                "GetExtensionInfo", "(s)", (UUID,), destination="org.gnome.Shell",
+                path="/org/gnome/Shell", interface="org.gnome.Shell.Extensions",
+            )
+        except provider.GLib.Error as error:
+            # Shell owns its name before exporting this object/interface.
+            # Once it has replied, disappearance is no longer startup absence.
+            if not responded and error.matches(provider.Gio.dbus_error_quark(), provider.Gio.DBusError.UNKNOWN_METHOD):
+                return None
+            raise
+        responded = True
+        require(isinstance(info, dict), f"Invalid extension metadata: {info}")
+        if not info:
+            return None
+        require(info.get("uuid") == UUID, f"Unexpected extension identity: {info}")
+        require(info.get("enabled") is False and info.get("error") == "",
+                f"Extension was not initially disabled and error-free: {info}")
+        # Shell 50.1 publishes createExtensionObject() before awaiting
+        # _handleMajorUpdate(); loadExtension() then assigns INITIALIZED.
+        # Its D-Bus serializer omits the still-undefined state in that gap.
+        # https://github.com/GNOME/gnome-shell/blob/50.1/js/ui/extensionSystem.js
+        if "state" not in info:
+            return None
+        require(type(info["state"]) in (int, float) and info["state"] in (2, 6),
+                f"Extension was not initially disabled: {info}")
+        return info
+
+    # Only explicit startup absence is pending. Never retry a Shell exit,
+    # other D-Bus error, enabled extension, error state or malformed response.
+    return wait_for(processes, initialized, "initially disabled Shell extension", timeout=timeout, retry_errors=False)
+
+
 def start_bus(processes, root, name):
     address = "unix:path=" + str(root / f"{name}.sock")
     # No service directories: activation cannot escape into a caller's user
@@ -396,16 +438,7 @@ def run_fixture(arguments):
             provider = Provider(env["DBUS_SESSION_BUS_ADDRESS"])
             foreign = Provider(env["DBUS_SESSION_BUS_ADDRESS"])
 
-            def extension_info():
-                require(shell.poll() is None, f"GNOME Shell exited {shell.returncode}")
-                info, = provider.call(
-                    "GetExtensionInfo", "(s)", (UUID,), destination="org.gnome.Shell",
-                    path="/org/gnome/Shell", interface="org.gnome.Shell.Extensions",
-                )
-                return info if info.get("uuid") == UUID else None
-
-            info = wait_for(processes, extension_info, "real Shell extension discovery", timeout=40)
-            require(info.get("state") in (2, 6), f"Extension was not initially disabled: {info}")
+            report["initialExtensionState"] = wait_for_disabled_extension(processes, shell, provider)["state"]
             require(provider.bus("NameHasOwner", "(s)", (SERVICE,)) == (False,), "Default-off provider unexpectedly active")
             report["defaultDisabled"] = True
             processes.run("enable-extension", ["gsettings", "set", "org.gnome.shell", "enabled-extensions", f"['{UUID}']"])

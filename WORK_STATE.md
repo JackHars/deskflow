@@ -48,6 +48,19 @@ The previous experimental copy is retained in
 `/Applications/Deskflow.app` was not replaced. Package and native evidence is in
 `build/native-smoke-20261012/evidence.json`.
 
+CI run `38301707752` for the cross-machine harness commit `b3d1a6430` passed
+five jobs but exposed a GNOME fixture startup race before native acceptance:
+Shell published disabled extension metadata before assigning its state. The
+fixture now waits within its existing 40-second deadline for explicit disabled
+or initialized state. Initial absence of the Shell object is allowed only before
+its first reply; enabled/error metadata, owner loss, later method loss and other
+D-Bus failures remain terminal. No measured native-input assertion was relaxed.
+All 11 startup regressions and fresh home-Ubuntu GTK/EIS and Qt scale 1/1.25
+acceptance runs pass with unchanged production binaries. The regressions are
+included in the GNOME CI job. Evidence, including the failed first correction,
+is under `build/gnome-startup-readiness/`; the original CI log is retained under
+`build/crossmachine-ci/38301707752/`.
+
 ## Mac targeted pointer coordinates (2026-10-12)
 
 The native own-window input failure is fixed. The public global-location setter
