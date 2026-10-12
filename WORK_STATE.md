@@ -88,6 +88,20 @@ included in the GNOME CI job. Evidence, including the failed first correction,
 is under `build/gnome-startup-readiness/`; the original CI log is retained under
 `build/crossmachine-ci/38301707752/`.
 
+The next CI run, `38303125940` for `0760fcaff`, passed the five other jobs,
+startup regressions, application suites and native GTK checks, but exposed a
+second fixture problem in the Qt focus-loss check. Its independent GTK child
+left a historical `focused: true` receipt after losing focus, and the fixture's
+blind center click could reactivate the original viewer. The corrected fixture
+publishes current focus and mapping changes atomically, removes that click and
+requires the same child PID and focus sequence before and after one unretried
+native denial. Nine focused regressions, all 11 startup regressions and fresh
+home-Ubuntu Qt scale 1/1.25 acceptance pass with unchanged production binaries.
+Both native runs observe `viewer-not-focused` while the independent child retains
+focus. CI now runs the new regressions and retains their log. Evidence is under
+`build/gnome-focus-readiness/`; the failed CI log and artifact remain under
+`build/gnome-startup-readiness/ci-38303125940/`.
+
 ## Mac targeted pointer coordinates (2026-10-12)
 
 The native own-window input failure is fixed. The public global-location setter

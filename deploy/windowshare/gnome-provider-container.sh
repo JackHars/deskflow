@@ -49,7 +49,7 @@ scratch=$(mktemp -d /tmp/deskflow-gnome-container-XXXXXX)
 finish() {
   local exit_status=$?
   mkdir -p "$scratch/report"
-  for name in readiness configure build application-tests launcher-native; do
+  for name in readiness viewer-fixture configure build application-tests launcher-native; do
     if [[ -f "$scratch/$name.log" ]]; then
       cp "$scratch/$name.log" "$scratch/report/"
       if [[ $exit_status != 0 ]]; then
@@ -69,6 +69,9 @@ node --test "$source_root/deploy/windowshare/gnome-provider/tests/logic.test.js"
 runuser -u "$fixture_user" -- /usr/bin/python3 \
   "$source_root/deploy/windowshare/gnome-provider-readiness-tests.py" \
   >"$scratch/readiness.log" 2>&1
+runuser -u "$fixture_user" -- /usr/bin/python3 \
+  "$source_root/deploy/windowshare/gnome-qt-viewer-fixture-tests.py" \
+  >"$scratch/viewer-fixture.log" 2>&1
 runuser -u "$fixture_user" -- cmake -S "$source_root/src/apps/windowshare" -B "$scratch/build" -G Ninja \
   -DWINDOWSHARE_APP=ON -DWINDOWSHARE_GNOME_FIXTURE=ON -DCMAKE_BUILD_TYPE=Debug \
   >"$scratch/configure.log" 2>&1

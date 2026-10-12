@@ -337,6 +337,56 @@ def denied(reply, description):
     return reply["error"]
 
 
+class FocusState:
+    """Publish current GTK state; a previous activation is not current focus."""
+
+    def __init__(self, path):
+        self.path = path
+        self.previous = None
+        self.sequence = 0
+
+    def publish(self, window):
+        state = {"mapped": window.get_mapped(), "focused": window.is_active(), "pid": os.getpid()}
+        if state == self.previous:
+            return
+        self.sequence += 1
+        receipt = {**state, "sequence": self.sequence}
+        temporary = self.path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(receipt))
+        # Readers see either complete state, including on focus loss/unmap.
+        temporary.replace(self.path)
+        self.previous = state
+        print(json.dumps(receipt), flush=True)
+
+
+def current_focus(path, child):
+    require(child.poll() is None, f"Independent focus child exited {child.returncode}")
+    try:
+        encoded = path.read_text()
+    except FileNotFoundError:
+        return None
+    require(len(encoded) <= 1024, "Independent focus receipt exceeded bound")
+    state = json.loads(encoded)
+    require(isinstance(state, dict) and set(state) == {"mapped", "focused", "pid", "sequence"}
+            and type(state["mapped"]) is bool and type(state["focused"]) is bool
+            and type(state["pid"]) is int and state["pid"] == child.pid
+            and type(state["sequence"]) is int and 0 < state["sequence"] <= 2**53 - 1,
+            f"Invalid independent focus receipt: {state}")
+    return state if state["mapped"] and state["focused"] else None
+
+
+def independent_focus_denial(processes, driver, child, path):
+    before = common.wait_for(processes, lambda: current_focus(path, child),
+                             "independent Wayland client current focus", timeout=5, retry_errors=False)
+    # Do not click a guessed desktop position: that can focus the original
+    # viewer again. Native denial is measured once while GTK owns focus.
+    reply = driver.command("observe")
+    after = current_focus(path, child)
+    require(after == before, "Independent child focus changed during the native denial observation")
+    reason = denied(reply, "focus lost to an independent client")
+    return {"before": before, "after": after, "reason": reason}
+
+
 def focus_child(path):
     require(os.environ.get("WAYLAND_DISPLAY") == "deskflow-real-qt-fixture"
             and not os.environ.get("DISPLAY"), "Focus child requires this harness's private Wayland socket")
@@ -349,11 +399,10 @@ def focus_child(path):
         window = Gtk.ApplicationWindow(application=app, title="Disposable independent focus owner")
         window.set_default_size(360, 180)
         window.set_child(Gtk.Label(label="Only the private test compositor is used"))
-        window.connect("map", lambda owner: path.write_text(json.dumps(
-            {"mapped": True, "focused": owner.is_active(), "pid": os.getpid()})))
-        window.connect("notify::is-active", lambda owner, _property:
-                       path.write_text(json.dumps({"mapped": True, "focused": True, "pid": os.getpid()}))
-                       if owner.is_active() else None)
+        state = FocusState(path)
+        window.connect("map", lambda owner: state.publish(owner))
+        window.connect("unmap", lambda owner: state.publish(owner))
+        window.connect("notify::is-active", lambda owner, _property: state.publish(owner))
         window.present()
         GLib.timeout_add_seconds(30, lambda: app.quit() or False)
     application.connect("activate", activate)
@@ -476,12 +525,8 @@ def run(arguments):
             focus_log = root / "independent-focus.json"
             focus = processes.start("independent-focus", [sys.executable, str(Path(__file__).resolve()),
                                                           "--focus-child", str(focus_log)])
-            common.wait_for(processes, focus_log.exists, "independent private Wayland focus owner", timeout=5)
-            driver.command("move", x=center[0], y=center[1])
-            driver.command("click")
-            common.wait_for(processes, lambda: json.loads(focus_log.read_text()).get("focused") is True,
-                            "independent Wayland client focus", timeout=5)
-            report["denials"]["focusLost"] = denied(driver.command("observe"), "focus lost to an independent client")
+            report["independentFocus"] = independent_focus_denial(processes, driver, focus, focus_log)
+            report["denials"]["focusLost"] = report["independentFocus"]["reason"]
             focus.terminate()
             focus.wait(timeout=5)
             driver.command("move", x=center[0], y=center[1])
