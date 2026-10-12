@@ -323,6 +323,18 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   });
   m_watchdog.start();
 }
+Channel::~Channel()
+{
+  // QSslSocket can emit disconnected while destroying its internal TCP socket.
+  // Stop callbacks while all members are alive: the watchdog is otherwise
+  // destroyed before the socket, and QObject disconnects this receiver later.
+  m_closed = true;
+  m_authenticated = false;
+  disconnect(&m_socket, nullptr, this, nullptr);
+  disconnect(&m_watchdog, nullptr, this, nullptr);
+  m_watchdog.stop();
+  m_socket.abort();
+}
 QString Channel::peerCertificateError() const
 {
   const auto certificate = m_socket.peerCertificate();

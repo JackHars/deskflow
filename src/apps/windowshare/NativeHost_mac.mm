@@ -4,6 +4,7 @@
  */
 #include "HoldingDisplay.h"
 #include "NativeHost.h"
+#include "NativeKeyboardAdmission.h"
 
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
@@ -908,7 +909,8 @@ struct NativeHost::Impl
   InputLedger ledger;
   FocusLease focus;
   Owner focusOwner;
-  std::uint64_t focusOwnerRequest = 0;
+  std::uint64_t focusOwnerRequest = 0, focusOwnerRevision = 0;
+  NativeKeyboardAdmission keyboardAdmission;
   std::map<std::pair<std::uint64_t, std::uint32_t>, KeyPress> keys;
   QTimer timer;
   CGEventSourceRef eventSource = nullptr;
@@ -985,6 +987,65 @@ struct NativeHost::Impl
   {
     auto it = entries.find(session);
     return it != entries.end() && it->second->session.epoch == epoch ? it->second.get() : nullptr;
+  }
+  const Entry *entry(std::uint64_t session, std::uint64_t epoch) const
+  {
+    auto it = entries.find(session);
+    return it != entries.end() && it->second->session.epoch == epoch ? it->second.get() : nullptr;
+  }
+  std::optional<KeyboardRouteBinding>
+  keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+  {
+    const Owner owner{session, epoch};
+    const auto *e = entry(session, epoch);
+    if (destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote || focusOwner != owner ||
+        !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
+      return std::nullopt;
+    const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry};
+    if (!validKeyboardRouteBinding(binding) || !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
+        launchTime(e->identity.pid) != e->identity.launch)
+      return std::nullopt;
+    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!active || active.processIdentifier != e->identity.pid)
+      return std::nullopt;
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(e->identity.pid));
+    if (!app)
+      return std::nullopt;
+    AXUIElementSetMessagingTimeout(app.get(), 0.25f);
+    CF<CFTypeRef> actualFocus(attribute(app.get(), kAXFocusedWindowAttribute));
+    CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
+    const auto actualBounds = bounds(e->window);
+    if (!actualFocus || !CFEqual(actualFocus.get(), e->window) || !minimized ||
+        !CFEqual(minimized.get(), kCFBooleanFalse) || !actualBounds ||
+        !sameGeometry(*actualBounds, e->session.source) || (e->moved && !holding.available()))
+      return std::nullopt;
+    return binding;
+  }
+  bool qtInputEmpty() const
+  {
+    return ledger.size() == 0 && keys.empty() &&
+           std::all_of(entries.begin(), entries.end(), [](const auto &item) { return item.second->buttons.empty(); });
+  }
+  bool quiesceKeyboard(const KeyboardRouteBinding &binding)
+  {
+    return keyboardAdmission.quiesce(
+        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation), qtInputEmpty()
+    );
+  }
+  bool keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
+  {
+    return keyboardAdmission.quiesced(
+        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation), qtInputEmpty()
+    );
+  }
+  void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)
+  {
+    const auto binding = keyboardAdmission.invalidate(owner);
+    if (binding && !destroying && q->onKeyboardRouteInvalidated) {
+      CallbackScope scope(*this);
+      const auto callback = q->onKeyboardRouteInvalidated;
+      callback(*binding, reason);
+    }
   }
   QJsonObject metadata(const Entry &e) const
   {
@@ -1095,7 +1156,9 @@ struct NativeHost::Impl
     auto notify = ^(NSNotification *) {
       std::lock_guard lock(life->mutex);
       if (life->receiver)
-        QMetaObject::invokeMethod(life->receiver, [this] { restoreAll(); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(
+            life->receiver, [this] { restoreAll(KeyboardRouteReason::AuthorityLost); }, Qt::QueuedConnection
+        );
     };
     auto center = NSWorkspace.sharedWorkspace.notificationCenter;
     sleepObserver = [center addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:nil usingBlock:notify];
@@ -1137,7 +1200,9 @@ struct NativeHost::Impl
     if (CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == kVK_Escape &&
         (modifiers & required) == required) {
       // No AX calls, I/O, or waits in an event tap.
-      QMetaObject::invokeMethod(self->q, [self] { self->restoreAll(); }, Qt::QueuedConnection);
+      QMetaObject::invokeMethod(
+          self->q, [self] { self->restoreAll(KeyboardRouteReason::AuthorityLost); }, Qt::QueuedConnection
+      );
     }
     return event;
   }
@@ -1344,7 +1409,8 @@ struct NativeHost::Impl
         q->onFrame(session, epoch, geometry, std::move(bytes));
       }
     };
-    e->capture->error = [this, session](QString message) {
+    e->capture->error = [this, session, epoch](QString message) {
+      releases(Owner{session, epoch}, KeyboardRouteReason::Failed);
       error(std::move(message));
       restore(session);
     };
@@ -1517,7 +1583,8 @@ struct NativeHost::Impl
       post(e, event.get(), modifiers);
     }
   }
-  void releases(std::optional<Owner> owner = std::nullopt)
+  void
+  releases(std::optional<Owner> owner = std::nullopt, KeyboardRouteReason reason = KeyboardRouteReason::FocusChanged)
   {
     Owner revoked;
     std::uint64_t revokedRequest = 0;
@@ -1527,6 +1594,7 @@ struct NativeHost::Impl
       focus.revoke();
       focusOwner = {};
       focusOwnerRequest = 0;
+      focusOwnerRevision = 0;
     }
     for (const auto &press : ledger.release(owner)) {
       auto *e = entry(press.owner.session, press.owner.epoch);
@@ -1542,6 +1610,7 @@ struct NativeHost::Impl
       } else if (e)
         button(*e, press.code, false);
     }
+    invalidateKeyboard(reason, owner);
     if (revoked.session && revokedRequest && !destroying && q->onFocused) {
       // Revoke the acknowledged request, not a newer request already received
       // by input(). Clear ownership before the callback can echo a release.
@@ -1552,6 +1621,10 @@ struct NativeHost::Impl
   bool setFocus(Entry &e, std::uint64_t request)
   {
     releases();
+    // A release/invalidation callback may have processed a newer focus request.
+    // Do not overwrite that lease or acknowledge the now-obsolete request.
+    if (e.focusRequest != request || focusOwner.session)
+      return false;
     CF<AXUIElementRef> app(AXUIElementCreateApplication(e.identity.pid));
     AXUIElementSetMessagingTimeout(app.get(), 0.25f);
     AXUIElementPerformAction(e.window, kAXRaiseAction);
@@ -1567,6 +1640,7 @@ struct NativeHost::Impl
     const auto revision = focus.request(focusOwner);
     focus.acknowledge(focusOwner, revision);
     focusOwnerRequest = request;
+    focusOwnerRevision = revision;
     for (auto &[id, other] : entries)
       updateCapture(*other);
     if (q->onFocused) {
@@ -1593,7 +1667,7 @@ struct NativeHost::Impl
         return;
       e->visible = event["visible"].toBool();
       if (!e->visible)
-        releases(owner);
+        releases(owner, KeyboardRouteReason::Hidden);
       updateCapture(*e);
       return;
     }
@@ -1640,7 +1714,7 @@ struct NativeHost::Impl
       return;
     const auto modifiers = flags(integer(event["modifiers"], UINT32_MAX).value_or(0));
     if (kind == "key") {
-      if (!code || !event["down"].isBool() || !down)
+      if (keyboardAdmission.blocksKeys() || !code || !event["down"].isBool() || !down)
         return;
       auto text = event["text"].toString().left(32);
       auto native = keyCode(std::uint32_t(*code));
@@ -1719,7 +1793,7 @@ struct NativeHost::Impl
     if (!e || e->session.phase != Phase::Remote || width < 64 || height < 64 || width > 8192 || height > 8192 ||
         request > maxJsonInteger)
       return;
-    releases(Owner{session, epoch});
+    releases(Owner{session, epoch}, KeyboardRouteReason::GeometryChanged);
     if (!e->session.journaled || !writeJournal())
       return;
     e->resizeRequest = request;
@@ -1754,8 +1828,8 @@ struct NativeHost::Impl
     if (found == entries.end())
       return;
     auto &e = *found->second;
-    releases(Owner{session, e.session.epoch});
     e.session.beginReturn();
+    releases(Owner{session, e.session.epoch}, KeyboardRouteReason::Returned);
     e.capture->shutdown();
     SCStream *stream = e.stream;
     DFWindowStream *delegate = e.delegate;
@@ -1789,10 +1863,10 @@ struct NativeHost::Impl
       q->onClosed(session);
     }
   }
-  void restoreAll()
+  void restoreAll(KeyboardRouteReason reason = KeyboardRouteReason::Returned)
   {
     ++exportGeneration; // cancel pending AX-startup retries on disconnect/restore
-    releases();
+    releases(std::nullopt, reason);
     std::vector<std::uint64_t> ids;
     for (const auto &[id, unused] : entries)
       ids.push_back(id);
@@ -1822,43 +1896,53 @@ struct NativeHost::Impl
     std::vector<std::uint64_t> restoreIds;
     for (auto &[id, e] : entries) {
       if (e->moved && !holding.available()) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         error("Holding display configuration changed; restoring source windows");
         restoreIds.push_back(id);
         continue;
       }
       if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
           (e->session.phase == Phase::Preparing && now - e->started > prepareTimeoutMs)) {
+        releases(
+            Owner{id, e->session.epoch},
+            e->session.phase == Phase::Preparing ? KeyboardRouteReason::Timeout : KeyboardRouteReason::AuthorityLost
+        );
         error("Window export timed out or macOS permission was revoked; restoring source");
         restoreIds.push_back(id);
         continue;
       }
       const auto last = e->capture->lastSample.load();
       if (last && now - last > frameTimeoutMs) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::Timeout);
         error("Window capture stopped delivering frames; restoring source");
         restoreIds.push_back(id);
         continue;
       }
       auto current = identity(e->identity.id);
       if (!current || current->pid != e->identity.pid || current->launch != e->identity.launch) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
         continue;
       }
       CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
       if (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::Hidden);
         restoreIds.push_back(id);
         continue;
       }
       auto actual = bounds(e->window);
       if (!actual) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
         continue;
       }
       if (e->moved && !CGRectContainsRect(rect(holding.bounds()), rect(*actual))) {
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::GeometryChanged);
         restoreIds.push_back(id);
         continue;
       }
       if (!sameGeometry(*actual, e->session.source)) {
-        releases(Owner{id, e->session.epoch});
+        releases(Owner{id, e->session.epoch}, KeyboardRouteReason::GeometryChanged);
         e->session.source = *actual;
         ++e->session.geometry;
         updateCapture(*e);
@@ -1948,6 +2032,23 @@ void NativeHost::restoreAll()
 }
 void NativeHost::releaseAll()
 {
-  m_impl->releases();
+  m_impl->releases(std::nullopt, KeyboardRouteReason::AuthorityLost);
+}
+std::optional<KeyboardRouteBinding>
+NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+{
+  return m_impl->keyboardRouteCandidate(session, epoch, generation);
+}
+bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
+{
+  return m_impl->quiesceKeyboard(binding);
+}
+bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
+{
+  return m_impl->keyboardRouteQuiesced(binding);
+}
+bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &binding)
+{
+  return m_impl->keyboardAdmission.resume(binding);
 }
 } // namespace deskflow::windowshare

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "NativeHost.h"
+#include "NativeKeyboardAdmission.h"
 #include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
@@ -16,7 +17,11 @@ namespace deskflow::windowshare::native {
 bool persistJournal(const QString &path, const QJsonArray &records, QString *diagnostic);
 }
 
+using deskflow::windowshare::FocusLease;
+using deskflow::windowshare::InputLedger;
+using deskflow::windowshare::KeyboardRouteBinding;
 using deskflow::windowshare::NativeHost;
+using deskflow::windowshare::NativeKeyboardAdmission;
 namespace {
 int failures = 0;
 void check(bool result, const char *message)
@@ -38,10 +43,110 @@ QByteArray read(const QString &path)
   file.open(QIODevice::ReadOnly);
   return file.readAll();
 }
+KeyboardRouteBinding routeBinding()
+{
+  return {{11, 12}, 13, 14, 1, 16};
+}
+void keyboardAdmission()
+{
+  const auto binding = routeBinding();
+  NativeKeyboardAdmission gate;
+  InputLedger ledger;
+  FocusLease focus;
+  const auto revision = focus.request(binding.owner);
+  check(focus.acknowledge(binding.owner, revision), "fixture focus lease acknowledges");
+  check(revision == binding.focusRevision, "fixture route uses the acknowledged focus revision");
+  check(!gate.blocksKeys(), "network keyboard begins admitted");
+  check(
+      !gate.quiesce(binding, std::nullopt, true), "viewer acknowledgment without a current native candidate is denied"
+  );
+  auto invalid = binding;
+  invalid.generation = 0;
+  check(!gate.quiesce(invalid, invalid, true), "zero route generation cannot fence input");
+  invalid.generation = std::uint64_t{1} << 53;
+  check(!gate.quiesce(invalid, invalid, true), "inexact JSON route generation cannot fence input");
+
+  std::vector<KeyboardRouteBinding> changed;
+  auto other = binding;
+  ++other.owner.session;
+  changed.push_back(other);
+  other = binding;
+  ++other.owner.epoch;
+  changed.push_back(other);
+  for (const auto member :
+       {&KeyboardRouteBinding::generation, &KeyboardRouteBinding::focusRequest, &KeyboardRouteBinding::focusRevision,
+        &KeyboardRouteBinding::geometry}) {
+    other = binding;
+    ++(other.*member);
+    changed.push_back(other);
+  }
+  for (const auto &mismatch : changed)
+    check(!gate.quiesce(binding, mismatch, true), "every candidate binding field must match exactly");
+  check(!gate.blocksKeys(), "denied admission attempts do not alter network forwarding");
+
+  check(ledger.down(true, 0x01000020, binding.owner), "fixture holds Qt Shift");
+  check(!gate.quiesce(binding, binding, ledger.size() == 0), "held Qt key denies quiescence");
+  check(ledger.ownerOf(true, 0x01000020) == binding.owner, "failed quiescence preserves the Qt key owner");
+  check(ledger.up(true, 0x01000020, binding.owner) == binding.owner, "Qt up releases its existing owner");
+  check(ledger.down(false, 0, binding.owner), "fixture holds left button");
+  check(!gate.quiesce(binding, binding, ledger.size() == 0), "held mouse button denies quiescence");
+  check(ledger.ownerOf(false, 0) == binding.owner, "failed handoff never synthesizes a pointer release");
+  check(ledger.up(false, 0, binding.owner) == binding.owner, "physical pointer up retains its owner");
+
+  check(gate.quiesce(binding, binding, ledger.size() == 0), "neutral exact candidate closes keyboard admission");
+  check(gate.blocksKeys(), "network key down and repeat admission is blocked while fenced");
+  check(gate.quiesce(binding, binding, true), "exact repeated acknowledgment is idempotent while valid");
+  check(gate.quiesced(binding, binding, true), "quiescence verifies the exact valid gate");
+  check(focus.permits(binding.owner, binding.focusRevision), "quiescence preserves the existing focus lease");
+  check(!ledger.up(true, 0x01000020, binding.owner), "late Qt up cannot invent a delivered key owner");
+  check(gate.blocksKeys(), "late Qt up cannot reopen network admission");
+  check(ledger.down(false, 0, binding.owner), "pointer input continues while keyboard is fenced");
+  check(!gate.quiesced(binding, binding, ledger.size() == 0), "held pointer denies a later neutral admission check");
+  check(
+      gate.blocksKeys() && focus.permits(binding.owner, binding.focusRevision), "held pointer preserves gate and focus"
+  );
+  check(ledger.up(false, 0, binding.owner) == binding.owner, "pointer up is unaffected by the keyboard gate");
+  check(gate.quiesced(binding, binding, ledger.size() == 0), "pointer release restores the neutral admission boundary");
+
+  for (const auto &mismatch : changed) {
+    check(!gate.quiesced(binding, mismatch, true), "changed current facts deny quiescence immediately");
+    check(!gate.quiesce(mismatch, mismatch, true), "another binding cannot replace an outstanding gate");
+    check(!gate.resume(mismatch), "mismatched resume cannot reopen admission");
+    check(gate.blocksKeys(), "mismatched operations preserve blocking state");
+  }
+  check(!gate.quiesced(binding, std::nullopt, true), "hidden or returned source cannot remain admissible");
+  check(gate.blocksKeys(), "loss of native candidate alone never reopens keyboard input");
+  check(!gate.invalidate(deskflow::windowshare::Owner{99, 12}), "another owner's change leaves this gate intact");
+  check(gate.quiesced(binding, binding, true), "unrelated owner invalidation is inert");
+  const auto revoked = gate.invalidate(binding.owner);
+  check(revoked == binding, "invalidation identifies the exact fenced owner");
+  check(!gate.quiesced(binding, binding, true) && gate.blocksKeys(), "invalidation marks a blocking tombstone first");
+  check(!gate.quiesce(binding, binding, true), "fresh acknowledgment cannot revive an invalidated gate");
+  check(!gate.invalidate(), "reentrant invalidation emits only one notification");
+  auto newer = binding;
+  ++newer.generation;
+  check(!gate.quiesce(newer, newer, true), "reentrant replacement is denied before exact resume");
+  check(gate.resume(*revoked), "exact owner resume clears its tombstone after authority revocation");
+  check(!gate.blocksKeys(), "exact resume reopens network admission");
+  check(!gate.quiesce(binding, binding, true), "retired generation cannot be fenced again");
+  check(gate.quiesce(newer, newer, true), "a newer route can fence the same still-focused source");
+  check(!gate.resume(binding), "late old resume cannot clear the newer route");
+  check(gate.quiesced(newer, newer, true), "newer route survives old callback completion");
+  check(gate.invalidate() == newer, "global lifecycle invalidation preserves the latest exact owner");
+  check(!gate.quiesced(newer, std::nullopt, true) && gate.blocksKeys(), "returned entry leaves a blocking tombstone");
+  check(gate.resume(newer), "returned entry is not required to release an exact tombstone");
+  other = binding;
+  ++other.owner.session;
+  other.generation = 1;
+  check(gate.quiesce(other, other, true), "a fresh window incarnation may start its own generation sequence");
+  check(!gate.resume(newer) && gate.blocksKeys(), "prior incarnation cannot reopen a new owner's keyboard route");
+  check(gate.resume(other), "new owner's exact resume succeeds");
+}
 } // namespace
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
+  keyboardAdmission();
   QTemporaryDir directory;
   check(directory.isValid(), "temporary journal directory");
   if (!directory.isValid())
@@ -53,6 +158,22 @@ int main(int argc, char **argv)
     // lifecycle, and must not depend on the deferred constructor callback.
     check(host.recover(), "synchronous recovery accepts a missing journal");
     check(!QFile::exists(path), "probe recovery does not create an unnecessary journal");
+    const auto binding = routeBinding();
+    int invalidations = 0;
+    host.onKeyboardRouteInvalidated = [&](KeyboardRouteBinding, deskflow::windowshare::KeyboardRouteReason) {
+      ++invalidations;
+    };
+    check(
+        !host.keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
+        "nonexistent native entry cannot produce a route candidate"
+    );
+    check(
+        !host.quiesceKeyboard(binding) && !host.keyboardRouteQuiesced(binding),
+        "an acknowledgment cannot admit a route without an exported native entry"
+    );
+    check(!host.resumeKeyboard(binding), "a route without a gate cannot be resumed");
+    host.releaseAll();
+    check(invalidations == 0, "release without a gate never fabricates an invalidation");
   }
   const QByteArray malformed("{partial power-loss data");
   write(path, malformed);
@@ -170,6 +291,7 @@ int main(int argc, char **argv)
       permissions["screenCapture"].isBool() && permissions["accessibility"].isBool(),
       "permission probe is explicit and does not request permission"
   );
-  QTextStream(stdout) << (failures ? "FAIL" : "PASS") << ": native recovery journal regression tests\n";
+  QTextStream(stdout) << (failures ? "FAIL" : "PASS")
+                      << ": native recovery journal and keyboard admission regressions\n";
   return failures ? 1 : 0;
 }

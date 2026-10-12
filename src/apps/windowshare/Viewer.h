@@ -5,11 +5,13 @@
 #pragma once
 
 #include "Core.h"
+#include "KeyboardRoute.h"
 #include <QImage>
 #include <QJsonObject>
 #include <QMap>
 #include <QPointF>
 #include <QRectF>
+#include <QSet>
 #include <QThread>
 #include <QTimer>
 #include <QVector>
@@ -29,10 +31,12 @@ public:
   void receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry);
   void committed();
   void focusAcknowledged(std::uint64_t revision, std::uint64_t request);
+  void keyboardRoute(const KeyboardRouteControl &control);
   void disconnected();
   bool placeOnScreen(int screenIndex);
 
   std::function<bool(MessageType, const QJsonObject &, std::uint64_t, std::uint64_t)> onSend;
+  std::function<bool(const KeyboardRouteControl &)> onKeyboardRouteSend;
   std::function<void(QString)> onError;
   std::function<void()> onReturned;
 
@@ -65,7 +69,12 @@ protected:
 
 private:
   void requestFocus();
-  void releaseInput();
+  void releaseInput(KeyboardRouteReason reason = KeyboardRouteReason::FocusChanged);
+  void handleKeyboardRoute(const KeyboardRouteControl &control);
+  bool sendKeyboardRoute(const KeyboardRouteControl &control);
+  bool currentKeyboardRoute(const KeyboardRouteBinding &binding) const;
+  void invalidateKeyboardRoute(KeyboardRouteReason reason);
+  void quiesceKeyboard();
   void queueInput(QJsonObject input);
   bool sendInput(QJsonObject input);
   bool send(MessageType type, const QJsonObject &message);
@@ -82,6 +91,9 @@ private:
   std::uint64_t m_geometry = 0, m_frameGeometry = 0, m_paintedGeometry = 0;
   std::uint64_t m_focusRevision = 0, m_focusRequest = 0;
   std::uint64_t m_resizeRequest = 0, m_resizeBaseGeometry = 0;
+  std::uint64_t m_keyboardGeneration = 0;
+  std::optional<KeyboardRouteBinding> m_keyboardBinding;
+  bool m_keyboardBindingValid = false, m_keyboardRouteHandling = false;
   QSizeF m_source;
   QImage m_image;
   QPointF m_lastSource;
@@ -93,6 +105,7 @@ private:
   bool m_readyPaintScheduled = false;
   QString m_error;
   QMap<int, QJsonObject> m_heldKeys, m_heldButtons, m_deliveredKeys, m_deliveredButtons;
+  QSet<int> m_suppressedKeys;
   QVector<QJsonObject> m_pendingInputs;
   QTimer m_focusTimeout, m_resizeDebounce, m_resizeTimeout;
   QThread m_decodeThread;

@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "KeyboardRouteProtocol.h"
 #include "Transport.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -59,6 +60,82 @@ void check(bool condition, const char *message)
 {
   if (!condition)
     throw std::runtime_error(message);
+}
+void keyboardRouteProtocol()
+{
+  const auto reject = [](const auto &operation) {
+    bool rejected = false;
+    try {
+      operation();
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    check(rejected, "Invalid keyboard forwarding control was accepted");
+  };
+  check(!peerSupportsKeyboardRoute({}), "Legacy peer gained keyboard route capability");
+  check(peerSupportsKeyboardRoute({{"capabilities", keyboardRouteCapabilities()}}), "Capability not recognized");
+  check(
+      !peerSupportsKeyboardRoute({{"capabilities", QJsonArray{"future-feature"}}}), "Unknown capability granted route"
+  );
+  for (const auto &value :
+       {QJsonValue("keyboard-route-v1"), QJsonValue(QJsonArray{1}),
+        QJsonValue(QJsonArray{"keyboard-route-v1", "keyboard-route-v1"})})
+    reject([&] { peerSupportsKeyboardRoute({{"capabilities", value}}); });
+  const KeyboardRouteBinding binding{{7, 2}, 9, 3, 4, 5};
+  std::vector<KeyboardRouteControl> controls;
+  for (auto mode : {KeyboardRouteMode::Viewer, KeyboardRouteMode::Original}) {
+    controls.push_back({binding, KeyboardRouteAction::Request, mode});
+    for (auto result :
+         {KeyboardRouteResult::Ready, KeyboardRouteResult::Busy, KeyboardRouteResult::Stale,
+          KeyboardRouteResult::Denied})
+      controls.push_back({binding, KeyboardRouteAction::Acknowledge, mode, result});
+  }
+  for (auto reason :
+       {KeyboardRouteReason::FocusChanged, KeyboardRouteReason::GeometryChanged, KeyboardRouteReason::Hidden,
+        KeyboardRouteReason::Returned, KeyboardRouteReason::Disconnected, KeyboardRouteReason::Timeout,
+        KeyboardRouteReason::AuthorityLost, KeyboardRouteReason::Failed})
+    controls.push_back(
+        {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None, reason}
+    );
+  for (const auto &control : controls) {
+    const Packet packet{MessageType::KeyboardRoute, 7, 2, 1, jsonBytes(encodeKeyboardRouteControl(control))};
+    check(parseKeyboardRouteControl(packet) == control, "Keyboard forwarding tuple changed on wire");
+    Decoder decoder;
+    bool decoded = false;
+    decoder.feed(encode(packet), [&](const Packet &received) {
+      decoded = parseKeyboardRouteControl(received) == control;
+    });
+    check(decoded, "Keyboard route message type did not survive framing");
+  }
+  const auto request = controls.front();
+  const auto parse = [&](QJsonObject object) {
+    return parseKeyboardRouteControl({MessageType::KeyboardRoute, 7, 2, 1, jsonBytes(object)});
+  };
+  const auto original = encodeKeyboardRouteControl(request);
+  for (const auto &field : {"generation", "focusRequest", "focusRevision", "geometry"})
+    for (const auto &invalid :
+         {QJsonValue(0), QJsonValue(-1), QJsonValue(1.5), QJsonValue("1"), QJsonValue(9007199254740992.0),
+          QJsonValue(QJsonValue::Null)}) {
+      auto object = original;
+      object[field] = invalid;
+      reject([&] { parse(object); });
+    }
+  for (const auto &field : {"native", "flags", "code", "result", "reason"}) {
+    auto object = original;
+    object[field] = 1;
+    reject([&] { parse(object); });
+  }
+  auto wrong = request;
+  wrong.action = static_cast<KeyboardRouteAction>(123);
+  reject([&] { encodeKeyboardRouteControl(wrong); });
+  wrong = request;
+  wrong.binding.owner.epoch = 0;
+  reject([&] { encodeKeyboardRouteControl(wrong); });
+  wrong = request;
+  wrong.action = KeyboardRouteAction::Withdraw;
+  wrong.reason = KeyboardRouteReason::FocusChanged;
+  reject([&] { encodeKeyboardRouteControl(wrong); }); // Withdraw is only Original -> host.
+  reject([&] { parseKeyboardRouteControl({MessageType::KeyboardRoute, 7, 2, 1, std::vector<std::uint8_t>(1025)}); });
 }
 void writeFixture(const QString &path, const QByteArray &bytes)
 {
@@ -474,11 +551,77 @@ void closeCauseTests(const Identity &host, const Identity &client)
     );
   }
 }
+void destructionLifetime(const Identity &host, const Identity &client)
+{
+  // Destruction is not an onClosed notification. In particular, socket signals
+  // emitted during teardown must not enter callbacks or already-destroyed timers.
+  for (bool destroyServer : {false, true}) {
+    Listener listener;
+    QEventLoop loop;
+    int serverCloses = 0, peerCloses = 0;
+    bool ready = false, timedOut = false;
+    std::unique_ptr<Channel> server;
+    auto peer = std::make_unique<Channel>(client, parseFingerprint(host.fingerprint()));
+    listener.incoming = [&](qintptr descriptor) {
+      server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
+      server->onPacket = [&](Packet) { server->send(MessageType::Accepted); };
+      server->onClosed = [&](QString, CloseCause) {
+        ++serverCloses;
+        loop.quit();
+      };
+      server->accept(descriptor);
+    };
+    peer->onAuthenticated = [&] { peer->send(MessageType::Hello); };
+    peer->onPacket = [&](Packet packet) {
+      ready = packet.type == MessageType::Accepted;
+      loop.quit();
+    };
+    peer->onClosed = [&](QString, CloseCause) {
+      ++peerCloses;
+      loop.quit();
+    };
+    check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for destruction fixture");
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+      timedOut = true;
+      loop.quit();
+    });
+    timeout.start(5000);
+    peer->connectTo("127.0.0.1", listener.serverPort());
+    loop.exec();
+    check(ready && !timedOut && !serverCloses && !peerCloses, "Destruction fixture did not establish");
+    const auto &destroyedCloses = destroyServer ? serverCloses : peerCloses;
+    const auto &survivingCloses = destroyServer ? peerCloses : serverCloses;
+    (destroyServer ? server : peer).reset();
+    check(destroyedCloses == 0, "Destruction invoked its own terminal callback");
+    if (!survivingCloses) {
+      timeout.start(5000);
+      loop.exec();
+    }
+    check(!timedOut && survivingCloses == 1, "Destroying a live channel did not notify its remote peer once");
+    (destroyServer ? peer : server).reset();
+    check(destroyedCloses == 0 && survivingCloses == 1, "Teardown repeated a terminal callback");
+  }
+  // Also tear down before any asynchronous connection/handshake callback runs.
+  QTcpServer listener;
+  check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for pending destruction fixture");
+  int callbacks = 0;
+  auto peer = std::make_unique<Channel>(client, parseFingerprint(host.fingerprint()));
+  peer->onAuthenticated = [&] { ++callbacks; };
+  peer->onPacket = [&](Packet) { ++callbacks; };
+  peer->onClosed = [&](QString, CloseCause) { ++callbacks; };
+  peer->connectTo("127.0.0.1", listener.serverPort());
+  peer.reset();
+  QCoreApplication::processEvents();
+  check(callbacks == 0, "A pending connection called its destroyed owner");
+}
 } // namespace
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
   try {
+    keyboardRouteProtocol();
     const auto arguments = application.arguments();
     if (arguments.size() > 1) {
       check(
@@ -495,6 +638,7 @@ int main(int argc, char **argv)
     initializeIdentity(b);
     const auto host = Identity::load(a), client = Identity::load(b);
     const auto hostPin = parseFingerprint(host.fingerprint()), clientPin = parseFingerprint(client.fingerprint());
+    destructionLifetime(host, client);
     exercise(host, client, hostPin, clientPin, true);
     const auto now = QDateTime::currentDateTimeUtc();
     const auto expired = certificateFixture(
@@ -571,7 +715,7 @@ int main(int argc, char **argv)
     }
     check(rejected, "empty media payload rejected");
     QTextStream(stdout) << "PASS: mutual TLS, wrong pins, invalid certificate dates/purpose, explicit TLS errors, "
-                           "identity guards, media revisions, serialization rejection, "
+                           "identity guards, silent transport teardown, media revisions, serialization rejection, "
                            "encrypted backpressure, bounded media and control reserve\n";
     return 0;
   } catch (const std::exception &error) {

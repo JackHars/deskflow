@@ -56,7 +56,7 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
   m_resizeDebounce.setSingleShot(true);
   m_resizeTimeout.setSingleShot(true);
   connect(&m_focusTimeout, &QTimer::timeout, this, [this] {
-    releaseInput();
+    releaseInput(KeyboardRouteReason::Timeout);
     if (onError)
       onError(QStringLiteral("The Mac did not acknowledge window focus; pending input was released"));
   });
@@ -93,7 +93,7 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
 
 Viewer::~Viewer()
 {
-  releaseInput();
+  releaseInput(KeyboardRouteReason::Returned);
   m_connected = false;
   // Decoding never runs on the GUI/event-tap path. Wait only for the current
   // bounded access unit; queued invocations are discarded when the loop exits.
@@ -121,7 +121,7 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
   }
   const bool firstMetadata = m_geometry == 0;
   if (!firstMetadata && geometry != m_geometry)
-    releaseInput();
+    releaseInput(KeyboardRouteReason::GeometryChanged);
   m_geometry = geometry;
   m_source = QSizeF(sourceWidth, sourceHeight);
   QString title = metadata.value(QStringLiteral("title")).toString();
@@ -240,9 +240,144 @@ void Viewer::focusAcknowledged(std::uint64_t lease, std::uint64_t request)
     if (!acceptsLocalInput() || m_focusRevision != lease ||
         revision(input.value(QStringLiteral("geometry"))) != m_geometry)
       break;
+    if (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key"))
+      continue;
     if (!sendInput(std::move(input)))
       break;
   }
+}
+
+bool Viewer::currentKeyboardRoute(const KeyboardRouteBinding &binding) const
+{
+  return acceptsLocalInput() && isVisible() && m_visibility && !m_applyingMetadata && !m_focusPending &&
+         binding.owner == Owner{m_session, m_epoch} && binding.focusRequest == m_focusRequest &&
+         binding.focusRevision == m_focusRevision && binding.geometry == m_geometry;
+}
+
+bool Viewer::sendKeyboardRoute(const KeyboardRouteControl &control)
+{
+  if (!m_connected)
+    return false;
+  const QPointer<Viewer> guard(this);
+  const auto callback = onKeyboardRouteSend;
+  bool sent = false;
+  try {
+    sent = callback && callback(control);
+  } catch (...) {
+    // A failed fence acknowledgement must never leave two keyboard routes live.
+  }
+  if (!guard)
+    return false;
+  if (!sent)
+    disconnected();
+  return sent && m_connected;
+}
+
+void Viewer::keyboardRoute(const KeyboardRouteControl &control)
+{
+  if (!m_connected || m_keyboardRouteHandling || !validKeyboardRouteBinding(control.binding) ||
+      control.binding.owner != Owner{m_session, m_epoch} || control.action != KeyboardRouteAction::Request ||
+      control.result != KeyboardRouteResult::None || control.reason != KeyboardRouteReason::None ||
+      (control.mode != KeyboardRouteMode::Original && control.mode != KeyboardRouteMode::Viewer))
+    return;
+  // Sending can synchronously disconnect or invoke callbacks. A nested request
+  // cannot resume forwarding in the middle of the release/acknowledgement fence.
+  m_keyboardRouteHandling = true;
+  const QPointer<Viewer> guard(this);
+  handleKeyboardRoute(control);
+  if (guard)
+    m_keyboardRouteHandling = false;
+}
+
+void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
+{
+  auto reply = control;
+  reply.action = KeyboardRouteAction::Acknowledge;
+  reply.result = KeyboardRouteResult::Stale;
+  const auto binding = control.binding;
+  if (control.mode == KeyboardRouteMode::Viewer) {
+    if (m_keyboardBinding != binding) {
+      sendKeyboardRoute(reply);
+      return;
+    }
+    reply.result = KeyboardRouteResult::Ready;
+    const QPointer<Viewer> guard(this);
+    // The acknowledgement precedes any newly forwarded key on the same stream.
+    // An invalidated binding remains resumable by its exact host request.
+    if (sendKeyboardRoute(reply) && guard && m_keyboardBinding == binding) {
+      m_keyboardBinding.reset();
+      m_keyboardBindingValid = false;
+    }
+    return;
+  }
+
+  const bool duplicate = m_keyboardBinding == binding && m_keyboardBindingValid;
+  if (!duplicate && binding.generation <= m_keyboardGeneration) {
+    sendKeyboardRoute(reply);
+    return;
+  }
+  m_keyboardGeneration = std::max(m_keyboardGeneration, binding.generation);
+  if (!currentKeyboardRoute(binding)) {
+    sendKeyboardRoute(reply);
+    return;
+  }
+  if ((!duplicate && m_keyboardBinding) || !m_heldButtons.isEmpty() || !m_deliveredButtons.isEmpty()) {
+    reply.result = KeyboardRouteResult::Busy;
+    sendKeyboardRoute(reply);
+    return;
+  }
+  const QPointer<Viewer> guard(this);
+  if (!duplicate) {
+    // Install the fence before releasing keys or invoking either send callback.
+    m_keyboardBinding = binding;
+    m_keyboardBindingValid = true;
+    quiesceKeyboard();
+  }
+  if (!guard || !m_connected || m_keyboardBinding != binding || !m_keyboardBindingValid ||
+      !currentKeyboardRoute(binding))
+    return;
+  reply.result = KeyboardRouteResult::Ready;
+  sendKeyboardRoute(reply);
+}
+
+void Viewer::quiesceKeyboard()
+{
+  for (auto held = m_heldKeys.cbegin(); held != m_heldKeys.cend(); ++held)
+    m_suppressedKeys.insert(held.key());
+  m_heldKeys.clear();
+  m_pendingInputs.erase(
+      std::remove_if(
+          m_pendingInputs.begin(), m_pendingInputs.end(),
+          [](const QJsonObject &input) { return input.value(QStringLiteral("kind")) == QStringLiteral("key"); }
+      ),
+      m_pendingInputs.end()
+  );
+  const auto keys = std::move(m_deliveredKeys);
+  m_deliveredKeys.clear();
+  const QPointer<Viewer> guard(this);
+  for (const auto &down : keys) {
+    auto up = down;
+    up.insert(QStringLiteral("down"), false);
+    up.insert(QStringLiteral("repeat"), false);
+    up.insert(QStringLiteral("modifiers"), 0);
+    if (!send(MessageType::Input, up) || !guard) {
+      if (guard && m_connected)
+        disconnected();
+      return;
+    }
+  }
+}
+
+void Viewer::invalidateKeyboardRoute(KeyboardRouteReason reason)
+{
+  if (!m_keyboardBinding || !m_keyboardBindingValid)
+    return;
+  const auto binding = *m_keyboardBinding;
+  m_keyboardBindingValid = false;
+  if (m_connected)
+    sendKeyboardRoute(
+        {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None, reason}
+    );
 }
 
 void Viewer::disconnected()
@@ -250,7 +385,7 @@ void Viewer::disconnected()
   // Controller/host releases native ownership on disconnect. No writes can be
   // attempted after the channel callback or its capture has been destroyed.
   m_connected = false;
-  releaseInput();
+  releaseInput(KeyboardRouteReason::Disconnected);
   m_resizeDebounce.stop();
   m_resizeTimeout.stop();
   m_error = QStringLiteral("Disconnected — restoring this window on the Mac");
@@ -308,7 +443,7 @@ bool Viewer::event(QEvent *event)
   case QEvent::WindowStateChange:
     if (isMinimized()) {
       m_localActive = false;
-      releaseInput();
+      releaseInput(KeyboardRouteReason::Hidden);
       sendVisibility(false);
     } else {
       sendVisibility(true);
@@ -316,7 +451,7 @@ bool Viewer::event(QEvent *event)
     break;
   case QEvent::Hide:
     m_localActive = false;
-    releaseInput();
+    releaseInput(KeyboardRouteReason::Hidden);
     sendVisibility(false);
     break;
   case QEvent::Show:
@@ -418,8 +553,17 @@ bool Viewer::send(MessageType type, const QJsonObject &message)
 {
   if (!m_connected || !onSend)
     return false;
-  if (onSend(type, message, m_session, m_epoch))
-    return true;
+  const QPointer<Viewer> guard(this);
+  const auto callback = onSend;
+  bool sent = false;
+  try {
+    sent = callback(type, message, m_session, m_epoch);
+  } catch (...) {
+  }
+  if (!guard)
+    return false;
+  if (sent)
+    return m_connected;
   disconnected();
   return false;
 }
@@ -439,19 +583,20 @@ void Viewer::recordDelivered(const QJsonObject &input)
 
 bool Viewer::sendInput(QJsonObject input)
 {
-  if (!acceptsLocalInput() || m_focusRevision == 0)
+  if (!acceptsLocalInput() || m_focusRevision == 0 ||
+      (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key")))
     return false;
   input.insert(QStringLiteral("geometry"), jsonNumber(m_geometry));
   input.insert(QStringLiteral("focusRevision"), jsonNumber(m_focusRevision));
-  if (!send(MessageType::Input, input))
-    return false;
+  // Record before the callback so synchronous quiescence releases this press.
+  // Failed sends disconnect and clear the ledger through releaseInput().
   recordDelivered(input);
-  return true;
+  return send(MessageType::Input, input);
 }
 
 void Viewer::queueInput(QJsonObject input)
 {
-  if (!acceptsLocalInput())
+  if (!acceptsLocalInput() || (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key")))
     return;
   if (m_requireFocusIntent) {
     const QString kind = input.value(QStringLiteral("kind")).toString();
@@ -476,7 +621,7 @@ void Viewer::queueInput(QJsonObject input)
   } else if (m_pendingInputs.size() < maxPendingInput) {
     m_pendingInputs.push_back(std::move(input));
   } else {
-    releaseInput();
+    releaseInput(KeyboardRouteReason::Failed);
     if (onError)
       onError(QStringLiteral("Too much input arrived before focus was acknowledged; input was released"));
     return;
@@ -484,8 +629,14 @@ void Viewer::queueInput(QJsonObject input)
   requestFocus();
 }
 
-void Viewer::releaseInput()
+void Viewer::releaseInput(KeyboardRouteReason reason)
 {
+  const QPointer<Viewer> guard(this);
+  const bool wasHandling = m_keyboardRouteHandling;
+  m_keyboardRouteHandling = true;
+  invalidateKeyboardRoute(reason);
+  if (!guard)
+    return;
   const bool hadLease =
       m_focusRevision != 0 || m_focusPending || !m_deliveredKeys.isEmpty() || !m_deliveredButtons.isEmpty();
   const auto keys = std::move(m_deliveredKeys);
@@ -493,6 +644,9 @@ void Viewer::releaseInput()
   m_deliveredKeys.clear();
   m_deliveredButtons.clear();
   m_pendingInputs.clear();
+  if (m_keyboardBinding)
+    for (auto held = m_heldKeys.cbegin(); held != m_heldKeys.cend(); ++held)
+      m_suppressedKeys.insert(held.key());
   m_heldKeys.clear();
   m_heldButtons.clear();
   m_focusTimeout.stop();
@@ -503,6 +657,8 @@ void Viewer::releaseInput()
       up.insert(QStringLiteral("repeat"), false);
       up.insert(QStringLiteral("modifiers"), 0);
       send(MessageType::Input, up);
+      if (!guard)
+        return;
     }
     for (const auto &down : buttons) {
       auto up = down;
@@ -511,8 +667,10 @@ void Viewer::releaseInput()
       up.insert(QStringLiteral("x"), m_lastSource.x());
       up.insert(QStringLiteral("y"), m_lastSource.y());
       send(MessageType::Input, up);
+      if (!guard)
+        return;
     }
-    if (hadLease)
+    if (hadLease) {
       send(
           MessageType::Input, {{"kind", "release"},
                                {"geometry", jsonNumber(m_geometry)},
@@ -520,9 +678,13 @@ void Viewer::releaseInput()
                                {"request", jsonNumber(m_focusRequest)},
                                {"active", false}}
       );
+      if (!guard)
+        return;
+    }
   }
   m_focusRevision = 0;
   m_focusPending = false;
+  m_keyboardRouteHandling = wasHandling;
 }
 
 QJsonObject Viewer::keyInput(const QKeyEvent *event, bool down) const
@@ -541,7 +703,13 @@ QJsonObject Viewer::keyInput(const QKeyEvent *event, bool down) const
 void Viewer::keyPressEvent(QKeyEvent *event)
 {
   event->accept();
-  if (!acceptsLocalInput() || event->key() == Qt::Key_unknown)
+  if (event->key() == Qt::Key_unknown)
+    return;
+  if (m_keyboardBinding || m_suppressedKeys.contains(event->key())) {
+    m_suppressedKeys.insert(event->key());
+    return;
+  }
+  if (!acceptsLocalInput())
     return;
   if (m_heldKeys.contains(event->key()) && !event->isAutoRepeat())
     return;
@@ -555,7 +723,7 @@ void Viewer::keyPressEvent(QKeyEvent *event)
 void Viewer::keyReleaseEvent(QKeyEvent *event)
 {
   event->accept();
-  if (event->isAutoRepeat() || !m_heldKeys.remove(event->key()))
+  if (event->isAutoRepeat() || m_suppressedKeys.remove(event->key()) || !m_heldKeys.remove(event->key()))
     return;
   queueInput(keyInput(event, false));
 }
@@ -671,7 +839,7 @@ void Viewer::resizeEvent(QResizeEvent *event)
 
 void Viewer::scheduleResize()
 {
-  releaseInput();
+  releaseInput(KeyboardRouteReason::GeometryChanged);
   m_resizing = true;
   m_resizeDebounce.start(150);
 }
@@ -693,7 +861,7 @@ void Viewer::sendVisibility(bool visible)
 void Viewer::closeEvent(QCloseEvent *event)
 {
   if (!m_returned) {
-    releaseInput();
+    releaseInput(KeyboardRouteReason::Returned);
     m_resizeDebounce.stop();
     m_resizeTimeout.stop();
     send(MessageType::Return, {{"geometry", jsonNumber(m_geometry)}});
@@ -711,7 +879,7 @@ void Viewer::fail(const QString &message)
 {
   if (m_failed)
     return;
-  releaseInput();
+  releaseInput(KeyboardRouteReason::Failed);
   m_failed = true;
   m_error = message;
   m_resizeDebounce.stop();

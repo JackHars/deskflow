@@ -54,4 +54,21 @@ void NativeHost::restoreAll()
 void NativeHost::releaseAll()
 {
 }
+std::optional<KeyboardRouteBinding>
+NativeHost::keyboardRouteCandidate(std::uint64_t, std::uint64_t, std::uint64_t) const
+{
+  return std::nullopt;
+}
+bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &)
+{
+  return false;
+}
+bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &) const
+{
+  return false;
+}
+bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &)
+{
+  return false;
+}
 } // namespace deskflow::windowshare

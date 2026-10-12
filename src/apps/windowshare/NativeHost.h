@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "Core.h"
+#include "KeyboardRoute.h"
 #include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
@@ -37,6 +38,18 @@ public:
   void restore(std::uint64_t session);
   void restoreAll();
   void releaseAll();
+  // An observed candidate and a quiesced network route are not authorization
+  // to inject original input. These calls neither change focus nor release
+  // pointer ownership, and quiescence requires an empty Qt input ledger.
+  // Admission queries fail during outgoing native callbacks; inspect again
+  // after the enclosing focus/geometry/lifecycle operation has completed.
+  std::optional<KeyboardRouteBinding>
+  keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const;
+  bool quiesceKeyboard(const KeyboardRouteBinding &binding);
+  bool keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const;
+  // Revoke original authority first. Only the exact outstanding binding can
+  // reopen network keyboard admission, including after invalidation/return.
+  bool resumeKeyboard(const KeyboardRouteBinding &binding);
   std::function<void(QVector<Candidate>)> onCatalog;
   std::function<void(std::uint64_t, std::uint64_t, QJsonObject)> onOpened;
   std::function<void(std::uint64_t, std::uint64_t, std::uint64_t, QByteArray)> onFrame;
@@ -44,6 +57,7 @@ public:
   std::function<void(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t)> onFocused;
   std::function<void(std::uint64_t)> onClosed;
   std::function<void(QString)> onError;
+  std::function<void(KeyboardRouteBinding, KeyboardRouteReason)> onKeyboardRouteInvalidated;
 
 private:
   struct Impl;

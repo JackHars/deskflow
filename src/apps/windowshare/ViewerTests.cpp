@@ -78,12 +78,22 @@ struct Sent
 };
 struct Recording
 {
+  struct RouteSent
+  {
+    KeyboardRouteControl control;
+    std::size_t inputCount;
+  };
   std::vector<Sent> events;
+  std::vector<RouteSent> routes;
   QStringList errors;
   void attach(Viewer &viewer)
   {
     viewer.onSend = [this](MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch) {
       events.push_back({type, object, session, epoch});
+      return true;
+    };
+    viewer.onKeyboardRouteSend = [this](const KeyboardRouteControl &control) {
+      routes.push_back({control, events.size()});
       return true;
     };
     viewer.onError = [this](QString error) { errors.push_back(error); };
@@ -106,6 +116,11 @@ struct Recording
   std::uint64_t focusRequest() const
   {
     return last(MessageType::Input, "focus").object.value("request").toInteger();
+  }
+  const KeyboardRouteControl &lastRoute() const
+  {
+    check(!routes.empty(), "Expected keyboard route response was not sent");
+    return routes.back().control;
   }
 };
 
@@ -144,6 +159,19 @@ void makeFocused(Viewer &viewer, Recording &recording, std::uint64_t lease = 7)
   focus(viewer, true);
   check(recording.count(MessageType::Input, "focus") > 0, "Committed active window did not request focus");
   viewer.focusAcknowledged(lease, recording.focusRequest());
+}
+
+KeyboardRouteControl
+originalRoute(const Viewer &viewer, const Recording &recording, std::uint64_t generation = 1, std::uint64_t lease = 7)
+{
+  const auto &request = recording.last(MessageType::Input, "focus");
+  return {{{request.session, request.epoch}, generation, recording.focusRequest(), lease, viewer.geometryRevision()}};
+}
+
+KeyboardRouteControl resumeRoute(KeyboardRouteControl control)
+{
+  control.mode = KeyboardRouteMode::Viewer;
+  return control;
 }
 
 void testDecoder()
@@ -477,6 +505,374 @@ void testQueuedFrameRevision()
   );
   viewer.disconnected();
 }
+
+void testKeyboardRouteFenceAndResume()
+{
+  Recording recording;
+  Viewer viewer(41, 14, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  QKeyEvent shift(QEvent::KeyPress, Qt::Key_Shift, Qt::ShiftModifier);
+  QCoreApplication::sendEvent(&viewer, &shift);
+  const auto request = originalRoute(viewer, recording);
+  const auto before = recording.events.size();
+  const auto focusCount = recording.count(MessageType::Input, "focus");
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Keyboard fence was not acknowledged");
+  check(
+      recording.events.size() == before + 1 && recording.routes.back().inputCount == before + 1 &&
+          recording.events.back().object.value("kind") == "key" &&
+          recording.events.back().object.value("code").toInt() == Qt::Key_Shift &&
+          !recording.events.back().object.value("down").toBool() &&
+          recording.events.back().object.value("modifiers").toInt(-1) == 0 &&
+          recording.events.back().object.value("focusRevision").toInteger() == 7,
+      "Held Shift was not released with its owner before the route acknowledgment"
+  );
+
+  mouse(viewer, QEvent::MouseMove, viewer.videoRect().center(), Qt::NoButton, Qt::NoButton);
+  mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+  mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
+  check(
+      recording.count(MessageType::Input, "button") == 2 && recording.count(MessageType::Input, "release") == 0 &&
+          recording.count(MessageType::Input, "focus") == focusCount &&
+          recording.last(MessageType::Input, "button").object.value("focusRevision").toInteger() == 7,
+      "Quiescence released pointer ownership or replaced the focus lease"
+  );
+  const int keys = recording.count(MessageType::Input, "key");
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyPress, Qt::Key_Tab, "\t");
+  key(viewer, QEvent::KeyRelease, Qt::Key_Tab, "\t");
+  key(viewer, QEvent::KeyPress, Qt::Key_Shift, {}, true);
+  key(viewer, QEvent::KeyRelease, Qt::Key_Shift, {}, true);
+  QKeyEvent shortcut(QEvent::ShortcutOverride, Qt::Key_B, Qt::ControlModifier);
+  shortcut.ignore();
+  QCoreApplication::sendEvent(&viewer, &shortcut);
+  check(shortcut.isAccepted(), "Fenced shortcut escaped into local Qt shortcut handling");
+  check(recording.count(MessageType::Input, "key") == keys, "Fenced input or repeats leaked to the host");
+
+  // A key arriving synchronously during the resume send remains fenced until
+  // the acknowledgement has actually been accepted by the transport.
+  const auto routeSend = viewer.onKeyboardRouteSend;
+  viewer.onKeyboardRouteSend = [&](const KeyboardRouteControl &control) {
+    const bool result = routeSend(control);
+    if (control.action == KeyboardRouteAction::Acknowledge && control.mode == KeyboardRouteMode::Viewer &&
+        control.result == KeyboardRouteResult::Ready)
+      key(viewer, QEvent::KeyPress, Qt::Key_Z, "z");
+    return result;
+  };
+  viewer.keyboardRoute(resumeRoute(request));
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Exact keyboard resume was rejected");
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b", true);
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyPress, Qt::Key_Z, "z", true);
+  key(viewer, QEvent::KeyRelease, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyRelease, Qt::Key_Z, "z");
+  key(viewer, QEvent::KeyRelease, Qt::Key_Shift);
+  check(recording.count(MessageType::Input, "key") == keys, "Resume replayed a held key or its orphan up");
+  const auto acknowledgedAt = recording.routes.back().inputCount;
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyRelease, Qt::Key_B, "b");
+  check(
+      recording.count(MessageType::Input, "key") == keys + 2 && recording.events.size() == acknowledgedAt + 2,
+      "Fresh paired input did not follow the successful resume acknowledgment"
+  );
+  viewer.disconnected();
+}
+
+void testKeyboardRouteBusyAndGenerations()
+{
+  Recording recording;
+  Viewer viewer(42, 15, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  auto request = originalRoute(viewer, recording);
+  mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+  const auto before = recording.events.size();
+  viewer.keyboardRoute(request);
+  check(
+      recording.lastRoute().result == KeyboardRouteResult::Busy && recording.events.size() == before,
+      "Held mouse button was released to force a keyboard handoff"
+  );
+  mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
+  check(recording.count(MessageType::Input, "button") == 2, "Busy response lost the held button owner");
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Busy generation was reused after mouse up");
+  request.binding.generation = 2;
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Fresh generation did not quiesce");
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Exact valid quiescence was not idempotent");
+  auto stale = resumeRoute(request);
+  stale.binding.generation = 1;
+  viewer.keyboardRoute(stale);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Old generation resumed a newer fence");
+  stale = resumeRoute(request);
+  ++stale.binding.focusRevision;
+  viewer.keyboardRoute(stale);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Wrong focus binding resumed keyboard input");
+  const int keys = recording.count(MessageType::Input, "key");
+  key(viewer, QEvent::KeyPress, Qt::Key_C, "c");
+  key(viewer, QEvent::KeyRelease, Qt::Key_C, "c");
+  check(recording.count(MessageType::Input, "key") == keys, "Rejected resume reopened the keyboard gate");
+  auto later = request;
+  later.binding.generation = 3;
+  viewer.keyboardRoute(later);
+  check(recording.lastRoute().result == KeyboardRouteResult::Busy, "New attempt replaced an existing fence");
+  viewer.keyboardRoute(resumeRoute(request));
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Later rejected attempt stranded the old fence");
+  viewer.keyboardRoute(later);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Rejected later attempt was not remembered");
+  later.binding.generation = 4;
+  viewer.keyboardRoute(later);
+  viewer.keyboardRoute(resumeRoute(request));
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Retired resume reopened a fresh route");
+  key(viewer, QEvent::KeyPress, Qt::Key_D, "d");
+  key(viewer, QEvent::KeyRelease, Qt::Key_D, "d");
+  check(recording.count(MessageType::Input, "key") == keys, "Retired resume allowed new key forwarding");
+  viewer.disconnected();
+}
+
+void testKeyboardRoutePendingFocus()
+{
+  Recording recording;
+  Viewer viewer(43, 16, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  viewer.committed();
+  focus(viewer, true);
+  auto request = originalRoute(viewer, recording);
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Pending focus accepted a keyboard lease");
+  ++request.binding.generation;
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyRelease, Qt::Key_B, "b");
+  mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+  mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
+  QWheelEvent wheel(
+      viewer.videoRect().center(), viewer.videoRect().center(), {}, {0, 120}, Qt::NoButton, Qt::NoModifier,
+      Qt::NoScrollPhase, false
+  );
+  QCoreApplication::sendEvent(&viewer, &wheel);
+  const auto send = viewer.onSend;
+  bool quiesced = false;
+  viewer.onSend = [&](MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch) {
+    const bool sent = send(type, object, session, epoch);
+    if (!quiesced && type == MessageType::Input && object.value("kind") == "key" && object.value("down").toBool()) {
+      quiesced = true;
+      viewer.keyboardRoute(request);
+    }
+    return sent;
+  };
+  viewer.focusAcknowledged(7, recording.focusRequest());
+  check(quiesced && recording.lastRoute().result == KeyboardRouteResult::Ready, "Pending flush did not quiesce");
+  check(
+      recording.count(MessageType::Input, "key") == 2 &&
+          !recording.last(MessageType::Input, "key").object.value("down").toBool() &&
+          recording.last(MessageType::Input, "key").object.value("code").toInt() == Qt::Key_A &&
+          recording.routes.back().inputCount == 4,
+      "Reentrant quiescence failed to release the in-flight key before acknowledgment"
+  );
+  check(
+      recording.count(MessageType::Input, "button") == 2 && recording.count(MessageType::Input, "scroll") == 1 &&
+          recording.count(MessageType::Input, "release") == 0,
+      "Keyboard-only fence swallowed queued pointer input or cancelled focus"
+  );
+  viewer.keyboardRoute(resumeRoute(request));
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a", true);
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  check(recording.count(MessageType::Input, "key") == 2, "Queued held key replayed after resume");
+  viewer.disconnected();
+}
+
+void testKeyboardRouteBindingValidation()
+{
+  Recording recording;
+  Viewer viewer(46, 19, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  auto request = originalRoute(viewer, recording);
+  auto foreign = request;
+  ++foreign.binding.owner.epoch;
+  viewer.keyboardRoute(foreign);
+  auto malformed = request;
+  malformed.binding.generation = 0;
+  viewer.keyboardRoute(malformed);
+  malformed = request;
+  malformed.action = KeyboardRouteAction::Acknowledge;
+  malformed.result = KeyboardRouteResult::Ready;
+  viewer.keyboardRoute(malformed);
+  check(recording.routes.empty(), "Malformed or foreign route reached the send callback");
+
+  for (int mismatch = 0; mismatch < 3; ++mismatch) {
+    auto stale = request;
+    if (mismatch == 0)
+      ++stale.binding.focusRequest;
+    else if (mismatch == 1)
+      ++stale.binding.focusRevision;
+    else
+      ++stale.binding.geometry;
+    viewer.keyboardRoute(stale);
+    check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Mismatched focus/geometry accepted a route");
+    ++request.binding.generation;
+  }
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  check(recording.count(MessageType::Input, "key") == 2, "Rejected route fenced normal keyboard forwarding");
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Current binding was not accepted");
+
+  // A resize acknowledgment does not by itself make the old painted frame safe
+  // for a fresh route. The old fence can still be explicitly resumed.
+  viewer.applyMetadata(metadata(2, 800, 600));
+  check(
+      recording.lastRoute().action == KeyboardRouteAction::Withdraw &&
+          recording.lastRoute().reason == KeyboardRouteReason::GeometryChanged,
+      "Source geometry change did not withdraw the route"
+  );
+  viewer.keyboardRoute(resumeRoute(request));
+  ++request.binding.generation;
+  request.binding.geometry = 2;
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Unpainted geometry accepted a new route");
+  viewer.disconnected();
+}
+
+void testKeyboardRouteInvalidation()
+{
+  for (const auto reason :
+       {KeyboardRouteReason::FocusChanged, KeyboardRouteReason::GeometryChanged, KeyboardRouteReason::Hidden,
+        KeyboardRouteReason::Returned, KeyboardRouteReason::Disconnected}) {
+    Recording recording;
+    Viewer viewer(44, 17, metadata());
+    recording.attach(viewer);
+    makeReady(viewer, recording);
+    makeFocused(viewer, recording);
+    const auto request = originalRoute(viewer, recording);
+    viewer.keyboardRoute(request);
+    key(viewer, QEvent::KeyPress, Qt::Key_C, "c");
+    if (reason == KeyboardRouteReason::FocusChanged)
+      viewer.focusAcknowledged(0, recording.focusRequest());
+    else if (reason == KeyboardRouteReason::GeometryChanged)
+      viewer.resize(420, 315);
+    else if (reason == KeyboardRouteReason::Hidden) {
+      QEvent hidden(QEvent::Hide);
+      QCoreApplication::sendEvent(&viewer, &hidden);
+    } else if (reason == KeyboardRouteReason::Returned)
+      viewer.close();
+    else
+      viewer.disconnected();
+
+    if (reason == KeyboardRouteReason::Disconnected) {
+      check(recording.routes.size() == 1, "Disconnect tried to withdraw over a dead transport");
+      const auto before = recording.events.size();
+      viewer.keyboardRoute(resumeRoute(request));
+      key(viewer, QEvent::KeyPress, Qt::Key_D, "d");
+      viewer.close();
+      check(recording.events.size() == before && recording.routes.size() == 1, "Disconnected route sent input");
+      continue;
+    }
+    check(
+        recording.routes.size() == 2 && recording.lastRoute().action == KeyboardRouteAction::Withdraw &&
+            recording.lastRoute().binding == request.binding && recording.lastRoute().reason == reason,
+        "Route invalidation did not withdraw its exact binding and reason"
+    );
+    const int keys = recording.count(MessageType::Input, "key");
+    viewer.keyboardRoute(request);
+    check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Invalidated route was acknowledged again");
+
+    if (reason == KeyboardRouteReason::GeometryChanged) {
+      check(waitUntil([&] { return recording.count(MessageType::Resize) == 1; }), "Route resize was not requested");
+      auto next = metadata(2, 800, 600);
+      next.insert("resizeRequest", recording.last(MessageType::Resize).object.value("request"));
+      viewer.applyMetadata(next);
+      const int focuses = recording.count(MessageType::Input, "focus");
+      viewer.receiveFrame(frame(), 2);
+      check(
+          waitUntil([&] { return recording.count(MessageType::Input, "focus") > focuses; }),
+          "Resized route did not repaint before reclaiming focus"
+      );
+      viewer.focusAcknowledged(8, recording.focusRequest());
+    } else if (reason != KeyboardRouteReason::Returned) {
+      if (reason == KeyboardRouteReason::Hidden) {
+        QEvent shown(QEvent::Show);
+        QCoreApplication::sendEvent(&viewer, &shown);
+      }
+      focus(viewer, true);
+      mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+      mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
+      viewer.focusAcknowledged(8, recording.focusRequest());
+    }
+    key(viewer, QEvent::KeyPress, Qt::Key_D, "d");
+    key(viewer, QEvent::KeyRelease, Qt::Key_D, "d");
+    check(recording.count(MessageType::Input, "key") == keys, "Focus, show or resize reopened the keyboard fence");
+    viewer.keyboardRoute(resumeRoute(request));
+    check(
+        recording.lastRoute().result == KeyboardRouteResult::Ready,
+        "Exact host resume could not clear an invalidated focus/geometry binding"
+    );
+    key(viewer, QEvent::KeyPress, Qt::Key_C, "c", true);
+    key(viewer, QEvent::KeyRelease, Qt::Key_C, "c");
+    check(recording.count(MessageType::Input, "key") == keys, "Invalidation erased held-key suppression");
+    if (reason != KeyboardRouteReason::Returned) {
+      key(viewer, QEvent::KeyPress, Qt::Key_D, "d");
+      key(viewer, QEvent::KeyRelease, Qt::Key_D, "d");
+      check(
+          recording.count(MessageType::Input, "key") == keys + 2, "Exact resume did not restore fresh keyboard input"
+      );
+    }
+    viewer.disconnected();
+  }
+}
+
+void testKeyboardRouteSendFailure()
+{
+  for (int failure = 0; failure < 5; ++failure) {
+    Recording recording;
+    Viewer viewer(45, 18, metadata());
+    recording.attach(viewer);
+    makeReady(viewer, recording);
+    makeFocused(viewer, recording);
+    const auto request = originalRoute(viewer, recording);
+    if (failure == 0) {
+      key(viewer, QEvent::KeyPress, Qt::Key_Shift);
+      const auto send = viewer.onSend;
+      viewer.onSend = [=](MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch) {
+        send(type, object, session, epoch);
+        return false;
+      };
+      viewer.keyboardRoute(request);
+      check(recording.routes.empty(), "Failed key-up send still acknowledged a ready original route");
+    } else if (failure == 3) {
+      viewer.onKeyboardRouteSend = {};
+      viewer.keyboardRoute(request);
+    } else {
+      if (failure == 2)
+        viewer.keyboardRoute(request);
+      const auto send = viewer.onKeyboardRouteSend;
+      viewer.onKeyboardRouteSend = [=](const KeyboardRouteControl &control) {
+        send(control);
+        if (failure == 4)
+          throw std::runtime_error("Fixture route send failed");
+        return false;
+      };
+      viewer.keyboardRoute(failure == 1 ? request : resumeRoute(request));
+    }
+    const auto before = recording.events.size();
+    const auto routes = recording.routes.size();
+    key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+    key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+    viewer.keyboardRoute(resumeRoute(request));
+    viewer.close();
+    check(
+        recording.events.size() == before && recording.routes.size() == routes,
+        "Failed keyboard fence send did not disconnect and stop further writes"
+    );
+  }
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -492,12 +888,19 @@ int main(int argc, char **argv)
     testResizeAndScroll();
     testBoundedDecodeQueue();
     testQueuedFrameRevision();
+    testKeyboardRouteFenceAndResume();
+    testKeyboardRouteBusyAndGenerations();
+    testKeyboardRoutePendingFocus();
+    testKeyboardRouteBindingValidation();
+    testKeyboardRouteInvalidation();
+    testKeyboardRouteSendFailure();
     QTextStream(
         stdout
     ) << "PASS: H.264 decode/reset, malformed video, letterboxing/scaling, first painted readiness, "
          "queued activating click, stale focus, special keys/repeat, ordered release, resize fencing, "
          "double-click, focus revocation/reclaim, scroll, minimize, safe return, disconnect, bounded video queue, "
-         "queued geometry race\n";
+         "queued geometry race, keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
+         "route generations, pending focus fence, route invalidation/resume and send failure\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

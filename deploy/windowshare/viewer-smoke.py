@@ -51,7 +51,10 @@ def read_hello(connection):
         b"DSW1", 1, 0, 0, 0, 1, 0
     ) or size > 65536:
         raise RuntimeError("Viewer did not start a fresh protocol negotiation")
-    if json.loads(read_exact(connection, size)) != {
+    hello = json.loads(read_exact(connection, size))
+    if hello.pop("capabilities", None) not in (None, ["keyboard-route-v1"]):
+        raise RuntimeError("Unexpected viewer capabilities")
+    if hello != {
         "version": 1, "role": "viewer", "codec": "h264"
     }:
         raise RuntimeError("Unexpected viewer negotiation")

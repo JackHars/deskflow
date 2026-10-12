@@ -2,12 +2,14 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "KeyboardRouteProtocol.h"
 #include "NativeHost.h"
 #include "Transport.h"
 #include "Viewer.h"
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCommandLineParser>
+#include <QDeadlineTimer>
 #include <QDir>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -165,6 +167,14 @@ public:
       if (m_established && m_catalogReady && !m_shuttingDown)
         m_retryStep = 0;
     });
+    m_keyboardTimeout.setSingleShot(true);
+    connect(&m_keyboardTimeout, &QTimer::timeout, this, [this] {
+      if (m_keyboardRoute && m_keyboardRoute->phase == KeyboardPhase::AwaitViewer) {
+        if (m_channel)
+          m_channel->close("Keyboard handoff resume timed out");
+      } else
+        withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+    });
     if (m_hosting) {
       m_native = std::make_unique<NativeHost>(std::move(journal));
       m_native->setHoldingDisplayEnabled(holding);
@@ -183,6 +193,9 @@ public:
         maybeInitialExport();
       };
       m_native->onOpened = [this](std::uint64_t session, std::uint64_t epoch, const QJsonObject &metadata) {
+        if (m_keyboardRoute && m_keyboardRoute->binding.owner == Owner{session, epoch} &&
+            m_keyboardRoute->binding.geometry != integer(metadata, "geometry"))
+          withdrawOriginalKeyboard(KeyboardRouteReason::GeometryChanged);
         m_hostSessions[session] = epoch;
         if (!send(MessageType::Opened, windowMetadataForWire(metadata), session, epoch))
           QTimer::singleShot(0, this, [this, session] { m_native->restore(session); });
@@ -210,9 +223,18 @@ public:
                                 std::uint64_t session, std::uint64_t epoch, std::uint64_t revision,
                                 std::uint64_t request
                             ) {
+        if (m_keyboardRoute && m_keyboardRoute->binding.owner == Owner{session, epoch} &&
+            (m_keyboardRoute->binding.focusRevision != revision || m_keyboardRoute->binding.focusRequest != request))
+          withdrawOriginalKeyboard(KeyboardRouteReason::FocusChanged);
         send(MessageType::Focus, {{"focusRevision", number(revision)}, {"request", number(request)}}, session, epoch);
       };
+      m_native->onKeyboardRouteInvalidated = [this](KeyboardRouteBinding binding, KeyboardRouteReason reason) {
+        if (m_keyboardRoute && m_keyboardRoute->binding == binding)
+          withdrawOriginalKeyboard(reason);
+      };
       m_native->onClosed = [this](std::uint64_t session) {
+        if (m_keyboardRoute && m_keyboardRoute->binding.owner.session == session)
+          withdrawOriginalKeyboard(KeyboardRouteReason::Returned, false);
         m_pendingKeyframes.erase(session);
         if (m_pendingKeyframes.empty())
           m_keyframeRetry.stop();
@@ -228,6 +250,79 @@ public:
     updateControls();
   }
   std::function<void()> onQuitRequested;
+  // A local controller must revoke its private original-input authority before
+  // either native admission or viewer forwarding can resume. Network messages
+  // cannot install this callback, and main does not activate this route yet.
+  // These callbacks borrow this controller. They may close the channel or
+  // withdraw a route, but must use deleteLater for controller destruction.
+  // Revocation is synchronous; quiesced notification is deferred outside the
+  // transport/native callback stack and revalidated immediately before delivery.
+  std::function<bool(const KeyboardRouteBinding &, KeyboardRouteReason)> revokeOriginalKeyboard;
+  std::function<void(const KeyboardRouteBinding &)> onKeyboardQuiesced;
+  bool requestOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
+  {
+    if (!m_native || !m_established || !m_keyboardCapable || m_keyboardRoute || m_cleaning || m_shuttingDown ||
+        !revokeOriginalKeyboard || m_keyboardGeneration == 9007199254740991ULL)
+      return false;
+    const auto found = m_hostSessions.find(session);
+    if (found == m_hostSessions.end() || found->second != epoch)
+      return false;
+    const auto binding = m_native->keyboardRouteCandidate(session, epoch, m_keyboardGeneration + 1);
+    if (!binding || !validKeyboardRouteBinding(*binding))
+      return false;
+    m_keyboardGeneration = binding->generation;
+    m_keyboardRoute = KeyboardAttempt{*binding};
+    m_keyboardRoute->deadline = QDeadlineTimer(m_keyboardTimeoutMs, Qt::PreciseTimer);
+    m_keyboardTimeout.start(m_keyboardTimeoutMs);
+    return sendKeyboardRoute({*binding, KeyboardRouteAction::Request, KeyboardRouteMode::Original});
+  }
+  void withdrawOriginalKeyboard(KeyboardRouteReason reason, bool resumeViewer = true)
+  {
+    if (!m_keyboardRoute)
+      return;
+    const QPointer<Bridge> alive(this);
+    const auto binding = m_keyboardRoute->binding;
+    if (m_keyboardRoute->phase == KeyboardPhase::Revoking) {
+      m_keyboardRoute->resumeViewer = m_keyboardRoute->resumeViewer && resumeViewer;
+      return;
+    }
+    if (!m_keyboardRoute->revoked) {
+      m_keyboardRoute->revoked = true;
+      m_keyboardRoute->phase = KeyboardPhase::Revoking;
+      m_keyboardRoute->resumeViewer = resumeViewer;
+      m_keyboardTimeout.stop();
+      bool released = false;
+      try {
+        const auto revoke = revokeOriginalKeyboard;
+        released = revoke && revoke(binding, reason);
+      } catch (...) {
+      }
+      if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding)
+        return;
+      if (!released) {
+        m_keyboardTimeout.stop();
+        retireKeyboardRoute();
+        if (m_channel)
+          m_channel->close("Original keyboard authority could not be revoked");
+        return;
+      }
+      if (!m_native->resumeKeyboard(binding) && m_keyboardRoute->quiesced) {
+        retireKeyboardRoute();
+        if (m_channel)
+          m_channel->close("Native keyboard fence could not be resumed");
+        return;
+      }
+      resumeViewer = m_keyboardRoute->resumeViewer;
+      m_keyboardRoute->phase = KeyboardPhase::AwaitViewer;
+    } else if (resumeViewer)
+      return;
+    if (resumeViewer && m_channel && m_established && !m_cleaning && !m_shuttingDown) {
+      m_keyboardRoute->deadline = QDeadlineTimer(m_keyboardTimeoutMs, Qt::PreciseTimer);
+      m_keyboardTimeout.start(m_keyboardTimeoutMs);
+      sendKeyboardRoute({binding, KeyboardRouteAction::Request, KeyboardRouteMode::Viewer});
+    } else
+      retireKeyboardRoute();
+  }
   ~Bridge() override
   {
     m_shuttingDown = true;
@@ -240,6 +335,7 @@ public:
       m_channel->onPacket = {};
       m_channel->close();
     }
+    withdrawOriginalKeyboard(KeyboardRouteReason::Disconnected, false);
     stopViewers();
     if (m_native) {
       m_native->releaseAll();
@@ -290,6 +386,119 @@ protected:
   }
 
 private:
+  enum class KeyboardPhase
+  {
+    AwaitQuiescence,
+    Quiesced,
+    Revoking,
+    AwaitViewer
+  };
+  struct KeyboardAttempt
+  {
+    KeyboardRouteBinding binding;
+    KeyboardPhase phase = KeyboardPhase::AwaitQuiescence;
+    bool revoked = false, quiesced = false;
+    bool resumeViewer = true;
+    QDeadlineTimer deadline{QDeadlineTimer::Forever};
+  };
+  bool sendKeyboardRoute(const KeyboardRouteControl &control)
+  {
+    return m_keyboardCapable && send(
+                                    MessageType::KeyboardRoute, encodeKeyboardRouteControl(control),
+                                    control.binding.owner.session, control.binding.owner.epoch
+                                );
+  }
+  void retireKeyboardRoute()
+  {
+    m_keyboardTimeout.stop();
+    if (m_keyboardRoute)
+      m_retiredKeyboardRoute = m_keyboardRoute->binding;
+    m_keyboardRoute.reset();
+  }
+  void receiveKeyboardRoute(const Packet &packet)
+  {
+    require(m_keyboardCapable, "Keyboard route capability was not negotiated");
+    const auto control = parseKeyboardRouteControl(packet);
+    if (!m_hosting) {
+      require(control.action == KeyboardRouteAction::Request, "Invalid keyboard route direction");
+      const auto found = m_viewers.find(packet.session);
+      if (found != m_viewers.end() && found->second.epoch == packet.epoch && found->second.window)
+        found->second.window->keyboardRoute(control);
+      return;
+    }
+    require(control.action != KeyboardRouteAction::Request, "Invalid keyboard route direction");
+    if (!m_keyboardRoute || m_keyboardRoute->binding != control.binding) {
+      if (control.binding.generation < m_keyboardGeneration || m_retiredKeyboardRoute == control.binding)
+        return;
+      throw std::runtime_error("Unsolicited or mismatched keyboard route reply");
+    }
+    if (control.action == KeyboardRouteAction::Withdraw) {
+      withdrawOriginalKeyboard(control.reason);
+      return;
+    }
+    if (m_keyboardRoute->phase == KeyboardPhase::Revoking)
+      return;
+    if (m_keyboardRoute->phase == KeyboardPhase::AwaitViewer && m_keyboardRoute->deadline.hasExpired()) {
+      if (m_channel)
+        m_channel->close("Keyboard handoff resume timed out");
+      return;
+    }
+    if (m_keyboardRoute->phase == KeyboardPhase::AwaitQuiescence && control.mode == KeyboardRouteMode::Original) {
+      if (m_keyboardRoute->deadline.hasExpired()) {
+        withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+        return;
+      }
+      if (control.result != KeyboardRouteResult::Ready) {
+        withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost, false);
+        return;
+      }
+      if (!m_native->quiesceKeyboard(control.binding)) {
+        withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+        return;
+      }
+      m_keyboardRoute->quiesced = true;
+      if (m_keyboardRoute->deadline.hasExpired()) {
+        withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+        return;
+      }
+      m_keyboardTimeout.stop();
+      m_keyboardRoute->phase = KeyboardPhase::Quiesced;
+      const auto binding = control.binding;
+      const auto generation = m_connectionGeneration;
+      QTimer::singleShot(0, this, [this, binding, generation] {
+        if (!m_keyboardRoute || m_keyboardRoute->binding != binding ||
+            m_keyboardRoute->phase != KeyboardPhase::Quiesced || m_connectionGeneration != generation ||
+            !m_established || m_cleaning || m_shuttingDown)
+          return;
+        const bool neutral = m_native->keyboardRouteQuiesced(binding);
+        if (m_keyboardRoute->deadline.hasExpired()) {
+          withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+          return;
+        }
+        if (!neutral) {
+          withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+          return;
+        }
+        try {
+          const auto callback = onKeyboardQuiesced;
+          if (callback)
+            callback(binding);
+        } catch (...) {
+          if (m_connectionGeneration == generation && m_keyboardRoute && m_keyboardRoute->binding == binding)
+            withdrawOriginalKeyboard(KeyboardRouteReason::Failed);
+        }
+      });
+    } else if (m_keyboardRoute->phase == KeyboardPhase::AwaitViewer && control.mode == KeyboardRouteMode::Viewer) {
+      require(
+          control.result == KeyboardRouteResult::Ready ||
+              (!m_keyboardRoute->quiesced && control.result == KeyboardRouteResult::Stale),
+          "Viewer did not resume the revoked keyboard route"
+      );
+      retireKeyboardRoute();
+    }
+    // An old Original ack may cross cancellation and the Viewer request. It
+    // never reactivates a quiesced or revoked attempt.
+  }
   void updateControls()
   {
     m_open->setEnabled(m_established && m_catalogReady && !m_cleaning && !m_shuttingDown);
@@ -398,6 +607,7 @@ private:
   {
     m_established = false;
     m_negotiating = false;
+    m_keyboardCapable = false;
     m_stableTimer.stop();
     clearKeyframeRetries();
     clearCatalog();
@@ -410,7 +620,10 @@ private:
       m_negotiating = true;
       if (!m_hosting)
         channel->send(
-            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"}}
+            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
+                                 {"role", "viewer"},
+                                 {"codec", "h264"},
+                                 {"capabilities", keyboardRouteCapabilities()}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -445,6 +658,7 @@ private:
       // send() may fail inside a NativeHost callback. Never destroy its entries
       // reentrantly while capture/geometry code is still using them.
       m_cleaning = true;
+      withdrawOriginalKeyboard(KeyboardRouteReason::Disconnected, false);
       clearCatalog();
       QTimer::singleShot(0, this, [this, generation, retryable] {
         if (m_connectionGeneration != generation)
@@ -478,12 +692,16 @@ private:
           integer(object, "version") == protocolVersion && object["codec"] == "h264",
           "Unsupported window sharing version or codec"
       );
+      m_keyboardCapable = peerSupportsKeyboardRoute(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
         if (!send(
                 MessageType::Accepted,
-                {{"version", static_cast<int>(protocolVersion)}, {"role", "host"}, {"codec", "h264"}}
+                {{"version", static_cast<int>(protocolVersion)},
+                 {"role", "host"},
+                 {"codec", "h264"},
+                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities() : QJsonArray{}}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -498,6 +716,10 @@ private:
       m_negotiating = false;
       updateControls();
       status("Connected to approved peer — window sharing enabled");
+      return;
+    }
+    if (packet.type == MessageType::KeyboardRoute) {
+      receiveKeyboardRoute(packet);
       return;
     }
     if (packet.type == MessageType::Error) {
@@ -588,6 +810,10 @@ private:
         if (!currentViewer(session, epoch, viewer, generation))
           return false;
         return send(type, object, session, epoch);
+      };
+      viewer->onKeyboardRouteSend = [this, viewer, generation](const KeyboardRouteControl &control) {
+        const auto owner = control.binding.owner;
+        return currentViewer(owner.session, owner.epoch, viewer, generation) && sendKeyboardRoute(control);
       };
       viewer->onError = [this, id, epoch = packet.epoch, viewer, generation](QString error) {
         if (currentViewer(id, epoch, viewer, generation))
@@ -688,6 +914,7 @@ private:
       if (view.window) {
         view.window->onReturned = {};
         view.window->onSend = {};
+        view.window->onKeyboardRouteSend = {};
         view.window->onError = {};
         view.window->disconnected();
         view.window->close();
@@ -725,6 +952,12 @@ private:
   QPointer<Channel> m_channel;
   QTimer m_keyframeRetry;
   QTimer m_reconnectTimer, m_stableTimer;
+  QTimer m_keyboardTimeout;
+  int m_keyboardTimeoutMs = 3000;
+  bool m_keyboardCapable = false;
+  std::uint64_t m_keyboardGeneration = 0;
+  std::optional<KeyboardAttempt> m_keyboardRoute;
+  std::optional<KeyboardRouteBinding> m_retiredKeyboardRoute;
   QString m_connectHost, m_disconnectReason;
   quint16 m_connectPort = 0;
   std::uint64_t m_connectionGeneration = 0;

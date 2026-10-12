@@ -53,7 +53,8 @@ enum class MessageType : std::uint16_t
   Error,
   Focus,
   ReleaseAll,
-  Ready
+  Ready,
+  KeyboardRoute
 };
 struct Packet
 {

@@ -5,11 +5,13 @@
 // Keep the controller private to its executable while testing its actual
 // callback wiring. Its native implementation below never touches a display.
 #define WINDOWSHARE_BRIDGE_TEST
+#include "NativeKeyboardAdmission.h"
 #include "main.cpp"
 #include <QCryptographicHash>
 #include <QEventLoop>
 #include <QFocusEvent>
 #include <QKeyEvent>
+#include <QMouseEvent>
 #include <QSet>
 #include <QSslConfiguration>
 #include <QSslError>
@@ -23,13 +25,19 @@ bool automaticNative = false;
 int nativeRefreshes = 0, nativeReleases = 0, nativeRestores = 0;
 QVector<QJsonObject> nativeInputs;
 QSet<int> nativeHeldKeys;
+QSet<int> nativeHeldButtons;
+std::function<void()> nativeResumeObserver;
+std::function<void()> nativeQuiesceObserver;
+bool nativeResumeSucceeds = true;
 } // namespace
 
 namespace deskflow::windowshare {
 struct NativeHost::Impl
 {
+  std::optional<KeyboardRouteBinding> focus;
+  NativeKeyboardAdmission keyboard;
 };
-NativeHost::NativeHost(QString, QObject *parent) : QObject(parent)
+NativeHost::NativeHost(QString, QObject *parent) : QObject(parent), m_impl(std::make_unique<Impl>())
 {
 }
 NativeHost::~NativeHost() = default;
@@ -65,6 +73,8 @@ void NativeHost::ready(std::uint64_t session, std::uint64_t epoch)
 }
 void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event)
 {
+  if (event["kind"] == "key" && m_impl->keyboard.blocksKeys() && event["down"].toBool())
+    return;
   nativeInputs.push_back(event);
   if (event["kind"] == "key") {
     const int code = event["code"].toInt();
@@ -73,8 +83,57 @@ void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonOb
     else
       nativeHeldKeys.remove(code);
   }
-  if (automaticNative && event["kind"] == "focus" && onFocused)
-    onFocused(session, epoch, 1, event["request"].toInteger());
+  if (event["kind"] == "button") {
+    if (event["down"].toBool())
+      nativeHeldButtons.insert(event["button"].toInt());
+    else
+      nativeHeldButtons.remove(event["button"].toInt());
+  }
+  if (event["kind"] == "focus") {
+    m_impl->focus = KeyboardRouteBinding{
+        {session, epoch},
+        0,
+        static_cast<std::uint64_t>(event["request"].toInteger()),
+        1,
+        static_cast<std::uint64_t>(event["geometry"].toInteger())
+    };
+    if (automaticNative && onFocused)
+      onFocused(session, epoch, 1, event["request"].toInteger());
+  }
+  if (event["kind"] == "blur")
+    m_impl->focus.reset();
+}
+std::optional<KeyboardRouteBinding>
+NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+{
+  auto binding = m_impl->focus;
+  if (!binding || binding->owner != Owner{session, epoch})
+    return std::nullopt;
+  binding->generation = generation;
+  return binding;
+}
+bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
+{
+  const bool result = m_impl->keyboard.quiesce(
+      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
+      nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
+  );
+  if (nativeQuiesceObserver)
+    nativeQuiesceObserver();
+  return result;
+}
+bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
+{
+  return m_impl->keyboard.quiesced(
+      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
+      nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
+  );
+}
+bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &binding)
+{
+  if (nativeResumeObserver)
+    nativeResumeObserver();
+  return nativeResumeSucceeds && m_impl->keyboard.resume(binding);
 }
 void NativeHost::resizeWindow(std::uint64_t, std::uint64_t, int, int, std::uint64_t)
 {
@@ -96,6 +155,8 @@ void NativeHost::releaseAll()
 {
   ++nativeReleases;
   nativeHeldKeys.clear();
+  nativeHeldButtons.clear();
+  m_impl->focus.reset();
 }
 struct ChannelTestAccess
 {
@@ -126,6 +187,36 @@ struct ChannelTestAccess
 namespace {
 struct BridgeTestAccess
 {
+  static std::optional<KeyboardRouteBinding> keyboardBinding(const Bridge &bridge)
+  {
+    return bridge.m_keyboardRoute ? std::optional(bridge.m_keyboardRoute->binding) : std::nullopt;
+  }
+  static bool keyboardQuiesced(const Bridge &bridge)
+  {
+    return bridge.m_keyboardRoute && bridge.m_keyboardRoute->phase == Bridge::KeyboardPhase::Quiesced &&
+           bridge.m_native->keyboardRouteQuiesced(bridge.m_keyboardRoute->binding);
+  }
+  static void keyboardReply(Bridge &bridge, const KeyboardRouteControl &control)
+  {
+    bridge.receiveKeyboardRoute(
+        Packet{
+            MessageType::KeyboardRoute, control.binding.owner.session, control.binding.owner.epoch, 1,
+            jsonBytes(encodeKeyboardRouteControl(control))
+        }
+    );
+  }
+  static void fastKeyboardTimeout(Bridge &bridge)
+  {
+    bridge.m_keyboardTimeoutMs = 40;
+  }
+  static void invalidateKeyboard(Bridge &bridge, KeyboardRouteReason reason)
+  {
+    bridge.m_native->onKeyboardRouteInvalidated(bridge.m_keyboardRoute->binding, reason);
+  }
+  static bool keyboardCapable(const Bridge &bridge)
+  {
+    return bridge.m_keyboardCapable;
+  }
   static void receive(Bridge &bridge, const Packet &packet)
   {
     bridge.receiveViewer(packet);
@@ -294,10 +385,17 @@ struct AutomaticNative
     automaticNative = true;
     nativeInputs.clear();
     nativeHeldKeys.clear();
+    nativeHeldButtons.clear();
+    nativeResumeObserver = {};
+    nativeQuiesceObserver = {};
+    nativeResumeSucceeds = true;
   }
   ~AutomaticNative()
   {
     automaticNative = false;
+    nativeResumeObserver = {};
+    nativeQuiesceObserver = {};
+    nativeResumeSucceeds = true;
   }
 };
 quint16 unusedPort()
@@ -471,6 +569,7 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for congestion fixture");
   sink.connectToHostEncrypted("127.0.0.1", BridgeTestAccess::port(host));
   check(waitUntil([&] { return BridgeTestAccess::established(host); }), "Congestion fixture did not negotiate");
+  check(!BridgeTestAccess::keyboardCapable(host), "Legacy peer gained unnegotiated keyboard capability");
   QPointer<Channel> channel = BridgeTestAccess::channel(host);
   const auto normalSendBuffer = ChannelTestAccess::sendBuffer(*channel);
   check(normalSendBuffer.isValid() && normalSendBuffer.toInt() > 0, "Cannot inspect fixture send buffer");
@@ -735,6 +834,411 @@ void reconnectCleanupAndIsolation(const Identity &hostIdentity, const Identity &
   check(waitUntil([&] { return !BridgeTestAccess::cleaning(viewer); }), "Panel-close cleanup did not finish");
 }
 
+struct KeyboardFixture
+{
+  AutomaticNative native;
+  Bridge host, viewer;
+  QPointer<Viewer> window;
+  int grants = 0, revokes = 0;
+  bool original = false, releaseSucceeds = true;
+  QVector<KeyboardRouteReason> reasons;
+
+  KeyboardFixture(const Identity &hostIdentity, const Identity &viewerIdentity)
+      : host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false),
+        viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false)
+  {
+    host.revokeOriginalKeyboard = [this](const auto &, auto reason) {
+      ++revokes;
+      reasons.push_back(reason);
+      original = false;
+      return releaseSucceeds;
+    };
+    host.onKeyboardQuiesced = [this](const auto &) {
+      check(nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty(), "Original grant preceded Qt releases");
+      check(BridgeTestAccess::keyboardQuiesced(host), "Original grant preceded native keyboard fence");
+      original = true;
+      ++grants;
+    };
+    nativeResumeObserver = [this] { check(!original, "Native keyboard resumed before original authority revoke"); };
+    check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for keyboard fixture");
+    viewer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+    check(waitUntil([&] { return BridgeTestAccess::catalogReady(viewer); }), "Keyboard fixture did not negotiate");
+    check(
+        BridgeTestAccess::keyboardCapable(host) && BridgeTestAccess::keyboardCapable(viewer),
+        "Keyboard capability was not negotiated"
+    );
+    BridgeTestAccess::opened(host, 91, 2);
+    check(waitUntil([&] { return BridgeTestAccess::viewer(viewer, 91) != nullptr; }), "Keyboard viewer missing");
+    window = BridgeTestAccess::viewer(viewer, 91);
+    check(waitUntil([&] { return BridgeTestAccess::channel(host)->readyForFrame(); }), "Keyboard frame queue blocked");
+    BridgeTestAccess::frame(
+        host, 91, 2,
+        QByteArray::fromBase64(
+            "AAAAAWdCwAraEewEQAAAAwBAAAAPI8SJqAAAAAFozg/IAAAAAWWIhDoRigACGPHAAED2OAAIeUnJyddddddddeA="
+        )
+    );
+    check(waitUntil([&] { return window && window->firstFramePainted(); }), "Keyboard frame not painted");
+    QFocusEvent focus(QEvent::FocusIn, Qt::OtherFocusReason);
+    QCoreApplication::sendEvent(window, &focus);
+    check(
+        waitUntil([&] {
+          return std::any_of(nativeInputs.begin(), nativeInputs.end(), [](const auto &input) {
+            return input["kind"] == "focus";
+          });
+        }),
+        "Keyboard fixture focus request missing"
+    );
+    key(QEvent::KeyPress, Qt::Key_A);
+    check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_A); }), "Keyboard focus did not acknowledge");
+    key(QEvent::KeyRelease, Qt::Key_A);
+    check(waitUntil([&] { return nativeHeldKeys.isEmpty(); }), "Keyboard fixture key release missing");
+  }
+  ~KeyboardFixture()
+  {
+    host.withdrawOriginalKeyboard(KeyboardRouteReason::Disconnected, false);
+    host.revokeOriginalKeyboard = {};
+    host.onKeyboardQuiesced = {};
+    nativeResumeObserver = {};
+  }
+  void key(QEvent::Type type, int code, bool repeat = false)
+  {
+    QKeyEvent event(type, code, Qt::NoModifier, {}, repeat);
+    QCoreApplication::sendEvent(window, &event);
+  }
+  void button(bool down)
+  {
+    const auto position = window->videoRect().center();
+    QMouseEvent event(
+        down ? QEvent::MouseButtonPress : QEvent::MouseButtonRelease, position, position, Qt::LeftButton,
+        down ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier
+    );
+    QCoreApplication::sendEvent(window, &event);
+  }
+  KeyboardRouteBinding request()
+  {
+    check(host.requestOriginalKeyboard(91, 2), "Keyboard handoff request failed");
+    const auto binding = BridgeTestAccess::keyboardBinding(host);
+    check(binding.has_value(), "Keyboard attempt not retained");
+    return *binding;
+  }
+  void quiesce()
+  {
+    request();
+    check(waitUntil([&] { return original && BridgeTestAccess::keyboardQuiesced(host); }), "Keyboard did not quiesce");
+  }
+};
+
+void keyboardFenceRoundTrip(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  auto &host = fixture.host;
+  const auto revoke = std::exchange(host.revokeOriginalKeyboard, {});
+  check(!host.requestOriginalKeyboard(91, 2), "Network-only bridge activated original route without local authority");
+  host.revokeOriginalKeyboard = revoke;
+  fixture.key(QEvent::KeyPress, Qt::Key_Shift);
+  check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_Shift); }), "Held Shift fixture missing");
+  const auto binding = fixture.request();
+  check(waitUntil([&] { return fixture.grants == 1; }), "Held keyboard did not quiesce");
+  check(nativeHeldKeys.isEmpty(), "Quiescence did not release held Shift");
+  const auto keysBefore =
+      std::count_if(nativeInputs.begin(), nativeInputs.end(), [](const auto &input) { return input["kind"] == "key"; });
+  fixture.key(QEvent::KeyPress, Qt::Key_Shift, true);
+  fixture.key(QEvent::KeyPress, Qt::Key_B);
+  fixture.key(QEvent::KeyRelease, Qt::Key_B);
+  // Even bypassing the viewer's public input path cannot send new network keys
+  // into the fake native ledger after the host's independent fence is installed.
+  check(
+      BridgeTestAccess::channel(fixture.viewer)
+          ->send(
+              MessageType::Input,
+              {{"kind", "key"}, {"code", Qt::Key_C}, {"down", true}, {"geometry", 1}, {"focusRevision", 1}}, 91, 2
+          ),
+      "Could not send fenced network key fixture"
+  );
+  fixture.button(true);
+  check(waitUntil([&] { return !nativeHeldButtons.isEmpty(); }), "Pointer stopped while keyboard was fenced");
+  check(!BridgeTestAccess::keyboardQuiesced(host), "Held pointer was reported as neutral");
+  fixture.button(false);
+  check(waitUntil([&] { return nativeHeldButtons.isEmpty(); }), "Fenced pointer release missing");
+  check(
+      nativeHeldKeys.isEmpty() && keysBefore == std::count_if(
+                                                    nativeInputs.begin(), nativeInputs.end(),
+                                                    [](const auto &input) { return input["kind"] == "key"; }
+                                                ),
+      "Fenced keyboard forwarded keys or repeats"
+  );
+  host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+  check(waitUntil([&] { return !BridgeTestAccess::keyboardBinding(host); }), "Exact viewer resume did not finish");
+  check(fixture.revokes == 1 && !fixture.original, "Cancellation did not revoke original authority exactly once");
+  BridgeTestAccess::keyboardReply(
+      host, {binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+  );
+  check(!BridgeTestAccess::keyboardBinding(host) && fixture.grants == 1, "Late Ready reactivated retired route");
+  fixture.key(QEvent::KeyPress, Qt::Key_Shift, true);
+  fixture.key(QEvent::KeyPress, Qt::Key_D);
+  check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_D); }), "Fresh keys did not resume");
+  check(!nativeHeldKeys.contains(Qt::Key_Shift), "Pre-handoff held key replayed after resume");
+  fixture.key(QEvent::KeyRelease, Qt::Key_Shift);
+  fixture.key(QEvent::KeyRelease, Qt::Key_D);
+  check(waitUntil([&] { return nativeHeldKeys.isEmpty(); }), "Resumed key release missing");
+  const auto next = fixture.request();
+  check(next.generation > binding.generation, "Next attempt reused a generation");
+  check(waitUntil([&] { return fixture.grants == 2; }), "Next keyboard route did not quiesce");
+  BridgeTestAccess::keyboardReply(
+      host, {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None,
+             KeyboardRouteReason::Hidden}
+  );
+  check(fixture.original && fixture.revokes == 1, "Retired withdrawal revoked the current route");
+}
+
+void keyboardCancellation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  // Cancellation and Original Ready can cross on the two independent streams.
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.request();
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }), "Crossed cancel did not resume");
+    check(fixture.grants == 0 && fixture.revokes == 1, "Crossed Original Ready granted authority");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.button(true);
+    check(waitUntil([&] { return !nativeHeldButtons.isEmpty(); }), "Busy pointer fixture missing");
+    fixture.request();
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }), "Busy viewer attempt not retired"
+    );
+    check(fixture.grants == 0 && !nativeHeldButtons.isEmpty(), "Busy handoff released a pointer or granted input");
+    fixture.button(false);
+    check(waitUntil([&] { return nativeHeldButtons.isEmpty(); }), "Busy pointer release missing");
+    fixture.quiesce();
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    const auto send = fixture.window->onKeyboardRouteSend;
+    fixture.window->onKeyboardRouteSend = [send](const auto &control) {
+      return control.mode == KeyboardRouteMode::Original ? true : send(control);
+    };
+    fixture.request();
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }),
+        "Quiescence timeout did not resume viewer"
+    );
+    check(
+        fixture.grants == 0 && fixture.reasons.contains(KeyboardRouteReason::Timeout) &&
+            BridgeTestAccess::established(fixture.host),
+        "Quiescence timeout granted input or closed recovered peer"
+    );
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    fixture.window->onKeyboardRouteSend = [](const auto &) { return true; };
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(
+        waitUntil([&] { return !BridgeTestAccess::established(fixture.host); }), "Resume timeout did not close channel"
+    );
+    check(!fixture.original && !BridgeTestAccess::keyboardBinding(fixture.host), "Resume timeout retained authority");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    fixture.releaseSucceeds = false;
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(!BridgeTestAccess::established(fixture.host), "Failed local revocation reopened viewer forwarding");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    nativeResumeSucceeds = false;
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(
+        !BridgeTestAccess::established(fixture.host) && !fixture.original,
+        "Failed native resume reopened viewer forwarding"
+    );
+  }
+}
+
+void keyboardInvalidation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (const auto reason :
+       {KeyboardRouteReason::FocusChanged, KeyboardRouteReason::GeometryChanged, KeyboardRouteReason::Hidden,
+        KeyboardRouteReason::Returned}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    BridgeTestAccess::invalidateKeyboard(fixture.host, reason);
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }),
+        "Native invalidation did not resume"
+    );
+    check(
+        fixture.revokes == 1 && fixture.reasons.back() == reason && !fixture.original,
+        "Native invalidation did not revoke exact authority"
+    );
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    BridgeTestAccess::fastReconnect(fixture.viewer);
+    const auto generation = BridgeTestAccess::generation(fixture.viewer);
+    BridgeTestAccess::channel(fixture.host)->close("Keyboard reconnect fixture", CloseCause::Network);
+    check(
+        !fixture.original && fixture.revokes == 1 && !BridgeTestAccess::keyboardBinding(fixture.host),
+        "Disconnect retained original keyboard authority"
+    );
+    check(
+        waitUntil([&] {
+          return BridgeTestAccess::generation(fixture.viewer) > generation &&
+                 BridgeTestAccess::catalogReady(fixture.viewer);
+        }),
+        "Keyboard fixture did not reconnect"
+    );
+    check(!fixture.host.requestOriginalKeyboard(91, 2), "Reconnect replayed keyboard session");
+    BridgeTestAccess::keyboardReply(
+        fixture.host,
+        {binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+    );
+    check(!fixture.original && fixture.grants == 1, "Stale pre-reconnect acknowledgement reactivated authority");
+  }
+  for (bool future : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    auto binding = fixture.request();
+    if (future)
+      ++binding.generation;
+    else
+      ++binding.focusRequest;
+    check(
+        BridgeTestAccess::channel(fixture.viewer)
+            ->send(
+                MessageType::KeyboardRoute,
+                encodeKeyboardRouteControl(
+                    {binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+                ),
+                91, 2
+            ),
+        "Invalid reply fixture send failed"
+    );
+    check(
+        waitUntil([&] { return !BridgeTestAccess::established(fixture.host); }),
+        "Mismatched keyboard reply was accepted"
+    );
+    check(!fixture.original, "Mismatched reply retained authority");
+  }
+}
+
+void keyboardReentrancyAndDeadlines(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (bool succeeds : {true, false}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    int resumes = 0;
+    nativeResumeObserver = [&] { ++resumes; };
+    fixture.host.revokeOriginalKeyboard = [&](const auto &binding, auto) {
+      fixture.original = false;
+      // This acknowledgement has not been requested yet and cannot retire an
+      // attempt while its synchronous revocation callback is still running.
+      BridgeTestAccess::keyboardReply(
+          fixture.host,
+          {binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Viewer, KeyboardRouteResult::Ready}
+      );
+      check(BridgeTestAccess::keyboardBinding(fixture.host) == binding, "Reentrant reply retired revoking attempt");
+      BridgeTestAccess::channel(fixture.host)->close("Close inside revocation", CloseCause::Network);
+      check(BridgeTestAccess::keyboardBinding(fixture.host) == binding, "Nested disconnect retired revoking attempt");
+      QCoreApplication::processEvents();
+      return succeeds;
+    };
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    check(
+        !BridgeTestAccess::keyboardBinding(fixture.host) && !BridgeTestAccess::established(fixture.host),
+        "Nested revoke did not complete cleanup"
+    );
+    check(resumes == (succeeds ? 1 : 0), "Nested disconnect stranded or prematurely reopened the native gate");
+  }
+  // A readyRead callback can beat an overdue QTimer. Observe elapsed time at
+  // admission, including after a synchronous native focus/geometry query.
+  for (bool stallDuringNative : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    const auto send = fixture.window->onKeyboardRouteSend;
+    bool delayed = false;
+    if (stallDuringNative)
+      nativeQuiesceObserver = [] { QThread::msleep(70); };
+    else
+      fixture.window->onKeyboardRouteSend = [&](const auto &control) {
+        if (control.mode == KeyboardRouteMode::Original && control.action == KeyboardRouteAction::Acknowledge) {
+          QThread::msleep(70);
+          delayed = true;
+          BridgeTestAccess::keyboardReply(fixture.host, control);
+          return true;
+        }
+        return send(control);
+      };
+    fixture.request();
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }),
+        "Expired Ready did not recover viewer"
+    );
+    check(
+        (stallDuringNative || delayed) && fixture.grants == 0 && fixture.reasons.contains(KeyboardRouteReason::Timeout),
+        "Expired acknowledgement granted original authority"
+    );
+    nativeQuiesceObserver = {};
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = fixture.request();
+    // Feed an exact Ready synchronously, then invalidate before its queued
+    // controller notification. No original authority may escape that boundary.
+    BridgeTestAccess::keyboardReply(
+        fixture.host,
+        {binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+    );
+    fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::GeometryChanged);
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }),
+        "Queued grant cancellation did not retire"
+    );
+    check(fixture.grants == 0, "Queued quiescence callback ignored intervening invalidation");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.host.onKeyboardQuiesced = [](const auto &) { throw std::runtime_error("Local controller failure"); };
+    fixture.request();
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }),
+        "Throwing controller did not revoke"
+    );
+    check(fixture.reasons.contains(KeyboardRouteReason::Failed), "Controller failure lost revocation reason");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    int notifications = 0;
+    std::optional<KeyboardRouteBinding> replacement;
+    fixture.host.onKeyboardQuiesced = [&](const auto &) {
+      if (++notifications == 1) {
+        fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+        check(
+            waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }), "Nested resume did not finish"
+        );
+        replacement = fixture.request();
+        throw std::runtime_error("Old local callback failed after replacement");
+      }
+      fixture.original = true;
+      ++fixture.grants;
+    };
+    fixture.request();
+    check(waitUntil([&] { return fixture.grants == 1; }), "Old callback failure revoked replacement route");
+    check(
+        replacement == BridgeTestAccess::keyboardBinding(fixture.host) && fixture.revokes == 1,
+        "Old callback exception changed the replacement binding"
+    );
+  }
+}
+
 void terminalReconnectFailures(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   for (int scenario = 0; scenario != 3; ++scenario) {
@@ -913,12 +1417,16 @@ int main(int argc, char **argv)
     congestionRecovery(hostIdentity, viewerIdentity);
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
     reconnectCleanupAndIsolation(hostIdentity, viewerIdentity);
+    keyboardFenceRoundTrip(hostIdentity, viewerIdentity);
+    keyboardCancellation(hostIdentity, viewerIdentity);
+    keyboardInvalidation(hostIdentity, viewerIdentity);
+    keyboardReentrancyAndDeadlines(hostIdentity, viewerIdentity);
     terminalReconnectFailures(hostIdentity, viewerIdentity);
     reconnectWaitsForHostCleanup(hostIdentity, viewerIdentity);
     cancelRetryAndDestroy(hostIdentity, viewerIdentity);
     QTextStream(stdout) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
                            "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
-                           "failures, cancellation and panel lifetime\n";
+                           "failures, cancellation, keyboard fencing/revocation and panel lifetime\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

@@ -49,6 +49,9 @@ class Channel final : public QObject
 
 public:
   Channel(Identity identity, QByteArray peerPin, QObject *parent = nullptr);
+  // Destruction silently shuts down transport. Call close() first when the
+  // owner needs the terminal notification while its callbacks are still alive.
+  ~Channel() override;
   void connectTo(const QString &host, quint16 port);
   void accept(qintptr descriptor);
   bool send(MessageType type, const QJsonObject &object = {}, std::uint64_t session = 0, std::uint64_t epoch = 0);

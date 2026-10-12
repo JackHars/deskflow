@@ -39,6 +39,23 @@ neither launch a companion nor register a tap or post OS input. Integration must
 bind both authenticated connections to an explicit approved fingerprint pair
 and coordinate a neutral keyboard boundary with viewer quiescence.
 
+The optional `keyboard-route-v1` handshake now fences Qt keyboard forwarding
+without interrupting pointer delivery. Viewer-held keys are released before an
+exact session/focus/geometry acknowledgment; the native host independently checks
+focus, geometry and its empty Qt ledger before closing network key admission.
+Invalidation preserves the fence until synchronous local revocation and an exact
+viewer-resume exchange. Reentrant cancellation, monotonic deadlines and deferred
+controller notification prevent stale authority. The production executable has
+no local route controller installed, so original capture/injection is still off.
+
+The next integration slice needs trusted parent/core launch and an Offer →
+Candidate → Quiesced preflight before the private channel's Prepare exchange.
+The main Qt thread must own private IPC; the core runs a separate blocking event
+loop. Bind accepted active client connections to revocable immutable snapshots,
+never names or proxy pointers across threads. Original keys and pointer intent
+must share capture order; current OS-to-Qt mouse delivery cannot preserve a source
+token. Resolve that ordering before activation rather than using latest flags.
+
 ## Recorded validation
 
 Local environment: Intel Mac, macOS 26.1, AppleClang 17, Qt 6.8.3, FFmpeg 8.0.1.
@@ -79,6 +96,17 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   callback destruction, queued disconnects and crossed cancellation/input
   regressions pass. Retired input advances replay protection without delivery;
   stale control traffic cannot activate or revoke a newer lease.
+- Keyboard-fence regressions pass for held-key releases before acknowledgment,
+  pointer preservation, exact native resume, crossed cancellation, invalidation,
+  reconnect and late replies. Stalled event loops and delayed native queries
+  cannot bypass the monotonic deadline. Reentrant callback closure and exceptions
+  cannot strand a successfully revoked fence or revoke its replacement.
+- After the fence changes, all eight standalone app suites, all eleven integrated
+  WindowShare suites and all five isolated core suites passed. The core suites,
+  viewer, native admission, and both TLS backends of Transport/Bridge also passed
+  ASan/UBSan and strict warnings. A newly exposed socket-destruction callback bug
+  is fixed by disconnecting callbacks before the socket and timer members are
+  destroyed; live and pending teardown regressions pass under both TLS backends.
 - Actual host and viewer executables negotiated mutual TLS, exchanged a catalog,
   and disconnected cleanly over loopback with disposable identities.
 - macOS reports Screen Recording and Accessibility permission granted to the local
@@ -107,25 +135,27 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   disposable loopback TLS fixture: initial refusal, recovery, authenticated
   disconnect/reconnect, fresh negotiation and clean exit. This newer smoke test
   never starts NativeHost, registers a tap, exports a window or changes displays.
-- All five GitHub Actions jobs passed for `fee69b2f5df63337ec6feabecc43b1ddd25f763c`
-  ([run 38217599883](https://github.com/JackHars/deskflow/actions/runs/38217599883)).
-  That result predates the reconnect and original-input foundation changes.
+- All five GitHub Actions jobs passed for `6de5c5b3da7a91efdcf65ae58f4761efd9fbd1c6`
+  ([run 38226039615](https://github.com/JackHars/deskflow/actions/runs/38226039615)).
+  That includes reconnect and original-input foundations; it predates the new
+  keyboard-fence handshake.
 
 ## Local package
 
 The signed Intel build is in
-`build/packages/reconnect-input-20261012/DeskflowWindowShare-Experimental.app`
+`build/packages/keyboard-fence-20261012/DeskflowWindowShare-Experimental.app`
 with a ZIP beside it. This particular package requires macOS 26.0 because of its
 Homebrew dependencies; it is not notarized. ZIP SHA-256:
-`6e9bb9a309b99baf96eed1f3b4259bccc9fb0c115d3894f06704d156b877be2d`.
+`33b79eba93a2728596723ac3691f4af861ad4f069ef6fcf8816c939a31f43a18`.
 
 The separate installation path is `~/Applications/DeskflowWindowShare-Experimental.app`.
 The installed copy also passed dependency/signature verification and the
 viewer-only TLS/reconnect smoke test without external library environment paths.
 The immediately preceding experimental installation is preserved in
-`build/packages/tls-installed-backup-20261012/DeskflowWindowShare-Experimental.app`;
-the earlier native milestone is preserved in
-`build/packages/native-installed-backup-20261012/DeskflowWindowShare-Experimental.app`.
+`build/packages/reconnect-installed-backup-20261012/DeskflowWindowShare-Experimental.app`.
+Earlier TLS and native installations remain in their respective
+`build/packages/tls-installed-backup-20261012/` and
+`build/packages/native-installed-backup-20261012/` directories.
 Launch with the explicit options documented in `docs/seamless-windows.md`; it is
 an experimental command-line-configured app, not yet the final integrated GUI.
 

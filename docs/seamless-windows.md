@@ -174,6 +174,21 @@ to an explicit pair of approved fingerprints and connection incarnations. The
 core exposes a fingerprint only after its existing trusted-peer check succeeds;
 ordinary encryption-only clients provide no authentication proof for this route.
 
+An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
+forwarding with an independent native admission fence. The viewer releases its
+held Qt keys before acknowledging the exact session, focus and geometry binding;
+pointer input continues. Invalidated fences remain closed until local original
+authority has been revoked and the host requests an exact viewer resume. Old
+held keys stay suppressed through their releases. Legacy peers keep the ordinary
+viewer path. The executable does not yet install the local controller required
+to initiate this handoff, and the network protocol carries no original Mac keys.
+
+Activation still requires a verified parent/core launch, both live authenticated
+connections, a neutral capture boundary, and causal ordering of original keys
+with pointer events. A cache of the latest modifier flags is insufficient: a
+delayed click must not be delivered after a later modifier release. These remain
+integration requirements, not behavior claimed by the current automated tests.
+
 The manual `windowshare-native-smoke` executable opens its own disposable test
 window and verifies real capture, decoding, targeted input and restoration. It
 requires an unlocked Mac desktop with normal Screen Recording and Accessibility
