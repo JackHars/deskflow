@@ -3,6 +3,33 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Physical input session preparation (2026-10-12)
+
+The first bounded human-test session authenticated an actual experimental Mac
+primary to the Ubuntu core, which opened its own EIS session and provider-owned
+Qt viewer in private GNOME 50.1. A separate mutually pinned connection streamed
+the disposable Mac source window. Both routes used SSH forwarding sockets;
+the ordinary installations and settings were preserved. Original-input delivery
+and holding-display relocation were disabled, with explicit hotkeys for entering
+and returning from the private Linux screen.
+
+The session expired without receiving any physical input: both the legacy packet
+counts and Mac receiver event counts remained zero. This is an inconclusive
+physical test, not an input-delivery pass. Disconnect emptied the restore journal,
+left the source neutral at its original frame and stopped all owned processes,
+container and sockets. Ubuntu's ordinary client PID 8762 and Mac settings remained
+unchanged. Evidence and the explicit assessment are under
+`build/physical-input-20261012/session-1/`.
+
+The source recorder now retains the latest 128 events per stream, with monotonic
+sequence numbers, total counts and dropped-history indicators. This permits a
+bounded collector to detect missing intervals during a longer human test. The
+existing native capture/input/release/restoration smoke passes with the new
+recorder in 2.121 seconds, with 31 Qt and 11 native events, contiguous sequences
+and no held input. Evidence is
+`build/native-smoke-20261012/bounded-receipt-regression/`. This automated local
+check does not replace the pending physical two-machine test.
+
 ## Actual Mac/Ubuntu synthetic round trip (2026-10-12)
 
 Overall completion is now approximately 50%. WiFiman SSH again reaches hostname
@@ -861,8 +888,9 @@ Launch with the explicit options documented in `docs/seamless-windows.md`; it is
 an experimental command-line-configured app, not yet the final integrated GUI.
 
 Ubuntu SSH access and isolated builds/tests are now verified as recorded above.
-The active desktop is GNOME Wayland with one active monitor. Real cross-machine
-window input, two-monitor behavior and an installed Linux release remain unproven.
+The active desktop is GNOME Wayland with one active monitor. Synthetic native
+cross-machine input passes; physical input, two-monitor behavior and an installed
+Linux release remain unproven.
 
 ## Remaining milestones
 
@@ -871,8 +899,9 @@ window input, two-monitor behavior and an installed Linux release remain unprove
    preflight wiring. Prove one Mac window's capture, keyboard, pointer, scroll and
    return path on Ubuntu; validate the emergency chord on an unlocked Mac.
 2. Prove holding-display lifecycle, multiple exported windows, focus changes,
-   shortcuts and both monitor destinations. Linux builds and headless X11 tests
-   are done; real Wayland behavior and the two-monitor arrangement remain open.
+   shortcuts and both monitor destinations. Linux builds, headless X11 and native
+   private GNOME/Wayland tests pass; the physical desktop and two-monitor
+   arrangement remain open.
 3. Complete compositor-specific coordinate handling and cross-machine input
    fencing for the supported Linux session types.
 4. Implement transactional edge-drag export and drag-back using Deskflow topology.

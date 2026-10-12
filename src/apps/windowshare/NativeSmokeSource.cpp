@@ -30,6 +30,20 @@
 #include <unistd.h>
 
 namespace {
+constexpr qsizetype receiptHistoryLimit = 128;
+constexpr qint64 receiptSequenceLimit = 9007199254740991;
+
+void appendReceipt(QJsonArray &history, qint64 &count, QJsonObject observed)
+{
+  // Keep JSON sequence values exact for collectors and never wrap/reuse one.
+  if (count == receiptSequenceLimit)
+    return;
+  observed["sequence"] = ++count;
+  history.append(observed);
+  if (history.size() > receiptHistoryLimit)
+    history.removeAt(0);
+}
+
 template <typename Result, typename... Args> Result nativeMessage(id receiver, const char *selector, Args... args)
 {
   return reinterpret_cast<Result (*)(id, SEL, Args...)>(objc_msgSend)(receiver, sel_registerName(selector), args...);
@@ -59,7 +73,7 @@ public:
   }
   bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *) override
   {
-    if (eventType != "mac_generic_NSEvent" || !message || m_nativeObserved.size() >= 64)
+    if (eventType != "mac_generic_NSEvent" || !message)
       return false;
     const auto event = reinterpret_cast<id>(message);
     const auto type = nativeMessage<unsigned long>(event, "type");
@@ -89,7 +103,7 @@ public:
       observed["dy"] = nativeMessage<double>(event, "scrollingDeltaY");
       observed["precise"] = bool(nativeMessage<BOOL>(event, "hasPreciseScrollingDeltas"));
     }
-    m_nativeObserved.append(observed);
+    appendReceipt(m_nativeObserved, m_nativeEventCount, std::move(observed));
     save();
     return false;
   }
@@ -140,8 +154,7 @@ public:
       observed["y"] = mouse->position().y();
       observed["button"] = int(mouse->button());
     }
-    if (m_observed.size() < 64)
-      m_observed.append(observed);
+    appendReceipt(m_observed, m_eventCount, std::move(observed));
     save();
     return false;
   }
@@ -208,6 +221,12 @@ private:
                        {"title", m_window ? m_window->windowTitle() : QString()},
                        {"originalFrame", m_originalFrame},
                        {"frame", frame},
+                       {"eventCount", m_eventCount},
+                       {"nativeEventCount", m_nativeEventCount},
+                       {"eventsDropped", m_eventCount - m_observed.size()},
+                       {"nativeEventsDropped", m_nativeEventCount - m_nativeObserved.size()},
+                       {"eventSequenceExhausted", m_eventCount == receiptSequenceLimit},
+                       {"nativeEventSequenceExhausted", m_nativeEventCount == receiptSequenceLimit},
                        {"events", m_observed},
                        {"nativeEvents", m_nativeObserved},
                        {"nativeActive", bool(nativeMessage<BOOL>(application, "isActive"))},
@@ -224,6 +243,7 @@ private:
   QSet<int> m_buttons;
   QJsonArray m_observed;
   QJsonArray m_nativeObserved;
+  qint64 m_eventCount = 0, m_nativeEventCount = 0;
   QElapsedTimer m_clock;
   QTimer m_stateTimer;
   int m_keyDown = 0, m_keyUp = 0, m_mouseDown = 0, m_mouseUp = 0, m_scroll = 0;

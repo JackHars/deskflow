@@ -38,6 +38,13 @@ separately, with the previous experimental installation retained as a backup.
 The 125% two-machine run used that installed host.
 See `WORK_STATE.md` for test logs, package details and remaining acceptance tests.
 
+A subsequent bounded human-test session also connected the actual Mac primary
+to the Ubuntu core's provider-owned EIS/viewer session. It received no human
+input before its automatic shutdown, so physical delivery remains unverified.
+The test closed cleanly and preserved the ordinary installations. Its native
+source recorder now exposes bounded event histories and monotonic sequences
+so a collector can detect any missing input receipts.
+
 ### Actual two-machine synthetic acceptance
 
 The coordinator exports only its own disposable Mac source window. A private
