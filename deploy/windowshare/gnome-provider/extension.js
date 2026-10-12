@@ -12,9 +12,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
-    samePointerPosition, supportedVersion, unavailableReason, validLaunch, validRect,
+    samePointerPosition, supportedVersion, unavailableReason, validRect,
     validRequest,
 } from './logic.js';
+import {closeDescriptorList, withViewerLauncher} from './launcher.js';
 
 const REMOTE_NAME = 'org.gnome.Mutter.RemoteDesktop';
 const REMOTE_PATH = '/org/gnome/Mutter/RemoteDesktop';
@@ -185,6 +186,7 @@ class Provider {
             providerApi: ['u', 1], backend: ['s', this._backend],
             nativeHitTesting: ['b', this._native], exactWaylandClientBinding: ['b', true],
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
+            viewportChannel: ['b', true], viewportSocketValidated: ['b', false],
             syncFenceVerified: ['b', false], pointerDeviceAttribution: ['b', false],
             qtViewportMapping: ['b', false], deliveryReady: ['b', false],
         })]));
@@ -267,22 +269,23 @@ class Provider {
     }
 
     LaunchViewerAsync([id, generation, executable, args], invocation) {
+        this._launchViewer(id, generation, executable, args, invocation, null);
+    }
+
+    LaunchViewerWithViewportAsync([id, generation, executable, args, handle], invocation) {
+        const message = invocation.get_message();
+        this._launchViewer(id, generation, executable, args, invocation, {
+            handle, fdList: message.get_unix_fd_list(), declaredCount: message.get_num_unix_fds(),
+        });
+    }
+
+    _launchViewer(id, generation, executable, args, invocation, viewport) {
         try {
             const session = this._lookup(invocation, id, generation);
-            if (session.viewer || !validLaunch(executable, args))
-                throw new Error('One viewer is allowed; use an absolute executable and bounded argv without Qt overrides');
-            const file = Gio.File.new_for_path(executable);
-            if (file.query_file_type(Gio.FileQueryInfoFlags.NONE, null) !== Gio.FileType.REGULAR ||
-                !GLib.file_test(executable, GLib.FileTest.IS_EXECUTABLE))
-                throw new Error('Viewer executable is not a regular executable file');
-            const launcher = new Gio.SubprocessLauncher({flags: Gio.SubprocessFlags.NONE});
-            launcher.setenv('QT_QPA_PLATFORM', 'wayland', true);
-            launcher.setenv('GDK_BACKEND', 'wayland', true);
-            for (const variable of ['DISPLAY', 'WAYLAND_DISPLAY', 'QT_PLUGIN_PATH',
-                'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_WAYLAND_SHELL_INTEGRATION',
-                'QT_WAYLAND_USE_BYPASSWINDOWMANAGERHINT', 'QT_WAYLAND_RECONNECT'])
-                launcher.unsetenv(variable);
-            const client = Meta.WaylandClient.new_subprocess(global.context, launcher, [executable, ...args]);
+            if (session.viewer)
+                throw new Error('One viewer is allowed per session');
+            const client = withViewerLauncher(executable, args, viewport,
+                (launcher, argv) => Meta.WaylandClient.new_subprocess(global.context, launcher, argv));
             const process = client.get_subprocess();
             session.viewer = {token: uuid(), client, process, exited: false, killSource: 0};
             const viewer = session.viewer;
@@ -303,6 +306,10 @@ class Provider {
             invocation.return_value(new GLib.Variant('(s)', [viewer.token]));
         } catch (error) {
             errorReply(invocation, error);
+        } finally {
+            // Also covers wrong caller/stale session/already-launched rejection
+            // before the launcher takes ownership. An emptied list is harmless.
+            closeDescriptorList(viewport?.fdList);
         }
     }
 

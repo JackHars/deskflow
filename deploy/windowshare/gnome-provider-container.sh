@@ -32,8 +32,12 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   gnome-shell mutter gjs python3 python3-gi gir1.2-gtk-4.0 \
-  libei-dev libeis-dev build-essential pkg-config dbus-daemon dbus-bin libglib2.0-bin \
-  libgl1-mesa-dri libegl-mesa0 fonts-dejavu-core nodejs
+  libei-dev libeis-dev build-essential pkg-config dbus-daemon dbus-bin libglib2.0-bin libglib2.0-dev \
+  libgl1-mesa-dri libegl-mesa0 fonts-dejavu-core nodejs \
+  cmake ninja-build qt6-base-dev qt6-base-private-dev qt6-tools-dev \
+  qt6-wayland qt6-wayland-dev qt6-wayland-private-dev libwayland-dev \
+  libssl-dev openssl libavcodec-dev libavutil-dev libswscale-dev libx264-dev ffmpeg \
+  libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 libxkbcommon-x11-0 xvfb xauth
 dbus-uuidgen --ensure=/etc/machine-id
 
 # This account exists only in this container; never adjust the checkout's owner.
@@ -42,18 +46,59 @@ if ! id "$fixture_user" >/dev/null 2>&1; then
   useradd --create-home --shell /bin/sh "$fixture_user"
 fi
 scratch=$(mktemp -d /tmp/deskflow-gnome-container-XXXXXX)
-trap 'rm -rf -- "$scratch"' EXIT
+finish() {
+  local exit_status=$?
+  mkdir -p "$scratch/report"
+  for name in configure build application-tests launcher-native; do
+    if [[ -f "$scratch/$name.log" ]]; then
+      cp "$scratch/$name.log" "$scratch/report/"
+      if [[ $exit_status != 0 ]]; then
+        tail -n 50 "$scratch/$name.log" >&2
+      fi
+    fi
+  done
+  chmod -R a+rX "$scratch/report"
+  cp -a "$scratch/report" "$output_path"
+  rm -rf -- "$scratch"
+}
+trap finish EXIT
 chown "$fixture_user:$fixture_user" "$scratch"
 mkdir -p "$(dirname "$output_path")"
 
 node --test "$source_root/deploy/windowshare/gnome-provider/tests/logic.test.js"
+runuser -u "$fixture_user" -- cmake -S "$source_root/src/apps/windowshare" -B "$scratch/build" -G Ninja \
+  -DWINDOWSHARE_APP=ON -DWINDOWSHARE_GNOME_FIXTURE=ON -DCMAKE_BUILD_TYPE=Debug \
+  >"$scratch/configure.log" 2>&1
+runuser -u "$fixture_user" -- cmake --build "$scratch/build" --parallel 2 \
+  >"$scratch/build.log" 2>&1
 set +e
-runuser -u "$fixture_user" -- /usr/bin/python3 \
-  "$source_root/deploy/windowshare/gnome-provider-tests.py" --output "$scratch/report"
+runuser -u "$fixture_user" -- env QT_QPA_PLATFORM=offscreen LANG=C.UTF-8 \
+  ctest --test-dir "$scratch/build" --output-on-failure --timeout 120 \
+  >"$scratch/application-tests.log" 2>&1
 result=$?
-set -e
-if [[ -d "$scratch/report" ]]; then
-  chmod -R a+rX "$scratch/report"
-  cp -a "$scratch/report" "$output_path"
+if [[ $result == 0 ]]; then
+  runuser -u "$fixture_user" -- /usr/bin/python3 \
+    "$source_root/deploy/windowshare/gnome-provider/tests/launcher-native.py" \
+    >"$scratch/launcher-native.log" 2>&1
+  result=$?
 fi
+if [[ $result == 0 ]]; then
+  runuser -u "$fixture_user" -- /usr/bin/python3 \
+  "$source_root/deploy/windowshare/gnome-provider-tests.py" --output "$scratch/report"
+  result=$?
+fi
+if [[ $result == 0 ]]; then
+  for scale in 1 1.25; do
+    runuser -u "$fixture_user" -- /usr/bin/python3 \
+      "$source_root/deploy/windowshare/gnome-qt-viewer-tests.py" \
+      --viewer "$scratch/build/deskflow-windowshare" \
+      --fixture "$scratch/build/windowshare-gnome-viewer-fixture" \
+      --scale "$scale" --output "$scratch/report/qt-scale-$scale"
+    result=$?
+    if [[ $result != 0 ]]; then
+      break
+    fi
+  done
+fi
+set -e
 exit "$result"

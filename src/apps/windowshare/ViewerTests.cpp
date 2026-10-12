@@ -10,6 +10,7 @@
 #include <QFocusEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
+#include <QMoveEvent>
 #include <QTextStream>
 #include <QWheelEvent>
 #include <cmath>
@@ -218,6 +219,39 @@ void testMappingAndReadiness()
       "Viewer messages lost session identity"
   );
   viewer.disconnected();
+}
+
+void testViewportLifecycle()
+{
+  Recording recording;
+  auto viewer = std::make_unique<Viewer>(131, 14, metadata());
+  recording.attach(*viewer);
+  makeReady(*viewer, recording);
+  makeFocused(*viewer, recording);
+  QCoreApplication::processEvents();
+  if (!QGuiApplication::platformName().startsWith("wayland")) {
+    check(!viewer->waylandViewportState(), "A non-Wayland window manufactured native viewport evidence");
+    check(!viewer->mapWaylandSurface({}, {20, 30}), "An unbound native surface point was mapped");
+  }
+  int invalidations = 0;
+  viewer->onViewportInvalidated = [&] { ++invalidations; };
+  viewer->repaint();
+  QCoreApplication::processEvents();
+  check(invalidations == 0, "An unchanged video repaint revoked its viewport");
+  for (int i = 0; i < 3; ++i) {
+    QMoveEvent event(viewer->pos(), viewer->pos());
+    QCoreApplication::sendEvent(viewer.get(), &event);
+  }
+  check(invalidations == 0, "Viewport invalidation reentered the triggering native event");
+  if (!waitUntil([&] { return invalidations == 1; })) {
+    QTextStream(stderr) << "Viewport coalescing callbacks: expected=1 actual=" << invalidations << '\n';
+    throw std::runtime_error("Native viewport changes were not coalesced");
+  }
+  focus(*viewer, false);
+  check(waitUntil([&] { return invalidations == 2; }), "Focus loss did not revoke viewport observation");
+  viewer->onViewportInvalidated = [&] { viewer.reset(); };
+  viewer->disconnected();
+  check(waitUntil([&] { return !viewer; }), "Viewport invalidation observer could not safely destroy viewer");
 }
 
 void testFocusQueueAndOwnership()
@@ -882,6 +916,7 @@ int main(int argc, char **argv)
   try {
     testDecoder();
     testMappingAndReadiness();
+    testViewportLifecycle();
     testFocusQueueAndOwnership();
     testModifierRelease();
     testFocusRevocation();

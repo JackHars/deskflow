@@ -5,7 +5,9 @@
 #pragma once
 
 #include "Core.h"
+#include "GnomeViewportProtocol.h"
 #include "KeyboardRoute.h"
+#include "WaylandViewport.h"
 #include <QImage>
 #include <QJsonObject>
 #include <QMap>
@@ -16,6 +18,7 @@
 #include <QTimer>
 #include <QVector>
 #include <QWidget>
+#include <atomic>
 #include <functional>
 #include <memory>
 #ifdef WINDOWSHARE_X11
@@ -70,6 +73,11 @@ public:
   // Unsupported platforms/plugins report unavailable. No Qt global-position
   // fallback is used to manufacture a native desktop coordinate space.
   QString viewportUnavailableReason() const;
+  std::optional<GnomeViewportState> waylandViewportState() const;
+  std::optional<QPointF> mapWaylandSurface(const GnomeViewportState &expected, QPointF point) const;
+  // Coalesced owner-thread notification, after the invalidating event unwinds.
+  // A snapshot/map query still rechecks all state synchronously at use.
+  std::function<void()> onViewportInvalidated;
 #ifdef WINDOWSHARE_X11
   std::optional<ViewerViewportObservation> viewportObservation() const;
 #endif
@@ -107,16 +115,19 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
-#ifdef WINDOWSHARE_X11
-  friend class ViewerX11Observer;
   void invalidateViewport();
-  std::unique_ptr<ViewerX11Observer> m_x11Observer;
   std::shared_ptr<std::atomic_bool> m_viewportRevoked = std::make_shared<std::atomic_bool>(false);
-  std::uint64_t m_surfaceIncarnation = 0, m_viewportRevision = 1;
+  std::uint64_t m_viewportRevision = 1, m_waylandSurfaceIncarnation = 1;
   QSize m_paintedClient, m_paintedImage;
   QRectF m_paintedVideo;
   double m_paintedDpr = 0;
   bool m_viewportClosed = false;
+  std::optional<WaylandViewportGeometry> m_paintedWayland;
+  QTimer m_viewportNotification;
+#ifdef WINDOWSHARE_X11
+  friend class ViewerX11Observer;
+  std::unique_ptr<ViewerX11Observer> m_x11Observer;
+  std::uint64_t m_surfaceIncarnation = 0;
 #endif
   void requestFocus();
   void releaseInput(KeyboardRouteReason reason = KeyboardRouteReason::FocusChanged);

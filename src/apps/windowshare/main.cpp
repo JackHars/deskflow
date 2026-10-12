@@ -6,6 +6,9 @@
 #include "NativeHost.h"
 #include "Transport.h"
 #include "Viewer.h"
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+#include "ViewerViewportEndpoint.h"
+#endif
 #if defined(WINDOWSHARE_LOCAL_INPUT) && !defined(WINDOWSHARE_BRIDGE_TEST)
 #include "LocalInputBootstrap.h"
 #include "LocalInputCodeAdmission.h"
@@ -272,6 +275,27 @@ public:
     updateControls();
   }
   std::function<void()> onQuitRequested;
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+  void attachViewportEndpoint(ViewerViewportEndpoint &endpoint)
+  {
+    require(!m_hosting && !m_viewportEndpoint, "Viewport endpoint requires one viewer controller");
+    m_viewportEndpoint = &endpoint;
+    const QPointer<Bridge> alive(this);
+    endpoint.onSnapshot = [alive] { return alive ? alive->viewportState() : std::nullopt; };
+    endpoint.onCheck = [alive](const GnomeViewportState &expected) {
+      return alive && alive->viewportState() == std::optional(expected);
+    };
+    endpoint.onMap = [alive](const GnomeViewportState &expected, QPointF point) -> std::optional<QPointF> {
+      if (!alive || alive->viewportState() != std::optional(expected))
+        return {};
+      const auto found = alive->m_viewers.find(expected.session);
+      if (found == alive->m_viewers.end() || !found->second.window)
+        return {};
+      const auto mapped = found->second.window->mapWaylandSurface(expected, point);
+      return alive && alive->viewportState() == std::optional(expected) ? mapped : std::nullopt;
+    };
+  }
+#endif
   // A local controller must revoke its private original-input authority before
   // either native admission or viewer forwarding can resume. Network messages
   // cannot install this callback, and main does not activate this route yet.
@@ -610,6 +634,27 @@ private:
     if (quit)
       quit();
   }
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+  std::optional<GnomeViewportState> viewportState() const
+  {
+    if (m_hosting || m_shuttingDown || m_cleaning || !m_established || !m_channel || m_viewers.size() != 1)
+      return {};
+    const auto peer = m_channel->authenticatedPeerObservation();
+    if (!peer || !peer->live())
+      return {};
+    const auto &view = m_viewers.begin()->second;
+    if (!view.window)
+      return {};
+    auto state = view.window->waylandViewportState();
+    if (!state)
+      return {};
+    state->connection = peer->ticket().incarnation();
+    const auto &fingerprint = peer->ticket().fingerprint();
+    state->peerFingerprint =
+        QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(fingerprint.data()), fingerprint.size()).toHex());
+    return state;
+  }
+#endif
   void finishShutdown()
   {
     if (!m_shuttingDown || m_shutdownFinishing || m_shutdownComplete ||
@@ -617,6 +662,12 @@ private:
       return;
     m_shutdownFinishing = true;
     const QPointer<Bridge> alive(this);
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    if (m_viewportEndpoint)
+      m_viewportEndpoint->close();
+    if (!alive)
+      return;
+#endif
     const auto channel = m_channel;
     m_channel = nullptr;
     if (channel) {
@@ -927,6 +978,14 @@ private:
     channel->onClosed = [this, channel, generation](QString reason, CloseCause cause) {
       if (m_shuttingDown || m_channel != channel || m_connectionGeneration != generation)
         return;
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_viewportEndpoint) {
+        const QPointer<Bridge> alive(this);
+        m_viewportEndpoint->close();
+        if (!alive || m_shuttingDown)
+          return;
+      }
+#endif
       // A peer that drops TLS while rejecting Hello may be rejecting our
       // identity or protocol. Only a fully negotiated loss is retryable there.
       const bool retryable = cause == CloseCause::Network && (!m_negotiating || m_established);
@@ -1113,10 +1172,22 @@ private:
       viewer->onReturned = [this, id, epoch = packet.epoch, viewer, generation] {
         forgetViewer(id, epoch, viewer, generation);
       };
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      viewer->onViewportInvalidated = [this, id, epoch = packet.epoch, viewer, generation] {
+        if (currentViewer(id, epoch, viewer, generation) && m_viewportEndpoint)
+          m_viewportEndpoint->invalidate();
+      };
+#endif
       connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer, generation] {
         forgetViewer(id, epoch, viewer, generation);
       });
       m_viewers.emplace(id, View{packet.epoch, viewer, viewer});
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_viewportEndpoint)
+        m_viewportEndpoint->invalidate(QStringLiteral("viewer-set-changed"));
+      if (m_shuttingDown)
+        return;
+#endif
       viewer->placeOnScreen(m_screen);
       viewer->show();
       return;
@@ -1141,6 +1212,12 @@ private:
       break;
     }
     case MessageType::Closed:
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_viewportEndpoint)
+        m_viewportEndpoint->invalidate(QStringLiteral("viewer-closed"));
+      if (m_shuttingDown)
+        return;
+#endif
       viewer->disconnected();
       viewer->onReturned = {};
       m_viewers.erase(found);
@@ -1209,6 +1286,7 @@ private:
         view.window->onSend = {};
         view.window->onKeyboardRouteSend = {};
         view.window->onError = {};
+        view.window->onViewportInvalidated = {};
         view.window->disconnected();
         view.window->close();
       }
@@ -1221,8 +1299,13 @@ private:
   }
   void forgetViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation)
   {
-    if (currentViewer(session, epoch, window, generation))
+    if (currentViewer(session, epoch, window, generation)) {
       m_viewers.erase(session);
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_viewportEndpoint)
+        m_viewportEndpoint->invalidate(QStringLiteral("viewer-returned"));
+#endif
+    }
   }
   struct View
   {
@@ -1245,6 +1328,9 @@ private:
   QPushButton *m_open = nullptr, *m_refresh = nullptr, *m_retry = nullptr, *m_cancel = nullptr;
   Listener m_listener;
   QPointer<Channel> m_channel;
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+  QPointer<ViewerViewportEndpoint> m_viewportEndpoint;
+#endif
   QTimer m_keyframeRetry;
   QTimer m_reconnectTimer, m_stableTimer;
   QTimer m_keyboardTimeout;
@@ -1337,6 +1423,9 @@ void configureApplicationLifetime(QApplication &application, Bridge &bridge, std
 int main(int argc, char **argv)
 {
   try {
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    auto viewportBootstrap = ViewerViewportBootstrap::inspect(argc, argv);
+#endif
 #ifdef WINDOWSHARE_LOCAL_INPUT
     auto inputBootstrap = LocalInputHostBootstrap::inspect(argc, argv);
 #endif
@@ -1374,6 +1463,13 @@ int main(int argc, char **argv)
          {"quit-after", "Exit cleanly after this many seconds (diagnostics).", "seconds", "0"},
          {"headless", "Do not show the connection window (viewer windows still appear)."}}
     );
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    QCommandLineOption viewportDescriptor(
+        "gnome-viewport-fd", "Inherited viewport observation descriptor.", "descriptor"
+    );
+    viewportDescriptor.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOption(viewportDescriptor);
+#endif
 #ifdef WINDOWSHARE_LOCAL_INPUT
     QCommandLineOption inputDescriptor("core-input-fd", "Inherited private descriptor.", "descriptor");
     QCommandLineOption inputProbe("core-input-probe", "Private handshake diagnostic.");
@@ -1421,6 +1517,11 @@ int main(int argc, char **argv)
         });
       }
     }
+#endif
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    if (!parser.parse(app.arguments()))
+      throw std::runtime_error(parser.errorText().toStdString());
+    viewportBootstrap.validateOptions(parser.optionNames());
 #endif
     parser.process(app);
     if (parser.isSet("init-identity"))
@@ -1476,6 +1577,14 @@ int main(int argc, char **argv)
     );
     configureApplicationLifetime(app, bridge, [&shutdown] { shutdown.request(); });
     shutdown.attach(bridge);
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    std::unique_ptr<ViewerViewportEndpoint> viewport;
+    if (viewportBootstrap.inherited()) {
+      viewport = std::make_unique<ViewerViewportEndpoint>(viewportBootstrap.takeDescriptor());
+      viewport->onClosed = [&shutdown] { shutdown.request(); };
+      bridge.attachViewportEndpoint(*viewport);
+    }
+#endif
     if (interrupted)
       shutdown.request();
     if (shutdown.requested())

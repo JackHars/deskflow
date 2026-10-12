@@ -424,6 +424,13 @@ void EiComputer::fakeMouseMove(int32_t x, int32_t y)
   ensureEmulating();
   ei_device_pointer_motion_absolute(m_eiAbs, x, y);
   ei_device_frame(m_eiAbs, ei_now(m_ei));
+#ifdef BUILD_WINDOWSHARE
+  // Observe the production viewer through the same owned EIS session. This
+  // asynchronous request is not an EIS fence or attribution of this motion;
+  // it leaves ordinary injection and original-input delivery unchanged.
+  if (m_gnomeProvider)
+    m_gnomeProvider->requestViewportObservation();
+#endif
 }
 
 void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
@@ -1046,16 +1053,25 @@ void EiComputer::handleGnomeProviderChanged()
     stopGnomeProvider(update.error.empty() ? "GNOME input session ended" : update.error.c_str());
     return;
   }
-  if (update.descriptor < 0)
-    return;
-  // libei takes ownership even on failure and closes at context teardown.
-  const auto result = ei_setup_backend_fd(m_ei, update.descriptor);
-  if (result != 0) {
-    LOG_ERR("failed to adopt GNOME EIS session: %s", strerror(-result));
-    stopGnomeProvider("Cannot adopt GNOME EIS session");
-    return;
+  if (update.descriptor >= 0) {
+    // libei takes ownership even on failure and closes at context teardown.
+    const auto result = ei_setup_backend_fd(m_ei, update.descriptor);
+    if (result != 0) {
+      LOG_ERR("failed to adopt GNOME EIS session: %s", strerror(-result));
+      stopGnomeProvider("Cannot adopt GNOME EIS session");
+      return;
+    }
+    LOG_INFO("connected experimental GNOME input session and owned Wayland viewer");
   }
-  LOG_INFO("connected experimental GNOME input session and owned Wayland viewer");
+  const auto viewport = m_gnomeProvider->takeViewportUpdate();
+  if (viewport && viewport->observation && viewport->observation->live() && !m_gnomeViewportReported) {
+    const auto &state = viewport->observation->snapshot();
+    LOG_DEBUG(
+        "GNOME viewer painted viewport observed: surface %.3f,%.3f -> source %.3f,%.3f (observation only)",
+        state.surfaceX, state.surfaceY, state.sourceX, state.sourceY
+    );
+    m_gnomeViewportReported = true;
+  }
 }
 
 void EiComputer::stopGnomeProvider(const char *reason)

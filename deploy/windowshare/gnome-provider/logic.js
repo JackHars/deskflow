@@ -21,8 +21,13 @@ export function validLaunch(executable, args) {
         Array.isArray(args) && args.length <= 64 &&
         args.every(a => typeof a === 'string' && a.length <= 4096 && !a.includes('\0') &&
             !/^-{1,2}(platform|platformpluginpath|plugin)(=|$)/i.test(a) &&
+            !/^-{1,2}gnome-viewport-fd(=|$)/i.test(a) &&
             !/^QT_(QPA_PLATFORM|PLUGIN_PATH)=/.test(a)) &&
         args.reduce((n, a) => n + a.length, 0) <= 16384;
+}
+
+export function validViewportHandle(handle, count, declaredCount) {
+    return handle === 0 && count === 1 && declaredCount === 1;
 }
 
 export function validRequest(request, x, y, revision) {

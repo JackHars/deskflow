@@ -6,23 +6,24 @@ feature. The ordinary Deskflow build remains the default.
 
 ## Roadmap status
 
-The project is in integration, before the first verified interactive Mac window
+The overall completion estimate is about 45%. The project is in integration,
+before the first verified interactive Mac window
 on Ubuntu. Passing component tests does not establish that complete user flow.
 The next acceptance test is one window with working capture, focus, keyboard,
 pointer, scrolling and return, using the Mac keyboard and trackpad.
 
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
-| Capture, viewer and transport | Mac capture/encode/decode has run live; authenticated transport, independent viewers and reconnect pass automated tests. | Repeat the complete flow across the two machines with interactive input. |
-| Original input integration | Ordered capture records now join the actual Server recipient and coordinate decision; press bookkeeping, private channel and handoff coordinator pass tests. Delivery remains disabled. | Finish remote coordinate validation, pointer fencing and production coordinator integration. |
-| Linux and two monitors | The current revision builds on home Ubuntu; all 56 integrated suites pass. The desktop is GNOME 50.1 Wayland with one active monitor. | Finish Wayland viewport/input integration and verify both physical monitor destinations. |
+| Capture, viewer and transport | Mac capture/encode/decode and targeted keyboard input have run live. The latest own-window smoke still fails pointer clicks and scrolling. Transport, independent viewers and reconnect pass automated tests. | Fix native pointer delivery and verify the complete interactive flow across the two machines. |
+| Original input integration | Ordered capture records join the actual Server recipient and coordinate decision. The GNOME client now joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
+| Linux and two monitors | The current Ubuntu candidate passes 57 integrated and 13 application suites. The native GNOME/Qt viewport join passes with Qt scale factors 1 and 1.25. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
 | Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
-hostname `jack`. The fresh build and integrated tests cover exact revision
+hostname `jack`. The initial restored-network build and integrated tests cover revision
 `6d96b1546c728ac3a8273f17ffd0f04492bc3f13`. That revision also passed all six CI
 jobs, including the real native headless GNOME 50 tests for EIS/Wayland ownership,
 native pointer targeting and caller-loss cleanup. These results do not establish
@@ -66,6 +67,28 @@ The example requires the real paths, host, certificate fingerprint and catalog
 window ID. Session setup and native observations do not authorize original-input
 delivery. See `deploy/windowshare/gnome-provider/README.md` for the supported
 compositor boundary and the remaining pointer/viewport checks.
+
+The core also passes a private Unix socket to the provider-owned viewer. A
+bounded observation joins a fresh GNOME surface hit to that viewer's last
+painted frame, source geometry, focus revision and authenticated peer. It uses
+Qt's native Wayland content transform to account for client-side decorations
+and scaling; letterboxing is excluded. The 250 ms deadline starts when the core
+queues the request and is never renewed. Surface, geometry, focus or connection
+changes revoke retained observations.
+
+The real headless GNOME 50.1/Qt 6.10.2 fixture passes with `QT_SCALE_FACTOR=1`
+and `1.25`, including exact agreement with the viewer's normal pointer packets
+and rejection of decorations, letterboxing, stale paint, lost focus and an
+ambiguous second window. The virtual monitor stays at compositor scale 1;
+these runs establish Qt fractional content scaling, not a fractional GNOME
+monitor configuration or input on the physical desktop.
+
+This channel currently provides observations only. The core requests one after
+ordinary absolute EIS motion, but does not treat the request as a motion fence
+or as evidence of which physical device caused the current pointer position.
+Original-input delivery still requires those bindings and the production
+handoff coordinator. This provider-owned viewer exits on connection loss;
+restarting requires a fresh core/provider session.
 
 ## Current behavior
 
@@ -115,6 +138,12 @@ Use the repository's C++20 baseline, Qt 6.4+ Core/Network/Widgets, FFmpeg develo
 libraries (`libavcodec`, `libavutil`, `libswscale`), pkg-config, and OpenSSL. The full
 Deskflow build can require a newer Qt independently. Hosting requires macOS 13+;
 Linux builds provide the viewer.
+
+Native GNOME viewport mapping additionally needs matching Qt Wayland and Qt Gui
+private development headers plus `wayland-client`. The adapter supports Qt 6.8
+and 6.10 and requires an exact build/runtime Qt version match. Unsupported or
+missing private APIs leave that observation unavailable; they do not supply an
+estimated transform.
 
 ```sh
 cmake -S src/apps/windowshare -B build/windowshare-app \

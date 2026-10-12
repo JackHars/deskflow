@@ -11,6 +11,7 @@
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPlatformSurfaceEvent>
 #include <QPointer>
 #include <QResizeEvent>
 #include <QScreen>
@@ -21,7 +22,6 @@
 #include <limits>
 #ifdef WINDOWSHARE_X11
 #include <QAbstractNativeEventFilter>
-#include <QPlatformSurfaceEvent>
 #endif
 
 namespace deskflow::windowshare {
@@ -52,8 +52,14 @@ public:
   explicit ViewerX11Observer(Viewer &viewer) : m_viewer(viewer)
   {
 #if QT_CONFIG(xcb)
-    if (auto *native = qApp->nativeInterface<QNativeInterface::QX11Application>()) {
-      m_observer = std::make_unique<X11DisplayObserver>(native->connection());
+    // The offscreen plugin can expose QX11Application for GLX while returning
+    // no XCB connection. Its synthetic window IDs are not native X11 surfaces.
+    if (QGuiApplication::platformName() != QStringLiteral("xcb"))
+      return;
+    auto *native = qApp->nativeInterface<QNativeInterface::QX11Application>();
+    auto *connection = native ? native->connection() : nullptr;
+    if (connection) {
+      m_observer = std::make_unique<X11DisplayObserver>(connection);
       qApp->installNativeEventFilter(this);
       m_timer.setInterval(10);
       QObject::connect(&m_timer, &QTimer::timeout, &viewer, [this] { poll(); });
@@ -129,6 +135,7 @@ const ViewerViewportSnapshot &ViewerViewportObservation::snapshot() const noexce
   static const ViewerViewportSnapshot empty;
   return m_snapshot ? *m_snapshot : empty;
 }
+#endif
 void Viewer::invalidateViewport()
 {
   m_viewportRevoked->store(true, std::memory_order_release);
@@ -137,10 +144,15 @@ void Viewer::invalidateViewport()
   else
     ++m_viewportRevision;
   m_viewportRevoked = std::make_shared<std::atomic_bool>(m_viewportClosed);
+#ifdef WINDOWSHARE_X11
   if (m_x11Observer)
     m_x11Observer->invalidate();
+#endif
+  if (!m_viewportNotification.isActive())
+    m_viewportNotification.start(0);
 }
 
+#ifdef WINDOWSHARE_X11
 std::optional<ViewerViewportObservation> Viewer::viewportObservation() const
 {
   if (!viewportUnavailableReason().isEmpty())
@@ -166,6 +178,71 @@ std::optional<ViewerViewportObservation> Viewer::viewportObservation() const
   return result.live() ? std::optional{std::move(result)} : std::nullopt;
 }
 #endif
+
+std::optional<GnomeViewportState> Viewer::waylandViewportState() const
+{
+  if (m_viewportClosed || !acceptsLocalInput() || !isVisible() || m_focusPending || !m_focusRevision ||
+      !m_focusRequest || !m_error.isEmpty() || !m_paintedWayland || m_paintedClient != size() ||
+      m_paintedDpr != devicePixelRatioF() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty())
+    return {};
+  const auto native = readWaylandViewport(windowHandle());
+  if (!native || native != m_paintedWayland)
+    return {};
+  GnomeViewportState state;
+  state.session = m_session;
+  state.epoch = m_epoch;
+  state.geometry = m_geometry;
+  state.focusRequest = m_focusRequest;
+  state.focusRevision = m_focusRevision;
+  state.surfaceIncarnation = m_waylandSurfaceIncarnation;
+  state.viewportRevision = m_viewportRevision;
+  state.nativeSurface = native->resource;
+  state.clientWidth = m_paintedClient.width();
+  state.clientHeight = m_paintedClient.height();
+  state.sourceWidth = m_source.width();
+  state.sourceHeight = m_source.height();
+  state.imageWidth = m_paintedImage.width();
+  state.imageHeight = m_paintedImage.height();
+  state.videoX = m_paintedVideo.x();
+  state.videoY = m_paintedVideo.y();
+  state.videoWidth = m_paintedVideo.width();
+  state.videoHeight = m_paintedVideo.height();
+  state.dpr = m_paintedDpr;
+  state.surfaceWidth = native->extent.width();
+  state.surfaceHeight = native->extent.height();
+  state.contentX = native->contentOrigin.x();
+  state.contentY = native->contentOrigin.y();
+  state.logicalScale = native->logicalScale;
+  return state;
+}
+
+std::optional<QPointF> Viewer::mapWaylandSurface(const GnomeViewportState &expected, QPointF point) const
+{
+  auto state = waylandViewportState();
+  if (!state)
+    return {};
+  // The Bridge independently checks these two channel-owned fields.
+  state->connection = expected.connection;
+  state->peerFingerprint = expected.peerFingerprint;
+  if (*state != expected || !m_paintedWayland)
+    return {};
+  const auto local = mapWaylandViewport(windowHandle(), *m_paintedWayland, point);
+  if (!local)
+    return {};
+  const auto mapped = mapPoint(
+      {local->x(), local->y()},
+      {m_paintedVideo.x(), m_paintedVideo.y(), m_paintedVideo.width(), m_paintedVideo.height()},
+      {0, 0, m_source.width(), m_source.height()}, false
+  );
+  auto fresh = waylandViewportState();
+  if (!fresh)
+    return {};
+  fresh->connection = expected.connection;
+  fresh->peerFingerprint = expected.peerFingerprint;
+  if (*fresh != expected || !mapped)
+    return {};
+  return QPointF(mapped->x, mapped->y);
+}
 
 QString Viewer::viewportUnavailableReason() const
 {
@@ -220,6 +297,12 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
   setMouseTracking(true);
   setMinimumSize(96, 64);
   setWindowTitle(QStringLiteral("Mac window — Deskflow"));
+  m_viewportNotification.setSingleShot(true);
+  connect(&m_viewportNotification, &QTimer::timeout, this, [this] {
+    const auto callback = onViewportInvalidated;
+    if (callback)
+      callback();
+  });
   m_focusTimeout.setSingleShot(true);
   m_resizeDebounce.setSingleShot(true);
   m_resizeTimeout.setSingleShot(true);
@@ -264,8 +347,9 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
 
 Viewer::~Viewer()
 {
-#ifdef WINDOWSHARE_X11
+  onViewportInvalidated = {};
   invalidateViewport();
+#ifdef WINDOWSHARE_X11
   m_x11Observer.reset();
 #endif
   releaseInput(KeyboardRouteReason::Returned);
@@ -604,7 +688,6 @@ std::optional<QPointF> Viewer::mapToSource(QPointF position, bool clampDrag) con
 
 bool Viewer::event(QEvent *event)
 {
-#ifdef WINDOWSHARE_X11
   switch (event->type()) {
   case QEvent::Move:
   case QEvent::Resize:
@@ -616,6 +699,12 @@ bool Viewer::event(QEvent *event)
   case QEvent::WindowDeactivate:
   case QEvent::WindowStateChange:
   case QEvent::PlatformSurface:
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide || event->type() == QEvent::PlatformSurface) {
+      if (m_waylandSurfaceIncarnation == std::numeric_limits<std::uint64_t>::max())
+        m_viewportClosed = true;
+      else
+        ++m_waylandSurfaceIncarnation;
+    }
     invalidateViewport();
     break;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
@@ -626,7 +715,6 @@ bool Viewer::event(QEvent *event)
   default:
     break;
   }
-#endif
   switch (event->type()) {
   case QEvent::WindowActivate:
     m_localActive = true;
@@ -681,15 +769,22 @@ void Viewer::paintEvent(QPaintEvent *)
   if (!m_image.isNull()) {
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.drawImage(videoRect(), m_image);
-#ifdef WINDOWSHARE_X11
+    const auto wayland = readWaylandViewport(windowHandle());
     if (m_paintedGeometry != m_frameGeometry || m_paintedClient != size() || m_paintedImage != m_image.size() ||
-        m_paintedVideo != videoRect() || m_paintedDpr != devicePixelRatioF())
+        m_paintedVideo != videoRect() || m_paintedDpr != devicePixelRatioF() || m_paintedWayland != wayland)
       invalidateViewport();
+    if (wayland && (!m_paintedWayland || wayland->surface != m_paintedWayland->surface ||
+                    wayland->resource != m_paintedWayland->resource)) {
+      if (m_waylandSurfaceIncarnation == std::numeric_limits<std::uint64_t>::max())
+        m_viewportClosed = true;
+      else
+        ++m_waylandSurfaceIncarnation;
+    }
+    m_paintedWayland = wayland;
     m_paintedClient = size();
     m_paintedImage = m_image.size();
     m_paintedVideo = videoRect();
     m_paintedDpr = devicePixelRatioF();
-#endif
     m_paintedGeometry = m_frameGeometry;
   }
   if (m_image.isNull() || !m_error.isEmpty()) {
@@ -838,9 +933,7 @@ void Viewer::queueInput(QJsonObject input)
 
 void Viewer::releaseInput(KeyboardRouteReason reason)
 {
-#ifdef WINDOWSHARE_X11
   invalidateViewport();
-#endif
   const QPointer<Viewer> guard(this);
   const bool wasHandling = m_keyboardRouteHandling;
   m_keyboardRouteHandling = true;

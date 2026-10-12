@@ -221,6 +221,7 @@ private:
   EventQueueTimer *m_gnomeProviderStartTimer = nullptr;
   bool m_gnomeProviderEnabled = false;
   bool m_gnomeProviderStopped = false;
+  bool m_gnomeViewportReported = false;
 #endif
 
   bool m_activated = false;

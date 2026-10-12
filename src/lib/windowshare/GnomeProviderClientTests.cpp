@@ -12,6 +12,7 @@
 #include <QTemporaryDir>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -30,6 +31,7 @@
 // The separate isolated GNOME harness tests the real Shell/Mutter provider.
 using deskflow::windowshare::GnomeProviderClient;
 using deskflow::windowshare::GnomeProviderConfig;
+using namespace deskflow::windowshare;
 using namespace std::chrono_literals;
 
 namespace {
@@ -49,15 +51,26 @@ constexpr auto introspection = R"xml(
       <arg type="s" direction="out"/><arg type="u" direction="out"/>
       <arg type="h" direction="out"/>
     </method>
-    <method name="LaunchViewer">
+    <method name="LaunchViewerWithViewport">
       <arg type="s" direction="in"/><arg type="u" direction="in"/>
       <arg type="s" direction="in"/><arg type="as" direction="in"/>
+      <arg type="h" direction="in"/>
       <arg type="s" direction="out"/>
+    </method>
+    <method name="GetViewer">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
+    <method name="ValidateCurrentHit">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
     </method>
     <method name="CloseSession">
       <arg type="s" direction="in"/><arg type="u" direction="in"/>
     </method>
     <signal name="Closed"><arg type="s"/><arg type="u"/><arg type="s"/></signal>
+    <signal name="Invalidated"><arg type="s"/><arg type="u"/><arg type="u"/><arg type="s"/></signal>
   </interface>
 </node>)xml";
 
@@ -252,8 +265,13 @@ struct Service
   GDBusConnection *connection = nullptr, *otherOwner = nullptr;
   GDBusNodeInfo *description = nullptr;
   GDBusMethodInvocation *pendingCreate = nullptr;
-  guint registration = 0, nameWatch = 0;
-  Descriptor peer;
+  guint registration = 0, nameWatch = 0, viewportTimer = 0, revision = 1;
+  Descriptor peer, viewportPeer;
+  GnomeViewportDecoder viewportDecoder;
+  std::uint64_t paintSnapshot = 0;
+  bool delaySnapshot = false, wrongPeer = false, invalidateOnCheck = false;
+  QByteArray delayedReply;
+  std::chrono::steady_clock::time_point delayedUntil;
   Mode mode;
   std::string caller, failure;
   unsigned capabilities = 0, creates = 0, launches = 0, closes = 0;
@@ -383,13 +401,112 @@ struct Service
     }
     g_object_unref(invocation);
   }
+  void sendViewport(const GnomeViewportReply &reply)
+  {
+    const auto bytes = gnomeViewportFrame(gnomeViewportJson(reply));
+    int flags = 0;
+#ifdef MSG_NOSIGNAL
+    flags = MSG_NOSIGNAL;
+#endif
+    check(
+        ::send(viewportPeer.value, bytes.constData(), static_cast<std::size_t>(bytes.size()), flags) == bytes.size(),
+        "Cannot send fixture viewport reply"
+    );
+  }
+  void invalidatePaint()
+  {
+    check(paintSnapshot != 0, "No fixture painted snapshot to invalidate");
+    GnomeViewportReply reply;
+    reply.operation = GnomeViewportOperation::Invalidated;
+    reply.snapshot = paintSnapshot;
+    reply.reason = "fixture-paint-changed";
+    sendViewport(reply);
+    paintSnapshot = 0;
+  }
+  void invalidateNative()
+  {
+    Error error;
+    check(
+        g_dbus_connection_emit_signal(
+            connection, caller.c_str(), objectPath, serviceName, "Invalidated",
+            g_variant_new("(suus)", sessionId, generation, ++revision, "fixture-focus-changed"), &error.value
+        ),
+        "Cannot invalidate fixture native observation"
+    );
+  }
+  void viewportTick()
+  {
+    if (!delayedReply.isEmpty() && std::chrono::steady_clock::now() >= delayedUntil) {
+      int flags = 0;
+#ifdef MSG_NOSIGNAL
+      flags = MSG_NOSIGNAL;
+#endif
+      check(
+          ::send(viewportPeer.value, delayedReply.constData(), static_cast<std::size_t>(delayedReply.size()), flags) ==
+              delayedReply.size(),
+          "Cannot send deliberately late viewport reply"
+      );
+      delayedReply.clear();
+    }
+    char buffer[4096];
+    const auto count = ::recv(viewportPeer.value, buffer, sizeof(buffer), MSG_DONTWAIT);
+    if (count > 0)
+      viewportDecoder.append(QByteArray(buffer, static_cast<qsizetype>(count)));
+    for (unsigned i = 0; i < 8; ++i) {
+      const auto object = viewportDecoder.take();
+      if (!object)
+        return;
+      const auto request = parseGnomeViewportRequest(*object);
+      GnomeViewportReply reply;
+      reply.operation = request.operation;
+      reply.request = request.request;
+      reply.ok = true;
+      if (request.operation == GnomeViewportOperation::Snapshot) {
+        paintSnapshot = request.request;
+        auto &state = reply.state;
+        state.connection = 1;
+        state.session = 11;
+        state.epoch = 12;
+        state.geometry = 3;
+        state.focusRequest = 4;
+        state.focusRevision = 5;
+        state.surfaceIncarnation = 1;
+        state.viewportRevision = 2;
+        state.peerFingerprint = QString(64, wrongPeer ? 'b' : 'a');
+        state.nativeSurface = 9;
+        state.clientWidth = state.surfaceWidth = state.videoWidth = 800;
+        state.clientHeight = state.surfaceHeight = state.videoHeight = 600;
+        state.sourceWidth = state.imageWidth = 640;
+        state.sourceHeight = state.imageHeight = 480;
+        state.dpr = state.logicalScale = 1;
+        if (std::exchange(delaySnapshot, false)) {
+          delayedReply = gnomeViewportFrame(gnomeViewportJson(reply));
+          delayedUntil = std::chrono::steady_clock::now() + 350ms;
+          continue;
+        }
+      } else {
+        reply.snapshot = request.snapshot;
+        if (request.snapshot != paintSnapshot) {
+          reply.ok = false;
+          reply.reason = "fixture-stale-snapshot";
+        } else if (request.operation == GnomeViewportOperation::Map) {
+          reply.x = request.x * 0.8;
+          reply.y = request.y * 0.8;
+        } else if (request.operation == GnomeViewportOperation::Check && std::exchange(invalidateOnCheck, false)) {
+          invalidatePaint();
+        }
+      }
+      sendViewport(reply);
+    }
+    throw std::runtime_error("Fixture viewport requests exceeded bound");
+  }
   void handle(const char *name, GVariant *parameters, GDBusMethodInvocation *invocation)
   {
     if (!std::strcmp(name, "GetCapabilities")) {
       ++capabilities;
       GVariantBuilder values;
       g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
-      for (const auto *key : {"exactWaylandClientBinding", "eisSessionOwned", "nativeHitTesting"})
+      for (const auto *key : {"exactWaylandClientBinding", "eisSessionOwned", "nativeHitTesting", "viewportChannel"})
         g_variant_builder_add(&values, "{sv}", key, g_variant_new_boolean(true));
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
@@ -401,17 +518,48 @@ struct Service
         pendingCreate = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
       else
         created(invocation);
-    } else if (!std::strcmp(name, "LaunchViewer")) {
+    } else if (!std::strcmp(name, "LaunchViewerWithViewport")) {
       ++launches;
       const char *id = nullptr, *executable = nullptr;
       guint value = 0;
       GVariant *arguments = nullptr;
-      g_variant_get(parameters, "(&su&s@as)", &id, &value, &executable, &arguments);
+      gint handle = -1;
+      g_variant_get(parameters, "(&su&s@ash)", &id, &value, &executable, &arguments, &handle);
       const bool valid = std::strcmp(id, sessionId) == 0 && value == generation && *executable == '/' &&
                          g_variant_n_children(arguments) > 0 &&
                          caller == g_dbus_method_invocation_get_sender(invocation);
       g_variant_unref(arguments);
       check(valid, "Client changed session or sent invalid viewer arguments");
+      auto *message = g_dbus_method_invocation_get_message(invocation);
+      auto *descriptors = g_dbus_message_get_unix_fd_list(message);
+      check(
+          descriptors && g_unix_fd_list_get_length(descriptors) == 1 && handle == 0, "Invalid viewport descriptor list"
+      );
+      Error descriptorError;
+      viewportPeer.reset(g_unix_fd_list_get(descriptors, handle, &descriptorError.value));
+      check(viewportPeer.value >= 0, "Cannot receive private viewport descriptor");
+#ifdef SO_NOSIGPIPE
+      const int noSigpipe = 1;
+      check(
+          ::setsockopt(viewportPeer.value, SOL_SOCKET, SO_NOSIGPIPE, &noSigpipe, sizeof(noSigpipe)) == 0,
+          "Cannot protect fixture writes"
+      );
+#endif
+      viewportTimer = g_timeout_add(
+          1,
+          [](gpointer data) -> gboolean {
+            auto &self = *static_cast<Service *>(data);
+            try {
+              self.viewportTick();
+              return G_SOURCE_CONTINUE;
+            } catch (const std::exception &error) {
+              self.failure = error.what();
+              self.viewportTimer = 0;
+              return G_SOURCE_REMOVE;
+            }
+          },
+          this
+      );
       if (mode == Mode::CloseDuringSetup) {
         Error error;
         check(
@@ -423,6 +571,42 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
+    } else if (!std::strcmp(name, "GetViewer") || !std::strcmp(name, "ValidateCurrentHit")) {
+      check(caller == g_dbus_method_invocation_get_sender(invocation), "Viewport query changed private caller");
+      const char *id = nullptr, *token = nullptr, *request = nullptr;
+      guint value = 0, expectedRevision = revision;
+      double x = 400, y = 300;
+      const bool hit = !std::strcmp(name, "ValidateCurrentHit");
+      if (hit)
+        g_variant_get(parameters, "(&su&s&sddu)", &id, &value, &token, &request, &x, &y, &expectedRevision);
+      else
+        g_variant_get(parameters, "(&su&s)", &id, &value, &token);
+      check(
+          id && token && std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(token, viewerId) == 0,
+          "Native viewport query changed binding"
+      );
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
+      add("session", g_variant_new_string(sessionId));
+      add("viewer", g_variant_new_string(viewerId));
+      add("generation", g_variant_new_uint32(generation));
+      add("revision", g_variant_new_uint32(revision));
+      add("window", g_variant_new_string("fixture-window"));
+      add("surface", g_variant_new_string("fixture-surface"));
+      add("focused", g_variant_new_boolean(true));
+      add("available", g_variant_new_boolean(expectedRevision == revision && x == 400 && y == 300));
+      add("reason", g_variant_new_string("fixture-native-denied"));
+      add("observationOnly", g_variant_new_boolean(true));
+      add("deliveryReady", g_variant_new_boolean(false));
+      add("pointerX", g_variant_new_double(400));
+      add("pointerY", g_variant_new_double(300));
+      if (hit) {
+        add("request", g_variant_new_string(request));
+        add("localX", g_variant_new_double(300));
+        add("localY", g_variant_new_double(200));
+      }
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
     } else if (!std::strcmp(name, "CloseSession")) {
       ++closes;
       const char *id = nullptr;
@@ -434,6 +618,10 @@ struct Service
           "Client closed a different session"
       );
       peer.reset();
+      if (viewportTimer)
+        g_source_remove(std::exchange(viewportTimer, 0));
+      viewportPeer.reset();
+      delayedReply.clear();
       g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
     } else {
       throw std::runtime_error("Unexpected client method");
@@ -454,6 +642,9 @@ struct Service
   }
   void cleanup() noexcept
   {
+    if (viewportTimer)
+      g_source_remove(std::exchange(viewportTimer, 0));
+    viewportPeer.reset();
     if (pendingCreate) {
       g_dbus_method_invocation_return_dbus_error(pendingCreate, "org.deskflow.Test.Ended", "Fixture ended");
       g_object_unref(std::exchange(pendingCreate, nullptr));
@@ -605,6 +796,134 @@ void stopDuringDelayedSetup(const PrivateBus &bus)
   );
   check(service.failure.empty(), "Private service failed");
 }
+GnomeProviderClient::ViewportUpdate viewportResult(GnomeProviderClient &client, std::uint64_t request)
+{
+  std::optional<GnomeProviderClient::ViewportUpdate> result;
+  waitUntil(
+      [&] {
+        auto value = client.takeViewportUpdate();
+        if (value) {
+          check(value->request == request, "Viewport result changed request identity");
+          result = std::move(value);
+        }
+        return result.has_value();
+      },
+      "Viewport result timed out"
+  );
+  return std::move(*result);
+}
+GnomeProviderClient::ViewportObservation observed(GnomeProviderClient &client)
+{
+  const auto request = client.requestViewportObservation();
+  check(request != 0, "Client refused an idle viewport request");
+  check(client.requestViewportObservation() == 0, "Client queued a second outstanding viewport request");
+  const auto result = viewportResult(client, request);
+  if (!result.observation || !result.observation->live())
+    throw std::runtime_error("No live viewport observation: " + result.error);
+  return *result.observation;
+}
+void viewportJoinAndRevocation(const PrivateBus &bus)
+{
+  Service service(bus);
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  check(ready.ready && descriptor.value >= 0, "Viewport fixture did not become Ready");
+  const auto first = observed(client);
+  const auto &snapshot = first.snapshot();
+  check(
+      snapshot.providerOwner == g_dbus_connection_get_unique_name(service.connection) &&
+          snapshot.session == sessionId && snapshot.viewer == viewerId && snapshot.generation == generation &&
+          snapshot.window == "fixture-window" && snapshot.surface == "fixture-surface" &&
+          snapshot.nativeRevision == service.revision && snapshot.desktopX == 400 && snapshot.desktopY == 300 &&
+          snapshot.surfaceX == 300 && snapshot.surfaceY == 200 && snapshot.sourceX == 240 && snapshot.sourceY == 160 &&
+          snapshot.paint.session == 11 && snapshot.paint.epoch == 12 && snapshot.paint.geometry == 3,
+      "Viewport join changed native, channel or paint identities"
+  );
+  service.invalidateNative();
+  waitUntil([&] { return !first.live(); }, "Native invalidation did not revoke retained viewport", 100ms);
+  const auto nativeClosed = client.takeViewportUpdate();
+  check(
+      nativeClosed && !nativeClosed->observation && nativeClosed->request == snapshot.request,
+      "Native revocation was not published"
+  );
+  const auto second = observed(client);
+  service.invalidatePaint();
+  waitUntil([&] { return !second.live(); }, "Child invalidation did not revoke retained viewport", 100ms);
+  const auto paintClosed = client.takeViewportUpdate();
+  check(paintClosed && !paintClosed->observation, "Child revocation was not published");
+  const auto third = observed(client);
+  client.stop();
+  check(!third.live(), "stop() did not immediately revoke retained viewport");
+  waitUntil([&] { return service.callerGone; }, "Viewport stop did not retire its provider caller");
+  check(service.failure.empty(), "Viewport service failed");
+}
+void viewportTimeoutAndLateReply(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.delaySnapshot = true;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  const auto request = client.requestViewportObservation();
+  check(request != 0, "Client refused initial timeout request");
+  const auto denied = viewportResult(client, request);
+  check(
+      !denied.observation && denied.error == "viewport-timeout" && client.live(),
+      "Timed-out viewport became authority or ended an otherwise valid session"
+  );
+  const auto fresh = observed(client);
+  waitUntil([&] { return service.delayedReply.isEmpty(); }, "Fixture did not send its deliberately late reply");
+  check(fresh.live() && client.live(), "Late retired reply revoked the new viewport or revived the old request");
+  check(!client.takeViewportUpdate(), "Late retired reply published another result");
+  waitUntil([&] { return !fresh.live(); }, "Retained viewport renewed its absolute deadline", 400ms);
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Timeout fixture did not clean up");
+  check(service.failure.empty(), "Timeout fixture service failed");
+}
+void viewportInvalidatedBeforePublication(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.invalidateOnCheck = true;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  const auto request = client.requestViewportObservation();
+  check(request != 0, "Client refused viewport invalidation fixture");
+  const auto denied = viewportResult(client, request);
+  check(!denied.observation && !denied.error.empty() && client.live(), "Invalidated final check published a viewport");
+  const auto fresh = observed(client);
+  check(fresh.live(), "Fresh observation did not recover from a bounded denial");
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Invalidation fixture did not clean up");
+  check(service.failure.empty(), "Invalidation fixture service failed");
+}
+void viewportWrongAuthenticatedPeer(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.wrongPeer = true;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  const auto request = client.requestViewportObservation();
+  check(request != 0, "Client refused peer mismatch fixture");
+  const auto denied = viewportResult(client, request);
+  check(
+      !denied.observation && denied.error.find("authenticated peer") != std::string::npos,
+      "A viewport from the wrong configured peer was accepted"
+  );
+  waitUntil([&] { return !client.live() && service.callerGone; }, "Protocol failure did not retire its session");
+  check(client.requestViewportObservation() == 0, "Terminal viewport channel revived");
+  check(service.failure.empty(), "Peer mismatch fixture service failed");
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -628,6 +947,14 @@ int main(int argc, char **argv)
     std::puts("PASS: provider owner loss retires the exact session without reconnect");
     stopDuringDelayedSetup(bus);
     std::puts("PASS: delayed setup cancellation closes the caller and ignores a late descriptor reply");
+    viewportJoinAndRevocation(bus);
+    std::puts("PASS: native/painted viewport join retains exact identities and revokes on native/child/stop changes");
+    viewportTimeoutAndLateReply(bus);
+    std::puts("PASS: request deadline and late-reply retirement cannot renew or revive a viewport");
+    viewportInvalidatedBeforePublication(bus);
+    std::puts("PASS: final child invalidation prevents viewport publication and permits a fresh request");
+    viewportWrongAuthenticatedPeer(bus);
+    std::puts("PASS: wrong authenticated viewer peer ends the viewport session");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

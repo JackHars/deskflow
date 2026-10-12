@@ -23,6 +23,14 @@
       <arg name="arguments" type="as" direction="in"/>
       <arg name="viewer" type="s" direction="out"/>
     </method>
+    <method name="LaunchViewerWithViewport">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="executable" type="s" direction="in"/>
+      <arg name="arguments" type="as" direction="in"/>
+      <arg name="viewportFd" type="h" direction="in"/>
+      <arg name="viewer" type="s" direction="out"/>
+    </method>
     <method name="GetViewer">
       <arg name="session" type="s" direction="in"/>
       <arg name="generation" type="u" direction="in"/>

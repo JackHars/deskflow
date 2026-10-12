@@ -3,6 +3,88 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## GNOME native hit and painted Qt viewport join (2026-10-12)
+
+Overall completion remains approximately 45%; the first physical two-machine
+interactive window is still unverified. The current implementation joins the
+GNOME provider's native hit to its owned Qt viewer's last painted geometry.
+Original delivery, physical-device attribution and ordered pointer fencing are
+not enabled by this change.
+
+The provider forwards exactly one inherited Unix stream endpoint at child FD 4,
+separate from Mutter's FD 3 Wayland connection. The core and child validate
+descriptor type, family, connection and ownership; the provider deterministically
+closes its duplicates. The child binds one live export to the pinned TLS peer,
+connection, source geometry, acknowledged focus, surface and painted viewport.
+Its mapping uses matching Qt private Wayland APIs for decorations and scaling,
+rejects letterboxing and cannot renew a retained snapshot's deadline.
+
+The GIO worker joins native hit, child mapping and final native/child checks
+under an absolute 250 ms budget beginning at enqueue. Retained observations are
+revoked by native or child invalidation, replacement, expiry or session loss.
+The real EIS motion path requests this observation without blocking its input
+thread. It continues ordinary injection and does not assert a motion fence.
+
+Strict and ASan/UBSan checks passed for nine private-bus client cases and the
+four scoped viewer/endpoint/Bridge/SecureTransport suites. The independent
+production review found no actionable defect. Home Ubuntu candidate 1 compiled
+and passed the 19 GJS descriptor checks and existing real GTK/EIS compositor
+acceptance. The new Qt fixture correctly denied mapping because CMake did not
+find installed private Wayland headers. Explicit matching-version private Qt
+package discovery corrected that build issue. Two fixture-only lifetime/result
+reporting issues were corrected before candidate 2.
+
+Candidate 2 passes the actual GNOME 50.1/Qt 6.10.2 native viewer checks at
+`QT_SCALE_FACTOR=1` and `1.25`. Three immediate, unretried motion/PONG/map rounds
+at each factor agree with the actual viewer's TLS pointer packets. Decorations,
+letterboxing, lost focus, stale paint and a second native window deny. Client
+cleanup passes. The virtual monitor remains at compositor scale 1; this proves
+Qt fractional content scaling, not a fractional GNOME monitor configuration.
+Candidate 2 is a verified 1010-file working-tree snapshot based on `c64af6110`,
+with archive SHA-256
+`9f7f738085f431b367d74cb2737a937be3f6e31cfb38b7d41bb5ead22fb1bb25`.
+It is not a clean committed revision. Its application run passed 12/13 suites
+and full integrated run passed 56/57; both failures were the new Viewer
+invalidation-coalescing assertion. Qt's offscreen plugin exposes an X11 native
+interface with no connection. The observer now requires the actual `xcb` plugin
+and a non-null borrowed connection before starting its native watcher. The
+strict coalescing assertion remains unchanged.
+
+The corrected candidate 3 passes all 13 application and all 57 integrated Linux
+suites, including native X11 checks. Node logic (12), GJS descriptor cases (19),
+the existing native GTK/EIS check, both actual QtWayland scale runs and real-core
+provider-absence/Xvfb lifecycle smokes also pass. Candidate 3 derives from the
+exact candidate 2 archive with four explicit viewer/harness updates; its archive
+SHA-256 is
+`d8babc2f3fc45921a7c82e1d156e8334a66e561ad2fe5b8e250208f4a0075eeb`.
+The CI configuration now includes the complete application suite against the
+GNOME fixture's Qt 6.10 dependencies as well as the native compositor checks. The ordinary running
+Linux client was preserved. Mac verification passed all
+59 integrated suites in 80.05 seconds and all 15 standalone application suites
+in 99.91 seconds. Evidence is under `build/gnome-viewport-*.log` and
+`build/gnome-qt-acceptance/candidate-{1,2,3}/`. The final observer correction also
+passes scoped Viewer/endpoint checks with strict warnings and ASan/UBSan on Mac.
+
+The separate exact-library Mac package was built and passed dependency/signature
+audit (77 records), private core/host launch/bootstrap rejection and mutually
+pinned TLS/reconnect/clean-exit smokes. It is retained at
+`build/packages/gnome-viewport-20261012/DeskflowSeamless-Core-Experimental.app`,
+with ZIP SHA-256
+`76640ca9276b676bf85944907ef8617fa65e2e83b6a7a8ede3f19fb4fd69c325`.
+It was built before the Linux-only observer correction and the ongoing Mac
+native input fix. It has not replaced the installed experimental package.
+
+A new bounded Mac own-window native smoke captured and decoded 1280×896,
+delivered F8/A key events, and released the held key. It failed mouse buttons
+and scroll: the source recorded zero such events. No smoke processes remained
+after cleanup. This is a concrete remaining native input bug, under diagnosis;
+it is not a successful interactive-window test. Receiver-side diagnostics now
+show the pointer events reach the correct, active native window but carry
+coordinates outside it; the event construction path is being corrected.
+Exact commands, result, log and
+cleanup are retained in `build/native-smoke-20261012/`. No holding display or
+physical Mac-to-Ubuntu input was exercised by this local synthetic test.
+
 ## Input-route observation and GNOME client integration (2026-10-12)
 
 The project remains before the first verified interactive Mac window on Ubuntu.

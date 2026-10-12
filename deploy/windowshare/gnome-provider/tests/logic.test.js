@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
-    unavailableReason, validLaunch, validRect, validRequest,
+    unavailableReason, validLaunch, validRect, validRequest, validViewportHandle,
 } from '../logic.js';
 
 test('only stable Shell 50 is supported', () => {
@@ -17,11 +17,23 @@ test('only stable Shell 50 is supported', () => {
 test('launch accepts bounded argv, never a platform override', () => {
     assert.equal(validLaunch('/opt/deskflow-windowshare', ['--headless', '--connect', 'host:42']), true);
     for (const arg of ['-platform', '--platform=xcb', '-platformpluginpath=/tmp',
-        '--plugin=anything', 'QT_QPA_PLATFORM=offscreen', 'nul\0byte'])
+        '--plugin=anything', 'QT_QPA_PLATFORM=offscreen', 'nul\0byte',
+        '--gnome-viewport-fd', '--gnome-viewport-fd=4', '-gnome-viewport-fd=4',
+        '--GNOME-VIEWPORT-FD=5'])
         assert.equal(validLaunch('/opt/viewer', [arg]), false, arg);
     assert.equal(validLaunch('viewer', []), false);
     assert.equal(validLaunch('/opt/viewer', Array(65).fill('x')), false);
     assert.equal(validLaunch('/opt/viewer', Array(5).fill('x'.repeat(4096))), false);
+});
+
+test('viewport handles name exactly one attached descriptor, never a process FD', () => {
+    assert.equal(validViewportHandle(0, 1, 1), true);
+    for (const handle of [-1, 1, 4, 0.5, '0', null, undefined, NaN])
+        assert.equal(validViewportHandle(handle, 1, 1), false);
+    for (const count of [0, 2, -1, 1.5, '1', null, undefined]) {
+        assert.equal(validViewportHandle(0, count, 1), false);
+        assert.equal(validViewportHandle(0, 1, count), false);
+    }
 });
 
 test('requests reject NaN, Infinity, absent revisions and oversized tokens', () => {

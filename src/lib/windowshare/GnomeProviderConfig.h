@@ -23,9 +23,13 @@ public:
   {
     return m_arguments;
   }
+  const QString &peerFingerprint() const noexcept
+  {
+    return m_peerFingerprint;
+  }
 
 private:
-  QString m_executable;
+  QString m_executable, m_peerFingerprint;
   QStringList m_arguments;
 };
 

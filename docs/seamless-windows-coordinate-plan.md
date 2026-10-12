@@ -5,8 +5,9 @@ Since then, the Mac capture-to-Server route join and an explicit GNOME 50
 provider/client have been implemented. The remaining X11 integration needs a
 native namespace witness carried over the two authenticated connections,
 followed by sequence-bound pointer validation and an ordered forwarding fence.
-The GNOME provider now supplies native compositor observations, but still needs
-the Qt viewport join and input ordering described below. Matching observations
+The GNOME provider now supplies native compositor observations, and its owned
+viewer has a bounded join to the last painted Qt viewport. Input ordering and
+production delivery integration remain unfinished. Matching observations
 alone must not enable original input.
 
 ## Supported boundary
@@ -209,13 +210,27 @@ the exact caller, session, viewer surface and current native hit. The production
 the EIS descriptor and ends on owner or session loss. Private native GNOME 50
 tests cover ownership, motion/PONG/native-hit agreement and revocation.
 
-The next connected slice must join those native observations to the production
-Qt viewer's last painted viewport through the existing owned launch. It must
-account for decorations and scaling, retain the source geometry and focus
-revision, and invalidate on repaint mapping, surface, focus or connection
-changes. Native pointer-device attribution and an ordered fence remain separate
-requirements before publishing delivery authority. Current capabilities report
-`deliveryReady=false`.
+The connected viewport slice passes one Unix stream endpoint through that owned
+launch to child FD 4, separate from Mutter's Wayland socket at FD 3. The core's
+worker joins two fresh native hit checks to an exact last-painted Qt snapshot
+and final snapshot check. The snapshot binds the authenticated peer, connection,
+export session, source geometry, focus revision, surface incarnation and viewport
+revision. Mapping uses Qt's native surface-to-content transform, includes
+decorations and scaling, and rejects points in letterboxing. Its absolute 250 ms
+budget starts before worker dispatch; updates do not extend it. Native or viewer
+invalidation revokes retained observations, and caller/connection loss terminates
+the owned lifetime. Native headless GNOME 50.1 and Qt 6.10.2 validation passes
+with Qt scale factors 1 and 1.25: three immediate, unretried motion/PONG/map
+rounds at each factor agree with actual Viewer pointer packets. Decorations,
+letterboxing, stale geometry, focus loss and a second native window deny. The
+virtual monitor's compositor scale remains 1; fractional GNOME monitor scaling
+and physical desktop input still require separate validation.
+
+Native pointer-device attribution and an ordered fence remain separate
+requirements before publishing delivery authority. The actual EIS motion path
+requests observations but continues ordinary injection. It does not associate a
+snapshot with an original capture token or construct the production handoff
+coordinator. Current capabilities still report `deliveryReady=false`.
 
 A combined RemoteDesktop/ScreenCast portal session can establish
 region-to-stream mapping, but cannot alone supply that surface/hit-test

@@ -92,6 +92,7 @@ GnomeProviderConfig GnomeProviderConfig::load(const QString &path)
           pin != QString(64, '0'),
       "GNOME viewer peer pin must be a nonzero SHA-256 fingerprint"
   );
+  result.m_peerFingerprint = pin;
   result.m_arguments = {
       "--enable-seamless",
       "--headless",

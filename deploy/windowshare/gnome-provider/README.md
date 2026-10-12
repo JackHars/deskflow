@@ -28,7 +28,8 @@ exporting the interface.
 - `GetCapabilities() -> (u version, s shellVersion, a{sv} capabilities)`.
   Version is 1. Capability types are `providerApi:u`, `backend:s`,
   `nativeHitTesting:b`, `exactWaylandClientBinding:b`, `eisSessionOwned:b`,
-  `trustedDesktopOnly:b`, `syncFenceVerified:b`, `pointerDeviceAttribution:b`,
+  `trustedDesktopOnly:b`, `viewportChannel:b`, `viewportSocketValidated:b`,
+  `syncFenceVerified:b`, `pointerDeviceAttribution:b`,
   `qtViewportMapping:b`, and `deliveryReady:b`.
 - `CreateSession() -> (s session, u generation, h eisFd)`. One outstanding
   session is allowed. Creation, Start, and ConnectToEIS are asynchronous with
@@ -45,6 +46,20 @@ exporting the interface.
   entries, 4096 characters each and 16384 characters total. The caller supplies
   the normal viewer configuration, such as `--headless`, `--connect`,
   `--identity`, and `--peer-pin`. The extension does not invent a remote peer.
+- `LaunchViewerWithViewport(s session, u generation, s absoluteExecutable,
+  as arguments, h viewportFd) -> (s viewer)` adds a private core-to-viewer
+  observation channel to that same owned subprocess. It requires exactly one
+  attached Unix FD at handle zero, representing a connected Unix stream socket.
+  Missing/extra descriptors and other handles are rejected before launch. The
+  trusted core creates the socketpair; the child must reject non-stream,
+  non-Unix or unconnected endpoints before adoption. The extension maps it to child FD **4**
+  and appends exactly `--gnome-viewport-fd=4`; Mutter reserves FD 3 for
+  `WAYLAND_SOCKET`. Caller-supplied forms of the reserved option are rejected by
+  both launch methods; the viewport method also rejects `--` argument termination.
+  The same caller/session and one-viewer checks apply across both methods.
+  `viewportChannel=true` advertises FD forwarding only, never viewport readiness
+  or delivery authority; `viewportSocketValidated` remains false. Core and child still validate and own their endpoint
+  lifetime and framed protocol. The provider does not read or write the channel.
 - `GetViewer(s session, u generation, s viewer) -> (a{sv} observation)` reports
   the current owned window and native surface. Exactly one normal, nontransient
   toplevel and one native surface are supported. Multiple windows or native
@@ -115,6 +130,19 @@ objects. The private Wayland socket is retained by Mutter, and unrelated
 same-title/PID claims do not match it. A genuine interpreter-launched GTK test
 child is allowed; it must still create its surface on that exact connection.
 
+Core supplies a CLOEXEC, nonblocking Unix stream endpoint; Shell preserves its
+mode and the child validates its native type, family and connected state. Shell
+does not use `Gio.Socket.new_from_fd()` to inspect an arbitrary descriptor:
+the supported GLib runtime closes it on constructor failure, contrary to that
+API's documented caller-close-on-failure ownership. Closing by its old numeric
+value could close a reused, unrelated descriptor. `UnixFDList.get()` instead
+creates a CLOEXEC duplicate with unambiguous ownership, transferred with `SubprocessLauncher.take_fd()`;
+`SubprocessLauncher.close()` closes all parent-side mappings immediately after
+spawn or failure. The invocation's FD list is explicitly emptied and closed on
+every return, including wrong-caller and already-launched rejection. Endpoint
+cleanup and peer EOF do not depend on GJS garbage collection. The provider never
+retains a viewport endpoint after the launch method finishes.
+
 ## Validation
 
 Pure tests require Node and no desktop:
@@ -122,11 +150,26 @@ Pure tests require Node and no desktop:
 ```sh
 node --test deploy/windowshare/gnome-provider/tests/*.test.js
 node --check deploy/windowshare/gnome-provider/extension.js
+node --check deploy/windowshare/gnome-provider/launcher.js
 ```
 
 These test caller/generation ownership, absolute deadlines, late completion,
 terminal disable, overflow, argument bounds, native-state policy, and fractional
 coordinate comparison. They do not prove GJS or compositor behavior.
+
+The headless GJS/GIO descriptor fixture requires Linux, GJS and Python, but no
+bus, display or compositor:
+
+```sh
+python3 deploy/windowshare/gnome-provider/tests/launcher-native.py
+```
+
+It uses disposable socketpairs and real subprocesses to check FD 4 exchange,
+the exact reserved argument, EOF while the launcher process remains alive,
+legacy launch, malformed lists/handles, child-side socket validation, callback/spawn
+failures, and repeated rejection without descriptor growth. The separate native
+compositor harness must also exercise `LaunchViewerWithViewport` over D-Bus and
+confirm FD 4 coexists with Mutter's actual FD 3 Wayland connection.
 
 The isolated integration harness must copy this directory only into a temporary
 `XDG_DATA_HOME/gnome-shell/extensions/seamless-windows@deskflow.org`, use private
@@ -168,4 +211,7 @@ changed native APIs cause unavailability, not a geometry fallback.
 - [Mutter input-thread sync](https://github.com/GNOME/mutter/blob/50.0/src/backends/meta-eis.c#L100-L171) and [conditional build gate](https://github.com/GNOME/mutter/blob/50.0/meson.build#L581-L582)
 - [Shell modal/session state](https://github.com/GNOME/gnome-shell/blob/50.0/js/ui/main.js)
 - [GIO asynchronous Unix FD calls](https://docs.gtk.org/gio/method.DBusConnection.call_with_unix_fd_list.html) and [FD replies](https://docs.gtk.org/gio/method.DBusMethodInvocation.return_value_with_unix_fd_list.html)
+- [GIO FD duplication](https://docs.gtk.org/gio/method.UnixFDList.get.html) and [FD list ownership transfer](https://docs.gtk.org/gio/method.UnixFDList.steal_fds.html)
+- [GSocket constructor ownership documentation](https://docs.gtk.org/gio/ctor.Socket.new_from_fd.html) and [GLib constructor/finalizer implementation](https://github.com/GNOME/glib/blob/2.86.0/gio/gsocket.c)
+- [Subprocess FD mapping](https://docs.gtk.org/gio/method.SubprocessLauncher.take_fd.html) and [deterministic launcher close](https://docs.gtk.org/gio/method.SubprocessLauncher.close.html)
 - [libei ping/disconnect semantics](https://libinput.pages.freedesktop.org/libei/api/group__libei.html)

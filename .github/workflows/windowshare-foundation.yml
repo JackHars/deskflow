@@ -139,10 +139,10 @@ jobs:
     container:
       image: ubuntu:26.04
       options: --init
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Exercise the real native headless GNOME 50 provider
+      - name: Exercise native GNOME ownership and the actual QtWayland painted viewer
         # Private buses/runtime/settings and software Mesa; no host display,
         # input devices, GPU, privileged mode, or production authority grants.
         run: bash deploy/windowshare/gnome-provider-container.sh "$PWD" "$PWD/build/gnome-provider"
@@ -157,6 +157,9 @@ jobs:
             build/gnome-provider/*.log
             build/gnome-provider/*.json
             build/gnome-provider/*.jsonl
+            build/gnome-provider/**/*.log
+            build/gnome-provider/**/*.json
+            build/gnome-provider/**/*.jsonl
   mac-app:
     runs-on: macos-15
     timeout-minutes: 30

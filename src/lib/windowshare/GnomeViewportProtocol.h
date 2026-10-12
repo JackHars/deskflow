@@ -1,0 +1,90 @@
+/*
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+ * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
+ */
+#pragma once
+
+#include <QByteArray>
+#include <QJsonObject>
+#include <QString>
+#include <cstdint>
+#include <optional>
+
+namespace deskflow::windowshare {
+
+// Private inherited stream only. Four-byte big-endian length followed by one
+// closed-schema UTF-8 JSON object. These messages are observations, never input
+// delivery authority. uint64 values use canonical decimal strings; dimensions
+// and coordinates use finite JSON numbers. The core owns the earliest deadline.
+inline constexpr qsizetype gnomeViewportMaximumPayload = 8192;
+inline constexpr int gnomeViewportLifetimeMs = 250;
+
+enum class GnomeViewportOperation
+{
+  Snapshot,
+  Map,
+  Check,
+  Invalidated
+};
+
+struct GnomeViewportState
+{
+  std::uint64_t connection = 0, session = 0, epoch = 0, geometry = 0;
+  std::uint64_t focusRequest = 0, focusRevision = 0, surfaceIncarnation = 0, viewportRevision = 0;
+  QString peerFingerprint;
+  std::uint32_t nativeSurface = 0;
+  double clientWidth = 0, clientHeight = 0, sourceWidth = 0, sourceHeight = 0;
+  std::uint32_t imageWidth = 0, imageHeight = 0;
+  double videoX = 0, videoY = 0, videoWidth = 0, videoHeight = 0, dpr = 0;
+  // Actual QtWayland wl_surface geometry. Surface->widget conversion is
+  // (point - content origin) / logicalScale, not division by buffer DPR.
+  double surfaceWidth = 0, surfaceHeight = 0, contentX = 0, contentY = 0, logicalScale = 0;
+  bool operator==(const GnomeViewportState &) const = default;
+};
+
+struct GnomeViewportRequest
+{
+  GnomeViewportOperation operation = GnomeViewportOperation::Snapshot;
+  std::uint64_t request = 0, snapshot = 0;
+  double x = 0, y = 0;
+};
+
+struct GnomeViewportReply
+{
+  GnomeViewportOperation operation = GnomeViewportOperation::Snapshot;
+  std::uint64_t request = 0, snapshot = 0;
+  bool ok = false;
+  QString reason;
+  GnomeViewportState state;
+  double x = 0, y = 0;
+};
+
+// Snapshot success: {version,operation,request,ok:true,state}. Its request ID
+// is the retained snapshot ID. Map/check success adds snapshot (map also x/y).
+// Denial: {version,operation,request,ok:false,reason}. Unsolicited revocation:
+// {version:1,operation:"invalidated",snapshot,reason}; no request/ok fields.
+// One retained snapshot and one revocation are enough; no timer may renew it.
+QJsonObject gnomeViewportJson(const GnomeViewportRequest &request);
+QJsonObject gnomeViewportJson(const GnomeViewportReply &reply);
+GnomeViewportRequest parseGnomeViewportRequest(const QJsonObject &object);
+GnomeViewportReply parseGnomeViewportReply(const QJsonObject &object);
+QByteArray gnomeViewportFrame(const QJsonObject &object);
+
+// Feed bounded chunks, then drain take(). A failed decoder is terminal. The
+// buffer cannot grow beyond two maximum frames; callers also bound queued IO.
+class GnomeViewportDecoder final
+{
+public:
+  void append(const QByteArray &bytes);
+  std::optional<QJsonObject> take();
+  bool empty() const noexcept
+  {
+    return m_bytes.isEmpty();
+  }
+
+private:
+  QByteArray m_bytes;
+  bool m_failed = false;
+};
+
+} // namespace deskflow::windowshare
