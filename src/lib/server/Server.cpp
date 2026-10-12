@@ -36,6 +36,38 @@
 
 using namespace deskflow::server;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+namespace {
+constexpr KeyModifierMask routedMomentaryModifiers =
+    KeyModifierShift | KeyModifierControl | KeyModifierAlt | KeyModifierMeta | KeyModifierSuper | KeyModifierAltGr;
+constexpr KeyModifierMask routedToggleModifiers = KeyModifierCapsLock | KeyModifierNumLock | KeyModifierScrollLock;
+KeyModifierMask modifierForRoutedKey(KeyID id)
+{
+  switch (id) {
+  case kKeyShift_L:
+  case kKeyShift_R:
+    return KeyModifierShift;
+  case kKeyControl_L:
+  case kKeyControl_R:
+    return KeyModifierControl;
+  case kKeyAlt_L:
+  case kKeyAlt_R:
+    return KeyModifierAlt;
+  case kKeyMeta_L:
+  case kKeyMeta_R:
+    return KeyModifierMeta;
+  case kKeySuper_L:
+  case kKeySuper_R:
+    return KeyModifierSuper;
+  case kKeyAltGr:
+    return KeyModifierAltGr;
+  default:
+    return 0;
+  }
+}
+} // namespace
+#endif
+
 //
 // Server
 //
@@ -490,7 +522,15 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
     ++m_seqNum;
 
     // enter new computer
-    m_active->enter(x, y, m_seqNum, m_primaryClient->getToggleMask(), forScreensaver);
+    auto enterMask = m_primaryClient->getToggleMask();
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    // Legacy peers may synchronize this mask on entry. A locally held modifier
+    // has no remote physical down owner yet; only synchronize toggle state.
+    // Desired masks on subsequent key events are tracked separately below.
+    if (m_active != m_primaryClient)
+      enterMask &= routedToggleModifiers;
+#endif
+    m_active->enter(x, y, m_seqNum, enterMask, forScreensaver);
 
     if (m_enableClipboard) {
       // send the clipboard data to new active computer
@@ -1532,11 +1572,125 @@ void Server::onScreensaver(bool activated)
   }
 }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+Server::InputRoutes::Recipients Server::inputRecipients(const char *computers) const
+{
+  InputRoutes::Recipients recipients;
+  if (!m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {
+    const auto active = m_inputRecipients.find(m_active);
+    if (active != m_inputRecipients.end())
+      recipients.push_back(active->second);
+    return recipients;
+  }
+  if (m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {
+    computers = m_keyboardBroadcastingComputers.c_str();
+    if (IKeyState::KeyInfo::isDefault(computers))
+      computers = "*";
+  }
+  for (const auto &[name, client] : m_clients) {
+    if (!IKeyState::KeyInfo::contains(computers, name))
+      continue;
+    const auto recipient = m_inputRecipients.find(client);
+    if (recipient != m_inputRecipients.end())
+      recipients.push_back(recipient->second);
+  }
+  // The primary is deliberately absent: its hardware event already passed to
+  // the OS. Synthesizing it again would duplicate local input or form a loop.
+  return recipients;
+}
+
+BaseClientProxy *Server::inputRecipient(InputRoutes::Recipient recipient) const
+{
+  const auto found = m_inputClients.find(recipient);
+  if (found == m_inputClients.end() || m_clientSet.find(found->second) == m_clientSet.end())
+    return nullptr;
+  return found->second;
+}
+
+void Server::forgetInputRecipient(BaseClientProxy *client, bool sendReleases)
+{
+  const auto found = m_inputRecipients.find(client);
+  if (found == m_inputRecipients.end())
+    return;
+  const auto recipient = found->second;
+  auto detached = m_inputRoutes.detach(recipient);
+  m_inputRecipients.erase(found);
+  m_inputClients.erase(recipient);
+  if (!sendReleases)
+    return;
+  try {
+    for (const auto &press : detached.presses) {
+      switch (press.control.kind) {
+      case InputRoutes::Kind::Key:
+        client->keyUp(press.key, 0, static_cast<KeyButton>(press.button));
+        break;
+      case InputRoutes::Kind::Button:
+        client->mouseUp(static_cast<ButtonID>(press.button));
+        break;
+      case InputRoutes::Kind::ModifierCommand:
+        detached.modifiers |= press.mask;
+        break;
+      }
+    }
+    if (detached.modifiers)
+      client->keyDown(kKeyClearModifiers, detached.modifiers, 0, {});
+  } catch (const std::exception &error) {
+    // A peer can disappear during an orderly close. Ownership is already
+    // detached; proceed with closing instead of reviving it on another client.
+    LOG_WARN("input release failed while closing client: %s", error.what());
+  }
+}
+
+void Server::routeModifierCommand(KeyID id, KeyModifierMask mask, const std::string &lang, const char *computers)
+{
+  const auto recipients = inputRecipients(computers);
+  std::map<InputRoutes::Recipient, KeyModifierMask> masks;
+  // Configured mouse actions use paired Set/Clear commands, both delivered as
+  // key-down events. Give each bit its own ownership instead of treating the
+  // command as a physical key that will eventually receive a normal key-up.
+  for (unsigned bit = 0; bit < 32; ++bit) {
+    const KeyModifierMask flag = KeyModifierMask{1} << bit;
+    if (!(mask & flag))
+      continue;
+    const InputRoutes::Control control{InputRoutes::Kind::ModifierCommand, bit};
+    const auto route =
+        id == kKeySetModifiers ? m_inputRoutes.down(control, id, flag, 0, recipients) : m_inputRoutes.up(control);
+    if (route)
+      for (auto recipient : route->recipients)
+        masks[recipient] |= flag;
+  }
+  for (const auto &[recipient, routedMask] : masks)
+    if (auto *client = inputRecipient(recipient)) {
+      if (id == kKeySetModifiers)
+        m_inputRoutes.observeModifiers(recipient, routedMask & routedMomentaryModifiers);
+      else
+        m_inputRoutes.forgetModifiers(recipient, routedMask);
+      client->keyDown(id, routedMask, 0, lang);
+    }
+}
+#endif
+
 void Server::onKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const std::string &lang, const char *computers)
 {
   LOG_VERBOSE("onKeyDown id=%d mask=0x%04x button=0x%04x lang=%s", id, mask, button, lang.c_str());
   assert(m_active != nullptr);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (id == kKeySetModifiers || id == kKeyClearModifiers) {
+    routeModifierCommand(id, mask, lang, computers);
+    return;
+  }
+  const auto route =
+      m_inputRoutes.down(InputRoutes::keyControl(id, button), id, mask, button, inputRecipients(computers));
+  if (route)
+    for (auto recipient : route->recipients)
+      if (auto *client = inputRecipient(recipient)) {
+        m_inputRoutes.observeModifiers(recipient, mask & routedMomentaryModifiers);
+        // Repeated downs retain the original recipient. Some keyboard layouts send
+        // multiple symbols per physical down; the client already handles these.
+        client->keyDown(id, mask, button, lang);
+      }
+#else
   // relay
   if (!m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {
     m_active->keyDown(id, mask, button, lang);
@@ -1553,6 +1707,7 @@ void Server::onKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const s
       }
     }
   }
+#endif
 }
 
 void Server::onKeyUp(KeyID id, KeyModifierMask mask, KeyButton button, const char *computers)
@@ -1560,6 +1715,18 @@ void Server::onKeyUp(KeyID id, KeyModifierMask mask, KeyButton button, const cha
   LOG_VERBOSE("onKeyUp id=%d mask=0x%04x button=0x%04x", id, mask, button);
   assert(m_active != nullptr);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  (void)computers; // Release destinations are the press snapshot, not new rules.
+  const auto route = m_inputRoutes.up(InputRoutes::keyControl(id, button));
+  if (route)
+    for (auto recipient : route->recipients)
+      if (auto *client = inputRecipient(recipient))
+        client->keyUp(id, mask, button);
+  const auto releasedModifier = modifierForRoutedKey(route ? route->key : id) & ~mask;
+  for (const auto &release : m_inputRoutes.releaseModifiers(releasedModifier))
+    if (auto *client = inputRecipient(release.recipient))
+      client->keyDown(kKeyClearModifiers, release.mask, 0, {});
+#else
   // relay
   if (!m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {
     m_active->keyUp(id, mask, button);
@@ -1576,6 +1743,7 @@ void Server::onKeyUp(KeyID id, KeyModifierMask mask, KeyButton button, const cha
       }
     }
   }
+#endif
 }
 
 void Server::onKeyRepeat(KeyID id, KeyModifierMask mask, int32_t count, KeyButton button, const std::string &lang)
@@ -1586,8 +1754,17 @@ void Server::onKeyRepeat(KeyID id, KeyModifierMask mask, int32_t count, KeyButto
   );
   assert(m_active != nullptr);
 
-  // relay
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  const auto route = m_inputRoutes.repeat(InputRoutes::keyControl(id, button));
+  if (route)
+    for (auto recipient : route->recipients)
+      if (auto *client = inputRecipient(recipient)) {
+        m_inputRoutes.observeModifiers(recipient, mask & routedMomentaryModifiers);
+        client->keyRepeat(id, mask, count, button, lang);
+      }
+#else
   m_active->keyRepeat(id, mask, count, button, lang);
+#endif
 }
 
 void Server::onMouseDown(ButtonID id)
@@ -1595,8 +1772,22 @@ void Server::onMouseDown(ButtonID id)
   LOG_VERBOSE("onMouseDown id=%d", id);
   assert(m_active != nullptr);
 
-  // relay
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Mouse buttons do not participate in keyboard broadcasting.
+  if (m_inputRoutes.repeat({InputRoutes::Kind::Button, id}))
+    return;
+  InputRoutes::Recipients recipients;
+  const auto active = m_inputRecipients.find(m_active);
+  if (active != m_inputRecipients.end())
+    recipients.push_back(active->second);
+  const auto route = m_inputRoutes.down({InputRoutes::Kind::Button, id}, 0, 0, id, std::move(recipients));
+  if (route)
+    for (auto recipient : route->recipients)
+      if (auto *client = inputRecipient(recipient))
+        client->mouseDown(id);
+#else
   m_active->mouseDown(id);
+#endif
 }
 
 void Server::onMouseUp(ButtonID id)
@@ -1604,8 +1795,15 @@ void Server::onMouseUp(ButtonID id)
   LOG_VERBOSE("onMouseUp id=%d", id);
   assert(m_active != nullptr);
 
-  // relay
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  const auto route = m_inputRoutes.up({InputRoutes::Kind::Button, id});
+  if (route)
+    for (auto recipient : route->recipients)
+      if (auto *client = inputRecipient(recipient))
+        client->mouseUp(id);
+#else
   m_active->mouseUp(id);
+#endif
 }
 
 bool Server::onMouseMovePrimary(int32_t x, int32_t y)
@@ -1908,6 +2106,14 @@ bool Server::addClient(BaseClientProxy *client)
   m_clientSet.insert(client);
   m_clients.try_emplace(name, client);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (client != m_primaryClient) {
+    const auto recipient = m_inputRoutes.attach();
+    m_inputRecipients.emplace(client, recipient);
+    m_inputClients.emplace(recipient, client);
+  }
+#endif
+
   // initialize client data
   int32_t x;
   int32_t y;
@@ -1928,6 +2134,12 @@ bool Server::removeClient(BaseClientProxy *client)
   if (i == m_clientSet.end()) {
     return false;
   }
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // This path also runs after an unexpected disconnect. Never write releases
+  // through a dead proxy or redirect them to the new active computer.
+  forgetInputRecipient(client, false);
+#endif
 
   // remove event handlers
   m_events->removeHandler(ComputerShapeChanged, client->getEventTarget());
@@ -1955,6 +2167,11 @@ void Server::closeClient(BaseClientProxy *client, const char *msg)
   // the m_clients list.  adoptClient() may call us with such a
   // client.
   LOG_INFO("disconnecting client \"%s\"", getName(client).c_str());
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Queue owned releases while the connection still accepts protocol writes.
+  forgetInputRecipient(client, true);
+#endif
 
   // send message
   // FIXME -- avoid type cast (kinda hard, though)

@@ -1,29 +1,57 @@
-# Seamless Windows: foundation milestone
+# Experimental window sharing
 
-Status: **foundation only, not an end-to-end window-sharing application**.
-This commit does not change normal Deskflow input handling or its default build.
-It does not yet let a user drag or display Mac windows on Ubuntu.
+This branch contains a native Mac capture host and independent Qt viewer windows.
+It is an opt-in development milestone, not yet the completed drag-between-desktops
+feature. The ordinary Deskflow build remains the default.
 
-## Published components
+## Current behavior
 
-- C++20 session lifecycle with journal-before-export and first-frame gates.
-- Explicit session epochs and geometry revisions for stale-input rejection.
-- Input ownership ledger: a held key/button retains its original owner.
-- Focus request/acknowledgment primitives.
-- Versioned, bounded, endian-independent packet framing and replay rejection.
-- Logical-coordinate mapping, letterbox rejection and recovery bounds handling.
-- Qt TLS transport requiring an explicitly approved SHA-256 leaf-certificate
-  fingerprint in both directions. No trust-on-first-use and no plaintext fallback.
-- Owner-only identity directory, private-key permission checks and an
-  overwrite guard when generating local test identities.
-- Portable core tests and real-socket Qt transport tests.
+The Mac host lists eligible application windows. Either paired computer can
+request a selected window. ScreenCaptureKit captures that window and VideoToolbox
+encodes H.264. The viewer decodes on a worker thread and displays each stream in
+an ordinary top-level window that can overlap local applications.
 
-`NativeHost.h` is an interface for later platform work. The non-Mac stub is not
-an implementation. Neither is linked into the foundation library.
+A source stays visible until the viewer has decoded and painted its first frame.
+With `--holding-display`, the host can then move it to an owned virtual display.
+If that display cannot be created, the source remains visible. This adapter uses
+private macOS APIs and is isolated from the capture and protocol code.
 
-## Build and test the core (no Qt required)
+Input requires a committed session, a current geometry revision, and a focus
+acknowledgement. A focus change releases held input; stale focus replies and stale
+video do not authorize new input. Native events target the source process and
+carry a loop-suppression marker. The opt-in Deskflow Mac backend recognizes this
+marker and excludes the holding display from its cursor boundaries. The marker
+is bookkeeping, never peer authentication.
 
-From the repository root, with CMake 3.24+ and a C++20 compiler:
+Closing a viewer returns its source window; it does not close the Mac application.
+The host also restores on disconnect, sleep, session deactivation and normal exit.
+Control–Option–Shift–Escape restores all exported windows. An owner-only restore
+journal is written before relocation. `--recover` retries restoration after a
+crash, preserving unresolved or malformed records rather than discarding them.
+
+## Build
+
+Use the repository's C++20 baseline, Qt 6.4+ Core/Network/Widgets, FFmpeg development
+libraries (`libavcodec`, `libavutil`, `libswscale`), pkg-config, and OpenSSL. The full
+Deskflow build can require a newer Qt independently. Hosting requires macOS 13+;
+Linux builds provide the viewer.
+
+```sh
+cmake -S src/apps/windowshare -B build/windowshare-app \
+  -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=Debug
+cmake --build build/windowshare-app --parallel
+ctest --test-dir build/windowshare-app --output-on-failure
+```
+
+For the full Deskflow application and its opt-in platform hooks, configure the
+repository root with `-DBUILD_WINDOWSHARE=ON`. Leave it off for an ordinary build.
+Run its tests from `build/src/unittests` (substitute the chosen build directory).
+
+Qt 6.8.3 on this Intel Mac references AGL, which is absent from the macOS 26 SDK.
+The local build uses `-DCMAKE_OSX_SYSROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk`.
+Use an installed compatible SDK; do not copy that path blindly to another machine.
+
+Core tests need no Qt:
 
 ```sh
 cmake -S src/unittests/windowshare -B build/windowshare-core \
@@ -32,52 +60,115 @@ cmake --build build/windowshare-core --parallel
 ctest --test-dir build/windowshare-core --output-on-failure
 ```
 
-The test executable performs 20,139 assertions, including 10,000 seeded
-geometry/parser mutation iterations. That count is not a claim of 20,139
-independent integration tests.
-
-## Build and test the transport
-
-Requires Qt 6.4+ Core/Network, a working Qt TLS backend, and the `openssl` command
-for generating temporary test certificates. Existing Deskflow builds may impose
-a newer Qt requirement independently.
+To package a Mac build with its Qt/FFmpeg libraries and owned helper:
 
 ```sh
-cmake -S src/apps/windowshare -B build/windowshare-transport
-cmake --build build/windowshare-transport --parallel
-ctest --test-dir build/windowshare-transport --output-on-failure
+MACDEPLOYQT=/path/to/this/Qt/bin/macdeployqt \
+  deploy/windowshare/package-macos.sh build/windowshare-app build/package-new \
+  "YOUR_SIGNING_IDENTITY"
 ```
 
-The socket tests exercise an approved pair, a wrong server pin, a wrong client
-pin, malformed fingerprints, and refusing to overwrite an existing identity.
-They do not capture a desktop, inject input, or connect to the user's machines.
+The output directory must be new. The script creates and verifies a separately
+named `DeskflowWindowShare-Experimental.app` and ZIP; omitting the signing identity
+uses ad-hoc signing for local development. It does not replace the installed
+Deskflow or notarize a release. Each installed app still needs its own normal
+macOS permission grants.
 
-## Validation recorded during authoring
+Packaging verifies every non-system Mach-O dependency and sets the app's minimum
+macOS version to match its bundled libraries. A local Homebrew build can therefore
+require a newer macOS than the capture API itself. Recheck an existing package
+without modifying it using:
 
-- GCC 14: core tests passed with AddressSanitizer and UndefinedBehaviorSanitizer.
-- Clang 17: the same core checks passed with both sanitizers.
-- Both builds enabled `-Wall -Wextra -Wpedantic -Werror`.
-- Qt and Apple SDKs were unavailable locally. Qt socket tests, native Mac
-  compilation and two-machine interactive behavior were not locally validated.
-- Added CI configuration is not itself evidence that the jobs passed. Consult
-  the results associated with the commit before relying on them.
+```sh
+python3 deploy/windowshare/macos-bundle.py verify /path/to/DeskflowWindowShare-Experimental.app
+```
 
-## Unpublished and unfinished work
+## Pair and run
 
-A separate experimental Mac capture host and Ubuntu viewer were authored, but
-publication of the write containing those files was blocked by a tool-level
-safety check. Those sources are not part of this committed milestone. Do not
-assume a `deskflow-windowshare` executable exists here.
+The examples use `deskflow-windowshare` as the executable. On a Mac build it is
+`build/windowshare-app/deskflow-windowshare.app/Contents/MacOS/deskflow-windowshare`;
+on Linux it is `build/windowshare-app/deskflow-windowshare`.
 
-The intended next milestone is a reviewed and hardware-tested single-window
-vertical slice. It must verify capture, explicit consent, focus ownership,
-loop-free input handling and safe return before automatic edge dragging.
+Create a separate private identity on each computer:
 
-Still required for the complete feature: integration with Deskflow's input and
-display topology, virtual-display lifecycle, native viewers, transactional drag
-handoff, compositor-specific placement, robust dialogs/menus, crash recovery,
-reconnection, hardware video encoding and packaged applications.
+```sh
+deskflow-windowshare --identity "$HOME/.local/share/deskflow-windowshare/identity" --init-identity
+```
 
-A synthetic-event marker is an input-loop bookkeeping aid, never authentication.
-Peer authentication belongs at the transport boundary. Do not bypass macOS
-capture or Accessibility permissions, protected input, or lock-screen controls.
+This prints the public SHA-256 certificate fingerprint. Exchange and approve
+those fingerprints through a trusted channel. Keep each private key on its own
+computer. Existing identities are never overwritten. `--fingerprint` prints an
+existing identity's fingerprint.
+
+On the Mac, check permissions and use the normal OS prompt if needed:
+
+```sh
+deskflow-windowshare --probe
+deskflow-windowshare --request-permissions
+```
+
+Then start the Mac host and Ubuntu viewer, substituting actual addresses and the
+other computer's fingerprint:
+
+```sh
+# Mac
+ deskflow-windowshare --enable-seamless --listen MAC_INTERFACE_IP \
+  --identity "$HOME/.local/share/deskflow-windowshare/identity" \
+  --peer-pin UBUNTU_FINGERPRINT
+
+# Ubuntu; screen 0 and screen 1 select different monitor destinations
+ deskflow-windowshare --enable-seamless --connect MAC_INTERFACE_IP \
+  --identity "$HOME/.local/share/deskflow-windowshare/identity" \
+  --peer-pin MAC_FINGERPRINT --screen 0
+```
+
+The separate TLS port defaults to 24810. Both sides pin the exact peer leaf
+certificate. There is no plaintext fallback or automatic trust on first use.
+The existing Deskflow connection carries the physical Mac keyboard and pointer to
+Ubuntu; use the opt-in core build for its injected-event and display exclusions.
+Select a window in the connection panel to share it. `--holding-display` is an
+additional host opt-in, separate from enabling the application.
+
+After an interrupted host, with that host stopped:
+
+```sh
+deskflow-windowshare --recover
+```
+
+Use the same `--journal PATH` if the original host used a custom journal. A lock
+prevents two hosts from owning the same recovery journal. A nonzero recovery exit
+status means some records still need attention.
+
+## Verification scope
+
+Automated tests cover protocol bounds and replay rejection, session and geometry
+fences, input ownership, exact display/event markers, mutually pinned TLS sockets,
+video framing/backpressure, viewer focus/resize/return behavior, decoder operation,
+private display API availability, and recovery-journal handling.
+
+The manual `windowshare-native-smoke` executable opens its own disposable test
+window and verifies real capture, decoding, targeted input and restoration. It
+requires an unlocked Mac desktop with normal Screen Recording and Accessibility
+permissions. It is deliberately not a permission-dependent CI test. The manual
+holding-display lifecycle check is `windowshare-holding-tests --create-and-destroy`.
+Do not confuse a read-only API probe with a successful display lifecycle test.
+`windowshare-holding-tests --crash-owner-cleanup` additionally kills only its own
+test owner and checks the helper/display cleanup against the original physical
+display inventory. Run either live display test with an open, unlocked desktop.
+
+Consult `WORK_STATE.md` for the actual results recorded for this milestone and
+GitHub Actions for a commit's CI results. A workflow file alone is not evidence
+that a job passed.
+
+## Remaining work
+
+Automatic edge-drag export/return and transactional drag ownership are unfinished.
+Precise Wayland placement may need compositor cooperation; Qt screen selection
+does not guarantee coordinates under every compositor. The Ubuntu machine and its
+two physical monitors still require direct validation.
+
+Dialogs, popup menus, clipboard integration with exported-window focus, complete
+shortcut remapping, browser/Electron behavior, reconnect UX, active-stream media
+scheduling, crash-watchdog recovery, and packaged cross-machine performance tests
+remain development work. Do not treat this application as a replacement for the
+working Deskflow installation yet.

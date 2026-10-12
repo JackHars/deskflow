@@ -42,6 +42,11 @@ add_library(server STATIC
 
 target_link_libraries(server PUBLIC common)
 
+if(BUILD_WINDOWSHARE)
+  # Server's optional route-state member also changes its public class layout.
+  target_compile_definitions(server PUBLIC BUILD_WINDOWSHARE=1)
+endif()
+
 if(UNIX)
   target_link_libraries(server PUBLIC app)
 endif()

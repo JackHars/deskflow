@@ -33,6 +33,10 @@
 #include "platform/OSXPasteboardPeeker.h"
 #include "platform/OSXScreenSaver.h"
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/PlatformMarkers.h"
+#endif
+
 #include <AppKit/NSEvent.h>
 #include <AvailabilityMacros.h>
 #include <IOKit/hidsystem/event_status_driver.h>
@@ -60,6 +64,15 @@ enum
 };
 
 static const double kCarbonLoopWaitTimeout = 10.0;
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+static bool isWindowshareHoldingDisplay(CGDirectDisplayID display)
+{
+  return deskflow::windowshare::isWindowshareHoldingDisplay(
+      CGDisplayVendorNumber(display), CGDisplayModelNumber(display), CGDisplaySerialNumber(display)
+  );
+}
+#endif
 
 // Synthetic mouse button and drag events require event numbers on macOS 27 and later.
 static inline bool needsEventNumber()
@@ -1333,12 +1346,42 @@ bool OSXComputer::updateComputerShape()
     return false;
   }
 
-  // get smallest rect enclosing all display rects
+  // get smallest rect enclosing the physical cursor topology
   CGRect totalBounds = CGRectZero;
+  CGDirectDisplayID main = CGMainDisplayID();
+  CGDisplayCount cursorDisplayCount = 0;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // A holding display can be far outside the physical desktop. Including it
+  // would move Deskflow's edge away from the actual monitor and trap the cursor.
+  totalBounds = CGRectNull;
+  CGDirectDisplayID firstCursorDisplay = kCGNullDirectDisplay;
+#endif
   for (CGDisplayCount i = 0; i < displayCount; ++i) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (isWindowshareHoldingDisplay(displays[i])) {
+      continue;
+    }
+    if (firstCursorDisplay == kCGNullDirectDisplay) {
+      firstCursorDisplay = displays[i];
+    }
+#endif
     CGRect bounds = CGDisplayBounds(displays[i]);
     totalBounds = CGRectUnion(totalBounds, bounds);
+    ++cursorDisplayCount;
   }
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (cursorDisplayCount == 0) {
+    // Preserve the previous shape during a display reconfiguration. Never use
+    // the holding display as a fallback cursor destination.
+    delete[] displays;
+    return false;
+  }
+  if (isWindowshareHoldingDisplay(main)) {
+    main = firstCursorDisplay;
+  }
+  m_displayID = main;
+#endif
 
   // get shape of default computer
   m_x = (int32_t)totalBounds.origin.x;
@@ -1347,18 +1390,24 @@ bool OSXComputer::updateComputerShape()
   m_h = (int32_t)totalBounds.size.height;
 
   // get center of default computer
-  CGDirectDisplayID main = CGMainDisplayID();
   const CGRect rect = CGDisplayBounds(main);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // A physical fallback need not start at the desktop origin if the holding
+  // display was selected as main by the operating system.
+  m_xCenter = CGRectGetMidX(rect);
+  m_yCenter = CGRectGetMidY(rect);
+#else
   m_xCenter = (rect.origin.x + rect.size.width) / 2;
   m_yCenter = (rect.origin.y + rect.size.height) / 2;
+#endif
 
   delete[] displays;
   // We want to notify the peer computer whether we are primary computer or not
   sendEvent(EventTypes::ComputerShapeChanged);
 
   LOG_DEBUG(
-      "computer shape: center=%d,%d size=%dx%d on %u %s", m_x, m_y, m_w, m_h, displayCount,
-      (displayCount == 1) ? "display" : "displays"
+      "computer shape: center=%d,%d size=%dx%d on %u %s", m_x, m_y, m_w, m_h, cursorDisplayCount,
+      (cursorDisplayCount == 1) ? "display" : "displays"
   );
 
   return true;
@@ -1678,6 +1727,17 @@ OSXComputer::handleCGInputEventSecondary(CGEventTapProxy proxy, CGEventType type
 // Quartz event tap support
 CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType type, CGEventRef event, void *refcon)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (event && type != kCGEventTapDisabledByTimeout && type != kCGEventTapDisabledByUserInput &&
+      deskflow::windowshare::isWindowshareSyntheticEvent(CGEventGetIntegerValueField(event, kCGEventSourceUserData))) {
+    // NativeHost posts directly to the source application's PID. Let that
+    // delivery proceed even while Deskflow owns a Linux cursor, without creating
+    // a second routed key/button or feeding a pointer event back to the viewer.
+    // This hot path performs no IPC, allocation, logging or waits.
+    return event;
+  }
+#endif
+
   OSXComputer *computer = (OSXComputer *)refcon;
 
   switch (type) {

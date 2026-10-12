@@ -24,6 +24,7 @@ endif()
 #Project level options
 option(BUILD_INSTALLER "Build installer" ON)
 option(ENABLE_COVERAGE "Enable test coverage" OFF)
+option(BUILD_WINDOWSHARE "Build experimental per-window sharing (requires runtime opt-in)" OFF)
 if(UNIX)
   if(APPLE)
     option(BUILD_OSX_BUNDLE "Build mac os bundle" ON)
@@ -97,6 +98,13 @@ project(
   HOMEPAGE_URL "https://deskflow.org"
   LANGUAGES C CXX
 )
+
+if(APPLE AND BUILD_WINDOWSHARE)
+  # Enable at the common ancestor of the platform backend and native host.
+  enable_language(OBJC OBJCXX)
+  set(CMAKE_OBJCXX_STANDARD 20)
+  set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+endif()
 
 # Define Additional "PROJECT" vars for packaging and metadata
 set(CMAKE_PROJECT_PROPER_NAME "Deskflow")

@@ -50,3 +50,8 @@ endif()
 add_subdirectory(deskflow-core)
 add_subdirectory(deskflow-daemon) #Only used on windows
 add_subdirectory(deskflow-gui)
+
+if(BUILD_WINDOWSHARE)
+  set(WINDOWSHARE_APP ON CACHE BOOL "Build experimental window sharing" FORCE)
+  add_subdirectory(windowshare)
+endif()

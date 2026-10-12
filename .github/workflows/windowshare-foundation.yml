@@ -1,22 +1,41 @@
 # SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
 # SPDX-License-Identifier: MIT
-name: Window sharing foundation
+name: Window sharing checks
 on:
   push:
     paths:
       - 'src/lib/windowshare/**'
       - 'src/apps/windowshare/**'
+      - 'deploy/windowshare/**'
       - 'src/unittests/windowshare/**'
       - '.github/workflows/windowshare-foundation.yml'
+      - 'src/lib/platform/OSXComputer.mm'
+      - 'src/lib/platform/CMakeLists.txt'
+      - 'src/lib/server/**'
+      - 'src/unittests/server/**'
+      - 'src/apps/CMakeLists.txt'
+      - 'src/unittests/CMakeLists.txt'
+      - 'CMakeLists.txt'
   pull_request:
     paths:
       - 'src/lib/windowshare/**'
       - 'src/apps/windowshare/**'
+      - 'deploy/windowshare/**'
       - 'src/unittests/windowshare/**'
       - '.github/workflows/windowshare-foundation.yml'
+      - 'src/lib/platform/OSXComputer.mm'
+      - 'src/lib/platform/CMakeLists.txt'
+      - 'src/lib/server/**'
+      - 'src/unittests/server/**'
+      - 'src/apps/CMakeLists.txt'
+      - 'src/unittests/CMakeLists.txt'
+      - 'CMakeLists.txt'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: windowshare-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   core:
     runs-on: ubuntu-24.04
@@ -44,3 +63,44 @@ jobs:
       - run: cmake -S src/apps/windowshare -B build/transport
       - run: cmake --build build/transport --parallel 2
       - run: ctest --test-dir build/transport --output-on-failure
+  linux-app:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install viewer dependencies
+        run: sudo apt-get update && sudo apt-get install -y qt6-base-dev libavcodec-dev libavutil-dev libswscale-dev libx264-dev openssl pkg-config
+      - name: Configure the opt-in application
+        run: cmake -S src/apps/windowshare -B build/app -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=Debug
+      - run: cmake --build build/app --parallel 2
+      - run: ctest --test-dir build/app --output-on-failure
+      - name: Check Linux platform diagnostics
+        run: QT_QPA_PLATFORM=offscreen build/app/deskflow-windowshare --probe
+  mac-app:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          cache: true
+      - name: Install decoder dependencies
+        run: brew install ffmpeg pkgconf
+      - name: Configure the opt-in application
+        # Match the compatible SDK used by the repository's Intel Mac CI.
+        run: cmake -S src/apps/windowshare -B build/app -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+      - run: cmake --build build/app --parallel 3
+      - run: ctest --test-dir build/app --output-on-failure
+      - name: Configure opt-in Deskflow integration
+        run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
+      - run: cmake --build build/integrated --target deskflow-core ServerTests --parallel 3
+      - run: ctest --test-dir build/integrated/src/unittests -R '^ServerTests$' --output-on-failure
+      - name: Test recursive Mac dependency packaging
+        run: python3 deploy/windowshare/macos-bundle-tests.py
+      - name: Package and verify a standalone experimental Mac app
+        run: |
+          deploy/windowshare/package-macos.sh build/app build/package
+          QT_QPA_PLATFORM=offscreen build/package/DeskflowWindowShare-Experimental.app/Contents/MacOS/deskflow-windowshare --help
+      # Native capture/input needs an unlocked desktop and explicit TCC grants.
+      # This job builds the smoke tools but never reports them as hardware tests.

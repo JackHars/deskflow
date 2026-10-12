@@ -5,6 +5,10 @@
  */
 
 #include <QTest>
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "arch/Arch.h"
+#include "base/Log.h"
+#endif
 
 class ServerTests : public QObject
 {
@@ -12,4 +16,15 @@ class ServerTests : public QObject
 private Q_SLOTS:
   void SwitchToComputerInfo_alloc_computer();
   void KeyboardBroadcastInfo_alloc_stateAndComputers();
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  void initTestCase();
+  void inputRoutes_keepPressRecipientAcrossSwitch();
+  void inputRoutes_localPressDoesNotAcquireRemoteRecipient();
+  void inputRoutes_disconnectDoesNotRetargetHeldInput();
+  void inputRoutes_orderlyCloseReleasesBeforeClosing();
+
+private:
+  Arch m_arch;
+  Log m_log;
+#endif
 };

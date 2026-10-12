@@ -12,29 +12,39 @@
 #include <functional>
 #include <memory>
 namespace deskflow::windowshare {
-struct Candidate {
+struct Candidate
+{
   std::uint32_t id = 0;
   QString title;
 };
-class NativeHost final : public QObject {
+class NativeHost final : public QObject
+{
 public:
   explicit NativeHost(QString journalPath, QObject *parent = nullptr);
   ~NativeHost() override;
+  // Probing never prompts. Only an explicit --request-permissions invocation
+  // should call requestPermissions(), which presents the normal macOS dialogs.
+  static QJsonObject permissions();
+  static void requestPermissions();
+  bool recover();
+  void setHoldingDisplayEnabled(bool enabled);
   void refresh();
   void exportWindow(std::uint32_t windowId);
   void ready(std::uint64_t session, std::uint64_t epoch);
   void input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event);
-  void resizeWindow(std::uint64_t session, std::uint64_t epoch, int width, int height);
+  void resizeWindow(std::uint64_t session, std::uint64_t epoch, int width, int height, std::uint64_t request = 0);
+  void requestKeyframe(std::uint64_t session, std::uint64_t epoch);
   void restore(std::uint64_t session);
   void restoreAll();
   void releaseAll();
   std::function<void(QVector<Candidate>)> onCatalog;
   std::function<void(std::uint64_t, std::uint64_t, QJsonObject)> onOpened;
-  std::function<void(std::uint64_t, std::uint64_t, QByteArray)> onFrame;
+  std::function<void(std::uint64_t, std::uint64_t, std::uint64_t, QByteArray)> onFrame;
   std::function<void(std::uint64_t, std::uint64_t)> onCommitted;
-  std::function<void(std::uint64_t, std::uint64_t, std::uint64_t)> onFocused;
+  std::function<void(std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t)> onFocused;
   std::function<void(std::uint64_t)> onClosed;
   std::function<void(QString)> onError;
+
 private:
   struct Impl;
   std::unique_ptr<Impl> m_impl;

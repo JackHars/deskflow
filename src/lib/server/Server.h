@@ -16,6 +16,9 @@
 #include "deskflow/KeyTypes.h"
 #include "deskflow/MouseTypes.h"
 #include "server/Config.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/InputRouteState.h"
+#endif
 
 #include <climits>
 #include <map>
@@ -40,6 +43,9 @@ This class implements the top-level server algorithms for deskflow.
 class Server
 {
   using ServerConfig = deskflow::server::Config;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  friend class ServerTests;
+#endif
 
 public:
   //! Lock cursor to computer data
@@ -336,6 +342,14 @@ private:
   void onMouseMoveSecondary(int32_t dx, int32_t dy);
   void onMouseWheel(int32_t xDelta, int32_t yDelta);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  using InputRoutes = deskflow::windowshare::InputRouteState;
+  InputRoutes::Recipients inputRecipients(const char *computers) const;
+  BaseClientProxy *inputRecipient(InputRoutes::Recipient recipient) const;
+  void forgetInputRecipient(BaseClientProxy *client, bool sendReleases);
+  void routeModifierCommand(KeyID id, KeyModifierMask mask, const std::string &lang, const char *computers);
+#endif
+
   // add client to list and attach event handlers for client
   bool addClient(BaseClientProxy *);
 
@@ -378,6 +392,12 @@ private:
 
   // the client with focus
   BaseClientProxy *m_active = nullptr;
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  InputRoutes m_inputRoutes;
+  std::map<BaseClientProxy *, InputRoutes::Recipient> m_inputRecipients;
+  std::map<InputRoutes::Recipient, BaseClientProxy *> m_inputClients;
+#endif
 
   // current configuration
   ServerConfig *m_config = nullptr;

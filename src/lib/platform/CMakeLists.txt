@@ -180,6 +180,10 @@ endif()
 # wayland.h is included to check for wayland support
 add_library(platform STATIC ${PLATFORM_SOURCES})
 
+if(BUILD_WINDOWSHARE)
+  target_compile_definitions(platform PRIVATE BUILD_WINDOWSHARE=1)
+endif()
+
 target_link_libraries(platform PUBLIC client ${libs})
 
 if(UNIX)
