@@ -170,7 +170,7 @@ def start_bus(processes, root, name):
     config.write_text(
         '<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN" '
         '"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">\n'
-        '<busconfig><type>session</type><auth>EXTERNAL</auth>'
+        f'<busconfig><type>session</type><listen>{address}</listen><auth>EXTERNAL</auth>'
         '<policy context="default"><allow send_destination="*"/>'
         '<allow receive_sender="*"/><allow own="*"/></policy></busconfig>\n'
     )
@@ -350,7 +350,7 @@ def run_fixture(arguments):
     foreign = None
     try:
         with contextlib.ExitStack() as cleanup:
-            temporary = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="df-gnome-"))
+            temporary = cleanup.enter_context(tempfile.TemporaryDirectory(prefix="df-gnome-", dir="/tmp"))
             root = Path(temporary)
             env = private_environment(root)
             processes = Processes(output, env)
