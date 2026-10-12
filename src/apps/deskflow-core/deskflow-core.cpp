@@ -177,6 +177,7 @@ int main(int argc, char **argv)
     // The factory and companion arguments have already required server mode.
     // Configure the value-only mailbox before moving App onto its core thread.
     static_cast<ServerApp *>(coreApp)->setSelectedPeerMailbox(inputSession->selectedPeerMailbox());
+    static_cast<ServerApp *>(coreApp)->setOriginalInputCapture(inputSession->captureSource());
   }
 #endif
 

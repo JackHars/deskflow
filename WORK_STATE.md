@@ -3,6 +3,46 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Latest mixed-input milestone (2026-10-12)
+
+The companion-enabled Mac core now attaches a preallocated, single-use capture
+source to its existing event tap before Deskflow translation. Keys, motion,
+buttons and two-axis scroll share one sequence and retain their original flags
+and timestamps. Qt drains the bounded queue outside the tap. Source stop,
+malformed input, overflow, tap disable, companion loss and server shutdown revoke
+retained continuity; the emergency chord remains visible after overflow. This
+observer does not suppress, forward or post original input.
+
+Private protocol v3 transports the mixed records within the existing 256-byte
+limit (236-byte maximum), with a capture epoch bound into its 120-byte offer and
+184-byte lease. Preflight requires a retained live core-local capture token.
+Same-epoch lease changes preserve replay counters; newer epochs require fresh
+preparation, and older epochs cannot return. No production authorizer or
+preflight controller is enabled.
+
+Private Mac event constructors verify their exact readback and reject lossy
+Quartz conversions. Tests preserve signed32 point/fixed-scroll limits and reject
+oversized native mouse/line-scroll values on this Intel runtime. Two event-tap
+lifecycle bugs are also fixed: permission loss no longer joins the tap from its
+own callback, and queued stop survives shutdown before CFRunLoopRun starts.
+
+Recorded checks for this source state:
+
+- Full opt-in build and all 55 integrated CTest suites passed.
+- All 13 foundation suites passed normally and with ASan/UBSan.
+- Standalone app's 12 suites passed across the full run and the final companion
+  rerun after migrating its lease fixture to v3. Separate strict and sanitizer
+  channel/preflight suites and private Mac adapter suites passed.
+- The ordinary core (`BUILD_WINDOWSHARE=OFF`) compiled successfully.
+- Formatting, diff and REUSE checks passed (941/941 licensed files).
+
+Physical neutrality remains Unknown: no complete physical-device/scroll provider
+or fence against queued native events exists. Observer checkpoints and HID state
+reads cannot substitute for that provider. Original input delivery, viewport
+authority and core-triggered restore-all remain unfinished. The Mac lid was
+closed and Ubuntu SSH timed out again; no interactive native, tap, posting or
+display tests ran during this milestone. The full goal remains incomplete.
+
 ## Implemented in this milestone
 
 A separate, default-off native Mac capture host and Qt viewer application now use
@@ -129,7 +169,8 @@ Team and absent/empty entitlements. PeerTrust can inspect live self, peer and
 anchor signing facts around its existing exact identity checks, but returns only
 an immutable historical snapshot. Apple-or-same-Team admission does not establish
 an exact permitted image set or satisfy the preflight module-integrity provider.
-These foundations install no capture provider, controller or input authorizer.
+These admission foundations install no controller or input authorizer. The
+latest passive capture observer is described above.
 
 ## Recorded validation
 
@@ -288,17 +329,18 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
 ## Local package
 
 The new signed core-main bundle is
-`build/packages/input-foundations-20261012/DeskflowSeamless-Core-Experimental.app`,
-with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification
-and restricted-library admission auditing for signing Team `MM5PBJ9D4Y`.
+`build/packages/mixed-input-20261012/DeskflowSeamless-Core-Experimental.app`,
+with its ZIP beside it. The dependency/signature audit and exact permitted-library
+audit pass for signing Team `MM5PBJ9D4Y`: 77 library records, slices and allowed
+CDHashes, sealed by the fixed executables' same-Team/CDHash constraints.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`cc8fcad3a7a2e688151198341655d75ab39461b29d5439b4e90fc86db3886440`.
+`4f037853f8aec15ff79928ad9609780780cc5329e2204bdb6489ac228ee62290`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
 The package and installed copy passed recursive dependency/signature verification,
 the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
-smoke, with original input disabled. The preceding preflight installation is
-preserved in `build/packages/input-foundations-installed-backup-20261012/`.
+smoke, with original input delivery disabled. The preceding exact-library
+installation is preserved in `build/packages/mixed-input-installed-backup-20261012/`.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 

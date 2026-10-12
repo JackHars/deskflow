@@ -87,6 +87,7 @@ elseif(APPLE)
     OSXComputer.mm
     OSXEventQueueBuffer.cpp
     OSXEventQueueBuffer.h
+    OSXEventTapRunLoop.h
     OSXKeyLayoutResource.cpp
     OSXKeyLayoutResource.h
     OSXKeyState.cpp
@@ -182,6 +183,9 @@ add_library(platform STATIC ${PLATFORM_SOURCES})
 
 if(BUILD_WINDOWSHARE)
   target_compile_definitions(platform PRIVATE BUILD_WINDOWSHARE=1)
+  if(APPLE)
+    target_link_libraries(platform PRIVATE windowshare-local-input)
+  endif()
 endif()
 
 target_link_libraries(platform PUBLIC client ${libs})

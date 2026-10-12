@@ -4,7 +4,7 @@
  */
 #pragma once
 
-#include "OriginalKeyboard.h"
+#include "OriginalInput.h"
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QLocalSocket>
@@ -40,12 +40,14 @@ std::optional<LocalInputProcess> currentLocalInputProcess();
 // This does not transfer ownership or authenticate the launching process.
 bool protectLocalInputDescriptor(int descriptor);
 
-// Private, core-attested selection. All four counters are full nonzero u64s;
+// Private, core-attested selection. All five counters are full nonzero u64s;
 // none is a JSON/window counter. Names and addresses never establish identity.
-// Wire order: four counters (32), Deskflow incarnation (16), both pins (64).
+// Wire order: selection counters then captureEpoch (40), Deskflow incarnation
+// (16), both pins (64). captureEpoch is separate from the host/session epoch.
 struct LocalInputOffer
 {
   std::uint64_t routeGeneration = 0, coreServerIncarnation = 0, coreRecipient = 0, coreSelectionGeneration = 0;
+  std::uint64_t captureEpoch = 0;
   LocalInputIncarnation deskflowClientIncarnation{};
   LocalInputPin deskflowPeerPin{}, windowSharePeerPin{};
   bool operator==(const LocalInputOffer &) const = default;
@@ -53,7 +55,7 @@ struct LocalInputOffer
 bool validLocalInputOffer(const LocalInputOffer &offer);
 
 // Adds the independently host-attested connection and exact keyboard fence.
-// Wire order: Offer (112), WindowShare incarnation (16), six counters (48).
+// Wire order: Offer (120), WindowShare incarnation (16), six counters (48).
 // These six host counters must be in [1, 2^53-1], matching the JSON protocol.
 // keyboardRouteGeneration and the private routeGeneration are distinct scopes.
 struct LocalInputLease : LocalInputOffer
@@ -111,9 +113,9 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 2;
+  static constexpr std::uint16_t version = 3;
   static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 256, maxQueueBytes = 16 * 1024;
-  static constexpr qsizetype offerPayloadBytes = 112, leasePayloadBytes = 176, originalPayloadBytes = 209;
+  static constexpr qsizetype offerPayloadBytes = 120, leasePayloadBytes = 184, maxOriginalPayloadBytes = 236;
 
   // Takes ownership even on failure. expectedCore must come from an independently
   // trusted bootstrap, not argv, an environment variable, or peer packet fields.
@@ -132,13 +134,20 @@ public:
   bool quiesced(LocalInputLease lease);  // Host -> core.
   // Bidirectional preflight cancellation, distinct from revoke() of a lease.
   bool cancelOffer(LocalInputOffer offer, LocalInputRevocation reason = LocalInputRevocation::Requested);
-  bool prepare(LocalInputLease lease);                              // Core -> host.
-  bool acknowledgePrepare(LocalInputLease lease);                   // Host -> core.
-  bool commit(LocalInputLease lease);                               // Core -> host; acknowledgement activates core.
-  bool sendOriginal(LocalInputLease lease, OriginalKeyEvent event); // Core -> host only.
+  bool prepare(LocalInputLease lease);            // Core -> host.
+  bool acknowledgePrepare(LocalInputLease lease); // Host -> core.
+  bool commit(LocalInputLease lease);             // Core -> host; acknowledgement activates core.
+  // One ordered key/motion/button/scroll/checkpoint stream; core -> host only.
+  // Epoch is derived from the bound lease on decode and must match on send.
+  // Motion/scroll use signed32, losslessly validated before encoding. Emergency
+  // and discontinuity revoke instead of becoming deliverable records.
+  bool sendOriginal(LocalInputLease lease, OriginalInputRecord record);
   // Retired control acknowledgements/revokes cannot affect a newer route.
   // Fully validated in-flight Original frames for retired routes advance
   // capture replay protection and are discarded without native delivery.
+  // Reuse in one capture epoch retains sequence/time high-water marks. Only a
+  // new lease can admit a higher epoch. Older-epoch records are terminal: FIFO
+  // ordering requires their legitimate traffic to precede that new Prepare.
   void revoke(LocalInputRevocation reason = LocalInputRevocation::Requested);
   void close(const QString &reason = QStringLiteral("Local input channel closed"));
 
@@ -160,7 +169,7 @@ public:
   std::function<void(const LocalInputLease &)> onCandidate, onQuiesced;
   std::function<void(const LocalInputOffer &, LocalInputRevocation)> onOfferCancelled;
   std::function<void(const LocalInputLease &)> onPrepare, onPrepared, onActivated;
-  std::function<void(const LocalInputLease &, const OriginalKeyEvent &)> onOriginal;
+  std::function<void(const LocalInputLease &, const OriginalInputRecord &)> onOriginal;
   // Release this exact owner's delivered state; do not fabricate capture events.
   std::function<void(const LocalInputLease &, LocalInputRevocation)> onRevoked;
   std::function<void(QString)> onClosed;
@@ -185,7 +194,8 @@ private:
   LocalInputIncarnation m_coreIncarnation{}, m_hostIncarnation{};
   QByteArray m_incoming;
   qsizetype m_expected = headerBytes;
-  std::uint64_t m_sent = 0, m_received = 0, m_originalSequence = 0, m_originalTimestamp = 0, m_routeGeneration = 0;
+  std::uint64_t m_sent = 0, m_received = 0, m_originalSequence = 0, m_originalTimestamp = 0, m_routeGeneration = 0,
+                m_captureEpoch = 0;
   int m_handshake = 0;
   bool m_authenticated = false, m_closed = false, m_readScheduled = false;
   bool m_authorizing = false, m_authorityInvalidated = false;

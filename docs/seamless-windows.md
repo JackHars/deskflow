@@ -157,7 +157,7 @@ check the policy's boundary. The suite does not establish arm64 or Rosetta behav
 
 Apple/system libraries remain exempt. An allowed hash does not restrict a
 library's path, enumerate currently loaded images or attest uncompromised process
-memory. Exact packaging does not enable original-input capture or preflight.
+memory. Exact packaging does not enable original-input delivery or preflight.
 
 ## Packaged core companion
 
@@ -215,7 +215,11 @@ unrelated ad-hoc signature, or an inherited FD alone cannot satisfy that check.
 Directly launching the nested host cannot establish this private route. These are
 packaged-code integrity checks, not publisher approval or complete loaded-module
 integrity. The child drops ambient DYLD and Qt/QML plugin search overrides. Input
-authorization remains unset; original capture and injection are still disabled.
+authorization remains unset. The companion-enabled Mac core now observes mixed
+input in its existing HID tap, before Deskflow translation. It allocates a bounded
+queue before starting the tap and drains it on the Qt thread. This observer does
+not suppress events, forward them to the companion or post input. An ordinary
+core launch without the companion does not attach this observer.
 
 ## Pair and run
 
@@ -315,13 +319,19 @@ Queued traffic checks the old deadline before refreshing it, so an overdue timer
 cannot revive a connection. Closing, socket failure and destruction revoke its
 ticket before notifying the owner; a reconnect requires a new Channel instance.
 
-Private protocol version 2 adds Offer, Candidate, Quiesced and Cancel controls.
-The 112-byte offer binds a private route generation, core server/recipient/selection
-tokens, the Deskflow connection incarnation, and both approved pins. A 176-byte
+Private protocol version 3 carries keys, motion, buttons, scroll and checkpoints
+in a single ordered stream. Its 120-byte offer binds a private route generation,
+core server/recipient/selection tokens, the capture epoch, the Deskflow connection
+incarnation, and both approved pins. A 184-byte
 lease also binds the WindowShare incarnation, session, epoch, focus request,
 focus revision, geometry revision and independent keyboard-fence generation.
-Original event messages remain within the fixed 256-byte private payload limit;
-none of these original events is carried over network JSON.
+Original event payloads use explicit tags and signed 32-bit motion/scroll values;
+the largest is 236 bytes, within the unchanged 256-byte private limit. Capture
+sequences may skip events outside a route but must increase within their epoch.
+Replay marks survive same-epoch lease replacement; a greater capture epoch needs
+a fresh Prepare, and an older epoch cannot return. Emergency/discontinuity
+boundaries revoke rather than deliver native input. Version 2 is rejected; none
+of these original records is carried over network JSON.
 
 `LocalInputPreflight` implements the exchange as an isolated, default-deny
 coordinator. Each endpoint checks its own live connection and an explicit immutable
@@ -332,8 +342,11 @@ blocking read. Cancellation takes effect before a following event can authorize;
 replacement waits for synchronous owner release. Reentrant controls use a bounded
 eight-value queue with one cancellation slot. Missing neutral-boundary, module
 integrity or ordered-input checks never authorize Prepare.
+Core begin now requires a retained live capture token and rechecks it through
+every callback, control and timer dispatch. The host binds the offered numeric
+epoch; that number alone is not physical-state authority.
 
-Three additional foundations remain isolated from production input. The bounded
+The bounded
 `OriginalInputStream` carries keys, motion, buttons, scroll phases and checkpoints
 in one capture epoch and sequence, preserving each record's original flags. Its
 retained epoch evidence is revoked on overflow, discontinuity, emergency or stop.
@@ -348,6 +361,26 @@ apply the returned releases with their release-time flags before resuming a rout
 and require an empty ledger in addition to a committed physical neutral boundary.
 Scroll ownership must survive gesture end and any following momentum; silence or
 a checkpoint cannot redirect that momentum to a new viewport.
+
+The Mac capture adapter preserves supplied CGEvent fields and constructs private,
+loop-tagged events without posting them. It rejects mismatched callback/event
+types, tablet subtypes, unsupported third scroll axes and malformed fields. It
+uses integer accessors for signed 16.16 scroll values. Every constructed field is
+read back: if Quartz narrows a representable wire value, construction fails
+instead of returning altered input. Constructed-event tests on the local Intel
+Mac found this for large mouse deltas and line-scroll values; point and raw fixed
+scroll fields retained signed 32-bit extremes.
+
+`OriginalInputCaptureSource` attaches once for the companion session. Its retained
+epoch is unavailable before tap startup and revoked on overflow, malformed input,
+tap disable, companion loss, server stop or source destruction. Restarting or
+resuming the ordinary core cannot revive it; a new core session is needed until
+a validated rearm provider exists. Qt drains every record into the neutral
+barrier, which has no trusted physical observation and cannot authorize input.
+The reserved emergency chord revokes even after queue overflow; integration with
+the host's restore-all action remains outstanding. Accessibility checks and tap
+re-enabling run on the core owner thread, avoiding a tap-thread self-join. A
+queued run-loop stop also survives shutdown before the first run begins.
 
 `ViewportLease` validates one-output, axis-aligned X11 coordinate mappings and
 host-request-based freshness. The Deskflow injection space and viewer space must

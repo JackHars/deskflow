@@ -11,7 +11,10 @@ on:
       - 'src/unittests/windowshare/**'
       - '.github/workflows/windowshare-foundation.yml'
       - 'src/lib/platform/OSXComputer.mm'
+      - 'src/lib/platform/OSXComputer.h'
+      - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
+      - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
       - 'src/lib/io/**'
       - 'src/lib/net/**'
@@ -32,7 +35,10 @@ on:
       - 'src/unittests/windowshare/**'
       - '.github/workflows/windowshare-foundation.yml'
       - 'src/lib/platform/OSXComputer.mm'
+      - 'src/lib/platform/OSXComputer.h'
+      - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
+      - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
       - 'src/lib/io/**'
       - 'src/lib/net/**'
@@ -122,7 +128,7 @@ jobs:
         run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
       - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests ServerTests SecurePeerIdentityTests --parallel 3
       - run: ctest --test-dir build/integrated/src/unittests -R '^(ServerTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
-      - name: Verify original keyboard state and private CGEvent construction
+      - name: Verify mixed input state, capture lifecycle and private CGEvent construction
         run: |
           cmake -S src/unittests/windowshare -B build/keyboard -DWINDOWSHARE_SANITIZERS=ON
           cmake --build build/keyboard --parallel 3

@@ -65,6 +65,10 @@ struct LocalInputChannelTestAccess
   {
     return channel.m_originalSequence == sequence && channel.m_originalTimestamp == timestamp;
   }
+  static std::uint64_t captureEpoch(const LocalInputChannel &channel)
+  {
+    return channel.m_captureEpoch;
+  }
   static void incoming(LocalInputChannel &channel, unsigned type, const QByteArray &payload = {})
   {
     // Model a complete frame already queued when a delayed readyRead runs.
@@ -131,19 +135,46 @@ LocalInputLease fixtureLease()
   lease.coreSelectionGeneration = 18;
   lease.focusRequest = 19;
   lease.keyboardRouteGeneration = 20;
+  lease.captureEpoch = 21;
   return lease;
 }
-OriginalKeyEvent fixtureEvent(std::uint64_t sequence, OriginalKeyTransition transition = OriginalKeyTransition::Down)
+OriginalInputRecord fixtureEvent(std::uint64_t sequence, OriginalKeyTransition transition = OriginalKeyTransition::Down)
 {
-  OriginalKeyEvent event;
-  event.sample.sequence = sequence;
-  event.sample.timestampNs = sequence * 100;
-  event.sample.keyboardType = 40;
-  event.sample.kind = transition == OriginalKeyTransition::Up ? OriginalKeyKind::Up : OriginalKeyKind::Down;
-  event.sample.repeat = transition == OriginalKeyTransition::Repeat;
-  event.transition = transition;
+  OriginalInputRecord event;
+  event.epoch = fixtureLease().captureEpoch;
+  event.sequence = sequence;
+  event.sourceTimestampNs = sequence * 100;
+  event.payload = OriginalInputKey{
+      40, 0, transition == OriginalKeyTransition::Up ? OriginalKeyKind::Up : OriginalKeyKind::Down, transition,
+      transition == OriginalKeyTransition::Repeat
+  };
   return event;
 }
+std::vector<OriginalInputRecord> mixedRecords()
+{
+  constexpr auto extraFlag = std::uint64_t{1} << 63;
+  constexpr auto shifted = extraFlag | originalKey::shiftFlag | originalKey::leftShiftFlag;
+  const auto key =
+      OriginalInputKey{40, originalKey::leftShift, OriginalKeyKind::FlagsChanged, OriginalKeyTransition::Down, false};
+  const auto up =
+      OriginalInputKey{40, originalKey::leftShift, OriginalKeyKind::FlagsChanged, OriginalKeyTransition::Up, false};
+  constexpr auto minimum = std::numeric_limits<std::int32_t>::min();
+  constexpr auto maximum = std::numeric_limits<std::int32_t>::max();
+  return {
+      {21, 100, 1000, shifted, key},
+      {21, 110, 1001, shifted, OriginalInputMotion{minimum, maximum, 32}},
+      {21, 120, 1002, shifted, OriginalInputButton{31, true, maximum}},
+      {21, 130, 1003, shifted, OriginalInputMotion{1, -2, 31}},
+      {21, 140, 1004, shifted,
+       OriginalInputScroll{
+           {minimum, maximum}, {-1, 0}, {65536, -65536}, OriginalScrollPhase::Began, OriginalMomentumPhase::None, true
+       }},
+      {21, 150, 1005, shifted, OriginalInputButton{31, false, 3}},
+      {21, 160, 1006, extraFlag, up},
+      {21, 170, 1007, extraFlag, OriginalInputBoundary::Checkpoint}
+  };
+}
+
 void number(QByteArray &bytes, std::uint64_t value, int size)
 {
   for (int i = size - 1; i >= 0; --i)
@@ -154,7 +185,8 @@ QByteArray offerPayload(const LocalInputOffer &offer)
   QByteArray bytes;
   auto append = [&](const auto &value) { bytes.append(reinterpret_cast<const char *>(value.data()), value.size()); };
   for (auto value :
-       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration})
+       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration,
+        offer.captureEpoch})
     number(bytes, value, 8);
   append(offer.deskflowClientIncarnation);
   append(offer.deskflowPeerPin);
@@ -174,16 +206,40 @@ QByteArray leasePayload(const LocalInputLease &lease)
     number(bytes, value, 8);
   return bytes;
 }
-QByteArray originalPayload(const LocalInputLease &lease, const OriginalKeyEvent &event)
+QByteArray originalPayload(const LocalInputLease &lease, const OriginalInputRecord &event)
 {
   auto bytes = leasePayload(lease);
-  for (auto value : {event.sample.sequence, event.sample.timestampNs, event.sample.flags})
+  for (auto value : {event.sequence, event.sourceTimestampNs, event.flags})
     number(bytes, value, 8);
-  number(bytes, event.sample.keyboardType, 4);
-  number(bytes, event.sample.keyCode, 2);
-  number(bytes, static_cast<unsigned>(event.sample.kind), 1);
-  number(bytes, event.sample.repeat, 1);
-  number(bytes, static_cast<unsigned>(event.transition), 1);
+  if (const auto *key = std::get_if<OriginalInputKey>(&event.payload)) {
+    number(bytes, 1, 1);
+    number(bytes, key->keyboardType, 4);
+    number(bytes, key->code, 2);
+    number(bytes, static_cast<unsigned>(key->kind), 1);
+    number(bytes, key->repeat, 1);
+    number(bytes, static_cast<unsigned>(key->transition), 1);
+  } else if (const auto *motion = std::get_if<OriginalInputMotion>(&event.payload)) {
+    number(bytes, 2, 1);
+    number(bytes, static_cast<std::uint32_t>(motion->dx), 4);
+    number(bytes, static_cast<std::uint32_t>(motion->dy), 4);
+    number(bytes, motion->dragButton, 1);
+  } else if (const auto *button = std::get_if<OriginalInputButton>(&event.payload)) {
+    number(bytes, 3, 1);
+    number(bytes, button->button, 1);
+    number(bytes, button->down, 1);
+    number(bytes, button->clickCount, 4);
+  } else if (const auto *scroll = std::get_if<OriginalInputScroll>(&event.payload)) {
+    number(bytes, 4, 1);
+    for (const auto &axes : {scroll->lines, scroll->points, scroll->fixed16_16})
+      for (auto value : axes)
+        number(bytes, static_cast<std::uint32_t>(value), 4);
+    number(bytes, static_cast<unsigned>(scroll->phase), 1);
+    number(bytes, static_cast<unsigned>(scroll->momentum), 1);
+    number(bytes, scroll->continuous, 1);
+  } else {
+    number(bytes, 5, 1);
+    number(bytes, static_cast<unsigned>(std::get<OriginalInputBoundary>(event.payload)), 1);
+  }
   return bytes;
 }
 
@@ -293,7 +349,7 @@ wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t s
 {
   QByteArray header;
   number(header, 0x444c4931, 4);
-  number(header, 2, 2);
+  number(header, 3, 2);
   number(header, type, 1);
   number(header, role, 1);
   number(header, payload.size(), 4);
@@ -304,14 +360,14 @@ wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t s
 int wireChild(int descriptor)
 {
   const auto hello = readBytes(descriptor, 76);
-  check(hello == wireFrame(hello, 1, 1, 1, hello.mid(52)), "Unexpected protocol v2 bootstrap layout");
+  check(hello == wireFrame(hello, 1, 1, 1, hello.mid(52)), "Unexpected protocol v3 bootstrap layout");
   const auto write = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
     const auto frame = wireFrame(hello, type, 2, sequence, payload);
     check(::write(descriptor, frame.constData(), frame.size()) == frame.size(), "Raw fixture write failed");
   };
   const auto expect = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
     const auto expected = wireFrame(hello, type, 1, sequence, payload);
-    check(readBytes(descriptor, expected.size()) == expected, "Protocol v2 wire bytes changed");
+    check(readBytes(descriptor, expected.size()) == expected, "Protocol v3 wire bytes changed");
   };
   const auto lease = fixtureLease();
   const auto offer = offerPayload(lease), binding = leasePayload(lease);
@@ -327,6 +383,9 @@ int wireChild(int descriptor)
   expect(8, 6, binding);
   write(9, 6, binding);
   expect(11, 7, originalPayload(lease, fixtureEvent(1)));
+  std::uint64_t sequence = 8;
+  for (const auto &record : mixedRecords())
+    expect(11, sequence++, originalPayload(lease, record));
   write(10, 7, binding + char(LocalInputRevocation::Requested));
   pollfd poller{descriptor, POLLIN, 0};
   char byte;
@@ -341,7 +400,7 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
   if (mode == "raw-magic")
     frame[0] = 'X';
   else if (mode == "raw-version")
-    frame[5] = 1;
+    frame[5] = 2; // The prior keyboard-only v2 must not negotiate.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -384,7 +443,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 #ifdef Q_OS_UNIX
   if (mode.startsWith("raw-"))
     return rawChild(application, descriptor, mode);
-  if (mode == "wire-v2")
+  if (mode == "wire-v3")
     return wireChild(descriptor);
   const auto expectedCore = localInputProcess(getppid());
   check(expectedCore.has_value(), "Controlled fixture launcher is unavailable");
@@ -400,7 +459,9 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     if (phase == LocalInputCheck::Deliver && mode == "nested-capture") {
       auto retired = fixtureLease();
       --retired.routeGeneration;
-      LocalInputChannelTestAccess::incoming(*host, 11, originalPayload(retired, fixtureEvent(2)));
+      auto newer = fixtureEvent(2);
+      newer.payload = OriginalInputMotion{-9, 11, 32};
+      LocalInputChannelTestAccess::incoming(*host, 11, originalPayload(retired, newer));
       return true;
     }
     if (phase == LocalInputCheck::Deliver && mode.startsWith("host-authority-")) {
@@ -415,11 +476,18 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       return true;
     }
     auto binding = lease;
-    if (mode == "reuse" || mode == "revoke-prepared" || mode.startsWith("retired-"))
+    if (mode == "reuse" || mode == "revoke-prepared" || mode.startsWith("retired-") || mode == "epochs")
       binding.routeGeneration = fixtureLease().routeGeneration;
+    if (mode == "epochs")
+      binding.captureEpoch = fixtureLease().captureEpoch;
     return binding == fixtureLease() && !(mode == "deny-commit" && phase == LocalInputCheck::Commit);
   };
   host->onPrepare = [&, marker = QString(256, 'p')](const LocalInputLease &lease) {
+    if (mode == "epochs" && lease.captureEpoch == 21 && lease.routeGeneration == 16)
+      check(
+          LocalInputChannelTestAccess::captureAt(*host, 100, 10000),
+          "Same-epoch host preparation reset capture replay state"
+      );
     if (mode == "delete-prepare") {
       host.reset();
       ++callbackEvents;
@@ -459,8 +527,29 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     if ((mode == "reuse" || mode.startsWith("retired-")) && lease.routeGeneration == fixtureLease().routeGeneration)
       host->revoke();
   };
-  host->onOriginal = [&, marker = QString(256, 'o')](const LocalInputLease &lease, const OriginalKeyEvent &event) {
+  host->onOriginal = [&, marker = QString(256, 'o')](const LocalInputLease &lease, const OriginalInputRecord &event) {
     ++originalEvents;
+    if (mode == "mixed") {
+      const auto records = mixedRecords();
+      check(
+          lease == fixtureLease() && originalEvents <= records.size() && event.epoch == lease.captureEpoch &&
+              originalPayload(lease, event) == originalPayload(lease, records[originalEvents - 1]),
+          "Mixed input type, signed value, flags, epoch or order changed"
+      );
+      if (originalEvents == records.size())
+        host->revoke();
+      return;
+    }
+    if (mode == "epochs") {
+      check(
+          originalEvents <= 3 && event.epoch == lease.captureEpoch &&
+              event.sequence == (originalEvents == 3 ? 1 : 90 + originalEvents * 10) &&
+              event.epoch == (originalEvents == 3 ? 22 : 21),
+          "Capture epoch or retained ordering changed"
+      );
+      host->revoke();
+      return;
+    }
     if (mode == "delete-original") {
       host.reset();
       ++callbackEvents;
@@ -471,7 +560,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       auto next = fixtureLease();
       ++next.routeGeneration;
       check(
-          lease == next && originalEvents == 1 && event.sample.sequence == 3,
+          lease == next && originalEvents == 1 && event.sequence == 3,
           "Retired input was delivered or new input lost its capture ordering"
       );
       retiredDelivered = true;
@@ -483,11 +572,13 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       return;
     }
     check(
-        lease == fixtureLease() && event.sample.keyboardType == 40 && event.sample.sequence == originalEvents,
+        lease == fixtureLease() && std::get<OriginalInputKey>(event.payload).keyboardType == 40 &&
+            event.sequence == originalEvents,
         "Original event envelope changed"
     );
     check(
-        event.transition == (originalEvents == 1 ? OriginalKeyTransition::Down : OriginalKeyTransition::Up),
+        std::get<OriginalInputKey>(event.payload).transition ==
+            (originalEvents == 1 ? OriginalKeyTransition::Down : OriginalKeyTransition::Up),
         "Original transition changed"
     );
     if (originalEvents == 2)
@@ -564,21 +655,46 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 2);
+  static_assert(LocalInputChannel::version == 3);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 256);
-  static_assert(LocalInputChannel::offerPayloadBytes == 112 && LocalInputChannel::leasePayloadBytes == 176);
-  static_assert(LocalInputChannel::originalPayloadBytes == 209);
+  static_assert(LocalInputChannel::offerPayloadBytes == 120 && LocalInputChannel::leasePayloadBytes == 184);
+  static_assert(LocalInputChannel::maxOriginalPayloadBytes == 236);
   const auto original = fixtureLease();
   const auto offer = leaseOffer(original);
-  check(validLocalInputOffer(offer) && validLocalInputLease(original), "Invalid version 2 fixture");
+  check(validLocalInputOffer(offer) && validLocalInputLease(original), "Invalid version 3 fixture");
   check(
-      offerPayload(offer).size() == 112 && leasePayload(original).size() == 176 &&
-          originalPayload(original, fixtureEvent(1)).size() == 209,
-      "Version 2 golden payload sizes changed"
+      offerPayload(offer).size() == 120 && leasePayload(original).size() == 184 &&
+          originalPayload(original, fixtureEvent(1)).size() == 218,
+      "Version 3 golden payload sizes changed"
+  );
+  const std::array suffixes{
+      "01000000280038030001",
+      "02800000007fffffff20",
+      "031f017fffffff",
+      "0200000001fffffffe1f",
+      "04800000007fffffffffffffff0000000000010000ffff0000010001",
+      "031f0000000003",
+      "01000000280038030002",
+      "0500"
+  };
+  const auto records = mixedRecords();
+  for (std::size_t i = 0; i < records.size(); ++i) {
+    const auto payload = originalPayload(original, records[i]);
+    check(
+        validOriginalInputRecord(records[i]) && payload.size() <= LocalInputChannel::maxOriginalPayloadBytes &&
+            payload.mid(208) == QByteArray::fromHex(suffixes[i]),
+        "Mixed original golden record bytes changed"
+    );
+  }
+  check(originalPayload(original, records[4]).size() == 236, "Scroll payload exceeded its fixed bounded layout");
+  check(
+      originalPayload(original, records[0]).mid(184, 24) ==
+          QByteArray::fromHex("000000000000006400000000000003e88000000000020002"),
+      "Original capture sequence/time/flags byte order changed"
   );
   for (const auto member :
        {&LocalInputOffer::routeGeneration, &LocalInputOffer::coreServerIncarnation, &LocalInputOffer::coreRecipient,
-        &LocalInputOffer::coreSelectionGeneration}) {
+        &LocalInputOffer::coreSelectionGeneration, &LocalInputOffer::captureEpoch}) {
     auto lease = original;
     lease.*member = std::numeric_limits<std::uint64_t>::max();
     check(validLocalInputOffer(lease) && validLocalInputLease(lease), "A core token was restricted to JSON precision");
@@ -660,7 +776,7 @@ void preflightRoundtrip()
 }
 void preflightWireLayout()
 {
-  Fixture fixture("wire-v2", {1000, 4000});
+  Fixture fixture("wire-v3", {1000, 4000});
   LocalInputChannelTestAccess::stopTimer(*fixture.core);
   int replies = 0, cancellations = 0;
   const auto receive = [&](const LocalInputLease &lease) {
@@ -686,6 +802,8 @@ void preflightWireLayout()
   );
   fixture.activate();
   check(fixture.core->sendOriginal(fixtureLease(), fixtureEvent(1)), "Cannot send golden Original");
+  for (const auto &record : mixedRecords())
+    check(fixture.core->sendOriginal(fixtureLease(), record), "Cannot send golden mixed Original");
   check(
       until([&] { return fixture.revoked == 1 || fixture.closed; }) && !fixture.closed, "Golden Original was rejected"
   );
@@ -952,7 +1070,7 @@ void malformedBootstrap()
 }
 void changedBindings()
 {
-  for (int field = 0; field < 14; ++field) {
+  for (int field = 0; field < 15; ++field) {
     Fixture fixture;
     fixture.activate();
     auto lease = fixtureLease();
@@ -998,6 +1116,9 @@ void changedBindings()
       break;
     case 13:
       ++lease.keyboardRouteGeneration;
+      break;
+    case 14:
+      ++lease.captureEpoch;
       break;
     }
     check(!fixture.core->sendOriginal(lease, fixtureEvent(1)), "Local API accepted a different lease");
@@ -1346,11 +1467,11 @@ void retiredOriginals()
       auto lease = fixtureLease();
       auto event = fixtureEvent(2);
       if (invalid == "replay")
-        event.sample.sequence = 1;
+        event.sequence = 1;
       else if (invalid == "timestamp")
-        event.sample.timestampNs = 99;
+        event.sourceTimestampNs = 99;
       else if (invalid == "malformed")
-        event.transition = static_cast<OriginalKeyTransition>(255);
+        std::get<OriginalInputKey>(event.payload).transition = static_cast<OriginalKeyTransition>(255);
       else if (invalid == "binding")
         ++lease.deskflowPeerPin[0];
       else
@@ -1366,6 +1487,188 @@ void retiredOriginals()
         "Malformed, replayed or unretired original escaped validation"
     );
     rejected.childExitedCleanly();
+  }
+}
+void mixedInputAndMalformedRecords()
+{
+  {
+    Fixture fixture("mixed");
+    fixture.activate();
+    for (const auto &record : mixedRecords())
+      check(fixture.core->sendOriginal(fixtureLease(), record), "Mixed ordered capture was not queued");
+    check(
+        until([&] { return fixture.revoked || fixture.closed; }) && !fixture.closed,
+        "Mixed input failed to reach its exact owner in order"
+    );
+    fixture.core->close();
+    fixture.childExitedCleanly();
+  }
+  const auto records = mixedRecords();
+  std::vector<QByteArray> malformed;
+  for (const auto index : {0, 1, 2, 4, 7}) {
+    auto truncated = originalPayload(fixtureLease(), records[index]);
+    truncated.chop(1);
+    malformed.push_back(truncated);
+    malformed.push_back(originalPayload(fixtureLease(), records[index]) + 'x');
+  }
+  const auto altered = [&](int index, qsizetype offset, unsigned value) {
+    auto payload = originalPayload(fixtureLease(), records[index]);
+    payload[offset] = static_cast<char>(value);
+    malformed.push_back(payload);
+  };
+  altered(0, 208, 0); // Unknown tag.
+  altered(0, 208, 255);
+  altered(0, 215, 0);   // Key kind.
+  altered(0, 216, 2);   // Key repeat is a strict bool.
+  altered(0, 217, 255); // Key transition.
+  altered(1, 217, 33);  // Invalid drag owner.
+  altered(2, 209, 32);  // Invalid button.
+  altered(2, 210, 2);   // Button direction is a strict bool.
+  altered(2, 211, 128); // Click count exceeds signed32.
+  altered(4, 233, 3);   // Scroll phase is an enum, never a bitmask.
+  altered(4, 234, 4);   // Momentum phase.
+  altered(4, 234, 1);   // Gesture and momentum cannot overlap.
+  altered(4, 235, 2);   // Continuous is a strict bool.
+  altered(4, 235, 0);   // Phased discrete scroll is inconsistent.
+  altered(7, 209, 1);   // Discontinuity/emergency are never delivered.
+  altered(7, 209, 2);
+  altered(7, 209, 255);
+  auto unknownFlags = records[1];
+  unknownFlags.flags = originalKey::shiftFlag;
+  malformed.push_back(originalPayload(fixtureLease(), unknownFlags));
+  auto emergencyKey = fixtureEvent(1);
+  std::get<OriginalInputKey>(emergencyKey.payload).code = originalKey::escape;
+  emergencyKey.flags = originalKey::shiftFlag | originalKey::leftShiftFlag | originalKey::controlFlag |
+                       originalKey::leftControlFlag | originalKey::optionFlag | originalKey::leftOptionFlag;
+  malformed.push_back(originalPayload(fixtureLease(), emergencyKey));
+  for (const auto &payload : malformed) {
+    Fixture fixture;
+    fixture.activate();
+    check(LocalInputChannelTestAccess::rawOriginal(*fixture.core, payload), "Malformed record fixture did not send");
+    check(
+        until([&] { return fixture.closed; }) && fixture.revoked == 1,
+        "Malformed mixed input did not revoke before delivery"
+    );
+    fixture.childExitedCleanly();
+  }
+  for (int fault = 0; fault < 4; ++fault) {
+    Fixture fixture;
+    fixture.activate();
+    auto record = records[1];
+    if (fault == 0)
+      std::get<OriginalInputMotion>(record.payload).dx = std::int64_t{1} << 31;
+    else if (fault == 1)
+      std::get<OriginalInputMotion>(record.payload).dy = -(std::int64_t{1} << 31) - 1;
+    else if (fault == 2) {
+      record = records[4];
+      std::get<OriginalInputScroll>(record.payload).fixed16_16[1] = std::int64_t{1} << 31;
+    } else
+      ++record.epoch;
+    check(
+        !fixture.core->sendOriginal(fixtureLease(), record) && fixture.closed && fixture.revoked == 1,
+        "Invalid signed32 value or mismatched capture epoch escaped local validation"
+    );
+    fixture.childExitedCleanly();
+  }
+  for (int stop = 0; stop < 3; ++stop) {
+    Fixture fixture;
+    fixture.activate();
+    auto record = fixtureEvent(1);
+    if (stop < 2)
+      record.payload = stop == 0 ? OriginalInputBoundary::Emergency : OriginalInputBoundary::Discontinuity;
+    else {
+      std::get<OriginalInputKey>(record.payload).code = originalKey::escape;
+      record.flags = originalKey::shiftFlag | originalKey::leftShiftFlag | originalKey::controlFlag |
+                     originalKey::leftControlFlag | originalKey::optionFlag | originalKey::leftOptionFlag;
+    }
+    check(
+        !fixture.core->sendOriginal(fixtureLease(), record) && !fixture.closed && fixture.revoked == 1 &&
+            fixture.core->phase() == LocalInputPhase::Idle,
+        "Emergency/discontinuity became deliverable input"
+    );
+    fixture.core->close();
+    fixture.childExitedCleanly();
+  }
+}
+void captureEpochCutover()
+{
+  {
+    Fixture fixture("epochs");
+    fixture.establish();
+    fixture.core->authorize = [](LocalInputLease lease, LocalInputCheck) {
+      lease.routeGeneration = fixtureLease().routeGeneration;
+      lease.captureEpoch = fixtureLease().captureEpoch;
+      return lease == fixtureLease();
+    };
+    int releases = 0;
+    fixture.core->onPrepared = [&](const auto &lease) {
+      check(fixture.core->commit(lease), "Epoch lease did not commit");
+    };
+    fixture.core->onActivated = [&](const auto &lease) {
+      if (releases == 1)
+        check(
+            LocalInputChannelTestAccess::captureAt(*fixture.core, 100, 10000),
+            "Same-epoch core preparation reset capture replay state"
+        );
+      auto record = fixtureEvent(lease.captureEpoch == 22 ? 1 : 100 + releases * 10);
+      record.epoch = lease.captureEpoch;
+      record.payload = OriginalInputMotion{-3, 4, 32};
+      check(fixture.core->sendOriginal(lease, record), "Epoch sequence gap/cutover was rejected");
+    };
+    fixture.core->onRevoked = [&](const auto &lease, auto) {
+      if (++releases < 3) {
+        auto next = lease;
+        ++next.routeGeneration;
+        if (releases == 2)
+          ++next.captureEpoch;
+        check(fixture.core->prepare(next), "Fresh epoch lease could not be prepared");
+      }
+    };
+    check(fixture.core->prepare(fixtureLease()), "Initial epoch did not prepare");
+    check(
+        until([&] { return releases == 3 || fixture.closed; }) && releases == 3 && !fixture.closed &&
+            LocalInputChannelTestAccess::captureEpoch(*fixture.core) == 22 &&
+            LocalInputChannelTestAccess::captureAt(*fixture.core, 1, 100),
+        "Epoch-qualified replay counters changed"
+    );
+    fixture.core->close();
+    fixture.childExitedCleanly();
+  }
+  for (int violation = 0; violation < 3; ++violation) {
+    Fixture fixture("epochs");
+    fixture.establish();
+    fixture.core->authorize = [](const auto &, auto) { return true; };
+    fixture.core->onPrepared = [&](const auto &) { fixture.prepared = true; };
+    fixture.core->onRevoked = [&](const auto &, auto) { ++fixture.revoked; };
+    auto newer = fixtureLease();
+    newer.captureEpoch = 22;
+    check(fixture.core->prepare(newer), "New capture epoch was not admitted");
+    check(
+        until([&] { return fixture.prepared || fixture.closed; }) && !fixture.closed,
+        "New capture epoch preparation failed"
+    );
+    fixture.core->revoke(); // No Original was sent: admission itself must retain the epoch.
+    auto old = fixtureLease();
+    ++old.routeGeneration;
+    check(
+        !fixture.core->prepare(old) && LocalInputChannelTestAccess::captureEpoch(*fixture.core) == 22,
+        "No-event capture preparation allowed epoch regression"
+    );
+    if (violation == 0) {
+      check(LocalInputChannelTestAccess::raw(*fixture.core, 6, leasePayload(old)), "Cannot queue regressed Prepare");
+    } else {
+      if (violation == 2)
+        old = newer; // Same admitted epoch, but unprepared future route is still forbidden.
+      old.routeGeneration = violation == 1 ? fixtureLease().routeGeneration - 1 : newer.routeGeneration + 1;
+      auto record = fixtureEvent(100);
+      record.epoch = old.captureEpoch;
+      check(
+          LocalInputChannelTestAccess::rawOriginal(*fixture.core, originalPayload(old, record)),
+          "Cannot queue stale/unprepared capture epoch fixture"
+      );
+    }
+    check(until([&] { return fixture.closed; }), "Old or unprepared capture epoch gained receiver authority");
+    fixture.childExitedCleanly();
   }
 }
 void lossAndLimits()
@@ -1537,10 +1840,12 @@ int main(int argc, char **argv)
     destructiveNotifications();
     cancelledLeaseReuse();
     retiredOriginals();
+    mixedInputAndMalformedRecords();
+    captureEpochCutover();
     lossAndLimits();
     QTextStream(
         stdout
-    ) << "PASS: inherited IPC, process/role/incarnation binding, version 2 preflight isolation and framing, "
+    ) << "PASS: inherited IPC, process/role/incarnation binding, version 3 preflight isolation and framing, "
          "authoritative leases, "
          "original-event framing, stale/replayed/malformed rejection, bounded queues and owner revocation\n";
     return 0;

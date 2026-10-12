@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #ifdef Q_OS_UNIX
 #include <fcntl.h>
@@ -72,6 +73,11 @@ struct Reader
       value = (value << 8) | static_cast<unsigned char>(data[offset++]);
     return value;
   }
+  std::int64_t signed32()
+  {
+    const auto value = number(4);
+    return value < 0x80000000ULL ? static_cast<std::int64_t>(value) : static_cast<std::int64_t>(value) - 0x100000000LL;
+  }
   template <std::size_t N> std::array<std::uint8_t, N> fixed()
   {
     require(static_cast<qsizetype>(N) <= data.size() - offset, "Truncated local input identity");
@@ -96,7 +102,8 @@ QByteArray encodeOffer(const LocalInputOffer &offer)
 {
   Writer out;
   for (auto value :
-       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration})
+       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration,
+        offer.captureEpoch})
     out.number(value, 8);
   out.fixed(offer.deskflowClientIncarnation);
   out.fixed(offer.deskflowPeerPin);
@@ -110,6 +117,7 @@ LocalInputOffer decodeOffer(Reader &in)
   offer.coreServerIncarnation = in.number(8);
   offer.coreRecipient = in.number(8);
   offer.coreSelectionGeneration = in.number(8);
+  offer.captureEpoch = in.number(8);
   offer.deskflowClientIncarnation = in.fixed<16>();
   offer.deskflowPeerPin = in.fixed<32>();
   offer.windowSharePeerPin = in.fixed<32>();
@@ -139,6 +147,119 @@ LocalInputLease decodeLease(Reader &in)
   lease.keyboardRouteGeneration = in.number(8);
   require(validLocalInputLease(lease), "Invalid local input lease binding");
   return lease;
+}
+// Stable wire tags are explicit, not std::variant indices. The record epoch is
+// carried once by the exact lease; all input families share sequence/time/flags.
+enum class InputTag : std::uint8_t
+{
+  Key = 1,
+  Motion,
+  Button,
+  Scroll,
+  Boundary
+};
+bool stopsCapture(const OriginalInputRecord &record)
+{
+  if (const auto *boundary = std::get_if<OriginalInputBoundary>(&record.payload))
+    return *boundary == OriginalInputBoundary::Emergency || *boundary == OriginalInputBoundary::Discontinuity;
+  const auto key = originalInputKeyEvent(record);
+  return key && originalEmergencyChord(key->sample);
+}
+QByteArray encodeOriginal(const LocalInputLease &lease, const OriginalInputRecord &record)
+{
+  Writer out{encodeLease(lease)};
+  out.number(record.sequence, 8);
+  out.number(record.sourceTimestampNs, 8);
+  out.number(record.flags, 8);
+  std::visit(
+      [&](const auto &value) {
+        using T = std::decay_t<decltype(value)>;
+        if constexpr (std::is_same_v<T, OriginalInputKey>) {
+          out.number(static_cast<unsigned>(InputTag::Key), 1);
+          out.number(value.keyboardType, 4);
+          out.number(value.code, 2);
+          out.number(static_cast<unsigned>(value.kind), 1);
+          out.number(value.repeat, 1);
+          out.number(static_cast<unsigned>(value.transition), 1);
+        } else if constexpr (std::is_same_v<T, OriginalInputMotion>) {
+          out.number(static_cast<unsigned>(InputTag::Motion), 1);
+          out.number(static_cast<std::uint32_t>(value.dx), 4);
+          out.number(static_cast<std::uint32_t>(value.dy), 4);
+          out.number(value.dragButton, 1);
+        } else if constexpr (std::is_same_v<T, OriginalInputButton>) {
+          out.number(static_cast<unsigned>(InputTag::Button), 1);
+          out.number(value.button, 1);
+          out.number(value.down, 1);
+          out.number(value.clickCount, 4);
+        } else if constexpr (std::is_same_v<T, OriginalInputScroll>) {
+          out.number(static_cast<unsigned>(InputTag::Scroll), 1);
+          for (const auto &axis : {value.lines, value.points, value.fixed16_16})
+            for (const auto number : axis)
+              out.number(static_cast<std::uint32_t>(number), 4);
+          out.number(static_cast<unsigned>(value.phase), 1);
+          out.number(static_cast<unsigned>(value.momentum), 1);
+          out.number(value.continuous, 1);
+        } else {
+          out.number(static_cast<unsigned>(InputTag::Boundary), 1);
+          out.number(static_cast<unsigned>(value), 1);
+        }
+      },
+      record.payload
+  );
+  return out.data;
+}
+OriginalInputRecord decodeOriginal(Reader &in, std::uint64_t epoch)
+{
+  OriginalInputRecord record;
+  record.epoch = epoch;
+  record.sequence = in.number(8);
+  record.sourceTimestampNs = in.number(8);
+  record.flags = in.number(8);
+  switch (static_cast<InputTag>(in.number(1))) {
+  case InputTag::Key: {
+    OriginalInputKey key;
+    key.keyboardType = static_cast<std::uint32_t>(in.number(4));
+    key.code = static_cast<std::uint16_t>(in.number(2));
+    key.kind = static_cast<OriginalKeyKind>(in.number(1));
+    const auto repeat = in.number(1);
+    require(repeat <= 1, "Invalid original key repeat flag");
+    key.repeat = repeat != 0;
+    key.transition = static_cast<OriginalKeyTransition>(in.number(1));
+    record.payload = key;
+    break;
+  }
+  case InputTag::Motion:
+    record.payload = OriginalInputMotion{in.signed32(), in.signed32(), static_cast<std::uint8_t>(in.number(1))};
+    break;
+  case InputTag::Button: {
+    const auto button = in.number(1), down = in.number(1), clicks = in.number(4);
+    require(down <= 1, "Invalid original button direction flag");
+    record.payload =
+        OriginalInputButton{static_cast<std::uint8_t>(button), down != 0, static_cast<std::uint32_t>(clicks)};
+    break;
+  }
+  case InputTag::Scroll: {
+    OriginalInputScroll scroll;
+    for (auto *axis : {&scroll.lines, &scroll.points, &scroll.fixed16_16})
+      for (auto &number : *axis)
+        number = in.signed32();
+    scroll.phase = static_cast<OriginalScrollPhase>(in.number(1));
+    scroll.momentum = static_cast<OriginalMomentumPhase>(in.number(1));
+    const auto continuous = in.number(1);
+    require(continuous <= 1, "Invalid original scroll continuous flag");
+    scroll.continuous = continuous != 0;
+    record.payload = scroll;
+    break;
+  }
+  case InputTag::Boundary:
+    record.payload = static_cast<OriginalInputBoundary>(in.number(1));
+    break;
+  default:
+    throw std::runtime_error("Unknown original input record tag");
+  }
+  in.end();
+  require(validOriginalInputRecord(record) && !stopsCapture(record), "Invalid or discontinuous original input record");
+  return record;
 }
 QByteArray processes(LocalInputProcess core, LocalInputProcess host)
 {
@@ -252,7 +373,7 @@ std::optional<LocalInputProcess> currentLocalInputProcess()
 bool validLocalInputOffer(const LocalInputOffer &offer)
 {
   return offer.routeGeneration != 0 && offer.coreServerIncarnation != 0 && offer.coreRecipient != 0 &&
-         offer.coreSelectionGeneration != 0 && nonzero(offer.deskflowClientIncarnation) &&
+         offer.coreSelectionGeneration != 0 && offer.captureEpoch != 0 && nonzero(offer.deskflowClientIncarnation) &&
          nonzero(offer.deskflowPeerPin) && nonzero(offer.windowSharePeerPin);
 }
 LocalInputOffer leaseOffer(const LocalInputLease &lease)
@@ -560,8 +681,13 @@ bool LocalInputChannel::cancelOffer(LocalInputOffer offer, LocalInputRevocation 
 bool LocalInputChannel::prepare(LocalInputLease lease)
 {
   if (!fresh() || m_role != LocalInputRole::Core || m_phase != LocalInputPhase::Idle ||
-      lease.routeGeneration <= m_routeGeneration || !permits(lease, LocalInputCheck::Prepare))
+      lease.routeGeneration <= m_routeGeneration || lease.captureEpoch < m_captureEpoch ||
+      !permits(lease, LocalInputCheck::Prepare))
     return false;
+  if (lease.captureEpoch > m_captureEpoch) {
+    m_captureEpoch = lease.captureEpoch;
+    m_originalSequence = m_originalTimestamp = 0;
+  }
   m_routeGeneration = lease.routeGeneration;
   m_lease = lease;
   m_phase = LocalInputPhase::Preparing;
@@ -583,33 +709,33 @@ bool LocalInputChannel::commit(LocalInputLease lease)
   m_phase = LocalInputPhase::Committing;
   return send(Type::Commit, encodeLease(lease));
 }
-bool LocalInputChannel::sendOriginal(LocalInputLease lease, OriginalKeyEvent event)
+bool LocalInputChannel::sendOriginal(LocalInputLease lease, OriginalInputRecord record)
 {
   const QPointer<LocalInputChannel> alive(this);
   if (!fresh() || m_role != LocalInputRole::Core || m_phase != LocalInputPhase::Active || m_lease != lease)
     return false;
+  if (!validOriginalInputRecord(record) || record.epoch != lease.captureEpoch || record.epoch != m_captureEpoch) {
+    close("Invalid original input record or capture epoch");
+    return false;
+  }
+  if (stopsCapture(record)) {
+    revoke(LocalInputRevocation::AuthorityLost);
+    return false;
+  }
   if (!permits(lease, LocalInputCheck::Deliver)) {
     if (alive && !m_closed && m_lease == lease)
       revoke(LocalInputRevocation::AuthorityLost);
     return false;
   }
-  if (!validOriginalKeyEvent(event) || event.sample.sequence <= m_originalSequence ||
-      event.sample.timestampNs < m_originalTimestamp) {
+  if (record.epoch != m_captureEpoch || record.sequence <= m_originalSequence ||
+      record.sourceTimestampNs < m_originalTimestamp) {
     close("Invalid original input capture ordering");
     return false;
   }
-  Writer out{encodeLease(lease)};
-  out.number(event.sample.sequence, 8);
-  out.number(event.sample.timestampNs, 8);
-  out.number(event.sample.flags, 8);
-  out.number(event.sample.keyboardType, 4);
-  out.number(event.sample.keyCode, 2);
-  out.number(static_cast<unsigned>(event.sample.kind), 1);
-  out.number(event.sample.repeat, 1);
-  out.number(static_cast<unsigned>(event.transition), 1);
-  m_originalSequence = event.sample.sequence;
-  m_originalTimestamp = event.sample.timestampNs;
-  return send(Type::Original, out.data);
+  const auto payload = encodeOriginal(lease, record);
+  m_originalSequence = record.sequence;
+  m_originalTimestamp = record.sourceTimestampNs;
+  return send(Type::Original, payload);
 }
 void LocalInputChannel::receive(Type type, const QByteArray &payload)
 {
@@ -666,9 +792,14 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     in.end();
     require(
         m_role == LocalInputRole::Host && m_phase == LocalInputPhase::Idle &&
-            lease.routeGeneration > m_routeGeneration && permits(lease, LocalInputCheck::Prepare),
+            lease.routeGeneration > m_routeGeneration && lease.captureEpoch >= m_captureEpoch &&
+            permits(lease, LocalInputCheck::Prepare),
         "Unauthorized local input preparation"
     );
+    if (lease.captureEpoch > m_captureEpoch) {
+      m_captureEpoch = lease.captureEpoch;
+      m_originalSequence = m_originalTimestamp = 0;
+    }
     m_routeGeneration = lease.routeGeneration;
     m_lease = lease;
     m_phase = LocalInputPhase::Preparing;
@@ -690,21 +821,10 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
   }
   if (type == Type::Original) {
     require(m_role == LocalInputRole::Host, "Invalid original input sender role");
-    OriginalKeyEvent event;
-    event.sample.sequence = in.number(8);
-    event.sample.timestampNs = in.number(8);
-    event.sample.flags = in.number(8);
-    event.sample.keyboardType = static_cast<std::uint32_t>(in.number(4));
-    event.sample.keyCode = static_cast<std::uint16_t>(in.number(2));
-    event.sample.kind = static_cast<OriginalKeyKind>(in.number(1));
-    const auto repeat = in.number(1);
-    require(repeat <= 1, "Invalid original key repeat flag");
-    event.sample.repeat = repeat != 0;
-    event.transition = static_cast<OriginalKeyTransition>(in.number(1));
-    in.end();
+    const auto record = decodeOriginal(in, lease.captureEpoch);
     require(
-        validOriginalKeyEvent(event) && event.sample.sequence > m_originalSequence &&
-            event.sample.timestampNs >= m_originalTimestamp,
+        record.epoch == m_captureEpoch && record.sequence > m_originalSequence &&
+            record.sourceTimestampNs >= m_originalTimestamp,
         "Invalid original input capture ordering"
     );
     const bool retired = lease.routeGeneration < m_routeGeneration ||
@@ -717,14 +837,15 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     // Authorization may run a nested event loop that validates a newer retired
     // capture. Never roll its replay high-water back or deliver the older one.
     require(
-        event.sample.sequence > m_originalSequence && event.sample.timestampNs >= m_originalTimestamp,
+        record.epoch == m_captureEpoch && record.sequence > m_originalSequence &&
+            record.sourceTimestampNs >= m_originalTimestamp,
         "Original input capture advanced during authorization"
     );
-    m_originalSequence = event.sample.sequence;
-    m_originalTimestamp = event.sample.timestampNs;
+    m_originalSequence = record.sequence;
+    m_originalTimestamp = record.sourceTimestampNs;
     if (retired)
       return; // Valid in-flight input retires its capture sequence, never delivers to a new owner.
-    notify(this, onOriginal, lease, event);
+    notify(this, onOriginal, lease, record);
     return;
   }
   require(m_lease == lease, "Stale local input lease binding");

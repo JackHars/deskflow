@@ -166,6 +166,7 @@ struct Fixture
   std::unique_ptr<LocalInputPreflight> coordinator;
   std::shared_ptr<SelectedPeerMailbox> mailbox = std::make_shared<SelectedPeerMailbox>();
   AuthenticatedPeerIssuer issuer;
+  OriginalInputStream capture;
   std::shared_ptr<std::atomic_bool> revoked = std::make_shared<std::atomic_bool>(false);
   SelectedPeer selected;
   QTimer publisher;
@@ -231,7 +232,7 @@ struct Fixture
   }
   void begin()
   {
-    check(coordinator->begin(), "Preflight did not offer selected peer");
+    check(coordinator->begin(capture.epoch()), "Preflight did not offer selected peer");
     check(channel->phase() == LocalInputPhase::Idle, "Offer acquired channel authority");
   }
   void active()
@@ -278,15 +279,17 @@ void successAndRetirement()
   const auto lease = *f.coordinator->lease();
   check(
       lease.coreServerIncarnation == 1 && lease.coreRecipient == 2 && lease.coreSelectionGeneration == 3 &&
-          lease.focusRequest == 13 && lease.keyboardRouteGeneration == 17 && f.preparedChecks >= 2,
+          lease.focusRequest == 13 && lease.keyboardRouteGeneration == 17 &&
+          lease.captureEpoch == f.capture.epoch().id() && f.preparedChecks >= 2,
       "Preflight lost selection, focus request, or neutral checks"
   );
-  OriginalKeyEvent event;
-  event.sample.sequence = 1;
-  event.sample.timestampNs = 100;
-  event.sample.keyboardType = 40;
-  event.sample.kind = OriginalKeyKind::Down;
-  event.transition = OriginalKeyTransition::Down;
+  OriginalInputRecord event;
+  event.epoch = lease.captureEpoch;
+  event.sequence = 1;
+  event.sourceTimestampNs = 100;
+  std::get<OriginalInputKey>(event.payload).keyboardType = 40;
+  std::get<OriginalInputKey>(event.payload).kind = OriginalKeyKind::Down;
+  std::get<OriginalInputKey>(event.payload).transition = OriginalKeyTransition::Down;
   check(f.channel->sendOriginal(lease, event), "Test-authorized original input did not send");
   f.coordinator->cancel();
   check(
@@ -306,12 +309,13 @@ void consecutiveControlAndOriginal()
     Fixture f("same-batch-cancel");
     f.active();
     const auto lease = *f.coordinator->lease();
-    OriginalKeyEvent event;
-    event.sample.sequence = 1;
-    event.sample.timestampNs = 100;
-    event.sample.keyboardType = 40;
-    event.sample.kind = OriginalKeyKind::Down;
-    event.transition = OriginalKeyTransition::Down;
+    OriginalInputRecord event;
+    event.epoch = lease.captureEpoch;
+    event.sequence = 1;
+    event.sourceTimestampNs = 100;
+    std::get<OriginalInputKey>(event.payload).keyboardType = 40;
+    std::get<OriginalInputKey>(event.payload).kind = OriginalKeyKind::Down;
+    std::get<OriginalInputKey>(event.payload).transition = OriginalKeyTransition::Down;
     // Both frames are queued without pumping Qt between them. The host must
     // retire this owner before reading the following in-flight Original; its
     // fixture asserts that no onOriginal callback ran for this mode.
@@ -331,12 +335,13 @@ void consecutiveControlAndOriginal()
       activated(lease);
       called = true;
       coordinatorActive = f.coordinator->phase() == Phase::Active;
-      OriginalKeyEvent event;
-      event.sample.sequence = 1;
-      event.sample.timestampNs = 100;
-      event.sample.keyboardType = 40;
-      event.sample.kind = OriginalKeyKind::Down;
-      event.transition = OriginalKeyTransition::Down;
+      OriginalInputRecord event;
+      event.epoch = lease.captureEpoch;
+      event.sequence = 1;
+      event.sourceTimestampNs = 100;
+      std::get<OriginalInputKey>(event.payload).keyboardType = 40;
+      std::get<OriginalInputKey>(event.payload).kind = OriginalKeyKind::Down;
+      std::get<OriginalInputKey>(event.payload).transition = OriginalKeyTransition::Down;
       // Delivery and an already queued channel heartbeat can run immediately
       // after activation, before a zero-duration coordinator timer dispatches.
       delivered = f.channel->sendOriginal(lease, event);
@@ -389,10 +394,10 @@ void selectionAndEvidence()
   {
     Fixture f;
     f.coordinator->replacePolicy(policy(3, 2));
-    check(!f.coordinator->begin(), "Unapproved selected Deskflow fingerprint offered");
+    check(!f.coordinator->begin(f.capture.epoch()), "Unapproved selected Deskflow fingerprint offered");
     f.finish();
   }
-  for (int change = 0; change < 4; ++change) {
+  for (int change = 0; change < 5; ++change) {
     Fixture f("no-quiescence");
     f.begin();
     check(
@@ -411,6 +416,8 @@ void selectionAndEvidence()
       QThread::msleep(270); // Expire the retained read, then republish the exact same selection.
       f.mailbox->replace(f.selected);
     }
+    if (change == 4)
+      f.capture.revoke(OriginalInputRevocation::Discontinuity);
     f.channel->onQuiesced(lease);
     check(until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }), "Revoked observation survived use");
     check(f.preparedChecks == 0, "Expired evidence reached neutral/prepare checks");
@@ -470,7 +477,7 @@ void deadlineAndQueue()
 }
 void changedAndFutureBindings()
 {
-  for (int change = 0; change < 4; ++change) {
+  for (int change = 0; change < 5; ++change) {
     Fixture f("no-quiescence");
     f.begin();
     check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "No candidate for mismatch");
@@ -483,6 +490,8 @@ void changedAndFutureBindings()
       ++lease.windowShareClientIncarnation[15];
     if (change == 3)
       ++lease.routeGeneration;
+    if (change == 4)
+      ++lease.captureEpoch;
     f.channel->onQuiesced(lease);
     check(until([&] { return f.closed; }), "Changed/future binding was not terminal");
     f.finish();
@@ -501,7 +510,7 @@ void reentrantChecksAndPolicy()
         auto future = lease;
         ++future.routeGeneration;
         fixture->channel->onCandidate(future);
-        restarted = fixture->coordinator->begin();
+        restarted = fixture->coordinator->begin(fixture->capture.epoch());
       }
       return true;
     };
@@ -533,7 +542,7 @@ void reentrantChecksAndPolicy()
     f.active();
     f.coordinator->replacePolicy(policy(3, 4));
     check(
-        f.coordinator->phase() == Phase::Idle && f.releases == 1 && !f.coordinator->begin(),
+        f.coordinator->phase() == Phase::Idle && f.releases == 1 && !f.coordinator->begin(f.capture.epoch()),
         "Policy replacement failed to revoke before approval changed"
     );
     f.finish();
@@ -579,6 +588,102 @@ void destructiveReleaseCallbacks()
     );
   }
 }
+void captureEpochAuthority()
+{
+  {
+    Fixture f;
+    check(!f.coordinator->begin({}), "Missing capture continuity began preflight");
+    OriginalInputEpoch destroyed;
+    {
+      OriginalInputStream temporary;
+      destroyed = temporary.epoch();
+    }
+    check(!f.coordinator->begin(destroyed), "Destroyed capture stream began preflight");
+    for (const auto reason :
+         {OriginalInputRevocation::Overflow, OriginalInputRevocation::Emergency, OriginalInputRevocation::Discontinuity,
+          OriginalInputRevocation::Stopped}) {
+      OriginalInputStream ended;
+      ended.revoke(reason);
+      check(!f.coordinator->begin(ended.epoch()), "Revoked capture epoch began preflight");
+    }
+    check(
+        f.coordinator->phase() == Phase::Idle && f.preparedChecks == 0, "Missing continuity reached preparation checks"
+    );
+    f.finish();
+  }
+  {
+    Fixture f("capture-offered");
+    f.begin();
+    f.capture.revoke(OriginalInputRevocation::Discontinuity);
+    check(
+        until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }) && !f.closed && f.preparedChecks == 0,
+        "Capture revoked during offered phase reached Prepare"
+    );
+    f.finish();
+  }
+  for (const bool atUse : {false, true}) {
+    Fixture f("capture-active");
+    f.active();
+    const auto lease = *f.coordinator->lease();
+    f.capture.revoke(OriginalInputRevocation::Overflow);
+    if (atUse) {
+      OriginalInputRecord record{lease.captureEpoch, 900, 1000, 0, OriginalInputMotion{1, -1, 32}};
+      check(!f.channel->sendOriginal(lease, record), "Revoked capture delivered before a timer could run");
+    } else {
+      check(
+          until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }),
+          "Preflight heartbeat retained revoked capture authority"
+      );
+    }
+    check(
+        !f.closed && f.coordinator->phase() == Phase::Idle && f.channel->phase() == LocalInputPhase::Idle &&
+            f.releases == 1,
+        "Capture revocation failed to synchronously release its exact owner"
+    );
+    check(!f.coordinator->begin(f.capture.epoch()), "Revoked retained capture epoch restarted");
+    f.finish();
+  }
+  for (int callback = 0; callback < 3; ++callback) {
+    Fixture *fixture = nullptr;
+    auto checks = allow();
+    const auto invalidate = [&](const LocalInputLease &) {
+      fixture->capture.revoke(OriginalInputRevocation::Emergency);
+      return true;
+    };
+    if (callback == 0)
+      checks.moduleIntegrity = invalidate;
+    else if (callback == 1)
+      checks.deliveryReady = invalidate;
+    else
+      checks.neutralBoundary = invalidate;
+    Fixture f("capture-callback", std::move(checks));
+    fixture = &f;
+    f.begin();
+    check(
+        until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }) && !f.closed &&
+            f.channel->phase() == LocalInputPhase::Idle && f.releases == 1,
+        "Reentrant capture revocation granted preparation authority"
+    );
+    f.finish();
+  }
+  {
+    Fixture f("no-quiescence");
+    const auto old = f.capture.epoch();
+    f.begin();
+    check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "No candidate for epoch reuse");
+    f.coordinator->cancel();
+    check(f.coordinator->begin(old), "Live same-epoch selection could not be reused");
+    check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Same-epoch candidate missing");
+    f.coordinator->cancel();
+    OriginalInputStream newer;
+    check(newer.epoch().id() > old.id() && f.coordinator->begin(newer.epoch()), "Fresh capture epoch did not begin");
+    check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Fresh-epoch candidate missing");
+    check(f.coordinator->offer()->captureEpoch == newer.epoch().id(), "Offer lost exact capture identity");
+    f.coordinator->cancel();
+    check(!f.coordinator->begin(old), "Capture epoch regressed after newer attempt without any Original traffic");
+    f.finish();
+  }
+}
 } // namespace
 int main(int argc, char **argv)
 {
@@ -597,6 +702,7 @@ int main(int argc, char **argv)
     changedAndFutureBindings();
     reentrantChecksAndPolicy();
     destructiveReleaseCallbacks();
+    captureEpochAuthority();
     QTextStream(stdout) << "Local input preflight checks passed\n";
     return 0;
   } catch (const std::exception &error) {

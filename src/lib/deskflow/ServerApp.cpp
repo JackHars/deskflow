@@ -49,6 +49,9 @@
 
 #if defined(Q_OS_MACOS)
 #include "platform/OSXComputer.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "platform/OriginalInputCaptureSource_mac.h"
+#endif
 #endif
 
 #include <fstream>
@@ -68,6 +71,10 @@ ServerApp::ServerApp(IEventQueue *events, const QString &processName) : App(even
 ServerApp::~ServerApp()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#ifdef Q_OS_MACOS
+  if (m_originalInputCapture)
+    m_originalInputCapture->stop();
+#endif
   // The core worker is joined before App destruction. The normal core cleanup
   // already removed the publisher; close also denies after an exceptional exit.
   if (m_selectedPeerMailbox)
@@ -76,6 +83,16 @@ ServerApp::~ServerApp()
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#ifdef Q_OS_MACOS
+void ServerApp::setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> capture)
+{
+  if (!capture || m_originalInputCapture || m_serverState != ServerState::Uninitialized ||
+      thread() != QThread::currentThread())
+    throw std::logic_error("Original input capture must be configured once before core startup");
+  m_originalInputCapture = std::move(capture);
+}
+#endif
+
 void ServerApp::setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox)
 {
   if (!mailbox || m_selectedPeerMailbox || m_serverState != ServerState::Uninitialized ||
@@ -239,6 +256,11 @@ void ServerApp::closeClientListener(ClientListener *listen)
 void ServerApp::stopServer()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#ifdef Q_OS_MACOS
+  // Revoke before closeServer can enter its nested disconnect event loop.
+  if (m_originalInputCapture)
+    m_originalInputCapture->stop();
+#endif
   stopSelectedPeerPublication();
 #endif
   using enum ServerState;
@@ -449,7 +471,14 @@ deskflow::Computer *ServerApp::createComputer()
       new MSWindowsComputer(true, Settings::value(Settings::Core::UseHooks).toBool(), getEvents()), getEvents()
   );
 #elif defined(Q_OS_MACOS)
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  auto platform = std::make_unique<OSXComputer>(getEvents(), true);
+  if (m_originalInputCapture)
+    platform->setOriginalInputCapture(m_originalInputCapture);
+  return new deskflow::Computer(platform.release(), getEvents());
+#else
   return new deskflow::Computer(new OSXComputer(getEvents(), true), getEvents());
+#endif
 #else
   if (deskflow::platform::isWayland()) {
 #if WINAPI_LIBEI

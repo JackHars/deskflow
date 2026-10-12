@@ -19,6 +19,7 @@
 #include <mach/mach_interface.h>
 #include <mach/mach_port.h>
 
+#include <atomic>
 #include <bitset>
 #include <map>
 #include <memory>
@@ -41,6 +42,12 @@ class OSXScreenSaver;
 class IEventQueue;
 class Mutex;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+namespace deskflow::windowshare {
+class OriginalInputCaptureSource;
+}
+#endif
+
 //! Implementation of IPlatformComputer for OS X
 class OSXComputer : public PlatformComputer
 {
@@ -48,6 +55,11 @@ public:
   OSXComputer(IEventQueue *events, bool isPrimary, bool enableLangSync = false);
 
   virtual ~OSXComputer();
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Core-owner thread, before enable(). Retained unchanged until tap join.
+  void setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> capture);
+#endif
 
   IEventQueue *getEvents() const
   {
@@ -304,6 +316,10 @@ private:
   CFRunLoopSourceRef m_eventTapRLSR;
   std::thread m_eventTapThread;
   CFRunLoopRef m_eventTapRunLoop = nullptr;
+  std::atomic<CGEventType> m_eventTapDisabled{kCGEventNull};
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> m_originalInputCapture;
+#endif
 
   // for double click coalescing.
   double m_lastClickTime;

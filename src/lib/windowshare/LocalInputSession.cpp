@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputSession.h"
+#ifdef __APPLE__
+#include "platform/OriginalInputCaptureSource_mac.h"
+#endif
 #include <QDeadlineTimer>
 #include <QEventLoop>
 #include <QJsonDocument>
@@ -44,6 +47,9 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
 )
 {
   auto result = std::unique_ptr<LocalInputCoreSession>(new LocalInputCoreSession);
+#ifdef __APPLE__
+  result->m_captureSource = std::make_shared<OriginalInputCaptureSource>();
+#endif
   result->m_companion = LocalInputCompanion::create(std::move(pair), error, limits);
   if (!result->m_companion)
     return {};
@@ -52,7 +58,16 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   result->m_stopWaitMs = limits.gracefulMs + limits.terminateMs + 700;
   auto *self = result.get();
   result->m_companion->onChannel = [self](std::unique_ptr<LocalInputChannel> channel) {
-    channel->onClosed = [weak = std::weak_ptr<SelectedPeerMailbox>(self->m_selectedPeerMailbox)](const QString &) {
+    channel->onClosed = [weak = std::weak_ptr<SelectedPeerMailbox>(self->m_selectedPeerMailbox)
+#ifdef __APPLE__
+                             ,
+                         capture = std::weak_ptr<OriginalInputCaptureSource>(self->m_captureSource)
+#endif
+    ](const QString &) {
+#ifdef __APPLE__
+      if (const auto source = capture.lock())
+        source->stop();
+#endif
       if (const auto mailbox = weak.lock())
         mailbox->close();
     };
@@ -80,6 +95,10 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
     return {};
   }
   result->m_companion->onStopped = [self](QString reason) {
+#ifdef __APPLE__
+    self->m_captureSource->stop();
+    self->m_captureTimer.stop();
+#endif
     self->m_selectedPeerMailbox->close();
     const auto callback = self->onStopped;
     if (callback)
@@ -87,10 +106,26 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   };
   if (error)
     error->clear();
+#ifdef __APPLE__
+  // Keep all Qt work and state tracking outside the tap. A bounded drain sees
+  // every observed event even with no active route. Missing a deadline causes
+  // the producer to revoke on overflow, never silently overwrite or coalesce.
+  result->m_captureTimer.setTimerType(Qt::PreciseTimer);
+  result->m_captureTimer.setInterval(4);
+  QObject::connect(&result->m_captureTimer, &QTimer::timeout, &result->m_captureTimer, [self] {
+    self->drainCapturedInput();
+  });
+  result->m_captureTimer.start();
+#endif
   return result;
 }
 LocalInputCoreSession::~LocalInputCoreSession()
 {
+#ifdef __APPLE__
+  m_captureTimer.stop();
+  if (m_captureSource)
+    m_captureSource->stop();
+#endif
   m_selectedPeerMailbox->close();
   onStopped = {};
   if (m_companion) {
@@ -101,6 +136,11 @@ LocalInputCoreSession::~LocalInputCoreSession()
 }
 bool LocalInputCoreSession::stop()
 {
+#ifdef __APPLE__
+  m_captureTimer.stop();
+  if (m_captureSource)
+    m_captureSource->stop();
+#endif
   m_selectedPeerMailbox->close();
   const QPointer<LocalInputCompanion> companion(m_companion.get());
   const int waitMs = m_stopWaitMs;
@@ -125,6 +165,34 @@ std::shared_ptr<SelectedPeerMailbox> LocalInputCoreSession::selectedPeerMailbox(
 {
   return m_selectedPeerMailbox;
 }
+#ifdef __APPLE__
+std::shared_ptr<OriginalInputCaptureSource> LocalInputCoreSession::captureSource() const
+{
+  return m_captureSource;
+}
+void LocalInputCoreSession::drainCapturedInput()
+{
+  const auto source = m_captureSource;
+  const auto epoch = source->epoch();
+  if (!epoch.live()) {
+    m_captureBarrier.reset();
+    return;
+  }
+  if (!m_captureBarrier)
+    m_captureBarrier = std::make_unique<OriginalInputNeutralBarrier>(epoch);
+  for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
+    const auto input = source->pop();
+    if (!input)
+      break;
+    if (!m_captureBarrier->observe(*input)) {
+      source->stop();
+      break;
+    }
+  }
+  // No trusted physical observation, cutover or delivery provider exists yet.
+  // Observing an empty queue therefore never enables a route or posts input.
+}
+#endif
 int localInputCoreProbe(LocalInputSocketPair pair)
 {
   QString error;

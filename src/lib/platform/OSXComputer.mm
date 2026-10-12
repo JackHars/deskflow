@@ -28,12 +28,14 @@
 #include "mt/Thread.h"
 #include "platform/OSXClipboard.h"
 #include "platform/OSXEventQueueBuffer.h"
+#include "platform/OSXEventTapRunLoop.h"
 #include "platform/OSXKeyState.h"
 #include "platform/OSXMediaKeySupport.h"
 #include "platform/OSXPasteboardPeeker.h"
 #include "platform/OSXScreenSaver.h"
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/PlatformMarkers.h"
 #endif
 
@@ -702,6 +704,15 @@ void OSXComputer::hideCursor()
   m_cursorHidden = true;
 }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+void OSXComputer::setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> capture)
+{
+  if (!capture || m_originalInputCapture || !m_isPrimary || m_eventTapPort || m_eventTapThread.joinable())
+    throw std::logic_error("Original input capture must be attached once before enabling the primary tap");
+  m_originalInputCapture = std::move(capture);
+}
+#endif
+
 void OSXComputer::enable()
 {
   // watch the clipboard
@@ -709,7 +720,19 @@ void OSXComputer::enable()
   m_events->addHandler(EventTypes::Timer, m_clipboardTimer, [this](const auto &) { checkClipboards(); });
 
   m_axTimer = m_events->newTimer(1.0, nullptr);
-  m_events->addHandler(EventTypes::Timer, m_axTimer, [this](const auto &) { checkAXPermissions(); });
+  m_events->addHandler(EventTypes::Timer, m_axTimer, [this](const auto &) {
+    if (!checkAXPermissions())
+      return;
+    const auto disabled = m_eventTapDisabled.exchange(kCGEventNull, std::memory_order_acq_rel);
+    if (disabled == kCGEventTapDisabledByTimeout && m_eventTapPort) {
+      // Permission checks and teardown belong to the core owner. Calling
+      // checkAXPermissions from the tap callback could make it join itself.
+      CGEventTapEnable(m_eventTapPort, true);
+      LOG_INFO("quartz event tap was disabled by timeout, re-enabling");
+    } else if (disabled == kCGEventTapDisabledByUserInput) {
+      LOG_ERR("quartz event tap was disabled by user input");
+    }
+  });
 
   if (m_isPrimary) {
     // FIXME -- start watching jump zones
@@ -745,11 +768,21 @@ void OSXComputer::enable()
       auto sem = dispatch_semaphore_create(0);
       m_eventTapThread = std::thread([this, sem]() {
         m_eventTapRunLoop = CFRunLoopGetCurrent();
+        CFRetain(m_eventTapRunLoop);
         CFRunLoopAddSource(m_eventTapRunLoop, m_eventTapRLSR, kCFRunLoopDefaultMode);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+        if (m_originalInputCapture)
+          m_originalInputCapture->start();
+#endif
         dispatch_semaphore_signal(sem);
         CFRunLoopRun();
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+        if (m_originalInputCapture)
+          m_originalInputCapture->stop();
+#endif
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), m_eventTapRLSR, kCFRunLoopDefaultMode);
-        m_eventTapRunLoop = nullptr;
+        // The owner retains this handle through stop/join. Clearing it here
+        // races owner reads and can discard the only handle before teardown.
       });
       dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
       dispatch_release(sem);
@@ -759,20 +792,33 @@ void OSXComputer::enable()
   } else {
     LOG_ERR("failed to create quartz event tap");
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (!m_eventTapThread.joinable() && m_originalInputCapture)
+    m_originalInputCapture->stop();
+#endif
 }
 
 void OSXComputer::disable()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (m_originalInputCapture)
+    m_originalInputCapture->stop();
+#endif
   showCursor();
 
   // FIXME -- stop watching jump zones, stop capturing input
 
   if (m_eventTapRunLoop) {
-    CFRunLoopStop(m_eventTapRunLoop);
+    stopOSXEventTapRunLoop(m_eventTapRunLoop);
   }
   if (m_eventTapThread.joinable()) {
     m_eventTapThread.join();
   }
+  if (m_eventTapRunLoop) {
+    CFRelease(m_eventTapRunLoop);
+    m_eventTapRunLoop = nullptr;
+  }
+  m_eventTapDisabled.store(kCGEventNull, std::memory_order_release);
 
   if (m_eventTapRLSR) {
     CFRelease(m_eventTapRLSR);
@@ -1740,6 +1786,11 @@ CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType ty
 
   OSXComputer *computer = (OSXComputer *)refcon;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (computer->m_originalInputCapture)
+    computer->m_originalInputCapture->capture(type, event);
+#endif
+
   switch (type) {
   case kCGEventLeftMouseDown:
   case kCGEventRightMouseDown:
@@ -1771,14 +1822,8 @@ CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType ty
     computer->onKey(event);
     break;
   case kCGEventTapDisabledByTimeout:
-    // Re-enable our event-tap if we still have accessibility permissions
-    if (computer->checkAXPermissions()) {
-      CGEventTapEnable(computer->m_eventTapPort, true);
-      LOG_INFO("quartz event tap was disabled by timeout, re-enabling");
-    }
-    break;
   case kCGEventTapDisabledByUserInput:
-    LOG_ERR("quartz event tap was disabled by user input");
+    computer->m_eventTapDisabled.store(type, std::memory_order_release);
     break;
   case NX_NULLEVENT:
     break;

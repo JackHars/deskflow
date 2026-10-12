@@ -42,6 +42,9 @@ class ServerArgs;
 namespace windowshare {
 class SelectedPeerMailbox;
 class SelectedPeerPublisher;
+#ifdef Q_OS_MACOS
+class OriginalInputCaptureSource;
+#endif
 } // namespace windowshare
 #endif
 } // namespace deskflow
@@ -57,6 +60,9 @@ public:
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   // Set once on the creating thread before run() moves the app to its worker.
   void setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox);
+#ifdef Q_OS_MACOS
+  void setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> capture);
+#endif
 #endif
 
   //
@@ -120,6 +126,9 @@ private:
   void stopSelectedPeerPublication();
   std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> m_selectedPeerMailbox;
   std::unique_ptr<deskflow::windowshare::SelectedPeerPublisher> m_selectedPeerPublisher;
+#ifdef Q_OS_MACOS
+  std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> m_originalInputCapture;
+#endif
 #endif
 
   bool m_suspended = false;

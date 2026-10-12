@@ -5,6 +5,9 @@
 #include "LocalInputCompanion.h"
 #include "LocalInputPeerTrust.h"
 #include "LocalInputSession.h"
+#ifdef __APPLE__
+#include "platform/OriginalInputCaptureSource_mac.h"
+#endif
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -450,6 +453,13 @@ void coreSessionOwnership()
       mailbox && !mailbox->read().closed && !mailbox->read().selected,
       "Core session began with a selected-peer identity before core publication"
   );
+#ifdef __APPLE__
+  const auto capture = session->captureSource();
+  check(capture && !capture->epoch().live(), "Session exposed capture continuity before producer start");
+  // Simulate producer lifecycle only. No tap registration or native input.
+  check(capture->start(), "Preallocated capture source could not start");
+  const auto captureToken = capture->epoch();
+#endif
   LocalInputLease lease;
   lease.deskflowClientIncarnation[0] = 1;
   lease.windowShareClientIncarnation[0] = 2;
@@ -457,7 +467,7 @@ void coreSessionOwnership()
   lease.windowSharePeerPin[0] = 4;
   lease.session = lease.epoch = lease.focusRequest = lease.focusRevision = lease.geometryRevision =
       lease.keyboardRouteGeneration = lease.routeGeneration = lease.coreServerIncarnation = lease.coreRecipient =
-          lease.coreSelectionGeneration = 1;
+          lease.coreSelectionGeneration = lease.captureEpoch = 1;
   check(
       validLocalInputLease(lease) && !session->channel()->prepare(lease),
       "Starting the companion implicitly authorized a native input lease"
@@ -465,9 +475,15 @@ void coreSessionOwnership()
   const auto firstChild = trust.observed;
   int completions = 0;
   bool mailboxClosedBeforeCallback = false;
+#ifdef __APPLE__
+  bool captureStoppedBeforeCallback = false;
+#endif
   session->onStopped = [&](QString) {
     ++completions;
     mailboxClosedBeforeCallback = mailbox->read().closed;
+#ifdef __APPLE__
+    captureStoppedBeforeCallback = !captureToken.live();
+#endif
   };
   check(session->stop() && session->stop(), "Core session could not drain its stopped child");
   check(
@@ -480,6 +496,10 @@ void coreSessionOwnership()
       "Core session lost graceful authenticated child exit evidence"
   );
   session.reset();
+#ifdef __APPLE__
+  check(captureStoppedBeforeCallback, "Session notified stop before revoking capture continuity");
+  check(!captureToken.live() && !capture->start(), "Retained capture source revived after session destruction");
+#endif
   check(mailbox->read().closed && !mailbox->clear(), "Retained mailbox reopened after session stop/destruction");
 
   resetTrust();

@@ -112,6 +112,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     std::optional<LocalInputLease> lease;
     std::optional<SelectedPeerMailbox::Observation> core;
     std::optional<AuthenticatedPeerObservation> host;
+    OriginalInputEpoch capture; // Core-local only; host retains its numeric attestation in offer.
     Clock::time_point deadline = Clock::now() + preflightTimeout;
     Phase phase = Phase::Offered;
   };
@@ -124,7 +125,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   std::optional<Attempt> attempt;
   std::optional<LocalInputOffer> retired;
   std::optional<LocalInputLease> retiredLease;
-  std::uint64_t highWater = 0;
+  std::uint64_t highWater = 0, captureHighWater = 0;
   std::deque<Control> controls;
   QTimer timer;
   bool running = true, scheduled = false, authorizing = false, processing = false, cancelling = false;
@@ -260,17 +261,19 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if (!withinDeadline() || !policy.permits(offer))
       return false;
     if (role == LocalInputRole::Core) {
-      if (!attempt->core || !attempt->core->live() || !mailbox)
+      if (!attempt->capture.live() || attempt->capture.id() != offer.captureEpoch || !attempt->core ||
+          !attempt->core->live() || !mailbox)
         return false;
       const auto latest = mailbox->read();
-      if (!current(offer) || !attempt->core->live() || latest.closed || !latest.selected || !latest.selected->live() ||
-          !latest.selected->peer().sameSelection(attempt->core->peer()))
+      if (!current(offer) || !attempt->capture.live() || !attempt->core->live() || latest.closed || !latest.selected ||
+          !latest.selected->live() || !latest.selected->peer().sameSelection(attempt->core->peer()))
         return false;
       if (refresh)
         attempt->core = latest.selected;
       const auto &peer = attempt->core->peer();
-      return withinDeadline() && peer.serverIncarnation() == offer.coreServerIncarnation &&
-             peer.recipient() == offer.coreRecipient && peer.generation() == offer.coreSelectionGeneration &&
+      return withinDeadline() && attempt->capture.live() && attempt->capture.id() == offer.captureEpoch &&
+             peer.serverIncarnation() == offer.coreServerIncarnation && peer.recipient() == offer.coreRecipient &&
+             peer.generation() == offer.coreSelectionGeneration &&
              peer.ticket().fingerprint() == offer.deskflowPeerPin &&
              localInputConnectionIncarnation(peer.ticket().incarnation()) == offer.deskflowClientIncarnation;
     }
@@ -296,13 +299,14 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if (attempt && !live())
       cancel(LocalInputRevocation::AuthorityLost, true);
   }
-  bool begin()
+  bool begin(OriginalInputEpoch capture)
   {
     if (!running || cancelling || authorizing || processing || !controls.empty() || role != LocalInputRole::Core ||
-        attempt || !channel || !channel->authenticated() || !mailbox)
+        attempt || !channel || !channel->authenticated() || !mailbox || !capture.live() ||
+        capture.id() < captureHighWater)
       return false;
     const auto value = mailbox->read();
-    if (value.closed || !value.selected || !value.selected->live())
+    if (!capture.live() || value.closed || !value.selected || !value.selected->live())
       return false;
     const auto &peer = value.selected->peer();
     const auto pin = policy.windowSharePeer(peer.ticket().fingerprint());
@@ -313,6 +317,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     offer.coreServerIncarnation = peer.serverIncarnation();
     offer.coreRecipient = peer.recipient();
     offer.coreSelectionGeneration = peer.generation();
+    offer.captureEpoch = capture.id();
     offer.deskflowClientIncarnation = localInputConnectionIncarnation(peer.ticket().incarnation());
     offer.deskflowPeerPin = peer.ticket().fingerprint();
     offer.windowSharePeerPin = *pin;
@@ -321,8 +326,9 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       return false;
     }
     highWater = offer.routeGeneration;
-    attempt = Attempt{offer, {}, value.selected, {}};
-    if (!live() || !channel->offer(offer)) {
+    captureHighWater = offer.captureEpoch;
+    attempt = Attempt{offer, {}, value.selected, {}, std::move(capture)};
+    if (!live() || !channel->offer(offer) || !current(offer) || !live()) {
       cancel(LocalInputRevocation::AuthorityLost, true);
       return false;
     }
@@ -537,8 +543,13 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       fail("Replacement offer preceded cancellation");
       return;
     }
+    if (offer.captureEpoch < captureHighWater) {
+      fail("Preflight capture epoch regressed");
+      return;
+    }
     highWater = offer.routeGeneration;
-    attempt = Attempt{offer, {}, {}, {}};
+    captureHighWater = offer.captureEpoch;
+    attempt = Attempt{offer, {}, {}, {}, {}};
     if (!policy.permits(offer) || !host.connection || !host.reserve || !host.startQuiescence) {
       cancel(LocalInputRevocation::AuthorityLost, true);
       return;
@@ -661,10 +672,10 @@ LocalInputPreflight::~LocalInputPreflight()
 {
   stop();
 }
-bool LocalInputPreflight::begin()
+bool LocalInputPreflight::begin(OriginalInputEpoch capture)
 {
   const auto state = m_state;
-  return state->begin();
+  return state->begin(std::move(capture));
 }
 void LocalInputPreflight::quiesced(const KeyboardRouteBinding &binding)
 {

@@ -100,6 +100,9 @@ target_link_libraries(${lib_name}
 if(BUILD_WINDOWSHARE)
   target_compile_definitions(${lib_name} PUBLIC BUILD_WINDOWSHARE=1)
   target_link_libraries(${lib_name} PRIVATE windowshare-selection)
+  if(APPLE)
+    target_link_libraries(${lib_name} PRIVATE windowshare-local-input)
+  endif()
 endif()
 
 if(UNIX AND NOT APPLE)

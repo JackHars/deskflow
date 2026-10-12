@@ -9,6 +9,10 @@
 
 namespace deskflow::windowshare {
 
+#ifdef __APPLE__
+class OriginalInputCaptureSource;
+#endif
+
 // Qt main-thread owner. Startup/shutdown run bounded local event loops before
 // ordinary core startup and after core shutdown. No input authorizer is set.
 class LocalInputCoreSession final
@@ -24,6 +28,9 @@ public:
   LocalInputChannel *channel() const;
   std::optional<LocalInputCompanion::ExitResult> exitResult() const;
   std::shared_ptr<SelectedPeerMailbox> selectedPeerMailbox() const;
+#ifdef __APPLE__
+  std::shared_ptr<OriginalInputCaptureSource> captureSource() const;
+#endif
   std::function<void(QString)> onStopped;
 
 private:
@@ -32,6 +39,12 @@ private:
   std::unique_ptr<LocalInputChannel> m_channel;
   std::unique_ptr<LocalInputCompanion> m_companion;
   int m_stopWaitMs = 2000;
+#ifdef __APPLE__
+  void drainCapturedInput();
+  std::shared_ptr<OriginalInputCaptureSource> m_captureSource;
+  std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;
+  QTimer m_captureTimer;
+#endif
 };
 
 // Diagnostic only: perform the real private handshake and shut down the owned

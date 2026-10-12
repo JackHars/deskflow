@@ -85,8 +85,13 @@ public:
   LocalInputPreflight(const LocalInputPreflight &) = delete;
   LocalInputPreflight &operator=(const LocalInputPreflight &) = delete;
 
-  // Explicit core request. Does not retry or start automatically on a heartbeat.
-  bool begin();
+  // Explicit core request with retained local continuity evidence, never a
+  // peer-supplied numeric epoch. Default/revoked evidence denies. The attempt
+  // retains and rechecks it at every authority use and heartbeat; epoch IDs
+  // cannot regress across attempts. The host binds the offered ID without
+  // claiming it independently observes the core's physical capture stream.
+  // Does not retry or start automatically on a heartbeat.
+  bool begin(OriginalInputEpoch capture);
   // Host's deferred, independently revalidated Bridge notification.
   void quiesced(const KeyboardRouteBinding &binding);
   void cancel(LocalInputRevocation reason = LocalInputRevocation::Requested);

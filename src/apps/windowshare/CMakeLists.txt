@@ -38,9 +38,12 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(windowshare-local-input PUBLIC Qt6::Core Qt6::Network windowshare-selection)
   if(APPLE)
     enable_language(OBJCXX)
-    target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_mac.mm")
+    target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_mac.mm"
+      "${WS_ROOT}/../platform/OriginalKeyboard_mac.mm"
+      "${WS_ROOT}/../platform/OriginalInput_mac.mm"
+      "${WS_ROOT}/../platform/OriginalInputCaptureSource_mac.mm")
     set_target_properties(windowshare-local-input PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-    target_link_libraries(windowshare-local-input PRIVATE "-framework Security" "-framework CoreFoundation")
+    target_link_libraries(windowshare-local-input PRIVATE "-framework Security" "-framework CoreFoundation" "-framework CoreGraphics")
   else()
     target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_stub.cpp")
   endif()
@@ -73,13 +76,20 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
     # into this test, and never compile its substitution into either executable.
     add_executable(windowshare-companion-tests
       "${WS_ROOT}/LocalInputCompanionTests.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
-      "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp" "${WS_ROOT}/LocalInputSession.cpp")
+      "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp"
+      "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/LocalInputSession.cpp")
     target_compile_features(windowshare-companion-tests PRIVATE cxx_std_20)
     target_compile_definitions(windowshare-companion-tests PRIVATE QT_NO_KEYWORDS LOCAL_INPUT_COMPANION_TEST_VERIFIER=1)
     target_link_libraries(windowshare-companion-tests PRIVATE Qt6::Core Qt6::Network windowshare-selection)
     add_test(NAME windowshare-companion COMMAND windowshare-companion-tests)
     set_tests_properties(windowshare-companion PROPERTIES TIMEOUT 60)
     if(APPLE)
+      target_sources(windowshare-companion-tests PRIVATE
+        "${WS_ROOT}/../platform/OriginalKeyboard_mac.mm"
+        "${WS_ROOT}/../platform/OriginalInput_mac.mm"
+        "${WS_ROOT}/../platform/OriginalInputCaptureSource_mac.mm")
+      set_target_properties(windowshare-companion-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
+      target_link_libraries(windowshare-companion-tests PRIVATE "-framework CoreGraphics" "-framework CoreFoundation")
       # Compile the verifier here once with a private malformed-image test
       # seam. The archive's ordinary verifier object is not pulled into this
       # target; the seam is absent from every production executable/library.
