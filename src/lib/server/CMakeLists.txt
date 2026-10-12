@@ -45,6 +45,7 @@ target_link_libraries(server PUBLIC common)
 if(BUILD_WINDOWSHARE)
   # Server's optional route-state member also changes its public class layout.
   target_compile_definitions(server PUBLIC BUILD_WINDOWSHARE=1)
+  target_link_libraries(server PRIVATE windowshare-original-input)
 endif()
 
 if(UNIX)

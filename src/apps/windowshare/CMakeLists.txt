@@ -21,6 +21,15 @@ target_include_directories(windowshare-selection PUBLIC "${WS_ROOT}" "${WS_ROOT}
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(windowshare-selection PRIVATE -Wall -Wextra -Wpedantic -Werror)
 endif()
+# The Server's capture inbox needs the portable records on every platform.
+# Keep these separate from the private companion and native capture backends.
+add_library(windowshare-original-input STATIC
+  "${WS_ROOT}/OriginalKeyboard.cpp" "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/OriginalInputRoute.cpp")
+target_compile_features(windowshare-original-input PUBLIC cxx_std_20)
+target_include_directories(windowshare-original-input PUBLIC "${WS_ROOT}" "${WS_ROOT}/..")
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(windowshare-original-input PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 add_library(windowshare-transport STATIC Transport.cpp KeyboardRouteProtocol.cpp "${WS_ROOT}/Core.cpp")
 target_compile_features(windowshare-transport PUBLIC cxx_std_20)
 target_compile_definitions(windowshare-transport PUBLIC QT_NO_KEYWORDS)
@@ -46,15 +55,14 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # A private inherited socketpair and explicit packaged companion bootstrap.
   # Merely linking this library neither launches a companion nor enables input.
   add_library(windowshare-local-input STATIC
-    "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp"
-    "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/OriginalInputRoute.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
+    "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
     "${WS_ROOT}/LocalInputLibraryConstraint.cpp" "${WS_ROOT}/LocalInputCodeAdmission.cpp"
     "${WS_ROOT}/LocalInputBootstrap.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
     "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp")
   target_compile_features(windowshare-local-input PUBLIC cxx_std_20)
   target_compile_definitions(windowshare-local-input PUBLIC QT_NO_KEYWORDS WINDOWSHARE_LOCAL_INPUT=1)
   target_include_directories(windowshare-local-input PUBLIC "${WS_ROOT}")
-  target_link_libraries(windowshare-local-input PUBLIC Qt6::Core Qt6::Network windowshare-selection Threads::Threads)
+  target_link_libraries(windowshare-local-input PUBLIC Qt6::Core Qt6::Network windowshare-selection windowshare-original-input Threads::Threads)
   if(APPLE)
     enable_language(OBJCXX)
     target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_mac.mm"
