@@ -6,24 +6,24 @@ feature. The ordinary Deskflow build remains the default.
 
 ## Roadmap status
 
-The overall completion estimate is about 45%. The project is in integration,
-before the first verified interactive Mac window
-on Ubuntu. Passing component tests does not establish that complete user flow.
-The next acceptance test is one window with working capture, focus, keyboard,
-pointer, scrolling and return, using the Mac keyboard and trackpad.
+The overall completion estimate is about 50%. The project is in integration:
+actual Mac capture and Ubuntu viewer input now pass a complete two-machine
+synthetic test. The next acceptance milestone is the physical Mac keyboard and
+trackpad flow, including input ownership and window return. The percentage is
+an engineering estimate, not the fraction of tests that pass.
 
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
-| Capture, viewer and transport | Mac capture/encode/decode, exact targeted keys, pointer motion/drag/buttons/scroll, forced input release and source restoration pass the native own-window smoke. Transport, independent viewers and reconnect pass automated tests. | Verify the complete interactive flow across the two machines using physical Mac input. |
+| Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
 | Original input integration | Ordered capture records join the actual Server recipient and coordinate decision. The GNOME client now joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
-| Linux and two monitors | The current Ubuntu candidate passes 57 integrated and 13 application suites. The native GNOME/Qt viewport join passes with Qt scale factors 1 and 1.25. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
+| Linux and two monitors | The Ubuntu candidate passes 57 integrated and 13 application suites, native GNOME/Qt tests and both synthetic two-machine runs. Ten Linux relay/control regressions pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
 | Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
-hostname `jack`. The GNOME viewport milestone
+hostname `jack` at `192.168.1.12`. The GNOME viewport milestone
 `04bf68b4c044e1adf2ff463850ae8d1c35b76dad` passed all six CI jobs in run
 `38296548399`, including the real native headless GNOME 50 tests for EIS/Wayland
 ownership, the actual Qt painted viewport and caller-loss cleanup. Its production
@@ -32,7 +32,46 @@ the physical two-machine interactive flow. Read-only display inspection currentl
 lists one active Samsung HDMI display at 1920×1080 and no second connected output.
 The Mac lid is open and the experimental app has Screen Recording and
 Accessibility permission; physical input and two-monitor handoff remain untested.
+The Mac pointer fix `79de560ca3682e4fcc0bb973bc94abf1e22379c3` also passed all six
+CI jobs in run `38299021367`. Its exact-library experimental package is installed
+separately, with the previous experimental installation retained as a backup.
+The 125% two-machine run used that installed host.
 See `WORK_STATE.md` for test logs, package details and remaining acceptance tests.
+
+### Actual two-machine synthetic acceptance
+
+The coordinator exports only its own disposable Mac source window. A private
+SSH Unix-socket forward carries mutually pinned TLS to a network-isolated
+container on Ubuntu. That container runs a real headless GNOME 50.1 compositor,
+Qt 6.10.2 viewer, production provider client and synthetic libei sender.
+
+Both scale runs verify a decoded 1280×896 Mac frame, three fractional pointer
+positions against fresh native/painted observations and actual tagged Mac native
+receipts, exact click/scroll coordinates and F8 down/up. The source has no held
+keys or buttons afterward. Disconnect clears its export journal while the Mac
+host is still alive; the original source frame remains intact. Cleanup removes
+the owned processes, container and forwarded socket. The ordinary Ubuntu client
+remains running.
+
+These tests do not move the source onto a holding display or exercise physical
+Mac input, ordinary Deskflow routing, drag handoff, or a physical Linux desktop.
+The compositor monitor remains at scale 1; `QT_SCALE_FACTOR=1.25` tests Qt content
+scaling. The TLS relay records coordinated socket closure separately from a
+fully drained EOF, including any undeliverable encrypted Mac-to-viewer tail.
+
+Prepare a fresh Linux plan as described in
+[`crossmachine-linux.md`](../deploy/windowshare/crossmachine-linux.md), then run:
+
+```sh
+python3 deploy/windowshare/crossmachine-macos-smoke.py \
+  --host /absolute/path/DeskflowSeamless-Core-Experimental.app/Contents/MacOS/deskflow-windowshare \
+  --source /absolute/path/windowshare-smoke-source \
+  --ssh-target USER@HOST --ssh-key /absolute/path/to/existing-ssh-key \
+  --plan /absolute/path/fresh-linux-plan.json --output /absolute/path/new-results
+```
+
+Keep both machines' results and hashes. The Mac coordinator requires actual
+receiver evidence; a Linux-only pass or EIS synchronization reply is insufficient.
 
 ### Experimental GNOME client configuration
 

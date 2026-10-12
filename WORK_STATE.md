@@ -3,6 +3,51 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Actual Mac/Ubuntu synthetic round trip (2026-10-12)
+
+Overall completion is now approximately 50%. WiFiman SSH again reaches hostname
+`jack` at `192.168.1.12`. The full two-machine synthetic test passes with Qt
+content scale factors 1 and 1.25, using the packaged Mac host and then its
+byte-identical installed copy. The actual source frame is captured on Mac and
+decoded to 1280×896 by the real Qt 6.10.2 viewer in a private GNOME 50.1 session
+on the home Ubuntu machine.
+
+Each run checks three unretried fractional motions against the fresh native
+GNOME hit, painted Qt mapping and tagged Mac receiver events, followed by exact
+click/scroll coordinates and F8 down/up. The target NSWindow, injector PID and
+synthetic marker must match. No keys or buttons remain held. Before stopping the
+Mac host or invoking recovery, disconnect must clear the export journal and
+leave the source at its original frame. Both runs also pass owned process,
+forwarding-socket and container cleanup. The ordinary Ubuntu client PID 8762
+remains unchanged. This does not test physical input, holding-display relocation,
+the ordinary Deskflow input route, drag handoff or physical monitor scaling.
+
+Passing joint evidence is in `build/crossmachine-macos/run-{5,6}/` and
+`build/crossmachine-linux/run-{5,6}/`. Earlier failed runs remain in place: source
+startup readiness (run 1), Qt wheel-coordinate rounding in the test expectation
+(run 2), and relay full-close/shutdown races (runs 3 and 4). All ten Linux
+control/relay regressions now pass and are wired into CI. Coordinated shutdown
+records encrypted Mac-to-viewer tail loss separately from fully drained EOF;
+Mac-bound bytes must drain without discard. The fixture never treats an EIS
+PONG or a Linux-only result as proof of Mac application delivery.
+
+The Linux application and fixture were clean-built for the cross-machine
+candidate. Their hashes are respectively
+`5322c9eefbb3a093e3a5f43a491986509f9bceac59154a279b761575f861d362`
+and `b70ad5eee8da76bc88780d8ba142f5013aae3932430186c0b60003ad571c9076`.
+The Mac host uses commit `79de560ca3682e4fcc0bb973bc94abf1e22379c3`, which
+passed all six CI jobs in run `38299021367`.
+
+The exact-library package is now installed at
+`~/Applications/DeskflowSeamless-Core-Experimental.app`; both staged and installed
+audits, private launch/bootstrap checks, TLS/reconnect checks and the permission
+probe pass. Installed core/host hashes match the tested package. ZIP SHA-256:
+`e40076f7b4f121ff5b9a7e195674ffe8bf04d8f62678be66f1acc8af133de15d`.
+The previous experimental copy is retained in
+`build/packages/native-pointer-installed-backup-20261012/`.
+`/Applications/Deskflow.app` was not replaced. Package and native evidence is in
+`build/native-smoke-20261012/evidence.json`.
+
 ## Mac targeted pointer coordinates (2026-10-12)
 
 The native own-window input failure is fixed. The public global-location setter
@@ -28,10 +73,9 @@ The rebuilt production host reports capture, Accessibility and targeted-pointer
 capabilities available. All 15 standalone application suites pass in 100.10
 seconds (`build/native-smoke-20261012/app-regressions.log`).
 
-This is local synthetic input evidence. The actual two-machine runner is being
-prepared separately; physical Mac input, holding-display input, first-click
-activation races and drag handoff are not established by this smoke. Overall
-roadmap completion remains about 45% pending the full interactive flow.
+This local smoke does not establish physical Mac input, holding-display input,
+first-click activation races or drag handoff. The subsequent two-machine
+synthetic acceptance is recorded above.
 
 The preceding GNOME viewport commit `04bf68b4c` passed all six CI jobs in run
 `38296548399`. Exact-revision job metadata and logs are retained and hashed in

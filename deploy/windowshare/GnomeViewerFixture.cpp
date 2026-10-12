@@ -58,6 +58,16 @@ std::uint64_t integer(const QJsonObject &object, const char *name)
   );
   return static_cast<std::uint64_t>(n);
 }
+std::int32_t scrollDelta(const QJsonObject &object, const char *name)
+{
+  const auto value = object.value(QLatin1String(name));
+  const auto n = value.toDouble();
+  require(
+      value.isDouble() && std::isfinite(n) && std::floor(n) == n && n >= -1200 && n <= 1200,
+      "Invalid bounded discrete scroll delta"
+  );
+  return static_cast<std::int32_t>(n);
+}
 QJsonObject snapshot(const GnomeProviderClient::ViewportSnapshot &value)
 {
   GnomeViewportReply paint;
@@ -198,8 +208,8 @@ int main(int argc, char **argv)
             break;
           case EI_EVENT_SEAT_ADDED:
             ei_seat_bind_capabilities(
-                ei_event_get_seat(event), EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_KEYBOARD,
-                nullptr
+                ei_event_get_seat(event), EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL,
+                EI_DEVICE_CAP_KEYBOARD, nullptr
             );
             break;
           case EI_EVENT_DEVICE_ADDED:
@@ -291,8 +301,10 @@ int main(int argc, char **argv)
         require(id > lastId && !observationId && !input.pending, "Unordered/concurrent fixture command");
         lastId = id;
         const auto operation = command.value("op").toString();
-        const QSet<QString> allowed =
-            operation == "move" ? QSet<QString>{"id", "op", "x", "y"} : QSet<QString>{"id", "op"};
+        const QSet<QString> allowed = operation == "move"     ? QSet<QString>{"id", "op", "x", "y"}
+                                      : operation == "scroll" ? QSet<QString>{"id", "op", "dx", "dy"}
+                                      : operation == "key"    ? QSet<QString>{"id", "op", "code"}
+                                                              : QSet<QString>{"id", "op"};
         for (auto it = command.begin(); it != command.end(); ++it)
           require(allowed.contains(it.key()), "Unknown fixture command field");
         if (operation == "stop") {
@@ -321,11 +333,21 @@ int main(int argc, char **argv)
           );
           ei_device_pointer_motion_absolute(input.pointer, x.toDouble(), y.toDouble());
           ei_device_frame(input.pointer, ei_now(input.context));
-        } else if (operation == "escape") {
-          ei_device_keyboard_key(input.keyboard, 1, true);
+        } else if (operation == "key" || operation == "escape") {
+          const auto code = operation == "escape" ? 1 : integer(command, "code");
+          require(code <= 767, "Key stroke is outside the Linux evdev key range");
+          // A complete synthetic stroke only; this fixture never transfers a
+          // held-key owner or grants original-input delivery authority.
+          ei_device_keyboard_key(input.keyboard, static_cast<std::uint32_t>(code), true);
           ei_device_frame(input.keyboard, ei_now(input.context));
-          ei_device_keyboard_key(input.keyboard, 1, false);
+          ei_device_keyboard_key(input.keyboard, static_cast<std::uint32_t>(code), false);
           ei_device_frame(input.keyboard, ei_now(input.context));
+        } else if (operation == "scroll") {
+          require(ei_device_has_capability(input.pointer, EI_DEVICE_CAP_SCROLL), "Pointer has no scroll capability");
+          const auto dx = scrollDelta(command, "dx"), dy = scrollDelta(command, "dy");
+          require(dx || dy, "Scroll fixture requires a nonzero delta");
+          ei_device_scroll_discrete(input.pointer, dx, dy);
+          ei_device_frame(input.pointer, ei_now(input.context));
         } else if (operation == "click") {
           require(ei_device_has_capability(input.pointer, EI_DEVICE_CAP_BUTTON), "Pointer has no button capability");
           ei_device_button_button(input.pointer, 272, true);

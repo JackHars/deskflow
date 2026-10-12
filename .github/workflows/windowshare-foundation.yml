@@ -125,6 +125,8 @@ jobs:
         run: QT_QPA_PLATFORM=offscreen build/app/deskflow-windowshare --probe
       - name: Check viewer reconnect against a disposable TLS fixture
         run: python3 deploy/windowshare/viewer-smoke.py build/app/deskflow-windowshare
+      - name: Check cross-machine control and bounded relay shutdown
+        run: python3 deploy/windowshare/gnome-crossmachine-tests.py
       - name: Compile the real opt-in Linux injection backend
         run: |
           cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
