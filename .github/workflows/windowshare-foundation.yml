@@ -14,6 +14,8 @@ on:
       - 'src/lib/platform/OSXComputer.h'
       - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/XWindowsComputer.*'
+      - 'src/lib/platform/EiComputer.*'
+      - 'src/lib/base/Event*'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
       - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
@@ -40,6 +42,8 @@ on:
       - 'src/lib/platform/OSXComputer.h'
       - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/XWindowsComputer.*'
+      - 'src/lib/platform/EiComputer.*'
+      - 'src/lib/base/Event*'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
       - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
@@ -110,7 +114,7 @@ jobs:
           apt-get install -y --no-install-recommends git ca-certificates cmake build-essential ninja-build pkg-config python3 \
             qt6-base-dev qt6-tools-dev libavcodec-dev libavutil-dev libswscale-dev libx264-dev openssl libssl-dev help2man \
             libx11-dev libx11-xcb-dev libxtst-dev libxkbfile-dev libxinerama-dev libxrandr-dev libxi-dev \
-            libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth dbus-daemon \
+            libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth dbus-daemon dbus-bin \
             libxkbregistry-dev libxkbcommon-dev libei-dev libportal-dev
       - uses: actions/checkout@v4
       - name: Configure the opt-in application
@@ -126,6 +130,8 @@ jobs:
           cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
           cmake --build build/integrated --target deskflow-core windowshare-core-args-tests windowshare-x11-viewport-tests --parallel 2
           ctest --test-dir build/integrated/src/unittests -R '^windowshare-(core-args|x11-viewport-.*)$' --output-on-failure
+      - name: Verify terminal GNOME provider absence on a private bus
+        run: python3 deploy/windowshare/gnome-core-smoke.py build/integrated/bin/deskflow-core
       - name: Exercise the real core observer on a private Xvfb
         run: python3 deploy/windowshare/x11-core-smoke.py build/integrated/bin/deskflow-core
   gnome-provider:
