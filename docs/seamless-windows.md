@@ -15,8 +15,8 @@ an engineering estimate, not the fraction of tests that pass.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Ordered capture records join the actual Server recipient and coordinate decision. The GNOME client now joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
-| Linux and two monitors | The Ubuntu candidate passes 57 integrated and 13 application suites, native GNOME/Qt tests and both synthetic two-machine runs. Ten Linux relay/control regressions pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
+| Original input integration | Captured stamps now follow actual Server input packets to receiver backend submission receipts. The GNOME client joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
+| Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
@@ -56,6 +56,20 @@ the disposable source window. Its countdown begins after connection readiness;
 the Linux preparation wait has a separate deadline. Fresh receipt, cancellation
 and cleanup checks remain separate from the human input verdict. See
 [`physical-macos.md`](../deploy/windowshare/physical-macos.md) for the procedure.
+
+The negotiated input trace preserves the actual legacy input bytes and records
+backend API submissions separately from native delivery. Its bounded packet
+parsing, retirement and compatibility tests are documented in
+[`input-sequence-trace.md`](../deploy/windowshare/input-sequence-trace.md).
+Passing those tests does not replace physical input acceptance or enable
+original-input delivery. Local packaging still awaits the requested Mac App
+Management permission.
+
+The final input-trace candidate passes 150 Qt test entries on both Mac and home
+Ubuntu. Ubuntu also passes 26 compatibility entries with window sharing disabled;
+29 trace entries are intentionally skipped in that build. All six CI jobs pass
+on code revision `5de96808c` in
+[run 38315383611](https://github.com/JackHars/deskflow/actions/runs/38315383611).
 
 ### Actual two-machine synthetic acceptance
 

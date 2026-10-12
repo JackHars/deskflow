@@ -3,6 +3,76 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Negotiated input submission tracing (2026-10-12)
+
+The captured-event stamp now follows the actual Server input write through the
+existing legacy protocol into the receiving `Computer` dispatch. The EIS backend
+counts its existing input/frame API calls, and an exact terminal receipt joins
+back to the sender's retained token. This does not enable original-input
+delivery, prove compositor or application consumption, or supply a native
+device identity. The post-dispatch route callback remains unsuitable for
+directly sending original input because it cannot replace the earlier dispatch.
+
+Only an opt-in protocol 1.8 connection with live TLS and a live capture route
+negotiates tracing. Generation changes, late replies, connection replacement,
+packet boundaries and nested dispatch are checked. Pending records are bounded
+to 256 across active and retired generations. Trace limits preserve ordinary
+legacy input while recording that its trace is unavailable. Controls and older
+peers keep their existing protocol. The contract is documented in
+`deploy/windowshare/input-sequence-trace.md`.
+
+Independent review found and reproduced a negotiation framing defect: a
+truncated `DSOP` could borrow the following `CNOP` bytes as its generation and
+emit `CISA`. The final fix bounds option decoding to the current packet and
+rejects trailing or incomplete data before negotiation or handshake effects.
+The failing regression is retained under
+`build/input-sequence-receiver/dsop-red/`; the fixed receiver passes 32 strict,
+32 scoped ASan/UBSan and six feature-off cases. Sanitizer coverage includes
+modified receiver/test code, not the prebuilt dependency archives.
+
+Implementation commit `ba22079b3d532fbd2519312c064ee9a5089e577d` and framing
+follow-up `5de96808caa5c539383ce0d5953c3b72b2d10b02` are pushed to the feature
+branch. The final Mac core builds and all five targeted suites pass 150 Qt
+cases with zero failures or skips. Evidence is under
+`build/input-sequence-20261012/mac-candidate-2/`. All 1,028 frozen candidate
+source entries are checked against the committed tree, including symlink modes
+and contents. No new Mac native input session or package installation was run.
+
+The final source also passes fresh builds on home Ubuntu for both feature
+settings, including the actual core and `EiComputer`. The enabled build passes
+all five suites: 150 Qt passes, no failures or skips. The disabled build passes
+both proxy suites: 26 passes, no failures and 29 intentional skips of disabled
+trace cases. Qt totals include setup and teardown entries. Every build/test
+phase and the build-only container exit is zero; no native session or input
+was started. Ordinary GUI/core process identities, settings and unrelated
+containers are unchanged, and the owned container and supervisor are absent.
+
+Ubuntu evidence is
+`build/input-sequence-20261012/ubuntu/candidate-2/evidence.json`, SHA-256
+`b51d76ec163090ea1ab935bbf029973bf7bc1d577683e5f81f8db8284b8ab727`.
+The parent independently verified all 32 copied artifact hashes, parsed the
+test counts, compared ordinary process/configuration/container inventories and
+checked actual EIS compiler flags in both builds. Candidate 1 remains preserved,
+including its cleanup-classifier false alarm and the correcting read-only audit.
+
+The final code revision `5de96808caa5c539383ce0d5953c3b72b2d10b02` passes all
+six CI jobs in run `38315383611`: both application builds, both sanitized core
+builds, transport and native GNOME integration. Every job step passed. Complete
+metadata, logs and artifact hashes are retained under
+`build/input-sequence-20261012/ci-38315383611/`. The Mac CI package and private
+core handshake pass on the runner; local App Management permission remains a
+separate requirement before updating the experimental app on this Mac.
+
+The installed Mutter 50.1 introspection audit exposes
+`Clutter.Event.get_source_device()` but no public EIS-session-to-device
+association. The retained audit is
+`build/gnome-attribution-audit-17a/installed-typelib.jsonl`. Native ownership and
+consumption still require separate integration; a device name, current pointer
+position or EIS synchronization reply cannot supply that evidence.
+
+Physical acceptance and the Mac App Management permission remain open. The
+overall roadmap estimate remains approximately 50%.
+
 ## Visible physical-test controls (2026-10-12)
 
 The reusable physical acceptance harness now starts from a button in its own
