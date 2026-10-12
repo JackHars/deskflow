@@ -82,9 +82,18 @@ struct ChannelTestAccess
   {
     return channel.m_socket.encryptedBytesToWrite();
   }
+  static QVariant sendBuffer(Channel &channel)
+  {
+    return channel.m_socket.socketOption(QAbstractSocket::SendBufferSizeSocketOption);
+  }
   static void smallSendBuffer(Channel &channel)
   {
     channel.m_socket.setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, 4096);
+  }
+  static void resumeOutput(Channel &channel, const QVariant &sendBuffer)
+  {
+    channel.m_socket.setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, sendBuffer);
+    channel.m_socket.setSocketOption(QAbstractSocket::LowDelayOption, 1);
   }
 };
 } // namespace deskflow::windowshare
@@ -315,14 +324,26 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   QObject::connect(&sink, &QSslSocket::encrypted, &sink, [&] {
     write(MessageType::Hello, {{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"}});
   });
+  // Real Channels originate idle heartbeats independently. A raw TLS fixture
+  // must do the same while incoming media prevents host Ping/Pong from draining.
+  QTimer heartbeat;
+  heartbeat.setInterval(1000);
+  QObject::connect(&heartbeat, &QTimer::timeout, &sink, [&] {
+    if (sink.isEncrypted() && sink.state() == QAbstractSocket::ConnectedState && sink.bytesToWrite() == 0 &&
+        sink.encryptedBytesToWrite() == 0)
+      write(MessageType::Ping, {});
+  });
+  heartbeat.start();
   Decoder decoder;
   bool consume = true;
   int opened = 0;
+  qint64 receivedBytes = 0;
   QByteArray receivedFrames;
   auto read = [&] {
     if (!consume)
       return;
     const auto bytes = sink.readAll();
+    receivedBytes += bytes.size();
     decoder.feed(
         {reinterpret_cast<const std::uint8_t *>(bytes.constData()), static_cast<std::size_t>(bytes.size())},
         [&](Packet packet) {
@@ -339,11 +360,16 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for congestion fixture");
   sink.connectToHostEncrypted("127.0.0.1", BridgeTestAccess::port(host));
   check(waitUntil([&] { return BridgeTestAccess::established(host); }), "Congestion fixture did not negotiate");
-  auto *channel = BridgeTestAccess::channel(host);
+  QPointer<Channel> channel = BridgeTestAccess::channel(host);
+  const auto normalSendBuffer = ChannelTestAccess::sendBuffer(*channel);
+  check(normalSendBuffer.isValid() && normalSendBuffer.toInt() > 0, "Cannot inspect fixture send buffer");
   ChannelTestAccess::smallSendBuffer(*channel);
   BridgeTestAccess::opened(host, 41, 7);
   BridgeTestAccess::opened(host, 42, 8);
-  check(waitUntil([&] { return opened == 2 && channel->readyForFrame(); }), "Congestion fixture setup did not drain");
+  check(
+      waitUntil([&] { return opened == 2 && channel && channel->readyForFrame(); }),
+      "Congestion fixture setup did not drain"
+  );
 
   consume = false;
   sink.setReadBufferSize(1);
@@ -351,7 +377,7 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   BridgeTestAccess::frame(host, 41, 7, largeFrame);
   check(
       waitUntil([&] {
-        return ChannelTestAccess::plaintext(*channel) == 0 && ChannelTestAccess::encrypted(*channel) > 0;
+        return channel && ChannelTestAccess::plaintext(*channel) == 0 && ChannelTestAccess::encrypted(*channel) > 0;
       }),
       "Congestion fixture did not isolate encrypted output"
   );
@@ -374,18 +400,34 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   blocked.exec();
   burst.stop();
   check(
-      !channel->readyForFrame() && ChannelTestAccess::encrypted(*channel) > 0 && keyframeRequests.isEmpty() &&
-          BridgeTestAccess::pendingKeyframes(host) == 1 && BridgeTestAccess::retryActive(host),
+      channel && !channel->readyForFrame() && ChannelTestAccess::encrypted(*channel) > 0 &&
+          keyframeRequests.isEmpty() && BridgeTestAccess::pendingKeyframes(host) == 1 &&
+          BridgeTestAccess::retryActive(host),
       "Encrypted congestion caused native replay work or unbounded pending requests"
   );
 
   // Hold the timer while inspecting the drained gap. A dependent frame still
   // cannot pass until requestKeyframe has invalidated the native GOP.
   BridgeTestAccess::pauseRetry(host);
+  // Remove BOTH artificial limits. Leaving the 4 KiB sender buffer in place
+  // couples this 16 MiB drain to Linux's Nagle/delayed-ACK timing even after the
+  // receiver resumes reading. Throughput timing is not what this fixture tests.
+  ChannelTestAccess::resumeOutput(*channel, normalSendBuffer);
+  sink.setSocketOption(QAbstractSocket::LowDelayOption, 1);
   consume = true;
   sink.setReadBufferSize(0);
   read();
-  check(waitUntil([&] { return channel->readyForFrame() && receivedFrames == "A"; }), "Congested media did not drain");
+  const bool drained = waitUntil([&] { return channel && channel->readyForFrame() && receivedFrames == "A"; });
+  if (!drained) {
+    QTextStream diagnostic(stderr);
+    diagnostic << "Drain diagnostic: connected=" << BridgeTestAccess::established(host)
+               << " plaintext=" << (channel ? ChannelTestAccess::plaintext(*channel) : -1)
+               << " ciphertext=" << (channel ? ChannelTestAccess::encrypted(*channel) : -1)
+               << " sendBuffer=" << (channel ? ChannelTestAccess::sendBuffer(*channel).toInt() : -1)
+               << " receivedBytes=" << receivedBytes << " completeFrames=" << receivedFrames.size()
+               << " sinkAvailable=" << sink.bytesAvailable() << " sinkState=" << sink.state() << '\n';
+  }
+  check(drained, "Congested media did not drain");
   BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
   check(
       channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 1,
@@ -393,7 +435,7 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   );
   bool clearedBeforeNative = false;
   keyframeReply = [&](NativeHost &native, std::uint64_t session, std::uint64_t epoch) {
-    clearedBeforeNative = channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 0;
+    clearedBeforeNative = channel && channel->readyForFrame() && BridgeTestAccess::pendingKeyframes(host) == 0;
     native.onFrame(session, epoch, 1, QByteArray("R"));
   };
   BridgeTestAccess::resumeRetry(host);
@@ -405,9 +447,10 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
       "Recovery was not coalesced to one request for the live session"
   );
 
-  check(waitUntil([&] { return channel->readyForFrame(); }), "Recovery output did not drain");
+  check(waitUntil([&] { return channel && channel->readyForFrame(); }), "Recovery output did not drain");
   consume = false;
   sink.setReadBufferSize(1);
+  ChannelTestAccess::smallSendBuffer(*channel);
   BridgeTestAccess::frame(host, 41, 7, largeFrame);
   BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
   check(BridgeTestAccess::pendingKeyframes(host) == 1, "Disconnect fixture has no pending recovery");
