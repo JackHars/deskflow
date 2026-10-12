@@ -302,6 +302,7 @@ def viewer_child(log_path):
     import gi
 
     gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
     from gi.repository import Gdk, GLib, GObject, Gtk
 
     output = Path(log_path).open("x", buffering=1)
@@ -451,6 +452,7 @@ def run_fixture(arguments):
             def viewer_observation():
                 observation, = provider.call("GetViewer", "(sus)", (session, generation, token))
                 observation_only(observation)
+                report["latestViewerObservation"] = observation
                 return observation if observation.get("available") is True else None
 
             observation = wait_for(processes, viewer_observation, "provider-owned native Wayland window")
@@ -458,6 +460,7 @@ def run_fixture(arguments):
                     and observation.get("generation") == generation, "Viewer observation binding mismatch")
             require(observation.get("window") and observation.get("surface"), "Native window/surface identity absent")
             report["nativeWaylandClientBound"] = True
+            report["initialViewerObservation"] = observation
             frame = observation.get("frameRect")
             require(isinstance(frame, (tuple, list)) and len(frame) == 4
                     and all(math.isfinite(value) for value in frame) and frame[2] > 100 and frame[3] > 100,
@@ -476,7 +479,8 @@ def run_fixture(arguments):
                 ei.sync(f"M {{request}} {x} {y}")
                 current, = provider.call("GetViewer", "(sus)", (session, generation, token))
                 observation_only(current)
-                require(current.get("available") is True, "Viewer invalidated after EI motion")
+                report["latestMotionObservation"] = {"request": index, "x": x, "y": y, "viewer": current}
+                require(current.get("available") is True, f"Viewer invalidated after EI motion: {current}")
                 require(abs(current.get("pointerX", -100000) - x) <= 1 and abs(current.get("pointerY", -100000) - y) <= 1,
                         "EI PONG preceded the requested real compositor pointer state")
                 hit, = provider.call("ValidateCurrentHit", "(sussddu)",
