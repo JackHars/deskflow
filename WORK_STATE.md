@@ -47,21 +47,42 @@ rounds matching actual GTK surface events, stale-revision denial, caller-loss
 EIS revocation and viewer termination, and a fresh session after revocation.
 This establishes compositor observations, not pointer-device attribution, Qt
 viewport mapping or production delivery authority. The initial compositor cursor
-at (0,0) triggered GNOME's hot-corner barrier; fixture setup now moves away before
-the measured assertions. The combined source still requires its exact Linux and
-Mac CI results. These tests use private buses, runtime/settings and software
+at (0,0) triggered GNOME's hot-corner barrier; fixture setup now moves away and
+waits for the first native surface hit before the measured assertions. These
+tests use private buses, runtime/settings and software
 rendering, without a user's display or devices. Retained logs and results are in
 `build/gnome-provider-harness/ci-38284680572/` and its adjacent `.log` file.
 
-The installed experimental Mac package remains the earlier `b2aa37e9b` milestone
-described below until the new source is packaged and verified. That milestone
-passed all five then-existing CI jobs. Home Ubuntu's recorded 52/52 integrated
-and 9/9 application results apply to the earlier `aab8467fb` revision. SSH to
+The first combined CI run `38285549947` on `a864739bc` passed Mac application,
+integrated core and package checks, the Clang foundation job and transport.
+The real Linux backend compiled and its targeted core tests passed. Follow-up
+test corrections use a reference in a GCC-strict tuple loop, wait for initial
+GNOME surface readiness, and distinguish Qt's portal metadata discovery from
+forbidden input/session fallback in the private-bus core smoke. Full job logs
+and exact source revisions are retained under `build/gnome-route-ci/`; focused
+passes alone must not be interpreted as a passing all-job run.
+
+The updated exact-library experimental package is installed at
+`~/Applications/DeskflowSeamless-Core-Experimental.app`. Staged and installed
+bundle audits passed with 77 permitted library records/slices. Both copies
+passed private core/host launch/bootstrap rejection and mutually pinned TLS,
+reconnect and clean-exit smokes. The prior experimental installation is retained
+under `build/packages/gnome-route-integration-installed-backup-20261012/`.
+The ZIP is
+`build/packages/gnome-route-integration-20261012/DeskflowSeamless-Core-Experimental.zip`
+with SHA-256
+`f550a2702a625944cc94a6827e8b72da535a04b08d093754431156a8a23f280e`.
+It still requires Intel macOS 26 and is not notarized. The ordinary installation
+was not replaced. The local verification record is `build/gnome-route-evidence.json`.
+
+Home Ubuntu's recorded 52/52 integrated and 9/9 application results apply to the
+earlier `aab8467fb` revision. The later `b2aa37e9b` milestone passed all five
+then-existing CI jobs. SSH to
 `192.168.1.12` still times out before authentication and routes through the
 local gateway; no new home-Ubuntu run was claimed. No live Mac capture or input
 tests ran with the lid closed. The full goal remains incomplete.
 
-## Latest pairing and code-admission integration (2026-10-12)
+## Previous pairing and code-admission integration (2026-10-12)
 
 The roadmap is now summarized near the top of `docs/seamless-windows.md`. The
 project remains before its first verified interactive Mac window on Ubuntu.

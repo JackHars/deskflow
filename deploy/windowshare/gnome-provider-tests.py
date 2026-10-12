@@ -146,7 +146,7 @@ class Processes:
             file.close()
 
 
-def wait_for(processes, predicate, description, timeout=12):
+def wait_for(processes, predicate, description, timeout=12, retry_errors=True):
     deadline = time.monotonic() + timeout
     last_error = "not ready"
     while time.monotonic() < deadline:
@@ -156,6 +156,8 @@ def wait_for(processes, predicate, description, timeout=12):
             if value:
                 return value
         except Exception as error:
+            if not retry_errors:
+                raise
             last_error = str(error)
         time.sleep(0.05)
     raise RuntimeError(f"Timed out waiting for {description}: {last_error}")
@@ -471,6 +473,38 @@ def run_fixture(arguments):
             require(observation.get("pointerX") == initial_x and observation.get("pointerY") == initial_y,
                     f"Fixture cursor did not leave the initial hot corner: {observation}")
             report["nativeWaylandClientBound"] = True
+
+            def initial_native_hit():
+                # Mapping a Wayland window exposes its geometry before the
+                # first frame necessarily reaches the stage's pick tree. This
+                # is a startup precondition, not a retry of a measured move.
+                current, = provider.call("GetViewer", "(sus)", (session, generation, token))
+                observation_only(current)
+                require(current.get("available") is True and current.get("focused") is True,
+                        f"Viewer lost readiness before the initial native hit: {current}")
+                require(all(current.get(key) == observation.get(key)
+                            for key in ("session", "generation", "viewer", "window", "surface")),
+                        "Native viewer identity changed during initial readiness")
+                require(current.get("pointerX") == initial_x and current.get("pointerY") == initial_y,
+                        f"Initial pointer moved while waiting for the first native hit: {current}")
+                hit, = provider.call("ValidateCurrentHit", "(sussddu)",
+                                     (session, generation, token, "initial-ready", initial_x, initial_y,
+                                      current["revision"]))
+                observation_only(hit)
+                report["latestInitialHit"] = hit
+                require(hit.get("request") == "initial-ready" and hit.get("focused") is True
+                        and all(hit.get(key) == current.get(key)
+                                for key in ("session", "generation", "revision", "viewer", "window", "surface")),
+                        "Initial hit did not retain the exact focused viewer binding")
+                if hit.get("available") is not True:
+                    require(hit.get("reason") == "not-viewer-surface", f"Initial native hit failed: {hit}")
+                    return None
+                require(all(isinstance(hit.get(key), (int, float)) and math.isfinite(hit[key])
+                            for key in ("localX", "localY")), "Initial native hit omitted finite surface coordinates")
+                return current
+
+            observation = wait_for(processes, initial_native_hit, "initial native viewer hit readiness", timeout=5,
+                                   retry_errors=False)
             report["initialViewerObservation"] = observation
             frame = observation.get("frameRect")
             require(isinstance(frame, (tuple, list)) and len(frame) == 4

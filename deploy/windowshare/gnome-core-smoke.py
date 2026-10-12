@@ -17,6 +17,7 @@ portal fallback. It is not a compositor or original-input delivery test.
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -111,6 +112,71 @@ def method_calls(output):
     return records
 
 
+def is_portal_fallback_call(record):
+    """Allow only the observed proxy metadata, never a portal input/session call."""
+    if "org.freedesktop.portal" not in record and "/org/freedesktop/portal" not in record:
+        return False
+    lines = record.splitlines()
+    fields = re.findall(r"(destination|path|interface|member)=([^\s;]+)", lines[0])
+    if len(fields) != 4 or len(dict(fields)) != 4:
+        return True
+    fields = dict(fields)
+    arguments = [line.strip() for line in lines[1:] if line.strip()]
+    if (fields["destination"], fields["path"], fields["interface"], fields["member"]) == (
+            "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Introspectable", "Introspect"):
+        return bool(arguments)
+    if (fields["destination"], fields["path"], fields["interface"]) != (
+            "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus"):
+        return True
+    if fields["member"] == "GetNameOwner":
+        return arguments != ['string "org.freedesktop.portal.Desktop"']
+    if fields["member"] in ("AddMatch", "RemoveMatch"):
+        return arguments != [
+            'string "type=\'signal\',sender=\'org.freedesktop.DBus\',interface=\'org.freedesktop.DBus\','
+            'member=\'NameOwnerChanged\',arg0=\'org.freedesktop.portal.Desktop\'"'
+        ]
+    # Includes StartServiceByName: the private bus has no activation directories,
+    # but attempting explicit portal activation is still a test failure.
+    return True
+
+
+def classifier_checks():
+    """Pure regression cases also run before the real smoke, without a bus."""
+    def record(destination, path, interface, member, arguments=()):
+        return (f"method call time=1 sender=:1.2 -> destination={destination} serial=1 path={path}; "
+                f"interface={interface}; member={member}\n" + "\n".join("   " + value for value in arguments))
+
+    bus = ("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus")
+    desktop = ("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
+    name = ['string "org.freedesktop.portal.Desktop"']
+    match = ['string "type=\'signal\',sender=\'org.freedesktop.DBus\',interface=\'org.freedesktop.DBus\','
+             'member=\'NameOwnerChanged\',arg0=\'org.freedesktop.portal.Desktop\'"']
+    metadata = [record(*bus, "GetNameOwner", name), record(*bus, "AddMatch", match),
+                record(*bus, "RemoveMatch", match),
+                record(*desktop, "org.freedesktop.DBus.Introspectable", "Introspect")]
+    for call in metadata:
+        require(not is_portal_fallback_call(call), "Classifier rejected the exact proxy metadata fixture")
+    forbidden = [
+        record(*desktop, "org.freedesktop.portal.RemoteDesktop", member)
+        for member in ("CreateSession", "SelectDevices", "Start", "ConnectToEIS", "NotifyPointerMotion")
+    ] + [
+        record(*desktop, "org.freedesktop.portal.InputCapture", "CreateSession"),
+        record(*desktop, "org.freedesktop.portal.InputCapture", "Enable"),
+        record(desktop[0], desktop[1] + "/session/1/token", "org.freedesktop.portal.Session", "Close"),
+        record(*bus, "StartServiceByName", name + ["uint32 0"]),
+        record(*desktop, "org.freedesktop.DBus.Properties", "GetAll", ['string "org.freedesktop.portal.RemoteDesktop"']),
+        record(*desktop, "org.freedesktop.portal.RemoteDesktop", "Introspect"),
+        record(desktop[0], desktop[1] + "/session/1/token", "org.freedesktop.DBus.Introspectable", "Introspect"),
+        record(*desktop, "org.freedesktop.DBus.Introspectable", "Introspect", ['string "unexpected"']),
+        record(*bus, "AddMatch", ['string "type=\'signal\',interface=\'org.freedesktop.portal.RemoteDesktop\'"']),
+        record(*bus, "GetNameOwner", ['string "org.freedesktop.portal.InputCapture"']),
+    ]
+    for call in forbidden:
+        require(is_portal_fallback_call(call), "Classifier allowed a portal session, activation or unlisted call")
+    require(not is_portal_fallback_call(record(*bus, "GetId")), "Ordinary bus marker was classified as fallback")
+
+
 def monitor_marker(send, environment, monitor_path, children, logs):
     """Prove monitoring is active, and later drain it beyond the core's exit."""
     before = sum("member=GetId" in record for record in method_calls(log_text(monitor_path)))
@@ -145,11 +211,12 @@ def verify_result(output, traffic, returncode, port, viewer_started):
     calls = method_calls(traffic)
     lookups = [record for record in calls if "member=GetNameOwner" in record and f'string "{PROVIDER}"' in record]
     require(len(lookups) == 1, "Core must look up the absent explicit provider exactly once")
-    require(not any("org.freedesktop.portal" in record or "/org/freedesktop/portal" in record for record in calls),
-            "Private bus audit observed portal fallback")
+    fallback = [record for record in calls if is_portal_fallback_call(record)]
+    require(not fallback, "Private bus audit observed portal fallback: " + (fallback[0].splitlines()[0] if fallback else ""))
 
 
 def main(executable):
+    classifier_checks()
     require(sys.platform == "linux", "This smoke test runs only on Linux and never uses a desktop session")
     executable = Path(executable).resolve(strict=True)
     require(executable.is_file() and os.access(executable, os.X_OK), "CORE_EXECUTABLE must be an executable regular file")
@@ -242,8 +309,12 @@ def main(executable):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--self-test"]:
+        classifier_checks()
+        print("PASS: exact portal proxy metadata allowed; input/session/activation and unlisted calls rejected")
+        raise SystemExit(0)
     if len(sys.argv) != 2:
-        raise SystemExit("Usage: gnome-core-smoke.py CORE_EXECUTABLE")
+        raise SystemExit("Usage: gnome-core-smoke.py CORE_EXECUTABLE | --self-test")
 
     def interrupted(signum, _frame):
         raise KeyboardInterrupt(f"Smoke interrupted by signal {signum}")

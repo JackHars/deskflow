@@ -100,7 +100,7 @@ void joinsAndDenials()
   check(f.join.pop(f.now)->input.record.sequence == 2, "output retains capture order");
   f.issuer.revoke();
   check(!joined->live(), "retained evidence follows exact TLS connection revocation");
-  for (const auto [parts, uncertain, outcome] :
+  for (const auto &[parts, uncertain, outcome] :
        {std::tuple{std::uint16_t(0), false, OriginalInputRouteOutcome::NoTranslation},
         std::tuple{std::uint16_t(2), false, OriginalInputRouteOutcome::Expanded},
         std::tuple{std::uint16_t(1), true, OriginalInputRouteOutcome::Uncorrelated}}) {
