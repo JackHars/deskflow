@@ -1091,15 +1091,18 @@ struct NativeHost::Impl
     auto it = entries.find(session);
     return it != entries.end() && it->second->session.epoch == epoch ? it->second.get() : nullptr;
   }
-  std::optional<KeyboardRouteBinding>
-  keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+  std::optional<KeyboardRouteBinding> keyboardRouteCandidate(
+      std::uint64_t session, std::uint64_t epoch, std::uint64_t generation,
+      ForwardingScope scope = ForwardingScope::Keyboard
+  ) const
   {
     const Owner owner{session, epoch};
     const auto *e = entry(session, epoch);
     if (destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote || focusOwner != owner ||
         !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
       return std::nullopt;
-    const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry};
+    const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry,
+                                       scope};
     if (!validKeyboardRouteBinding(binding) || !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
         launchTime(e->identity.pid) != e->identity.launch)
       return std::nullopt;
@@ -1127,13 +1130,15 @@ struct NativeHost::Impl
   bool quiesceKeyboard(const KeyboardRouteBinding &binding)
   {
     return keyboardAdmission.quiesce(
-        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation), qtInputEmpty()
+        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, binding.scope),
+        qtInputEmpty()
     );
   }
   bool keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
   {
     return keyboardAdmission.quiesced(
-        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation), qtInputEmpty()
+        binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, binding.scope),
+        qtInputEmpty()
     );
   }
   void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)
@@ -1819,6 +1824,8 @@ struct NativeHost::Impl
       key(*e, press, true);
       return;
     }
+    if (keyboardAdmission.blocksPointers())
+      return;
     const auto x = event["x"].toDouble(NAN), y = event["y"].toDouble(NAN);
     if (!std::isfinite(x) || !std::isfinite(y) || x < 0 || y < 0 || x >= e->session.source.width ||
         y >= e->session.source.height)
@@ -2112,10 +2119,11 @@ void NativeHost::releaseAll()
 {
   m_impl->releases(std::nullopt, KeyboardRouteReason::AuthorityLost);
 }
-std::optional<KeyboardRouteBinding>
-NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+std::optional<KeyboardRouteBinding> NativeHost::keyboardRouteCandidate(
+    std::uint64_t session, std::uint64_t epoch, std::uint64_t generation, ForwardingScope scope
+) const
 {
-  return m_impl->keyboardRouteCandidate(session, epoch, generation);
+  return m_impl->keyboardRouteCandidate(session, epoch, generation, scope);
 }
 bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
 {

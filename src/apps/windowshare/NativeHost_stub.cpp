@@ -55,7 +55,7 @@ void NativeHost::releaseAll()
 {
 }
 std::optional<KeyboardRouteBinding>
-NativeHost::keyboardRouteCandidate(std::uint64_t, std::uint64_t, std::uint64_t) const
+NativeHost::keyboardRouteCandidate(std::uint64_t, std::uint64_t, std::uint64_t, ForwardingScope) const
 {
   return std::nullopt;
 }

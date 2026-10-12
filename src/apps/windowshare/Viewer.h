@@ -134,6 +134,8 @@ private:
   void handleKeyboardRoute(const KeyboardRouteControl &control);
   bool sendKeyboardRoute(const KeyboardRouteControl &control);
   bool currentKeyboardRoute(const KeyboardRouteBinding &binding) const;
+  bool fencesInput(const QJsonObject &input) const;
+  bool fencesPointer() const;
   void invalidateKeyboardRoute(KeyboardRouteReason reason);
   void quiesceKeyboard();
   void queueInput(QJsonObject input);
@@ -153,6 +155,7 @@ private:
   std::uint64_t m_focusRevision = 0, m_focusRequest = 0;
   std::uint64_t m_resizeRequest = 0, m_resizeBaseGeometry = 0;
   std::uint64_t m_keyboardGeneration = 0;
+  std::uint64_t m_keyboardFencedGeneration = 0, m_pointerFencedGeneration = 0;
   std::optional<KeyboardRouteBinding> m_keyboardBinding;
   bool m_keyboardBindingValid = false, m_keyboardRouteHandling = false;
   QSizeF m_source;
@@ -167,6 +170,7 @@ private:
   QString m_error;
   QMap<int, QJsonObject> m_heldKeys, m_heldButtons, m_deliveredKeys, m_deliveredButtons;
   QSet<int> m_suppressedKeys;
+  QSet<int> m_suppressedButtons;
   QVector<QJsonObject> m_pendingInputs;
   QTimer m_focusTimeout, m_resizeDebounce, m_resizeTimeout;
   QThread m_decodeThread;

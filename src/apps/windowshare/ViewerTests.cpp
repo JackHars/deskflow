@@ -668,7 +668,7 @@ void testKeyboardRouteBusyAndGenerations()
   viewer.disconnected();
 }
 
-void testKeyboardRoutePendingFocus()
+void testKeyboardRoutePendingFocus(ForwardingScope scope = ForwardingScope::Keyboard, bool resumeImmediately = false)
 {
   Recording recording;
   Viewer viewer(43, 16, metadata());
@@ -677,6 +677,7 @@ void testKeyboardRoutePendingFocus()
   viewer.committed();
   focus(viewer, true);
   auto request = originalRoute(viewer, recording);
+  request.binding.scope = scope;
   viewer.keyboardRoute(request);
   check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Pending focus accepted a keyboard lease");
   ++request.binding.generation;
@@ -697,6 +698,8 @@ void testKeyboardRoutePendingFocus()
     if (!quiesced && type == MessageType::Input && object.value("kind") == "key" && object.value("down").toBool()) {
       quiesced = true;
       viewer.keyboardRoute(request);
+      if (resumeImmediately)
+        viewer.keyboardRoute(resumeRoute(request));
     }
     return sent;
   };
@@ -709,15 +712,138 @@ void testKeyboardRoutePendingFocus()
           recording.routes.back().inputCount == 4,
       "Reentrant quiescence failed to release the in-flight key before acknowledgment"
   );
+  const bool all = scope == ForwardingScope::All;
   check(
-      recording.count(MessageType::Input, "button") == 2 && recording.count(MessageType::Input, "scroll") == 1 &&
+      recording.count(MessageType::Input, "button") == (all ? 0 : 2) &&
+          recording.count(MessageType::Input, "scroll") == (all ? 0 : 1) &&
           recording.count(MessageType::Input, "release") == 0,
-      "Keyboard-only fence swallowed queued pointer input or cancelled focus"
+      "Forwarding scope did not govern the already-detached pending-focus queue"
   );
   viewer.keyboardRoute(resumeRoute(request));
   key(viewer, QEvent::KeyPress, Qt::Key_A, "a", true);
   key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
   check(recording.count(MessageType::Input, "key") == 2, "Queued held key replayed after resume");
+  viewer.disconnected();
+}
+
+void testFullInputFenceAndResume()
+{
+  Recording recording;
+  Viewer viewer(47, 20, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  auto request = originalRoute(viewer, recording);
+  request.binding.scope = ForwardingScope::All;
+  const auto position = viewer.videoRect().center();
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  const auto held = recording.events.size();
+  viewer.keyboardRoute(request);
+  check(
+      recording.lastRoute().result == KeyboardRouteResult::Busy && recording.events.size() == held,
+      "Full handoff interrupted an existing button owner"
+  );
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Full busy generation was reusable");
+  ++request.binding.generation;
+  key(viewer, QEvent::KeyPress, Qt::Key_Shift);
+  viewer.keyboardRoute(request);
+  check(
+      recording.lastRoute().result == KeyboardRouteResult::Ready && recording.lastRoute().binding == request.binding,
+      "Full handoff did not acknowledge the exact scope"
+  );
+  check(
+      recording.last(MessageType::Input, "key").object["down"] == false,
+      "Full handoff did not release a delivered key before acknowledging"
+  );
+  const auto before = recording.events.size();
+  const auto scroll = [&] {
+    QWheelEvent event(position, position, {3, -4}, {120, -120}, Qt::NoButton, Qt::NoModifier, Qt::ScrollUpdate, false);
+    QCoreApplication::sendEvent(&viewer, &event);
+  };
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::NoButton);
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  mouse(viewer, QEvent::MouseButtonDblClick, position);
+  scroll();
+  check(recording.events.size() == before, "Full fence leaked key, button, motion or either scroll axis");
+
+  auto partial = resumeRoute(request);
+  partial.binding.scope = ForwardingScope::Keyboard;
+  viewer.keyboardRoute(partial);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Keyboard scope resumed a full-input fence");
+  scroll();
+  check(recording.events.size() == before, "Mismatched scope reopened pointer forwarding");
+  const auto routeSend = viewer.onKeyboardRouteSend;
+  viewer.onKeyboardRouteSend = [&](const KeyboardRouteControl &control) {
+    const bool sent = routeSend(control);
+    if (control.mode == KeyboardRouteMode::Viewer && control.result == KeyboardRouteResult::Ready) {
+      mouse(viewer, QEvent::MouseButtonPress, position, Qt::RightButton, Qt::LeftButton | Qt::RightButton);
+      scroll();
+    }
+    return sent;
+  };
+  viewer.keyboardRoute(resumeRoute(request));
+  check(recording.lastRoute().result == KeyboardRouteResult::Ready, "Exact full-input resume failed");
+  // Both presses began while the fence was closed, including one from inside
+  // the resume callback. Their drags, repeat downs and physical ups stay orphaned.
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::LeftButton | Qt::RightButton);
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  scroll();
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::RightButton);
+  scroll();
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::RightButton, Qt::NoButton);
+  key(viewer, QEvent::KeyRelease, Qt::Key_Shift);
+  check(recording.events.size() == before, "Resume replayed fenced pointer input or lost a held-button tombstone");
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::NoButton);
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+  scroll();
+  check(
+      recording.events.size() == before + 4 && recording.events.back().object["kind"] == "scroll",
+      "Neutral pointer input did not resume after the exact acknowledgement"
+  );
+  viewer.disconnected();
+}
+
+void testFullInputFenceInvalidation()
+{
+  Recording recording;
+  Viewer viewer(48, 21, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  auto request = originalRoute(viewer, recording);
+  request.binding.scope = ForwardingScope::All;
+  viewer.keyboardRoute(request);
+  const auto position = viewer.videoRect().center();
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  viewer.focusAcknowledged(0, recording.focusRequest());
+  check(
+      recording.lastRoute().action == KeyboardRouteAction::Withdraw && recording.lastRoute().binding == request.binding,
+      "Full invalidation lost its exact scope"
+  );
+  const auto before = recording.events.size();
+  focus(viewer, true);
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::LeftButton);
+  mouse(viewer, QEvent::MouseButtonPress, position, Qt::RightButton, Qt::LeftButton | Qt::RightButton);
+  check(recording.events.size() == before, "Focus changes reopened an invalidated full-input fence");
+  viewer.keyboardRoute(request);
+  check(recording.lastRoute().result == KeyboardRouteResult::Stale, "Invalidated full-input fence was revived");
+  viewer.keyboardRoute(resumeRoute(request));
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::RightButton);
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::RightButton, Qt::NoButton);
+  check(recording.events.size() == before, "Invalidation lost pointer tombstones before physical ups");
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  check(
+      recording.events.size() == before + 1 && recording.events.back().object["kind"] == "focus",
+      "Fresh click did not request focus after full-input resume"
+  );
+  viewer.focusAcknowledged(8, recording.focusRequest());
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+  check(recording.count(MessageType::Input, "button") == 2, "Fresh post-resume click did not retain its owner");
   viewer.disconnected();
 }
 
@@ -862,7 +988,7 @@ void testKeyboardRouteInvalidation()
   }
 }
 
-void testKeyboardRouteSendFailure()
+void testKeyboardRouteSendFailure(ForwardingScope scope = ForwardingScope::Keyboard)
 {
   for (int failure = 0; failure < 5; ++failure) {
     Recording recording;
@@ -870,7 +996,8 @@ void testKeyboardRouteSendFailure()
     recording.attach(viewer);
     makeReady(viewer, recording);
     makeFocused(viewer, recording);
-    const auto request = originalRoute(viewer, recording);
+    auto request = originalRoute(viewer, recording);
+    request.binding.scope = scope;
     if (failure == 0) {
       key(viewer, QEvent::KeyPress, Qt::Key_Shift);
       const auto send = viewer.onSend;
@@ -899,6 +1026,8 @@ void testKeyboardRouteSendFailure()
     const auto routes = recording.routes.size();
     key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
     key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+    mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+    mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
     viewer.keyboardRoute(resumeRoute(request));
     viewer.close();
     check(
@@ -926,16 +1055,23 @@ int main(int argc, char **argv)
     testKeyboardRouteFenceAndResume();
     testKeyboardRouteBusyAndGenerations();
     testKeyboardRoutePendingFocus();
+    testKeyboardRoutePendingFocus(ForwardingScope::All);
+    testKeyboardRoutePendingFocus(ForwardingScope::Keyboard, true);
+    testKeyboardRoutePendingFocus(ForwardingScope::All, true);
+    testFullInputFenceAndResume();
+    testFullInputFenceInvalidation();
     testKeyboardRouteBindingValidation();
     testKeyboardRouteInvalidation();
     testKeyboardRouteSendFailure();
+    testKeyboardRouteSendFailure(ForwardingScope::All);
     QTextStream(
         stdout
     ) << "PASS: H.264 decode/reset, malformed video, letterboxing/scaling, first painted readiness, "
          "queued activating click, stale focus, special keys/repeat, ordered release, resize fencing, "
          "double-click, focus revocation/reclaim, scroll, minimize, safe return, disconnect, bounded video queue, "
          "queued geometry race, keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
-         "route generations, pending focus fence, route invalidation/resume and send failure\n";
+         "route generations, pending focus fence, full-input scope, pointer tombstones, "
+         "route invalidation/resume and send failure\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

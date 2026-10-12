@@ -18,6 +18,7 @@
 #include <QSslConfiguration>
 #include <QSslError>
 #include <QTemporaryDir>
+#include <QWheelEvent>
 
 namespace {
 QVector<std::uint32_t> exportedWindows;
@@ -82,6 +83,9 @@ void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonOb
 {
   if (event["kind"] == "key" && m_impl->keyboard.blocksKeys() && event["down"].toBool())
     return;
+  if (m_impl->keyboard.blocksPointers() &&
+      ((event["kind"] == "button" && event["down"].toBool()) || event["kind"] == "move" || event["kind"] == "scroll"))
+    return;
   nativeInputs.push_back(event);
   if (event["kind"] == "key") {
     const int code = event["code"].toInt();
@@ -92,9 +96,9 @@ void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonOb
   }
   if (event["kind"] == "button") {
     if (event["down"].toBool())
-      nativeHeldButtons.insert(event["button"].toInt());
+      nativeHeldButtons.insert(event["code"].toInt());
     else
-      nativeHeldButtons.remove(event["button"].toInt());
+      nativeHeldButtons.remove(event["code"].toInt());
   }
   if (event["kind"] == "focus") {
     m_impl->focus = KeyboardRouteBinding{
@@ -110,8 +114,9 @@ void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonOb
   if (event["kind"] == "blur")
     m_impl->focus.reset();
 }
-std::optional<KeyboardRouteBinding>
-NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
+std::optional<KeyboardRouteBinding> NativeHost::keyboardRouteCandidate(
+    std::uint64_t session, std::uint64_t epoch, std::uint64_t generation, ForwardingScope scope
+) const
 {
   const auto observer = nativeCandidateObserver;
   if (observer)
@@ -120,12 +125,13 @@ NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, s
   if (!binding || binding->owner != Owner{session, epoch})
     return std::nullopt;
   binding->generation = generation;
+  binding->scope = scope;
   return binding;
 }
 bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
 {
   const bool result = m_impl->keyboard.quiesce(
-      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
+      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, binding.scope),
       nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
   );
   const auto observer = nativeQuiesceObserver;
@@ -136,7 +142,7 @@ bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
 bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
 {
   return m_impl->keyboard.quiesced(
-      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
+      binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, binding.scope),
       nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
   );
 }
@@ -241,7 +247,7 @@ struct BridgeTestAccess
   {
     bridge.receiveKeyboardRoute(
         Packet{
-            MessageType::KeyboardRoute, control.binding.owner.session, control.binding.owner.epoch, 1,
+            forwardingRouteMessageType(control.binding), control.binding.owner.session, control.binding.owner.epoch, 1,
             jsonBytes(encodeKeyboardRouteControl(control))
         }
     );
@@ -261,6 +267,10 @@ struct BridgeTestAccess
   static bool keyboardCapable(const Bridge &bridge)
   {
     return bridge.m_keyboardCapable;
+  }
+  static bool inputCapable(const Bridge &bridge)
+  {
+    return bridge.m_inputCapable;
   }
   static void receive(Bridge &bridge, const Packet &packet)
   {
@@ -1042,6 +1052,151 @@ void keyboardFenceRoundTrip(const Identity &hostIdentity, const Identity &viewer
              KeyboardRouteReason::Hidden}
   );
   check(fixture.original && fixture.revokes == 1, "Retired withdrawal revoked the current route");
+}
+
+void fullInputFenceRoundTrip(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  auto &host = fixture.host;
+  check(
+      BridgeTestAccess::inputCapable(host) && BridgeTestAccess::inputCapable(fixture.viewer),
+      "Full-input capability was not negotiated over TLS"
+  );
+  fixture.key(QEvent::KeyPress, Qt::Key_Shift);
+  check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_Shift); }), "Full-input fixture key was not delivered");
+  const auto binding = host.reserveOriginalInput(91, 2);
+  check(
+      binding && binding->scope == ForwardingScope::All && host.startOriginalKeyboard(*binding),
+      "Full-input handoff could not start"
+  );
+  check(waitUntil([&] { return fixture.grants == 1; }), "Full-input handoff did not complete");
+  check(nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty(), "Full-input grant preceded owner releases");
+  const auto before = nativeInputs.size();
+  fixture.key(QEvent::KeyPress, Qt::Key_B);
+  fixture.key(QEvent::KeyRelease, Qt::Key_B);
+  fixture.button(true);
+  const auto point = fixture.window->videoRect().center();
+  QMouseEvent move(QEvent::MouseMove, point, point, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+  QCoreApplication::sendEvent(fixture.window, &move);
+  QWheelEvent wheel(point, point, {3, -4}, {120, -120}, Qt::LeftButton, Qt::NoModifier, Qt::ScrollUpdate, false);
+  QCoreApplication::sendEvent(fixture.window, &wheel);
+  auto *channel = BridgeTestAccess::channel(fixture.viewer);
+  // Bypass QWidget to exercise the host's independent admission gate through
+  // the real encrypted transport. A later catalog request is an ordered marker.
+  for (const auto &kind : {"key", "button", "move", "scroll"})
+    check(
+        channel->send(
+            MessageType::Input,
+            {{"kind", kind},
+             {"code", qstrcmp(kind, "button") == 0 ? 0 : int(Qt::Key_C)},
+             {"down", true},
+             {"x", 3},
+             {"y", 4},
+             {"dx", 120},
+             {"dy", -120},
+             {"geometry", 1},
+             {"focusRevision", 1}},
+            91, 2
+        ),
+        "Cannot send fenced peer input fixture"
+    );
+  const auto refreshes = nativeRefreshes;
+  check(channel->send(MessageType::Catalog, {{"refresh", true}}), "Cannot send post-input stream marker");
+  check(waitUntil([&] { return nativeRefreshes > refreshes; }), "Fenced input stream did not drain");
+  check(
+      nativeInputs.size() == before && nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty(),
+      "Full-input fence leaked viewer or peer input into the host"
+  );
+  host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+  check(waitUntil([&] { return !BridgeTestAccess::keyboardBinding(host); }), "Full-input resume did not complete");
+  check(fixture.revokes == 1 && !fixture.original, "Full-input resume preceded original ownership release");
+  fixture.button(false);
+  fixture.key(QEvent::KeyRelease, Qt::Key_Shift);
+  fixture.button(true);
+  check(waitUntil([&] { return nativeHeldButtons.contains(0); }), "Fresh pointer down did not resume");
+  fixture.button(false);
+  check(waitUntil([&] { return nativeHeldButtons.isEmpty(); }), "Resumed pointer lost its exact release owner");
+  check(nativeInputs.size() == before + 2, "Full-input resume replayed an old key or button");
+}
+
+void fullInputScopeSubstitution(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  const auto binding = fixture.host.reserveOriginalInput(91, 2);
+  check(binding && fixture.host.startOriginalKeyboard(*binding), "Cannot reserve full-input substitution fixture");
+  check(waitUntil([&] { return fixture.grants == 1; }), "Substitution fixture did not quiesce");
+  auto partial = *binding;
+  partial.scope = ForwardingScope::Keyboard;
+  check(
+      BridgeTestAccess::channel(fixture.viewer)
+          ->send(
+              MessageType::KeyboardRoute,
+              encodeKeyboardRouteControl(
+                  {partial, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Viewer, KeyboardRouteResult::Ready}
+              ),
+              91, 2
+          ),
+      "Cannot send scope-substitution fixture"
+  );
+  check(
+      waitUntil([&] { return !BridgeTestAccess::established(fixture.host); }),
+      "Keyboard-only acknowledgment was accepted for a full-input route"
+  );
+  check(!fixture.original && fixture.revokes == 1, "Mismatched scope preserved original ownership");
+}
+
+void fullInputLegacyNegotiation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (bool keyboard : {false, true}) {
+    AutomaticNative native;
+    Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+    Channel peer(viewerIdentity, parseFingerprint(hostIdentity.fingerprint()));
+    bool accepted = false;
+    peer.onAuthenticated = [&] {
+      QJsonObject hello{{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"}};
+      if (keyboard)
+        hello["capabilities"] = keyboardRouteCapabilities();
+      check(peer.send(MessageType::Hello, hello), "Cannot negotiate legacy route peer");
+    };
+    peer.onPacket = [&](const Packet &packet) {
+      if (packet.type == MessageType::Accepted) {
+        const auto object = parseObject(packet);
+        check(
+            !peerSupportsInputRoute(object) && peerSupportsKeyboardRoute(object) == keyboard,
+            "Host advertised full input to a peer that did not offer it"
+        );
+        accepted = true;
+      }
+    };
+    check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for legacy route peer");
+    peer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+    check(waitUntil([&] { return accepted; }), "Legacy route negotiation did not finish");
+    check(!BridgeTestAccess::inputCapable(host), "Legacy peer acquired full-input capability");
+    BridgeTestAccess::opened(host, 91, 2);
+    host.revokeOriginalKeyboard = [](const auto &, auto) { return true; };
+    KeyboardRouteBinding candidate{{91, 2}, 1, 1, 1, 1};
+    BridgeTestAccess::observedNativeFocus(host, candidate);
+    check(!host.reserveOriginalInput(91, 2), "Full-input route was reserved without negotiation");
+    if (keyboard) {
+      const auto legacy = host.reserveOriginalKeyboard(91, 2);
+      check(legacy && legacy->scope == ForwardingScope::Keyboard, "Legacy keyboard-only reservation regressed");
+      host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+    }
+    candidate.scope = ForwardingScope::All;
+    check(
+        peer.send(
+            MessageType::InputRoute,
+            encodeKeyboardRouteControl(
+                {candidate, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+            ),
+            91, 2
+        ),
+        "Cannot send unnegotiated full-input control fixture"
+    );
+    check(
+        waitUntil([&] { return !BridgeTestAccess::established(host); }), "Unnegotiated full-input control was accepted"
+    );
+  }
 }
 
 void keyboardReservation(const Identity &hostIdentity, const Identity &viewerIdentity)
@@ -1949,6 +2104,9 @@ int main(int argc, char **argv)
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
     reconnectCleanupAndIsolation(hostIdentity, viewerIdentity);
     keyboardFenceRoundTrip(hostIdentity, viewerIdentity);
+    fullInputFenceRoundTrip(hostIdentity, viewerIdentity);
+    fullInputScopeSubstitution(hostIdentity, viewerIdentity);
+    fullInputLegacyNegotiation(hostIdentity, viewerIdentity);
     keyboardReservation(hostIdentity, viewerIdentity);
     keyboardReservationInvalidation(hostIdentity, viewerIdentity);
     keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);
@@ -1961,10 +2119,12 @@ int main(int argc, char **argv)
     cancelRetryAndDestroy(hostIdentity, viewerIdentity);
     terminalShutdownOrdering(hostIdentity, viewerIdentity);
     shutdownSupersedesDeferredCleanup(hostIdentity, viewerIdentity);
-    QTextStream(stdout) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
-                           "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
-                           "failures, cancellation, keyboard fencing/revocation, panel lifetime and terminal "
-                           "private-channel shutdown ordering\n";
+    QTextStream(
+        stdout
+    ) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
+         "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
+         "failures, cancellation, keyboard/full-input fencing and capability isolation, panel lifetime and terminal "
+         "private-channel shutdown ordering\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

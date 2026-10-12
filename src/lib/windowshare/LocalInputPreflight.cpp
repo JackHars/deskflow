@@ -575,6 +575,14 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
         cancel(LocalInputRevocation::AuthorityLost, true);
       return;
     }
+    if (binding->scope != ForwardingScope::Keyboard) {
+      // The private lease cannot represent a full forwarding fence. Reject it
+      // before constructing a downgraded lease, including after a reentrant
+      // cancellation. Closing the connection owns the unstarted reservation's
+      // cleanup; a scope-erased lease cannot identify it for checks.release.
+      fail("Private input preflight requires a keyboard-only reservation");
+      return;
+    }
     LocalInputLease lease;
     static_cast<LocalInputOffer &>(lease) = offer;
     lease.windowShareClientIncarnation = localInputConnectionIncarnation(observation->ticket().incarnation());

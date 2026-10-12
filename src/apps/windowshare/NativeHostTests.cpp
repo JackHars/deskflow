@@ -26,6 +26,7 @@ CGEventRef targetedPointerEvent(
 } // namespace deskflow::windowshare::native
 
 using deskflow::windowshare::FocusLease;
+using deskflow::windowshare::ForwardingScope;
 using deskflow::windowshare::InputLedger;
 using deskflow::windowshare::KeyboardRouteBinding;
 using deskflow::windowshare::NativeHost;
@@ -159,7 +160,7 @@ void keyboardAdmission()
   const auto revision = focus.request(binding.owner);
   check(focus.acknowledge(binding.owner, revision), "fixture focus lease acknowledges");
   check(revision == binding.focusRevision, "fixture route uses the acknowledged focus revision");
-  check(!gate.blocksKeys(), "network keyboard begins admitted");
+  check(!gate.blocksKeys() && !gate.blocksPointers(), "network keyboard and pointer begin admitted");
   check(
       !gate.quiesce(binding, std::nullopt, true), "viewer acknowledgment without a current native candidate is denied"
   );
@@ -198,6 +199,7 @@ void keyboardAdmission()
 
   check(gate.quiesce(binding, binding, ledger.size() == 0), "neutral exact candidate closes keyboard admission");
   check(gate.blocksKeys(), "network key down and repeat admission is blocked while fenced");
+  check(!gate.blocksPointers(), "a legacy keyboard-only fence leaves pointer forwarding admitted");
   check(gate.quiesce(binding, binding, true), "exact repeated acknowledgment is idempotent while valid");
   check(gate.quiesced(binding, binding, true), "quiescence verifies the exact valid gate");
   check(focus.permits(binding.owner, binding.focusRevision), "quiescence preserves the existing focus lease");
@@ -224,6 +226,7 @@ void keyboardAdmission()
   const auto revoked = gate.invalidate(binding.owner);
   check(revoked == binding, "invalidation identifies the exact fenced owner");
   check(!gate.quiesced(binding, binding, true) && gate.blocksKeys(), "invalidation marks a blocking tombstone first");
+  check(!gate.blocksPointers(), "invalidating a legacy keyboard fence cannot widen its pointer scope");
   check(!gate.quiesce(binding, binding, true), "fresh acknowledgment cannot revive an invalidated gate");
   check(!gate.invalidate(), "reentrant invalidation emits only one notification");
   auto newer = binding;
@@ -245,12 +248,126 @@ void keyboardAdmission()
   check(!gate.resume(newer) && gate.blocksKeys(), "prior incarnation cannot reopen a new owner's keyboard route");
   check(gate.resume(other), "new owner's exact resume succeeds");
 }
+void fullInputAdmission()
+{
+  auto binding = routeBinding();
+  binding.scope = ForwardingScope::All;
+  auto keyboard = binding;
+  keyboard.scope = ForwardingScope::Keyboard;
+  check(binding != keyboard, "a full-input binding differs from the otherwise identical keyboard binding");
+  NativeKeyboardAdmission gate;
+  InputLedger ledger;
+  check(!gate.blocksKeys() && !gate.blocksPointers(), "full-input fixture starts with both paths admitted");
+  auto invalid = binding;
+  invalid.scope = static_cast<ForwardingScope>(123);
+  check(!gate.quiesce(invalid, invalid, true), "unknown scope cannot fence native forwarding");
+  check(!gate.quiesce(binding, std::nullopt, true), "full-input fence requires an observed native candidate");
+  check(!gate.quiesce(binding, keyboard, true), "keyboard-only candidate cannot acknowledge full-input quiescence");
+  check(!gate.quiesce(keyboard, binding, true), "full-input candidate cannot be silently downgraded to keyboard");
+  check(!gate.blocksKeys() && !gate.blocksPointers(), "failed full-input admission does not change either route");
+
+  for (const auto isKey : {true, false}) {
+    const auto code = isKey ? 0x01000020u : 0u;
+    check(ledger.down(isKey, code, binding.owner), "fixture retains physical key or pointer ownership");
+    check(!gate.quiesce(binding, binding, ledger.size() == 0), "held input denies full-input cutover");
+    check(
+        ledger.ownerOf(isKey, code) == binding.owner && !gate.blocksKeys() && !gate.blocksPointers(),
+        "denied full-input cutover preserves ownership and the still-needed release route"
+    );
+    check(ledger.up(isKey, code, binding.owner) == binding.owner, "the prior owner receives its matching release");
+  }
+  check(gate.quiesce(binding, binding, ledger.size() == 0), "neutral exact full-input candidate fences both paths");
+  check(gate.blocksKeys() && gate.blocksPointers(), "full-input fence blocks keyboard and pointer forwarding");
+  check(gate.quiesce(binding, binding, true), "repeated exact full-input acknowledgement is idempotent");
+  check(gate.quiesced(binding, binding, true), "full-input quiescence retains all current facts");
+  check(!gate.quiesced(binding, binding, false), "full-input quiescence must remain neutral at every query");
+  check(!gate.quiesced(binding, std::nullopt, true), "missing native candidate cannot retain admissible quiescence");
+  check(gate.blocksKeys() && gate.blocksPointers(), "loss of candidate or neutrality never reopens either path");
+
+  std::vector<KeyboardRouteBinding> changed{keyboard, invalid};
+  auto other = binding;
+  ++other.owner.session;
+  changed.push_back(other);
+  other = binding;
+  ++other.owner.epoch;
+  changed.push_back(other);
+  for (const auto member :
+       {&KeyboardRouteBinding::generation, &KeyboardRouteBinding::focusRequest, &KeyboardRouteBinding::focusRevision,
+        &KeyboardRouteBinding::geometry}) {
+    other = binding;
+    ++(other.*member);
+    changed.push_back(other);
+  }
+  for (const auto &mismatch : changed) {
+    check(!gate.quiesced(binding, mismatch, true), "every current binding field participates in full-input admission");
+    check(!gate.quiesced(mismatch, binding, true), "every queried binding field participates in full-input admission");
+    check(!gate.quiesce(mismatch, mismatch, true), "a live full-input gate cannot be replaced or downgraded");
+    check(!gate.resume(mismatch), "wrong-scope or stale completion cannot reopen a live full-input gate");
+    check(gate.blocksKeys() && gate.blocksPointers(), "mismatched operations preserve both forwarding fences");
+  }
+  check(!gate.invalidate(deskflow::windowshare::Owner{99, 12}), "an unrelated source cannot invalidate this gate");
+  check(gate.quiesced(binding, binding, true), "unrelated invalidation preserves exact full-input readiness");
+  check(gate.invalidate(binding.owner) == binding, "invalidation returns the complete original scope and binding");
+  check(
+      !gate.quiesced(binding, binding, true) && gate.blocksKeys() && gate.blocksPointers(),
+      "invalidated full-input tombstone keeps both forwarding paths fenced"
+  );
+  check(!gate.invalidate(), "full-input lifecycle invalidation is delivered only once");
+  check(!gate.quiesce(binding, binding, true), "a repeated full-input acknowledgement cannot revive invalidation");
+  for (const auto &mismatch : changed) {
+    check(!gate.quiesce(mismatch, mismatch, true), "invalidated full-input fence cannot be replaced or downgraded");
+    check(!gate.resume(mismatch), "tombstone cannot be resumed by a different scope or binding");
+    check(gate.blocksKeys() && gate.blocksPointers(), "invalidated route retains both fences until exact resume");
+  }
+  check(gate.resume(binding), "exact full-input resume clears the tombstone after authority revocation");
+  check(!gate.blocksKeys() && !gate.blocksPointers(), "exact resume reopens keyboard and pointer together");
+  check(!gate.resume(binding), "duplicate full-input resume cannot affect another route");
+  check(!gate.quiesce(binding, binding, true), "retired full-input generation cannot be revived");
+  check(!gate.quiesce(keyboard, keyboard, true), "changing scope cannot replay a retired generation");
+  auto older = binding;
+  --older.generation;
+  check(!gate.quiesce(older, older, true), "older full-input generations remain retired");
+  older.scope = ForwardingScope::Keyboard;
+  check(!gate.quiesce(older, older, true), "scope downgrade cannot bypass generation retirement");
+
+  auto newerKeyboard = keyboard;
+  ++newerKeyboard.generation;
+  check(gate.quiesce(newerKeyboard, newerKeyboard, true), "newer negotiated keyboard-only route remains supported");
+  check(gate.blocksKeys() && !gate.blocksPointers(), "new keyboard-only generation does not inherit old pointer fence");
+  auto newerAll = newerKeyboard;
+  newerAll.scope = ForwardingScope::All;
+  check(!gate.quiesce(newerAll, newerAll, true), "a live keyboard gate cannot be silently widened");
+  check(!gate.resume(newerAll), "full-input completion cannot resume a keyboard-only gate");
+  check(gate.invalidate() == newerKeyboard, "keyboard-only invalidation preserves its scope after full-input use");
+  check(gate.blocksKeys() && !gate.blocksPointers(), "keyboard-only tombstone does not acquire pointer ownership");
+  check(gate.resume(newerKeyboard), "exact newer keyboard resume succeeds");
+  check(!gate.quiesce(newerAll, newerAll, true), "scope upgrade cannot reuse a retired keyboard generation");
+  ++newerAll.generation;
+  check(gate.quiesce(newerAll, newerAll, true), "next full-input generation can establish a fresh fence");
+  check(!gate.resume(binding) && !gate.resume(newerKeyboard), "old completions cannot clear newer full-input fences");
+  check(gate.blocksKeys() && gate.blocksPointers(), "new full-input route survives both kinds of stale completion");
+  check(gate.resume(newerAll), "exact newest full-input resume succeeds");
+
+  other = binding;
+  ++other.owner.epoch;
+  other.generation = 1;
+  check(gate.quiesce(other, other, true), "a new source epoch may begin its own full-input generation sequence");
+  check(!gate.resume(newerAll), "prior source epoch cannot reopen new full-input ownership");
+  check(gate.invalidate() == other && gate.blocksPointers(), "global invalidation preserves the new epoch scope");
+  check(gate.resume(other), "new source epoch resumes only its exact tombstone");
+  auto newWindow = other;
+  ++newWindow.owner.session;
+  check(gate.quiesce(newWindow, newWindow, true), "another source window can begin its own full-input sequence");
+  check(!gate.resume(other) && gate.blocksKeys() && gate.blocksPointers(), "prior window cannot reopen new ownership");
+  check(gate.resume(newWindow), "new window resumes its own full-input fence");
+}
 } // namespace
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
   targetedPointerConstruction();
   keyboardAdmission();
+  fullInputAdmission();
   QTemporaryDir directory;
   check(directory.isValid(), "temporary journal directory");
   if (!directory.isValid())
@@ -276,6 +393,16 @@ int main(int argc, char **argv)
         "an acknowledgment cannot admit a route without an exported native entry"
     );
     check(!host.resumeKeyboard(binding), "a route without a gate cannot be resumed");
+    auto all = binding;
+    all.scope = ForwardingScope::All;
+    check(
+        !host.keyboardRouteCandidate(all.owner.session, all.owner.epoch, all.generation, all.scope),
+        "nonexistent native entry cannot produce a full-input route candidate"
+    );
+    check(
+        !host.quiesceKeyboard(all) && !host.keyboardRouteQuiesced(all) && !host.resumeKeyboard(all),
+        "full-input acknowledgement cannot create native ownership without an exported entry"
+    );
     host.releaseAll();
     check(invalidations == 0, "release without a gate never fabricates an invalidation");
   }
@@ -396,6 +523,6 @@ int main(int argc, char **argv)
       "permission probe is explicit and does not request permission"
   );
   QTextStream(stdout) << (failures ? "FAIL" : "PASS")
-                      << ": native recovery journal and keyboard admission regressions\n";
+                      << ": native recovery journal and forwarding admission regressions\n";
   return failures ? 1 : 0;
 }

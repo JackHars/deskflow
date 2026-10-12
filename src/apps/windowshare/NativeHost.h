@@ -39,12 +39,15 @@ public:
   void restoreAll();
   void releaseAll();
   // An observed candidate and a quiesced network route are not authorization
-  // to inject original input. These calls neither change focus nor release
-  // pointer ownership, and quiescence requires an empty Qt input ledger.
+  // to inject original input or a native-queue barrier. These calls neither
+  // change focus nor release pointer ownership. Quiescence requires an empty
+  // Qt input ledger; a full scope then also blocks new network pointer input.
   // Admission queries fail during outgoing native callbacks; inspect again
   // after the enclosing focus/geometry/lifecycle operation has completed.
-  std::optional<KeyboardRouteBinding>
-  keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const;
+  std::optional<KeyboardRouteBinding> keyboardRouteCandidate(
+      std::uint64_t session, std::uint64_t epoch, std::uint64_t generation,
+      ForwardingScope scope = ForwardingScope::Keyboard
+  ) const;
   bool quiesceKeyboard(const KeyboardRouteBinding &binding);
   bool keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const;
   // Revoke original authority first. Only the exact outstanding binding can

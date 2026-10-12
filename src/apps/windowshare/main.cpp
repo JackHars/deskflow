@@ -314,10 +314,13 @@ public:
   }
   // Reserve before sending private preflight state. No viewer fence is requested
   // until start(), and slow native validation consumes this same deadline.
-  std::optional<KeyboardRouteBinding> reserveOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
+  std::optional<KeyboardRouteBinding>
+  reserveOriginalKeyboard(std::uint64_t session, std::uint64_t epoch, ForwardingScope scope = ForwardingScope::Keyboard)
   {
     if (!m_native || !authenticatedPeerObservation() || m_keyboardRoute || m_reservingKeyboard ||
-        !revokeOriginalKeyboard || m_keyboardGeneration == 9007199254740991ULL)
+        !revokeOriginalKeyboard || m_keyboardGeneration == 9007199254740991ULL ||
+        (scope != ForwardingScope::Keyboard && scope != ForwardingScope::All) ||
+        (scope == ForwardingScope::All && !m_inputCapable))
       return std::nullopt;
     const auto found = m_hostSessions.find(session);
     if (found == m_hostSessions.end() || found->second != epoch)
@@ -329,7 +332,7 @@ public:
     m_reservingKeyboard = true;
     std::optional<KeyboardRouteBinding> binding;
     try {
-      binding = m_native->keyboardRouteCandidate(session, epoch, next);
+      binding = m_native->keyboardRouteCandidate(session, epoch, next, scope);
     } catch (...) {
     }
     if (!alive)
@@ -337,15 +340,22 @@ public:
     m_reservingKeyboard = false;
     const auto current = m_hostSessions.find(session);
     if (!binding || !validKeyboardRouteBinding(*binding) || binding->owner != Owner{session, epoch} ||
-        binding->generation != next || connection != m_connectionGeneration || !authenticatedPeerObservation() ||
-        !revokeOriginalKeyboard || current == m_hostSessions.end() || current->second != epoch || m_keyboardRoute ||
-        deadline.hasExpired())
+        binding->generation != next || binding->scope != scope || connection != m_connectionGeneration ||
+        !authenticatedPeerObservation() || !revokeOriginalKeyboard || current == m_hostSessions.end() ||
+        current->second != epoch || m_keyboardRoute || deadline.hasExpired())
       return std::nullopt;
     m_keyboardGeneration = binding->generation;
     m_keyboardRoute = KeyboardAttempt{*binding, connection};
     m_keyboardRoute->deadline = deadline;
     m_keyboardTimeout.start(static_cast<int>(deadline.remainingTime()));
     return binding;
+  }
+  // This negotiated fence covers keys and pointers in the actual Viewer and
+  // NativeHost paths. It supplies neither compositor consumption evidence nor
+  // original-input authority; the private controller must establish both.
+  std::optional<KeyboardRouteBinding> reserveOriginalInput(std::uint64_t session, std::uint64_t epoch)
+  {
+    return reserveOriginalKeyboard(session, epoch, ForwardingScope::All);
   }
   std::optional<KeyboardRouteBinding> reserveOriginalKeyboard()
   {
@@ -375,7 +385,9 @@ public:
     const QPointer<Bridge> alive(this);
     std::optional<KeyboardRouteBinding> current;
     try {
-      current = m_native->keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation);
+      current = m_native->keyboardRouteCandidate(
+          binding.owner.session, binding.owner.epoch, binding.generation, binding.scope
+      );
     } catch (...) {
     }
     if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
@@ -723,14 +735,16 @@ private:
     return m_native && revokeOriginalKeyboard && m_keyboardRoute && m_keyboardRoute->binding == binding &&
            m_keyboardRoute->phase == phase && !m_keyboardRoute->revoked && !m_keyboardRoute->deadline.hasExpired() &&
            m_keyboardRoute->connectionGeneration == m_connectionGeneration && found != m_hostSessions.end() &&
-           found->second == binding.owner.epoch && authenticatedPeerObservation().has_value();
+           found->second == binding.owner.epoch && authenticatedPeerObservation().has_value() &&
+           (binding.scope != ForwardingScope::All || m_inputCapable);
   }
   bool sendKeyboardRoute(const KeyboardRouteControl &control)
   {
-    return m_keyboardCapable && send(
-                                    MessageType::KeyboardRoute, encodeKeyboardRouteControl(control),
-                                    control.binding.owner.session, control.binding.owner.epoch
-                                );
+    return m_keyboardCapable && (control.binding.scope != ForwardingScope::All || m_inputCapable) &&
+           send(
+               forwardingRouteMessageType(control.binding), encodeKeyboardRouteControl(control),
+               control.binding.owner.session, control.binding.owner.epoch
+           );
   }
   void retireKeyboardRoute()
   {
@@ -744,6 +758,7 @@ private:
     if (m_shuttingDown)
       return;
     require(m_keyboardCapable, "Keyboard route capability was not negotiated");
+    require(packet.type != MessageType::InputRoute || m_inputCapable, "Full input route capability was not negotiated");
     const auto control = parseKeyboardRouteControl(packet);
     if (!m_hosting) {
       require(control.action == KeyboardRouteAction::Request, "Invalid keyboard route direction");
@@ -944,6 +959,7 @@ private:
     m_established = false;
     m_negotiating = false;
     m_keyboardCapable = false;
+    m_inputCapable = false;
     m_stableTimer.stop();
     clearKeyframeRetries();
     clearCatalog();
@@ -959,7 +975,7 @@ private:
             MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
                                  {"role", "viewer"},
                                  {"codec", "h264"},
-                                 {"capabilities", keyboardRouteCapabilities()}}
+                                 {"capabilities", keyboardRouteCapabilities(true)}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1039,6 +1055,7 @@ private:
           "Unsupported window sharing version or codec"
       );
       m_keyboardCapable = peerSupportsKeyboardRoute(object);
+      m_inputCapable = peerSupportsInputRoute(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
@@ -1047,7 +1064,7 @@ private:
                 {{"version", static_cast<int>(protocolVersion)},
                  {"role", "host"},
                  {"codec", "h264"},
-                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities() : QJsonArray{}}}
+                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable) : QJsonArray{}}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -1064,7 +1081,7 @@ private:
       status("Connected to approved peer — window sharing enabled");
       return;
     }
-    if (packet.type == MessageType::KeyboardRoute) {
+    if (packet.type == MessageType::KeyboardRoute || packet.type == MessageType::InputRoute) {
       receiveKeyboardRoute(packet);
       return;
     }
@@ -1336,6 +1353,7 @@ private:
   QTimer m_keyboardTimeout;
   int m_keyboardTimeoutMs = 3000;
   bool m_keyboardCapable = false;
+  bool m_inputCapable = false;
   bool m_reservingKeyboard = false;
   std::uint64_t m_keyboardGeneration = 0;
   std::optional<KeyboardAttempt> m_keyboardRoute;

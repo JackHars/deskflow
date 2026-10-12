@@ -101,10 +101,19 @@ int child(int descriptor, const QString &mode)
   const auto process = localInputProcess(getppid());
   check(process.has_value(), "Fixture parent unavailable");
   auto channel = LocalInputChannel::adoptHost(descriptor, *process);
+  const bool unsupportedScope = mode.startsWith("full-scope-") || mode == "invalid-scope-reserve";
   bool closed = false, quiescent = false, reserved = false, active = false, held = false, providerLost = false;
   int releases = 0, reads = 0, originals = 0, activations = 0, neutralAfterActivation = 0,
-      quiescenceAfterActivation = 0;
-  channel->onClosed = [&](QString) { closed = true; };
+      quiescenceAfterActivation = 0, starts = 0, reservationShutdowns = 0;
+  channel->onClosed = [&](QString) {
+    closed = true;
+    if (unsupportedScope && reserved) {
+      // Simulate the owning connection shutting down its unstarted reservation.
+      // A private keyboard lease cannot perform this exact-scope cleanup.
+      ++reservationShutdowns;
+      reserved = false;
+    }
+  };
   channel->onOriginal = [&](const auto &, const auto &) {
     ++originals;
     held = true;
@@ -126,13 +135,19 @@ int child(int descriptor, const QString &mode)
   };
   host.reserve = [&]() -> std::optional<KeyboardRouteBinding> {
     reserved = true;
-    if (mode == "destroy-reserve")
+    if (mode == "destroy-reserve" || mode == "full-scope-destroy-reserve")
       coordinator.reset();
+    if (mode == "full-scope-cancel-reserve")
+      coordinator->cancel();
     if (mode == "throw-reserve")
       throw std::runtime_error("Fixture reserve failed");
-    return binding();
+    auto candidate = binding();
+    if (unsupportedScope)
+      candidate.scope = mode == "invalid-scope-reserve" ? static_cast<ForwardingScope>(123) : ForwardingScope::All;
+    return candidate;
   };
   host.startQuiescence = [&](const auto &candidate) {
+    ++starts;
     check(candidate == binding(), "Host started a different reservation");
     check(channel->phase() == LocalInputPhase::Idle, "Preflight acquired channel authority");
     if (mode == "no-quiescence")
@@ -218,6 +233,13 @@ int child(int descriptor, const QString &mode)
     checks.neutralBoundary = {};
   coordinator = LocalInputPreflight::host(*channel, policy(), std::move(host), std::move(checks));
   check(until([&] { return closed; }, 12000), "Fixture child did not close");
+  if (unsupportedScope)
+    check(
+        reservationShutdowns == 1 && releases == 0 && starts == 0 && activations == 0 && !reserved && !quiescent &&
+            !active && !channel->lease() &&
+            (!coordinator || (coordinator->phase() == Phase::Stopped && !coordinator->lease())),
+        "Unsupported scope started a fence or used a downgraded private lease for reservation cleanup"
+    );
   if (mode == "destroy-reserve")
     check(!reserved && releases == 1, "Destroyed reservation was not released exactly once");
   if (mode.startsWith("host-watchdog-"))
@@ -473,6 +495,33 @@ void hostFailureCases()
     check(
         f.coordinator->phase() != Phase::Active && f.channel->phase() != LocalInputPhase::Active,
         "Failed host authority activated route"
+    );
+    f.finish();
+  }
+}
+void unsupportedReservationScope()
+{
+  for (const auto mode :
+       {"full-scope-reserve", "full-scope-cancel-reserve", "full-scope-destroy-reserve", "invalid-scope-reserve"}) {
+    Fixture f(mode);
+    int candidates = 0, activations = 0;
+    const auto candidate = f.channel->onCandidate;
+    f.channel->onCandidate = [&](const auto &lease) {
+      ++candidates;
+      candidate(lease);
+    };
+    const auto activated = f.channel->onActivated;
+    f.channel->onActivated = [&](const auto &lease) {
+      ++activations;
+      activated(lease);
+    };
+    f.begin();
+    check(until([&] { return f.closed; }), "Unsupported host reservation did not close the private connection");
+    check(
+        candidates == 0 && activations == 0 && f.preparedChecks == 0 && f.releases == 0 && f.revokeNotifications == 0 &&
+            f.coordinator->phase() == Phase::Stopped && !f.coordinator->lease() && !f.channel->lease() &&
+            f.channel->phase() == LocalInputPhase::Idle,
+        "Unsupported host scope crossed the private keyboard-only lease boundary"
     );
     f.finish();
   }
@@ -900,6 +949,7 @@ int main(int argc, char **argv)
     consecutiveControlAndOriginal();
     defaultDeny();
     hostFailureCases();
+    unsupportedReservationScope();
     hostActivation();
     activeProviderWatchdog();
     selectionAndEvidence();

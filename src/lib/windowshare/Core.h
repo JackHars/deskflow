@@ -54,7 +54,8 @@ enum class MessageType : std::uint16_t
   Focus,
   ReleaseAll,
   Ready,
-  KeyboardRoute
+  KeyboardRoute,
+  InputRoute
 };
 struct Packet
 {

@@ -32,7 +32,7 @@ std::uint64_t get(std::span<const std::uint8_t> in, unsigned offset, unsigned by
 }
 bool validType(std::uint64_t type)
 {
-  return type >= static_cast<unsigned>(MessageType::Hello) && type <= static_cast<unsigned>(MessageType::KeyboardRoute);
+  return type >= static_cast<unsigned>(MessageType::Hello) && type <= static_cast<unsigned>(MessageType::InputRoute);
 }
 std::uint32_t limit(MessageType type)
 {

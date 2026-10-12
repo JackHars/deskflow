@@ -68,9 +68,12 @@ void validate(const KeyboardRouteControl &control)
     );
 }
 } // namespace
-QJsonArray keyboardRouteCapabilities()
+QJsonArray keyboardRouteCapabilities(bool includeInput)
 {
-  return {QLatin1String(keyboardRouteCapability)};
+  QJsonArray capabilities{QLatin1String(keyboardRouteCapability)};
+  if (includeInput)
+    capabilities.append(QLatin1String(inputRouteCapability));
+  return capabilities;
 }
 bool peerSupportsKeyboardRoute(const QJsonObject &negotiation)
 {
@@ -86,6 +89,17 @@ bool peerSupportsKeyboardRoute(const QJsonObject &negotiation)
     seen.insert(name);
   }
   return seen.contains(QLatin1String(keyboardRouteCapability));
+}
+bool peerSupportsInputRoute(const QJsonObject &negotiation)
+{
+  // Validate the complete list and require the base route protocol as well.
+  return peerSupportsKeyboardRoute(negotiation) &&
+         negotiation["capabilities"].toArray().contains(QLatin1String(inputRouteCapability));
+}
+MessageType forwardingRouteMessageType(const KeyboardRouteBinding &binding)
+{
+  require(validKeyboardRouteBinding(binding), "Invalid forwarding route binding");
+  return binding.scope == ForwardingScope::All ? MessageType::InputRoute : MessageType::KeyboardRoute;
 }
 QJsonObject encodeKeyboardRouteControl(const KeyboardRouteControl &control)
 {
@@ -108,7 +122,8 @@ QJsonObject encodeKeyboardRouteControl(const KeyboardRouteControl &control)
 KeyboardRouteControl parseKeyboardRouteControl(const Packet &packet)
 {
   require(
-      packet.type == MessageType::KeyboardRoute && packet.payload.size() <= 1024,
+      (packet.type == MessageType::KeyboardRoute || packet.type == MessageType::InputRoute) &&
+          packet.payload.size() <= 1024,
       "Invalid keyboard route control packet"
   );
   const auto object = parseObject(packet);
@@ -120,6 +135,7 @@ KeyboardRouteControl parseKeyboardRouteControl(const Packet &packet)
       number(object["focusRevision"]),
       number(object["geometry"])
   };
+  control.binding.scope = packet.type == MessageType::InputRoute ? ForwardingScope::All : ForwardingScope::Keyboard;
   control.action = value<KeyboardRouteAction>(object["action"], actions);
   control.mode = value<KeyboardRouteMode>(object["mode"], modes);
   if (control.action == KeyboardRouteAction::Acknowledge)

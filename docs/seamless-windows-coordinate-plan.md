@@ -6,9 +6,11 @@ provider/client have been implemented. The remaining X11 integration needs a
 native namespace witness carried over the two authenticated connections,
 followed by sequence-bound pointer validation and an ordered forwarding fence.
 The GNOME provider now supplies native compositor observations, and its owned
-viewer has a bounded join to the last painted Qt viewport. Input ordering and
-production delivery integration remain unfinished. Matching observations
-alone must not enable original input.
+viewer has a bounded join to the last painted Qt viewport. Captured packet
+stamps now reach backend submission receipts, and the negotiated full-input
+forwarding gate closes both Viewer and NativeHost keyboard/pointer admission.
+Pre-dispatch ownership, native queue draining and production delivery remain
+unfinished. Matching observations alone must not enable original input.
 
 ## Supported boundary
 
@@ -226,8 +228,10 @@ letterboxing, stale geometry, focus loss and a second native window deny. The
 virtual monitor's compositor scale remains 1; fractional GNOME monitor scaling
 and physical desktop input still require separate validation.
 
-Native pointer-device attribution and an ordered fence remain separate
-requirements before publishing delivery authority. The actual EIS motion path
+Native pointer-device attribution remains unavailable. A pre-dispatch command
+route can avoid reconstructing Mac origin from a native event, but needs the
+complete queue drain described below before publishing delivery authority.
+The actual EIS motion path
 requests observations but continues ordinary injection. It does not associate a
 snapshot with an original capture token or construct the production handoff
 coordinator. Current capabilities still report `deliveryReady=false`.
@@ -244,3 +248,51 @@ Xwayland root bounds, monitor names and equal EIS rectangles are not fallbacks.
 Until the compositor observations, painted viewport and ordered input path are
 joined, the GNOME Wayland original-pointer route remains unavailable even when
 the individual GNOME and X11 tests pass.
+
+## GNOME pre-dispatch route and queue drain
+
+The source audit on 2026-10-12 identifies a testable path that keeps the owned
+EIS session alive. This sequence is an implementation direction, not a verified
+native delivery guarantee. The full forwarding gate is implemented; the native
+drain and production dispatcher below are still required.
+
+1. On the Server event thread, stop new legacy key/button/scroll dispatch before
+   choosing original ownership. Session remains the sole consumer of the raw
+   capture ring: a stamped Event can arrive before the tap publishes completed
+   translation. Use bounded copied captures and typed pending operations rather
+   than adding a second ring consumer or waiting inside the tap. Preserve each
+   physical press's original or legacy owner through repeats and releases.
+2. After the finite legacy prefix and its old-owner releases, match an EI ping
+   on the same live connection and drain its response batch. Mutter 50.1 routes
+   this through its native input thread when built with `HAVE_EIS_EVENT_REF`;
+   its high-priority PONG callback may precede ordinary event dispatch. See the
+   [Mutter sync implementation](https://github.com/GNOME/mutter/blob/50.1/src/backends/meta-eis.c#L100-L170).
+3. In the owned provider, wait for `Clutter.events_pending()` to clear and then
+   observe a genuinely later stage update with its matching `after-update`.
+   Retain an absolute deadline and exact session, surface and forwarding binding.
+   This must drain both the global and stage queues, not merely sample the cursor.
+4. With full forwarding still closed, issue two asynchronous `wl_display_sync`
+   callbacks on the Viewer's existing default Wayland queue. The second follows
+   Qt's deferred focus synchronization. On the GUI thread, drain QPA events with
+   `QWindowSystemInterface::sendWindowSystemEvents(AllEvents)`, then recheck the
+   binding and deadline before acknowledging. The pinned Qt private adapter must
+   reject unsupported versions. See
+   [Qt deferred activation](https://github.com/qt/qtbase/blob/v6.10.2/src/plugins/platforms/wayland/qwaylanddisplay.cpp#L950-L1038)
+   and [QPA queue draining](https://github.com/qt/qtbase/blob/v6.10.2/src/gui/kernel/qwindowsysteminterface.cpp#L1100-L1129).
+5. Keep the display-only Viewer input-method-disabled and verify that state.
+   Asynchronous IBus key processing is outside the Wayland/QPA barrier. Release
+   old keys before the EI ping so Qt repeat timers cannot recreate the prefix.
+6. Validate the exact Server-routed coordinate and capture sequence through the
+   provider's owned-surface pick and the painted Snapshot/Map/Check exchange.
+   Implement first-click activation as an owned-window transaction after the
+   visible-point pick; suppressing the original Linux click does not focus the
+   Viewer automatically. Maintain Linux cursor presentation separately from
+   forwarding the original motion to the Mac app.
+
+The read-only installed-build audit found Mutter `50.1-0ubuntu2.2`, libei/libeis
+`1.5.0-3`, an `eis_event_ref` import, and the necessary public Clutter operations.
+Evidence and hashed primary source files are under
+`build/gnome-cutover-audit-20261012/`. Neither `stop_emulating`, closing the EIS
+session, a quiet delay nor one PONG substitutes for the complete drain. Verify
+the ordering with delayed real native input in the isolated GNOME harness before
+connecting it to original delivery.

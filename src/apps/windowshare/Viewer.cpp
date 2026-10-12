@@ -493,13 +493,18 @@ void Viewer::focusAcknowledged(std::uint64_t lease, std::uint64_t request)
   m_focusPending = false;
   m_focusRevision = lease;
   m_focusTimeout.stop();
+  const auto keyboardFence = m_keyboardFencedGeneration, pointerFence = m_pointerFencedGeneration;
   auto inputs = std::move(m_pendingInputs);
   m_pendingInputs.clear();
   for (auto &input : inputs) {
     if (!acceptsLocalInput() || m_focusRevision != lease ||
         revision(input.value(QStringLiteral("geometry"))) != m_geometry)
       break;
-    if (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key"))
+    // A send callback may complete both quiescence and resume. A current-state
+    // check alone would then replay old entries detached from m_pendingInputs.
+    const bool key = input.value(QStringLiteral("kind")) == QStringLiteral("key");
+    if (fencesInput(input) ||
+        (key ? keyboardFence != m_keyboardFencedGeneration : pointerFence != m_pointerFencedGeneration))
       continue;
     if (!sendInput(std::move(input)))
       break;
@@ -511,6 +516,19 @@ bool Viewer::currentKeyboardRoute(const KeyboardRouteBinding &binding) const
   return acceptsLocalInput() && isVisible() && m_visibility && !m_applyingMetadata && !m_focusPending &&
          binding.owner == Owner{m_session, m_epoch} && binding.focusRequest == m_focusRequest &&
          binding.focusRevision == m_focusRevision && binding.geometry == m_geometry;
+}
+
+bool Viewer::fencesPointer() const
+{
+  return (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All) || !m_suppressedButtons.isEmpty();
+}
+
+bool Viewer::fencesInput(const QJsonObject &input) const
+{
+  const auto kind = input.value(QStringLiteral("kind")).toString();
+  return (m_keyboardBinding && kind == QStringLiteral("key")) ||
+         (fencesPointer() &&
+          (kind == QStringLiteral("button") || kind == QStringLiteral("move") || kind == QStringLiteral("scroll")));
 }
 
 bool Viewer::sendKeyboardRoute(const KeyboardRouteControl &control)
@@ -561,7 +579,7 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
     }
     reply.result = KeyboardRouteResult::Ready;
     const QPointer<Viewer> guard(this);
-    // The acknowledgement precedes any newly forwarded key on the same stream.
+    // The acknowledgement precedes any newly forwarded input on the same stream.
     // An invalidated binding remains resumable by its exact host request.
     if (sendKeyboardRoute(reply) && guard && m_keyboardBinding == binding) {
       m_keyboardBinding.reset();
@@ -587,7 +605,8 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
   }
   const QPointer<Viewer> guard(this);
   if (!duplicate) {
-    // Install the fence before releasing keys or invoking either send callback.
+    // Install the whole requested fence before releasing keys or invoking either
+    // callback. Pending pointer events cannot escape a full-input handoff.
     m_keyboardBinding = binding;
     m_keyboardBindingValid = true;
     quiesceKeyboard();
@@ -601,13 +620,18 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
 
 void Viewer::quiesceKeyboard()
 {
+  // Accepted generations never repeat or wrap. Retain each scope's cutover
+  // marker after resume so an already-running queue flush cannot replay it.
+  m_keyboardFencedGeneration = m_keyboardBinding->generation;
+  if (m_keyboardBinding->scope == ForwardingScope::All)
+    m_pointerFencedGeneration = m_keyboardBinding->generation;
   for (auto held = m_heldKeys.cbegin(); held != m_heldKeys.cend(); ++held)
     m_suppressedKeys.insert(held.key());
   m_heldKeys.clear();
   m_pendingInputs.erase(
       std::remove_if(
           m_pendingInputs.begin(), m_pendingInputs.end(),
-          [](const QJsonObject &input) { return input.value(QStringLiteral("kind")) == QStringLiteral("key"); }
+          [this](const QJsonObject &input) { return fencesInput(input); }
       ),
       m_pendingInputs.end()
   );
@@ -885,8 +909,7 @@ void Viewer::recordDelivered(const QJsonObject &input)
 
 bool Viewer::sendInput(QJsonObject input)
 {
-  if (!acceptsLocalInput() || m_focusRevision == 0 ||
-      (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key")))
+  if (!acceptsLocalInput() || m_focusRevision == 0 || fencesInput(input))
     return false;
   input.insert(QStringLiteral("geometry"), jsonNumber(m_geometry));
   input.insert(QStringLiteral("focusRevision"), jsonNumber(m_focusRevision));
@@ -898,7 +921,7 @@ bool Viewer::sendInput(QJsonObject input)
 
 void Viewer::queueInput(QJsonObject input)
 {
-  if (!acceptsLocalInput() || (m_keyboardBinding && input.value(QStringLiteral("kind")) == QStringLiteral("key")))
+  if (!acceptsLocalInput() || fencesInput(input))
     return;
   if (m_requireFocusIntent) {
     const QString kind = input.value(QStringLiteral("kind")).toString();
@@ -950,6 +973,9 @@ void Viewer::releaseInput(KeyboardRouteReason reason)
   if (m_keyboardBinding)
     for (auto held = m_heldKeys.cbegin(); held != m_heldKeys.cend(); ++held)
       m_suppressedKeys.insert(held.key());
+  if (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All)
+    for (auto held = m_heldButtons.cbegin(); held != m_heldButtons.cend(); ++held)
+      m_suppressedButtons.insert(held.key());
   m_heldKeys.clear();
   m_heldButtons.clear();
   m_focusTimeout.stop();
@@ -1062,8 +1088,14 @@ void Viewer::mouseButtonDown(QMouseEvent *event, int clickCount)
 {
   event->accept();
   const int code = buttonCode(event->button());
+  if (code < 0)
+    return;
+  if (fencesPointer()) {
+    m_suppressedButtons.insert(code);
+    return;
+  }
   const auto point = mapToSource(event->position());
-  if (code < 0 || !point || !acceptsLocalInput() || m_heldButtons.contains(code))
+  if (!point || !acceptsLocalInput() || m_heldButtons.contains(code))
     return;
   m_lastSource = *point;
   QJsonObject input{
@@ -1083,8 +1115,10 @@ void Viewer::mouseReleaseEvent(QMouseEvent *event)
 {
   event->accept();
   const int code = buttonCode(event->button());
+  if (code < 0 || m_suppressedButtons.remove(code))
+    return;
   const auto held = m_heldButtons.find(code);
-  if (code < 0 || held == m_heldButtons.end())
+  if (held == m_heldButtons.end())
     return;
   const int clickCount = held->value(QStringLiteral("clickCount")).toInt(1);
   m_heldButtons.erase(held);
@@ -1106,6 +1140,8 @@ void Viewer::mouseReleaseEvent(QMouseEvent *event)
 void Viewer::mouseMoveEvent(QMouseEvent *event)
 {
   event->accept();
+  if (fencesPointer())
+    return;
   const auto point = mapToSource(event->position(), !m_heldButtons.isEmpty());
   if (!point || !acceptsLocalInput())
     return;
@@ -1118,6 +1154,8 @@ void Viewer::mouseMoveEvent(QMouseEvent *event)
 void Viewer::wheelEvent(QWheelEvent *event)
 {
   event->accept();
+  if (fencesPointer())
+    return;
   const auto point = mapToSource(event->position());
   if (!point || !acceptsLocalInput())
     return;

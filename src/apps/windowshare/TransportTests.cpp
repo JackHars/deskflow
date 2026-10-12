@@ -387,18 +387,65 @@ void keyboardRouteProtocol()
     } catch (const std::exception &) {
       rejected = true;
     }
-    check(rejected, "Invalid keyboard forwarding control was accepted");
+    check(rejected, "Invalid forwarding control or capability was accepted");
   };
   check(!peerSupportsKeyboardRoute({}), "Legacy peer gained keyboard route capability");
   check(peerSupportsKeyboardRoute({{"capabilities", keyboardRouteCapabilities()}}), "Capability not recognized");
+  check(
+      keyboardRouteCapabilities() == QJsonArray{"keyboard-route-v1"} &&
+          keyboardRouteCapabilities(false) == keyboardRouteCapabilities(),
+      "Default negotiation changed the legacy keyboard-only capability"
+  );
+  check(
+      keyboardRouteCapabilities(true) == QJsonArray{"keyboard-route-v1", "input-route-v1"},
+      "Full-input forwarding requires both independently versioned capabilities"
+  );
+  check(
+      !peerSupportsInputRoute({}) && !peerSupportsInputRoute({{"capabilities", QJsonArray{}}}) &&
+          !peerSupportsInputRoute({{"capabilities", keyboardRouteCapabilities()}}) &&
+          !peerSupportsInputRoute({{"capabilities", QJsonArray{"input-route-v1"}}}),
+      "Absent, legacy or input-only capabilities granted a full-input route"
+  );
+  const QJsonObject extendedCapabilities{
+      {"capabilities", QJsonArray{"future-feature", "input-route-v1", "keyboard-route-v1"}}
+  };
+  check(
+      peerSupportsInputRoute({{"capabilities", keyboardRouteCapabilities(true)}}) &&
+          peerSupportsKeyboardRoute({{"capabilities", keyboardRouteCapabilities(true)}}) &&
+          peerSupportsInputRoute(extendedCapabilities),
+      "Full-input negotiation lost its base capability or depended on capability order"
+  );
   check(
       !peerSupportsKeyboardRoute({{"capabilities", QJsonArray{"future-feature"}}}), "Unknown capability granted route"
   );
   for (const auto &value :
        {QJsonValue("keyboard-route-v1"), QJsonValue(QJsonArray{1}),
-        QJsonValue(QJsonArray{"keyboard-route-v1", "keyboard-route-v1"})})
+        QJsonValue(QJsonArray{"keyboard-route-v1", "keyboard-route-v1"}),
+        QJsonValue(QJsonArray{"input-route-v1", "input-route-v1"}),
+        QJsonValue(QJsonArray{"keyboard-route-v1", "input-route-v1", "input-route-v1"}),
+        QJsonValue(QJsonArray{"keyboard-route-v1", "input-route-v1", "future-feature", "future-feature"}),
+        QJsonValue(QJsonArray{"keyboard-route-v1", "input-route-v1", ""}),
+        QJsonValue(QJsonArray{"keyboard-route-v1", "input-route-v1", QString(65, QChar(u'x'))})}) {
     reject([&] { peerSupportsKeyboardRoute({{"capabilities", value}}); });
+    reject([&] { peerSupportsInputRoute({{"capabilities", value}}); });
+  }
+  auto oversizedCapabilities = keyboardRouteCapabilities(true);
+  for (int i = 0; i != 15; ++i)
+    oversizedCapabilities.append(QString("future-%1").arg(i));
+  reject([&] { peerSupportsInputRoute({{"capabilities", oversizedCapabilities}}); });
   const KeyboardRouteBinding binding{{7, 2}, 9, 3, 4, 5};
+  auto allBinding = binding;
+  allBinding.scope = ForwardingScope::All;
+  check(
+      binding.scope == ForwardingScope::Keyboard && validKeyboardRouteBinding(binding) &&
+          validKeyboardRouteBinding(allBinding) && binding != allBinding,
+      "Scope must be a valid, exact part of the forwarding binding"
+  );
+  check(
+      forwardingRouteMessageType(binding) == MessageType::KeyboardRoute &&
+          forwardingRouteMessageType(allBinding) == MessageType::InputRoute,
+      "Full-input and legacy fences share a wire message type"
+  );
   std::vector<KeyboardRouteControl> controls;
   for (auto mode : {KeyboardRouteMode::Viewer, KeyboardRouteMode::Original}) {
     controls.push_back({binding, KeyboardRouteAction::Request, mode});
@@ -414,45 +461,103 @@ void keyboardRouteProtocol()
     controls.push_back(
         {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None, reason}
     );
-  for (const auto &control : controls) {
-    const Packet packet{MessageType::KeyboardRoute, 7, 2, 1, jsonBytes(encodeKeyboardRouteControl(control))};
-    check(parseKeyboardRouteControl(packet) == control, "Keyboard forwarding tuple changed on wire");
-    Decoder decoder;
-    bool decoded = false;
-    decoder.feed(encode(packet), [&](const Packet &received) {
-      decoded = parseKeyboardRouteControl(received) == control;
-    });
-    check(decoded, "Keyboard route message type did not survive framing");
-  }
-  const auto request = controls.front();
-  const auto parse = [&](QJsonObject object) {
-    return parseKeyboardRouteControl({MessageType::KeyboardRoute, 7, 2, 1, jsonBytes(object)});
-  };
-  const auto original = encodeKeyboardRouteControl(request);
-  for (const auto &field : {"generation", "focusRequest", "focusRevision", "geometry"})
-    for (const auto &invalid :
-         {QJsonValue(0), QJsonValue(-1), QJsonValue(1.5), QJsonValue("1"), QJsonValue(9007199254740992.0),
-          QJsonValue(QJsonValue::Null)}) {
+  for (const auto scope : {ForwardingScope::Keyboard, ForwardingScope::All}) {
+    for (auto control : controls) {
+      const auto legacyObject = encodeKeyboardRouteControl(control);
+      control.binding.scope = scope;
+      const auto object = encodeKeyboardRouteControl(control);
+      check(object == legacyObject, "Scope changed the exact legacy JSON schema");
+      check(
+          !object.contains("scope") && object.size() == (control.action == KeyboardRouteAction::Request ? 6 : 7),
+          "Forwarding controls gained unnegotiated payload fields"
+      );
+      const Packet packet{forwardingRouteMessageType(control.binding), 7, 2, 1, jsonBytes(object)};
+      check(parseKeyboardRouteControl(packet) == control, "Forwarding tuple or scope changed on wire");
+      Decoder decoder;
+      int decoded = 0;
+      const auto bytes = encode(packet);
+      for (const auto byte : bytes)
+        decoder.feed({&byte, 1}, [&](const Packet &received) {
+          check(received.type == packet.type, "Forwarding message type changed during fragmented framing");
+          check(parseKeyboardRouteControl(received) == control, "Framing changed the exact forwarding tuple");
+          ++decoded;
+        });
+      check(decoded == 1, "Forwarding control was not decoded exactly once");
+
+      auto substituted = packet;
+      substituted.type = scope == ForwardingScope::All ? MessageType::KeyboardRoute : MessageType::InputRoute;
+      const auto parsed = parseKeyboardRouteControl(substituted);
+      auto expected = control;
+      expected.binding.scope = scope == ForwardingScope::All ? ForwardingScope::Keyboard : ForwardingScope::All;
+      check(
+          parsed == expected && parsed != control && parsed.binding != control.binding,
+          "A substituted message type retained the original fence authority"
+      );
+    }
+    auto request = controls.front();
+    request.binding.scope = scope;
+    const auto type = forwardingRouteMessageType(request.binding);
+    const auto parse = [&](QJsonObject object) {
+      return parseKeyboardRouteControl({type, 7, 2, 1, jsonBytes(object)});
+    };
+    const auto original = encodeKeyboardRouteControl(request);
+    for (const auto &field : {"generation", "focusRequest", "focusRevision", "geometry"})
+      for (const auto &invalid :
+           {QJsonValue(0), QJsonValue(-1), QJsonValue(1.5), QJsonValue("1"), QJsonValue(9007199254740992.0),
+            QJsonValue(QJsonValue::Null)}) {
+        auto object = original;
+        object[field] = invalid;
+        reject([&] { parse(object); });
+      }
+    for (const auto &field : {"native", "flags", "code", "result", "reason", "scope"}) {
       auto object = original;
-      object[field] = invalid;
+      object[field] = 1;
       reject([&] { parse(object); });
     }
-  for (const auto &field : {"native", "flags", "code", "result", "reason"}) {
-    auto object = original;
-    object[field] = 1;
-    reject([&] { parse(object); });
+    for (const auto &field : {"action", "mode"}) {
+      auto object = original;
+      object[field] = "unknown";
+      reject([&] { parse(object); });
+      object.remove(field);
+      reject([&] { parse(object); });
+    }
+    for (const auto action : {KeyboardRouteAction::Acknowledge, KeyboardRouteAction::Withdraw}) {
+      auto control = request;
+      control.action = action;
+      control.mode = KeyboardRouteMode::Original;
+      control.result =
+          action == KeyboardRouteAction::Acknowledge ? KeyboardRouteResult::Ready : KeyboardRouteResult::None;
+      control.reason =
+          action == KeyboardRouteAction::Withdraw ? KeyboardRouteReason::Failed : KeyboardRouteReason::None;
+      auto object = encodeKeyboardRouteControl(control);
+      const auto field = action == KeyboardRouteAction::Acknowledge ? "result" : "reason";
+      for (const auto invalid : {"unknown", "none"}) {
+        object[field] = invalid;
+        reject([&] { parse(object); });
+      }
+      object.remove(field);
+      reject([&] { parse(object); });
+    }
+    auto wrong = request;
+    wrong.action = static_cast<KeyboardRouteAction>(123);
+    reject([&] { encodeKeyboardRouteControl(wrong); });
+    wrong = request;
+    wrong.binding.owner.epoch = 0;
+    reject([&] { encodeKeyboardRouteControl(wrong); });
+    wrong = request;
+    wrong.action = KeyboardRouteAction::Withdraw;
+    wrong.reason = KeyboardRouteReason::FocusChanged;
+    reject([&] { encodeKeyboardRouteControl(wrong); }); // Withdraw is only Original -> host.
+    reject([&] { parseKeyboardRouteControl({type, 0, 2, 1, jsonBytes(original)}); });
+    reject([&] { parseKeyboardRouteControl({type, 7, 0, 1, jsonBytes(original)}); });
+    reject([&] { parseKeyboardRouteControl({type, 7, 2, 1, std::vector<std::uint8_t>(1025)}); });
+    reject([&] { parseKeyboardRouteControl({MessageType::Hello, 7, 2, 1, jsonBytes(original)}); });
+    wrong = request;
+    wrong.binding.scope = static_cast<ForwardingScope>(123);
+    check(!validKeyboardRouteBinding(wrong.binding), "Unknown scope became a valid forwarding binding");
+    reject([&] { encodeKeyboardRouteControl(wrong); });
+    reject([&] { forwardingRouteMessageType(wrong.binding); });
   }
-  auto wrong = request;
-  wrong.action = static_cast<KeyboardRouteAction>(123);
-  reject([&] { encodeKeyboardRouteControl(wrong); });
-  wrong = request;
-  wrong.binding.owner.epoch = 0;
-  reject([&] { encodeKeyboardRouteControl(wrong); });
-  wrong = request;
-  wrong.action = KeyboardRouteAction::Withdraw;
-  wrong.reason = KeyboardRouteReason::FocusChanged;
-  reject([&] { encodeKeyboardRouteControl(wrong); }); // Withdraw is only Original -> host.
-  reject([&] { parseKeyboardRouteControl({MessageType::KeyboardRoute, 7, 2, 1, std::vector<std::uint8_t>(1025)}); });
 }
 void writeFixture(const QString &path, const QByteArray &bytes)
 {

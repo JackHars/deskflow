@@ -15,7 +15,7 @@ an engineering estimate, not the fraction of tests that pass.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Captured stamps now follow actual Server input packets to receiver backend submission receipts. The GNOME client joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
+| Original input integration | Captured stamps follow actual Server packets to backend submission receipts. A negotiated viewer/host gate now fences keys and pointers together. GNOME hit observations join painted source geometry. Delivery remains disabled. | Connect pre-dispatch ownership, compositor/Qt queue draining, exact routed-point validation and the production coordinator. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
@@ -713,6 +713,16 @@ authority has been revoked and the host requests an exact viewer resume. Old
 held keys stay suppressed through their releases. Legacy peers keep the ordinary
 viewer path. The executable does not yet install the local controller required
 to initiate this handoff, and the network protocol carries no original Mac keys.
+
+The additional `input-route-v1` capability uses a separate full-input control
+message. It fences keys, buttons, movement and both scroll axes in Viewer and
+NativeHost together. Scope is part of the exact binding, and older peers retain
+keyboard-only behavior. Pending input stays discarded even if pause and resume
+complete inside one callback; fenced button presses retain suppression through
+their physical releases. See
+[`forwarding-fence.md`](../deploy/windowshare/forwarding-fence.md) for its ordering
+and compatibility contract. This is a forwarding gate, not a native queue drain.
+
 Bridge reservation now separates selecting an exact binding from requesting the
 viewer fence. It sends the request only after the private candidate can be sent,
 then independently rechecks quiescence and the same fixed reservation deadline.

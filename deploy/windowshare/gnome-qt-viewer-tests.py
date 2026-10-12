@@ -40,6 +40,9 @@ common = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(common)
 require = common.require
 HEADER = struct.Struct(">4sIHHQQQI")
+INPUT_ROUTE = 18
+FORWARDING_CAPABILITIES = ["keyboard-route-v1", "input-route-v1"]
+INPUT_KINDS = {"key", "button", "move", "scroll"}
 
 
 class TlsHost:
@@ -58,6 +61,8 @@ class TlsHost:
         self.sessions = {}
         self.output_sequence = 0
         self.input_sequence = 0
+        self.pending_route = None
+        self.input_route_negotiated = False
         self.host_identity, self.viewer_identity = root / "host-identity", root / "viewer-identity"
         environment = dict(processes.env, QT_QPA_PLATFORM="offscreen")
 
@@ -142,7 +147,14 @@ class TlsHost:
             require(self.input_sequence == 1 and session == epoch == 0
                     and value.get("version") == 1 and value.get("role") == "viewer"
                     and value.get("codec") == "h264", "Invalid real viewer Hello")
-            self.send(2, {"version": 1, "role": "host", "codec": "h264", "capabilities": []})
+            capabilities = value.get("capabilities")
+            require(isinstance(capabilities, list) and all(isinstance(item, str) for item in capabilities)
+                    and len(capabilities) == len(set(capabilities))
+                    and all(item in capabilities for item in FORWARDING_CAPABILITIES),
+                    "Real viewer did not negotiate both forwarding capabilities")
+            self.input_route_negotiated = True
+            self.send(2, {"version": 1, "role": "host", "codec": "h264",
+                          "capabilities": FORWARDING_CAPABILITIES})
             self.send(3, {"windows": []})
             self.opened(1)
         elif kind == 11:
@@ -164,6 +176,14 @@ class TlsHost:
         elif kind == 8:
             require(epoch == 1 and session in self.sessions, "Resize for unknown fixture session")
             self.opened(session, advance=True, resize=value)
+        elif kind == INPUT_ROUTE:
+            require(self.input_route_negotiated and self.pending_route is not None,
+                    "Unsolicited or unnegotiated forwarding-fence reply")
+            expected = self.pending_route
+            require(session == expected["session"] and epoch == expected["epoch"]
+                    and value == {**expected["payload"], "action": "ack", "result": "ready"},
+                    "Forwarding-fence reply did not acknowledge the exact requested binding")
+            self.pending_route = None
         elif kind in (9, 15):
             require(self.expected_disconnect, "Viewer returned its session unexpectedly")
         else:
@@ -197,6 +217,11 @@ class TlsHost:
                             self.send_frame(session)
                         elif operation == "second-window":
                             self.opened(session)
+                        elif operation == "input-route":
+                            require(self.input_route_negotiated and self.pending_route is None,
+                                    "Concurrent or unnegotiated forwarding-fence request")
+                            self.pending_route = session
+                            self.send(INPUT_ROUTE, session["payload"], session["session"], session["epoch"])
                         else:
                             raise RuntimeError("Unknown TLS fixture command")
                     except queue.Empty:
@@ -335,6 +360,148 @@ def denied(reply, description):
     require(not any(term in text for term in ("timeout", "protocol", "disconnected", "closed", "connection")),
             f"{description} failed infrastructure instead of denying observation: {reply}")
     return reply["error"]
+
+
+def forwarding_request(snapshot, generation, mode):
+    """Bind the network-only fence to a currently observed painted viewport."""
+    require(type(generation) is int and 0 < generation < 2**53 and mode in ("original", "viewer"),
+            "Invalid forwarding-fence generation or mode")
+
+    def number(name):
+        value = snapshot["paint"].get(name)
+        require(isinstance(value, str) and value.isascii() and value.isdecimal()
+                and value[0] != "0" and len(value) <= 16 and 0 < int(value) < 2**53,
+                f"Invalid painted forwarding binding: {name}")
+        return int(value)
+
+    return {"kind": INPUT_ROUTE, "session": number("session"), "epoch": number("epoch"),
+            "payload": {"generation": generation, "focusRequest": number("focusRequest"),
+                        "focusRevision": number("focusRevision"), "geometry": number("geometry"),
+                        "action": "request", "mode": mode}}
+
+
+def forwarding_acknowledgement(messages, request, start):
+    replies = [(index, message) for index, message in enumerate(messages[start:], start)
+               if message["direction"] == "viewer" and message["kind"] in (17, INPUT_ROUTE)]
+    require(len(replies) <= 1, "Duplicate forwarding-fence acknowledgement")
+    if not replies:
+        return None
+    index, message = replies[0]
+    require(message["kind"] == INPUT_ROUTE and message["session"] == request["session"]
+            and message["epoch"] == request["epoch"]
+            and message["payload"] == {**request["payload"], "action": "ack", "result": "ready"},
+            "Forwarding acknowledgement changed scope, owner, binding, mode or result")
+    return {"index": index, "packet": message}
+
+
+def request_forwarding(processes, host, request):
+    start = len(host.events())
+    host.commands.put_nowait(("input-route", request))
+    return common.wait_for(processes, lambda: forwarding_acknowledgement(host.events(), request, start),
+                           "exact real viewer full-input forwarding acknowledgement", timeout=3, retry_errors=False)
+
+
+def forwarding_receipts(messages, request, expected, start, tolerance):
+    """Accept only an exact prefix, completing on positive fresh input receipts.
+
+    This checks the observed TLS interval. It does not turn EI PONG, elapsed
+    silence or a forwarding acknowledgement into native consumption evidence.
+    """
+    inputs = [message for message in messages[start:]
+              if message["direction"] == "viewer" and message["kind"] == 7
+              and message["payload"].get("kind") in INPUT_KINDS]
+    require(len(inputs) <= len(expected), "Duplicated or fenced input escaped the forwarding gate")
+    for message, wanted in zip(inputs, expected):
+        value = message["payload"]
+        require(message["session"] == request["session"] and message["epoch"] == request["epoch"]
+                and value.get("geometry") == request["payload"]["geometry"]
+                and value.get("focusRevision") == request["payload"]["focusRevision"],
+                "Fresh input receipt changed its observed forwarding binding")
+        for field, required in wanted.items():
+            actual = value.get(field)
+            if field in ("x", "y"):
+                matches = type(actual) in (float, int) and math.isfinite(actual) \
+                    and abs(actual - required) <= tolerance[0 if field == "x" else 1]
+            elif type(required) is bool:
+                matches = actual is required
+            else:
+                matches = actual == required
+            require(matches, f"Fenced, reordered or duplicate input in fresh receipt sequence: {value}")
+    return inputs if len(inputs) == len(expected) else None
+
+
+def forwarding_fence_acceptance(processes, host, driver, initial, desktop):
+    paint = initial["paint"]
+    request = forwarding_request(initial, 1, "original")
+    entered = request_forwarding(processes, host, request)
+    interval = entered["index"] + 1
+    tolerance = [1 / 256 / paint["logicalScale"] * paint["sourceWidth"] / paint["videoWidth"] + 1e-6,
+                 1 / 256 / paint["logicalScale"] * paint["sourceHeight"] / paint["videoHeight"] + 1e-6]
+
+    def point(horizontal, vertical):
+        # Integral Qt logical points avoid Qt's separate wheel QPoint rounding.
+        return desktop(math.floor((paint["videoX"] + paint["videoWidth"] * horizontal) / 4) * 4,
+                       math.floor((paint["videoY"] + paint["videoHeight"] * vertical) / 4) * 4)
+
+    def observe_position(target):
+        reply = driver.command("observe")
+        require(reply.get("live") is True, f"Forwarding fence lost the native/painted viewport: {reply}")
+        snapshot = reply["snapshot"]
+        require(snapshot["window"] == initial["window"] and snapshot["surface"] == initial["surface"]
+                and snapshot["paint"] == paint, "Forwarding fence changed the exact painted focus or geometry")
+        require(abs(snapshot["desktopX"] - target[0]) <= 1 / 256
+                and abs(snapshot["desktopY"] - target[1]) <= 1 / 256,
+                "Forwarding fence prevented the independently observed Linux cursor movement")
+        return snapshot
+
+    fenced_target = point(.6, .4)
+    fenced_commands = [driver.command("key", code=65),  # evdev F7, distinct from fresh F8 below.
+                       driver.command("click"), driver.command("scroll", dx=120, dy=0),
+                       driver.command("move", x=fenced_target[0], y=fenced_target[1])]
+    fenced_position = observe_position(fenced_target)
+    resumed_request = {**request, "payload": {**request["payload"], "mode": "viewer"}}
+    resumed = request_forwarding(processes, host, resumed_request)
+    forwarding_receipts(host.events()[:resumed["index"] + 1], request, [], interval, tolerance)
+
+    expected, fresh_commands, observations, positive_receipts = [], [], [], []
+
+    def receive(wanted):
+        expected.extend(wanted)
+        receipts = common.wait_for(
+            processes, lambda: forwarding_receipts(host.events(), request, expected, interval, tolerance),
+            "ordered fresh input after exact forwarding resume", timeout=3, retry_errors=False)
+        positive_receipts.append(receipts[-1])
+
+    for ordinal, target in enumerate((point(.35, .6), point(.65, .65))):
+        fresh_commands.append(driver.command("move", x=target[0], y=target[1]))
+        observed = observe_position(target)
+        observations.append(observed)
+        receive([{"kind": "move", "x": observed["sourceX"], "y": observed["sourceY"]}])
+        if ordinal == 0:
+            fresh_commands.append(driver.command("key", code=66))  # F8 is independent of keyboard text layout.
+            receive([{"kind": "key", "code": 16777271, "down": down, "repeat": False}
+                     for down in (True, False)])
+            fresh_commands.append(driver.command("click"))
+            receive([{"kind": "button", "code": 0, "down": down} for down in (True, False)])
+            fresh_commands.append(driver.command("scroll", dx=0, dy=120))
+            receive([{"kind": "scroll", "dx": 0, "dy": -40}])
+
+    # A second exact gate bounds the observed network interval after the fresh
+    # key/button pairs, scroll and terminal motion have positively arrived.
+    # No elapsed quiet period or EIS ping is treated as a queue-consumption fence.
+    closing_request = forwarding_request(observations[-1], 2, "original")
+    closing = request_forwarding(processes, host, closing_request)
+    final_receipts = forwarding_receipts(host.events()[:closing["index"] + 1], request, expected, interval, tolerance)
+    require(final_receipts is not None, "Forwarding interval ended without all fresh positive input receipts")
+    reopened_request = {**closing_request, "payload": {**closing_request["payload"], "mode": "viewer"}}
+    reopened = request_forwarding(processes, host, reopened_request)
+    return {"scope": "negotiated-full-input-forwarding-fence", "originalDeliveryAuthority": False,
+            "compositorConsumptionBarrier": False, "nativeEventDeviceAttribution": False,
+            "capabilities": FORWARDING_CAPABILITIES, "request": request,
+            "entered": entered, "fencedCommandPongs": fenced_commands, "fencedCursorObservation": fenced_position,
+            "resumed": resumed, "freshCommandPongs": fresh_commands, "freshCursorObservations": observations,
+            "freshReceipts": final_receipts, "positiveReceiptBoundaries": positive_receipts,
+            "closedInterval": closing, "reopened": reopened, "sourceTolerance": tolerance}
 
 
 class FocusState:
@@ -509,6 +676,10 @@ def run(arguments):
                 rounds.append({"observation": observed, "pointer": pointer,
                                "sourceTolerance": [tolerance_x, tolerance_y]})
             report["measuredMotionPongMappingPointerRounds"] = rounds
+            fence_initial = driver.command("observe")
+            require(fence_initial.get("live") is True, "Full-input acceptance requires current painted focus")
+            report["forwardingFence"] = forwarding_fence_acceptance(
+                processes, host, driver, fence_initial["snapshot"], desktop)
             report["denials"] = {}
             for label, point in (
                 ("letterbox", desktop(paint["videoX"] / 2, paint["clientHeight"] / 2)),

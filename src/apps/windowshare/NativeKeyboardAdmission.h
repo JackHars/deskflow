@@ -12,6 +12,7 @@ namespace deskflow::windowshare {
 // independently observed focus/geometry and ledger state; this grants no native
 // input authority. The host has one focus lease, so an outstanding gate blocks
 // all network key downs/repeats, including after focus moves to another window.
+// A full-input gate also blocks pointer acquisition, movement and scrolling.
 class NativeKeyboardAdmission
 {
 public:
@@ -40,6 +41,11 @@ public:
   bool blocksKeys() const
   {
     return m_gate.has_value();
+  }
+
+  bool blocksPointers() const
+  {
+    return m_gate && m_gate->scope == ForwardingScope::All;
   }
 
   // Mark first, notify afterwards. Invalidation retains an exact-binding

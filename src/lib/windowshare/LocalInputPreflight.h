@@ -82,6 +82,9 @@ public:
   struct Host
   {
     std::function<std::optional<AuthenticatedPeerObservation>()> connection;
+    // The private lease represents keyboard scope only. Any other reservation
+    // closes the connection before Candidate or startQuiescence; connection
+    // teardown must clean up that unstarted reservation, without a lease release.
     std::function<std::optional<KeyboardRouteBinding>()> reserve;
     std::function<bool(const KeyboardRouteBinding &)> startQuiescence, isQuiesced;
     // Required exact-binding transfer from the reservation deadline to active
