@@ -40,6 +40,13 @@ Evidence is `build/physical-fixture-agent/ubuntu-gate-20261012/evidence.json`
 and `independent-verification.json` in the same directory. Startup cancellation
 has control regressions; this actual smoke does not exercise native startup.
 
+The visible-controls commit `d3be1f8c75733f8377e2d9ecc67a5caaa0a36619`
+passed all six CI jobs in run `38310550492`, including the new control tests,
+both application builds, native GNOME integration, Mac hotkey regressions and
+packaged private-core handshake. Every job step passed. Complete metadata,
+logs and hashes are retained under
+`build/manual-acceptance-20261012/ci-38310550492/`.
+
 No new Mac source window or physical route was launched for this change.
 The package permission and human physical acceptance remain open; the overall
 completion estimate remains about 50%. Local evidence is under
