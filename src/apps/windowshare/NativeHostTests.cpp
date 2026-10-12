@@ -4,18 +4,26 @@
  */
 #include "NativeHost.h"
 #include "NativeKeyboardAdmission.h"
+#include <CoreGraphics/CoreGraphics.h>
 #include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <cmath>
+#include <dlfcn.h>
 #include <unistd.h>
 
 // Internal filesystem primitive; exercising it never enumerates native windows.
 namespace deskflow::windowshare::native {
 bool persistJournal(const QString &path, const QJsonArray &records, QString *diagnostic);
-}
+bool targetedPointerAvailable();
+CGEventRef targetedPointerEvent(
+    CGEventSourceRef source, CGWindowID window, Rect frame, Point point, CGEventType type, std::uint32_t button,
+    CGEventFlags modifiers, std::int64_t eventNumber, int clicks
+);
+} // namespace deskflow::windowshare::native
 
 using deskflow::windowshare::FocusLease;
 using deskflow::windowshare::InputLedger;
@@ -42,6 +50,101 @@ QByteArray read(const QString &path)
   QFile file(path);
   file.open(QIODevice::ReadOnly);
   return file.readAll();
+}
+void targetedPointerConstruction()
+{
+  using namespace deskflow::windowshare;
+  using native::targetedPointerEvent;
+  const deskflow::windowshare::Rect frame{-400, 180, 640, 448};
+  using InputPoint = deskflow::windowshare::Point;
+  const InputPoint point{100.25, 140.5};
+  constexpr CGWindowID window = 987654; // Construction only: no real window or posting.
+  const auto source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  check(source != nullptr, "create an independent private event source");
+  if (!source)
+    return;
+  const auto make = [&](CGEventType type, std::uint32_t button) {
+    return targetedPointerEvent(source, window, frame, point, type, button, kCGEventFlagMaskShift, 42, 2);
+  };
+  const auto getLocal = reinterpret_cast<CGPoint (*)(CGEventRef)>(dlsym(RTLD_DEFAULT, "CGEventGetWindowLocation"));
+  const bool supported = native::targetedPointerAvailable();
+  const auto permissions = NativeHost::permissions();
+  check(permissions["targetedPointer"].toBool() == supported, "probe reports the actual targeted-pointer capability");
+  check(permissions["targetedPointerApi"].toString().contains("private"), "probe discloses the private API dependency");
+  for (const auto type :
+       {kCGEventMouseMoved, kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGEventLeftMouseDragged,
+        kCGEventRightMouseDown, kCGEventRightMouseUp, kCGEventRightMouseDragged, kCGEventOtherMouseDown,
+        kCGEventOtherMouseUp, kCGEventOtherMouseDragged, kCGEventScrollWheel}) {
+    const auto button =
+        type == kCGEventRightMouseDown || type == kCGEventRightMouseUp || type == kCGEventRightMouseDragged   ? 1u
+        : type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp || type == kCGEventOtherMouseDragged ? 2u
+                                                                                                              : 0u;
+    const auto event = make(type, button);
+    check(bool(event) == supported, "all pointer families fail closed without the private annotation API");
+    if (!event)
+      continue;
+    check(getLocal != nullptr, "private annotation getter is available for independent readback");
+    check(CGEventGetType(event) == type, "pointer construction preserves its event family");
+    check(
+        CGPointEqualToPoint(CGEventGetLocation(event), CGPointMake(frame.x + point.x, frame.y + point.y)),
+        "targeted pointer keeps correct global coordinates with a negative screen origin"
+    );
+    check(
+        getLocal && CGPointEqualToPoint(getLocal(event), CGPointMake(point.x, point.y)),
+        "global-location assignment cannot erase or flip the independent window-local coordinates"
+    );
+    // CG's mouse-only fields are not defined for the scroll-wheel type. Its
+    // AppKit window binding and local/global coordinates are checked above.
+    if (type != kCGEventScrollWheel) {
+      check(
+          CGEventGetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer) == window &&
+              CGEventGetIntegerValueField(event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent) == window,
+          "both public window annotations identify the same selected window"
+      );
+      check(
+          CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber) == button,
+          "button identity survives construction"
+      );
+      check(
+          CGEventGetIntegerValueField(event, kCGMouseEventNumber) == 42, "pointer event number survives construction"
+      );
+      check(CGEventGetIntegerValueField(event, kCGMouseEventClickState) == 2, "click count survives construction");
+    }
+    check(CGEventGetFlags(event) == kCGEventFlagMaskShift, "no artificial Command modifier is added");
+    check(
+        CGEventGetIntegerValueField(event, kCGEventSourceUserData) == syntheticEventTag &&
+            CGEventGetIntegerValueField(event, kCGEventSourceStateID) == CGEventSourceGetSourceStateID(source),
+        "constructed events retain the private source and synthetic loop marker"
+    );
+    CFRelease(event);
+  }
+  if (supported) {
+    const auto fractional = targetedPointerEvent(source, window, frame, {100.1, 140.3}, kCGEventMouseMoved, 0, 0, 0, 0);
+    check(fractional != nullptr, "fractional remote coordinates retain their independent annotation");
+    if (fractional)
+      CFRelease(fractional);
+  }
+  check(!make(kCGEventKeyDown, 0), "pointer constructor rejects keyboard events");
+  check(!make(kCGEventMouseMoved, 32), "pointer constructor rejects an unsupported button");
+  check(!targetedPointerEvent(nullptr, window, frame, point, kCGEventMouseMoved, 0, 0, 0, 0), "null sources denied");
+  check(!targetedPointerEvent(source, 0, frame, point, kCGEventMouseMoved, 0, 0, 0, 0), "unbound window denied");
+  for (const auto invalid :
+       {InputPoint{-1, 1}, InputPoint{1, -1}, InputPoint{640, 1}, InputPoint{1, 448}, InputPoint{NAN, 1}})
+    check(
+        !targetedPointerEvent(source, window, frame, invalid, kCGEventMouseMoved, 0, 0, 0, 0),
+        "outside or nonfinite local point denied"
+    );
+  for (const auto state : {kCGEventSourceStateCombinedSessionState, kCGEventSourceStateHIDSystemState}) {
+    const auto shared = CGEventSourceCreate(state);
+    check(shared != nullptr, "create shared-source rejection fixture");
+    check(
+        !targetedPointerEvent(shared, window, frame, point, kCGEventMouseMoved, 0, 0, 0, 0),
+        "shared physical/session event sources denied"
+    );
+    if (shared)
+      CFRelease(shared);
+  }
+  CFRelease(source);
 }
 KeyboardRouteBinding routeBinding()
 {
@@ -146,6 +249,7 @@ void keyboardAdmission()
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
+  targetedPointerConstruction();
   keyboardAdmission();
   QTemporaryDir directory;
   check(directory.isValid(), "temporary journal directory");

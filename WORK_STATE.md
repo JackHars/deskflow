@@ -3,6 +3,40 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Mac targeted pointer coordinates (2026-10-12)
+
+The native own-window input failure is fixed. The public global-location setter
+cleared the event's separate window-local annotation, so AppKit delivered mouse
+and scroll events outside the correct native window. A narrowly scoped private
+CoreGraphics getter/setter is now resolved from the system framework; the local
+position is set after the global position, and both coordinates plus the window
+binding are read back before PID-targeted posting. Missing APIs disable export.
+No global-post or cursor-warp fallback was added. This dependency is reported by
+`--probe` and remains limited to the tested macOS runtime.
+
+The final bounded native smoke passes real ScreenCaptureKit/H.264 capture,
+observed own-source focus, exact tagged native F8/A down/up sequences, motion,
+drag, left click, scroll, held-right-button release, neutral key/button state,
+original frame/journal restoration and process cleanup. Exit 0 in 2.693 seconds;
+evidence is `build/native-smoke-20261012/final-exact-input/`. Receiver metadata
+corroborates its own NSWindow ID with WindowServer PID/frame and waits for stable
+initial geometry. Strict compilation and ASan/UBSan construction/journal tests
+pass; logs are `build/native-smoke-20261012/native-unit-sanitize*` and
+`native-unit-fixed.log`. Independent review prompted exact key assertions to
+avoid Qt propagation inflating aggregate counts.
+The rebuilt production host reports capture, Accessibility and targeted-pointer
+capabilities available. All 15 standalone application suites pass in 100.10
+seconds (`build/native-smoke-20261012/app-regressions.log`).
+
+This is local synthetic input evidence. The actual two-machine runner is being
+prepared separately; physical Mac input, holding-display input, first-click
+activation races and drag handoff are not established by this smoke. Overall
+roadmap completion remains about 45% pending the full interactive flow.
+
+The preceding GNOME viewport commit `04bf68b4c` passed all six CI jobs in run
+`38296548399`. Exact-revision job metadata and logs are retained and hashed in
+`build/gnome-viewport-ci/38296548399/` and `build/gnome-viewport-evidence.json`.
+
 ## GNOME native hit and painted Qt viewport join (2026-10-12)
 
 Overall completion remains approximately 45%; the first physical two-machine

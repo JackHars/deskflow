@@ -29,6 +29,7 @@
 #include <atomic>
 #include <cmath>
 #include <deque>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <libproc.h>
 #include <map>
@@ -45,6 +46,103 @@ constexpr qint64 maxJournalBytes = 1024 * 1024;
 constexpr qint64 prepareTimeoutMs = 15000;
 constexpr qint64 frameTimeoutMs = 30000;
 constexpr std::uint64_t maxJsonInteger = (1ULL << 53) - 1;
+
+// Experimental targeted pointer delivery needs this private CoreGraphics SPI.
+// It is also used by Apple's WebKit test runner (CoreGraphicsTestSPI.h). The
+// public global-location setter clears window-local coordinates; the public
+// window-under-pointer fields alone do not bind AppKit's destination window.
+// Resolve only from the system framework and keep it loaded for these pointers.
+// No global-post/cursor-warp fallback is permitted when this API is absent.
+struct WindowLocationApi
+{
+  using Get = CGPoint (*)(CGEventRef);
+  using Set = void (*)(CGEventRef, CGPoint);
+  Get get = nullptr;
+  Set set = nullptr;
+};
+const WindowLocationApi &windowLocationApi()
+{
+  static const auto api = [] {
+    WindowLocationApi result;
+    const auto framework =
+        dlopen("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY | RTLD_LOCAL);
+    if (framework) {
+      result.get = reinterpret_cast<WindowLocationApi::Get>(dlsym(framework, "CGEventGetWindowLocation"));
+      result.set = reinterpret_cast<WindowLocationApi::Set>(dlsym(framework, "CGEventSetWindowLocation"));
+    }
+    return result;
+  }();
+  return api;
+}
+bool targetedPointerAvailable()
+{
+  const auto &api = windowLocationApi();
+  return api.get && api.set;
+}
+CGEventRef targetedPointerEvent(
+    CGEventSourceRef eventSource, CGWindowID window, Rect frame, Point point, CGEventType type, std::uint32_t button,
+    CGEventFlags modifiers, std::int64_t eventNumber, int clicks
+)
+{
+  const auto &location = windowLocationApi();
+  const auto global = CGPointMake(frame.x + point.x, frame.y + point.y);
+  const auto local = CGPointMake(point.x, point.y);
+  const bool mouseType = type == kCGEventMouseMoved || type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp ||
+                         type == kCGEventRightMouseDown || type == kCGEventRightMouseUp ||
+                         type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp ||
+                         type == kCGEventLeftMouseDragged || type == kCGEventRightMouseDragged ||
+                         type == kCGEventOtherMouseDragged || type == kCGEventScrollWheel;
+  if (!location.get || !location.set || !eventSource ||
+      CGEventSourceGetSourceStateID(eventSource) == kCGEventSourceStateCombinedSessionState ||
+      CGEventSourceGetSourceStateID(eventSource) == kCGEventSourceStateHIDSystemState || !window || !frame.valid() ||
+      !std::isfinite(point.x) || !std::isfinite(point.y) || point.x < 0 || point.y < 0 || point.x >= frame.width ||
+      point.y >= frame.height || !std::isfinite(global.x) || !std::isfinite(global.y) || !mouseType || button > 31 ||
+      eventNumber < 0 || clicks < 0 || clicks > 3)
+    return nullptr;
+  const auto nativeType = type == kCGEventLeftMouseDown       ? NSEventTypeLeftMouseDown
+                          : type == kCGEventLeftMouseUp       ? NSEventTypeLeftMouseUp
+                          : type == kCGEventRightMouseDown    ? NSEventTypeRightMouseDown
+                          : type == kCGEventRightMouseUp      ? NSEventTypeRightMouseUp
+                          : type == kCGEventOtherMouseDown    ? NSEventTypeOtherMouseDown
+                          : type == kCGEventOtherMouseUp      ? NSEventTypeOtherMouseUp
+                          : type == kCGEventLeftMouseDragged  ? NSEventTypeLeftMouseDragged
+                          : type == kCGEventRightMouseDragged ? NSEventTypeRightMouseDragged
+                          : type == kCGEventOtherMouseDragged ? NSEventTypeOtherMouseDragged
+                                                              : NSEventTypeMouseMoved;
+  NSEvent *native = [NSEvent mouseEventWithType:nativeType
+                                       location:NSMakePoint(point.x, frame.height - point.y)
+                                  modifierFlags:NSEventModifierFlags(modifiers)
+                                      timestamp:NSProcessInfo.processInfo.systemUptime
+                                   windowNumber:window
+                                        context:nil
+                                    eventNumber:eventNumber
+                                     clickCount:clicks
+                                       pressure:(type == kCGEventLeftMouseDown || type == kCGEventRightMouseDown ||
+                                                 type == kCGEventOtherMouseDown)
+                                                    ? 1.0f
+                                                    : 0.0f];
+  if (!native.CGEvent)
+    return nullptr;
+  auto event = CGEventCreateCopy(native.CGEvent);
+  if (!event)
+    return nullptr;
+  CGEventSetSource(event, eventSource);
+  CGEventSetType(event, type);
+  CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, button);
+  CGEventSetIntegerValueField(event, kCGEventSourceUserData, syntheticEventTag);
+  CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer, window);
+  CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, window);
+  // Setting the global location clears the separate window-local annotation.
+  // Restore that annotation last, in top-left window coordinates.
+  CGEventSetLocation(event, global);
+  location.set(event, local);
+  if (!CGPointEqualToPoint(CGEventGetLocation(event), global) || !CGPointEqualToPoint(location.get(event), local) ||
+      [NSEvent eventWithCGEvent:event].windowNumber != window) {
+    CFRelease(event);
+    return nullptr;
+  }
+  return event;
+}
 
 QString string(NSString *value)
 {
@@ -1338,6 +1436,10 @@ struct NativeHost::Impl
       error("Cannot create private input event source");
       return;
     }
+    if (!targetedPointerAvailable()) {
+      error("Targeted pointer input requires unavailable private macOS window-location API; export disabled");
+      return;
+    }
     if (entries.size() >= maxSessions) {
       error("At most 16 windows may be exported at once");
       return;
@@ -1515,38 +1617,12 @@ struct NativeHost::Impl
       int clicks = 0
   )
   {
-    // AppKit uses NSEvent's windowNumber as well as the public CG window-under-
-    // pointer fields. Let its public factory provide the complete annotation;
-    // setting CG fields 91/92 alone does not target a background window reliably.
-    const auto nativeType = type == kCGEventLeftMouseDown       ? NSEventTypeLeftMouseDown
-                            : type == kCGEventLeftMouseUp       ? NSEventTypeLeftMouseUp
-                            : type == kCGEventRightMouseDown    ? NSEventTypeRightMouseDown
-                            : type == kCGEventRightMouseUp      ? NSEventTypeRightMouseUp
-                            : type == kCGEventOtherMouseDown    ? NSEventTypeOtherMouseDown
-                            : type == kCGEventOtherMouseUp      ? NSEventTypeOtherMouseUp
-                            : type == kCGEventLeftMouseDragged  ? NSEventTypeLeftMouseDragged
-                            : type == kCGEventRightMouseDragged ? NSEventTypeRightMouseDragged
-                            : type == kCGEventOtherMouseDragged ? NSEventTypeOtherMouseDragged
-                                                                : NSEventTypeMouseMoved;
-    NSEvent *native = [NSEvent mouseEventWithType:nativeType
-                                         location:NSMakePoint(e.pointer.x(), e.session.source.height - e.pointer.y())
-                                    modifierFlags:NSEventModifierFlags(modifiers)
-                                        timestamp:NSProcessInfo.processInfo.systemUptime
-                                     windowNumber:e.identity.id
-                                          context:nil
-                                      eventNumber:eventNumber
-                                       clickCount:clicks
-                                         pressure:(type == kCGEventLeftMouseDown || type == kCGEventRightMouseDown ||
-                                                   type == kCGEventOtherMouseDown)
-                                                      ? 1.0f
-                                                      : 0.0f];
-    if (!native.CGEvent)
-      return nullptr;
-    auto event = CGEventCreateCopy(native.CGEvent);
-    CGEventSetSource(event, eventSource);
-    CGEventSetType(event, type);
-    CGEventSetLocation(event, CGPointMake(e.session.source.x + e.pointer.x(), e.session.source.y + e.pointer.y()));
-    CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, button);
+    auto event = targetedPointerEvent(
+        eventSource, e.identity.id, e.session.source, {e.pointer.x(), e.pointer.y()}, type, button, modifiers,
+        eventNumber, clicks
+    );
+    if (!event)
+      error("macOS targeted pointer construction failed; private window-location API required");
     return event;
   }
   void key(Entry &e, const KeyPress &press, bool down, bool repeat = false)
@@ -1970,6 +2046,8 @@ QJsonObject NativeHost::permissions()
       {"supported", true},
       {"screenCapture", bool(CGPreflightScreenCaptureAccess())},
       {"accessibility", bool(AXIsProcessTrusted())},
+      {"targetedPointer", targetedPointerAvailable()},
+      {"targetedPointerApi", "private CoreGraphics window-location SPI"},
       {"holdingDisplay", HoldingDisplay::supported()},
       {"emergencyRestore", "Control+Option+Shift+Escape"}
   };

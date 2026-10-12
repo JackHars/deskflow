@@ -14,7 +14,7 @@ pointer, scrolling and return, using the Mac keyboard and trackpad.
 
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
-| Capture, viewer and transport | Mac capture/encode/decode and targeted keyboard input have run live. The latest own-window smoke still fails pointer clicks and scrolling. Transport, independent viewers and reconnect pass automated tests. | Fix native pointer delivery and verify the complete interactive flow across the two machines. |
+| Capture, viewer and transport | Mac capture/encode/decode, exact targeted keys, pointer motion/drag/buttons/scroll, forced input release and source restoration pass the native own-window smoke. Transport, independent viewers and reconnect pass automated tests. | Verify the complete interactive flow across the two machines using physical Mac input. |
 | Original input integration | Ordered capture records join the actual Server recipient and coordinate decision. The GNOME client now joins native hit observations to the viewer's painted source geometry. Delivery remains disabled. | Establish input-device attribution, ordered pointer fencing and production coordinator integration. |
 | Linux and two monitors | The current Ubuntu candidate passes 57 integrated and 13 application suites. The native GNOME/Qt viewport join passes with Qt scale factors 1 and 1.25. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
@@ -23,10 +23,11 @@ pointer, scrolling and return, using the Mac keyboard and trackpad.
 | Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
-hostname `jack`. The initial restored-network build and integrated tests cover revision
-`6d96b1546c728ac3a8273f17ffd0f04492bc3f13`. That revision also passed all six CI
-jobs, including the real native headless GNOME 50 tests for EIS/Wayland ownership,
-native pointer targeting and caller-loss cleanup. These results do not establish
+hostname `jack`. The GNOME viewport milestone
+`04bf68b4c044e1adf2ff463850ae8d1c35b76dad` passed all six CI jobs in run
+`38296548399`, including the real native headless GNOME 50 tests for EIS/Wayland
+ownership, the actual Qt painted viewport and caller-loss cleanup. Its production
+source bytes also match the passing home Ubuntu candidate. These results do not establish
 the physical two-machine interactive flow. Read-only display inspection currently
 lists one active Samsung HDMI display at 1920×1080 and no second connected output.
 The Mac lid is open and the experimental app has Screen Recording and
@@ -108,6 +109,17 @@ video do not authorize new input. Native events target the source process and
 carry a loop-suppression marker. The opt-in Deskflow Mac backend recognizes this
 marker and excludes the holding display from its cursor boundaries. The marker
 is bookkeeping, never peer authentication.
+
+Targeted mouse and scroll construction additionally requires the private
+CoreGraphics window-location getter/setter, resolved from the system framework
+at runtime. Setting the public global position clears this separate annotation;
+the host restores window-local coordinates afterward and checks both coordinate
+domains and the destination window before posting. `--probe` reports
+`targetedPointer` and the private API dependency. Missing symbols disable export;
+there is no global posting or cursor-warp fallback. Current-machine native
+receiver tests verify this path, but do not establish compatibility across
+other macOS versions. The declarations also appear in
+[Apple's WebKit test SPI](https://github.com/WebKit/WebKit/blob/main/Tools/TestRunnerShared/spi/CoreGraphicsTestSPI.h).
 
 Closing a viewer returns its source window; it does not close the Mac application.
 The host also restores on disconnect, sleep, session deactivation and normal exit.
