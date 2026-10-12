@@ -103,11 +103,58 @@ expires without renewing its deadline. Production policy loading/controller
 wiring remains pending, as do capture ordering and module integrity. Original
 capture and injection remain off.
 
+Three activation prerequisites now exist as isolated, default-deny foundations.
+OriginalInput carries keys, buttons, motion, scroll and checkpoints through one
+bounded SPSC stream. Retained epoch revocation survives popped records, overflow
+and shutdown. Neutral cutover requires complete trusted physical coverage and a
+consumed checkpoint committed by the producer; unknown keys, buttons, Caps Lock
+physical state or pending scroll momentum cannot be inferred away. A mixed press
+ledger retains each original owner and releases ordinary keys/buttons before
+modifiers. Both keyboard ledgers reject undelivered downs without manufacturing
+release debt and preserve release order on a conflicting modifier up.
+
+Viewport leases copy exact route, connection, coordinate-space, output and layout
+identities. A 250 ms host-observation lifetime, independent delivery validation
+and original press ownership govern mapping and drag clamping. Refresh cannot
+extend an old observation or preserve press ownership across an expiry gap.
+The only accepted coordinate kind is explicit X11 root geometry; an authoritative
+X11 provider and any Wayland provider remain unimplemented. Pure geometry mapping
+does not grant delivery authority, and neither motion nor scroll ownership is
+implemented by the mixed key/button ledger.
+
+Optional restricted-library packaging signs the dependency closure with one real
+Apple-issued Team and enables hardened runtime plus explicit library validation
+on fixed executables. Static audits cover each architecture, fixed executable paths,
+Team and absent/empty entitlements. PeerTrust can inspect live self, peer and
+anchor signing facts around its existing exact identity checks, but returns only
+an immutable historical snapshot. Apple-or-same-Team admission does not establish
+an exact permitted image set or satisfy the preflight module-integrity provider.
+These foundations install no capture provider, controller or input authorizer.
+
 ## Recorded validation
 
 Local environment: Intel Mac, macOS 26.1, AppleClang 17, Qt 6.8.3, FFmpeg 8.0.1.
 The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link.
 
+- All 10 isolated foundation suites pass with strict compiler warnings and
+  ASan/UBSan. The mixed stream also passes TSan with 40,000 threaded records.
+  Regressions cover queue overflow/revocation, contradictory physical snapshots,
+  incomplete coverage, Caps Lock, scroll uncertainty, checkpoint races, owner
+  tombstones and modifier release order. Removing either keyboard rejection or
+  removed-up ordering fix makes its regression fail. Viewport tests cover
+  fractional DPR, letterboxing, stale identities, expiry during a mutex wait,
+  renewal gaps and independent ownership/proof revocation.
+- The final foundation sources build in the complete standalone and integrated
+  opt-in configurations; all 12 standalone and 52 integrated CTest suites pass.
+  Eight packaging fixture tests, formatting, whitespace and REUSE validation
+  (928/928 files) pass. The default-off configuration is unchanged by this slice.
+- Restricted-library policy and PeerTrust fixtures pass strict and ASan/UBSan
+  suites. A real Apple Development signed, hardened fixture package passes live
+  inspection in both roles. Eight headless OS admission checks confirm startup
+  and later same-Team loads, reject unsigned/ad-hoc library constructors, and
+  confirm ordinary-loader controls can load the same ad-hoc fixtures. They do
+  not test a different Apple Team or exact-image constraints and never start
+  NativeHost, register input hooks or mutate a display.
 - After preflight v2, all 30 default-off Deskflow, all 12 standalone app and all
   49 integrated opt-in CTest suites pass. Strict and ASan/UBSan preflight suites
   cover missing integrity/neutral/ordering/release providers, both independent
@@ -233,24 +280,25 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   disposable loopback TLS fixture: initial refusal, recovery, authenticated
   disconnect/reconnect, fresh negotiation and clean exit. This newer smoke test
   never starts NativeHost, registers a tap, exports a window or changes displays.
-- All five GitHub Actions jobs passed for `6d9da2014794832e64f10df9e9b74031f7fc0b81`
-  ([run 38237378832](https://github.com/JackHars/deskflow/actions/runs/38237378832)).
-  That includes selected-peer snapshots and the packaged trusted core/host
-  handshake. The subsequent preflight work is recorded separately below.
+- All five GitHub Actions jobs passed for `3752b54f2f868331cddb3f2d65e4bb72ff105acd`
+  ([run 38242032018](https://github.com/JackHars/deskflow/actions/runs/38242032018)).
+  That includes preflight v2, selected-peer snapshots and the packaged trusted
+  core/host handshake. The subsequent foundation work is recorded separately.
 
 ## Local package
 
 The new signed core-main bundle is
-`build/packages/preflight-20261012/DeskflowSeamless-Core-Experimental.app`,
-with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification.
+`build/packages/input-foundations-20261012/DeskflowSeamless-Core-Experimental.app`,
+with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification
+and restricted-library admission auditing for signing Team `MM5PBJ9D4Y`.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`b2ae647726574948eece1c67ac54a58af222fcfa3ac642889cdbfef8c1b84b56`.
+`cc8fcad3a7a2e688151198341655d75ab39461b29d5439b4e90fc86db3886440`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
 The package and installed copy passed recursive dependency/signature verification,
 the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
-smoke, with original input disabled. The preceding selected-peer installation is
-preserved in `build/packages/preflight-installed-backup-20261012/`.
+smoke, with original input disabled. The preceding preflight installation is
+preserved in `build/packages/input-foundations-installed-backup-20261012/`.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 

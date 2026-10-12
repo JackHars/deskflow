@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "LocalInputModulePolicy.h"
 #include "LocalInputPeerTrust.h"
 
 #include <CoreFoundation/CoreFoundation.h>
@@ -30,6 +31,12 @@ constexpr qsizetype maximumExecutable = 256 * 1024 * 1024;
 constexpr qsizetype maximumResources = 8 * 1024 * 1024;
 constexpr SecCSFlags strictFlags =
     kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSRestrictSymlinks;
+static_assert(localInputModulePolicyBits::adHoc == kSecCodeSignatureAdhoc);
+static_assert(localInputModulePolicyBits::linkerSigned == kSecCodeSignatureLinkerSigned);
+static_assert(localInputModulePolicyBits::hardenedRuntime == kSecCodeSignatureRuntime);
+static_assert(localInputModulePolicyBits::libraryValidation == kSecCodeSignatureLibraryValidation);
+static_assert(localInputModulePolicyBits::dynamicallyValid == kSecCodeStatusValid);
+static_assert(localInputModulePolicyBits::debugged == kSecCodeStatusDebugged);
 
 void require(bool value, const char *message)
 {
@@ -335,7 +342,7 @@ void checkStatic(const Pin &pin)
       "Packaged code identity or executable path changed"
   );
 }
-void checkRunning(const Process &expected, const Pin &pin)
+CF<SecCodeRef> checkRunning(const Process &expected, const Pin &pin)
 {
   require(
       process(expected.identity.pid) == expected && expected.executable == pin.executable,
@@ -370,6 +377,111 @@ void checkRunning(const Process &expected, const Pin &pin)
           process(expected.identity.pid) == expected,
       "Running packaged code changed during identity verification"
   );
+  return code;
+}
+std::optional<std::uint32_t> moduleNumber(CFDictionaryRef information, CFStringRef key)
+{
+  const auto value = CFDictionaryGetValue(information, key);
+  if (!value)
+    return std::nullopt;
+  require(value && CFGetTypeID(value) == CFNumberGetTypeID(), "Invalid library-admission numeric metadata");
+  const auto number = static_cast<CFNumberRef>(value);
+  std::int64_t result = 0;
+  require(
+      !CFNumberIsFloatType(number) && CFNumberGetValue(number, kCFNumberSInt64Type, &result) && result >= 0 &&
+          result <= std::numeric_limits<std::uint32_t>::max(),
+      "Malformed library-admission flags or dynamic status"
+  );
+  return static_cast<std::uint32_t>(result);
+}
+LocalInputEntitlements moduleEntitlements(CFDictionaryRef information)
+{
+  const auto raw = CFDictionaryGetValue(information, kSecCodeInfoEntitlements);
+  const auto dictionary = CFDictionaryGetValue(information, kSecCodeInfoEntitlementsDict);
+  // A missing dictionary alone does not mean absent entitlements: Security may
+  // have returned an unsupported raw representation. Do not waive that case.
+  if (raw && (CFGetTypeID(raw) != CFDataGetTypeID() || CFDataGetLength(static_cast<CFDataRef>(raw)) <= 0 ||
+              CFDataGetLength(static_cast<CFDataRef>(raw)) > 64 * 1024))
+    return LocalInputEntitlements::Malformed;
+  if (!dictionary)
+    return raw ? LocalInputEntitlements::Malformed : LocalInputEntitlements::Absent;
+  if (CFGetTypeID(dictionary) != CFDictionaryGetTypeID())
+    return LocalInputEntitlements::Malformed;
+  // Reject every entry, including false-valued exceptions and unknown future
+  // entitlements. No signed exception is needed by this restricted prototype.
+  return CFDictionaryGetCount(static_cast<CFDictionaryRef>(dictionary)) == 0
+             ? LocalInputEntitlements::EmptyDictionary
+             : LocalInputEntitlements::NonemptyDictionary;
+}
+LocalInputModuleFacts moduleFacts(const Process &expected, const Pin &pin)
+{
+  const auto code = checkRunning(expected, pin);
+  CF<CFDictionaryRef> information;
+  require(
+      SecCodeCopySigningInformation(
+          code.value, kSecCSSigningInformation | kSecCSDynamicInformation, &information.value
+      ) == errSecSuccess &&
+          information.value && CFGetTypeID(information.value) == CFDictionaryGetTypeID(),
+      "Cannot inspect live restricted-library-admission metadata"
+  );
+  require(
+      data(CFDictionaryGetValue(information.value, kSecCodeInfoUnique)) == pin.hash &&
+          fileUrl(CFDictionaryGetValue(information.value, kSecCodeInfoMainExecutable)) == pin.executable,
+      "Library-admission metadata differs from the exact live packaged identity"
+  );
+  LocalInputModuleFacts result;
+  result.signatureFlags = moduleNumber(information.value, kSecCodeInfoFlags);
+  result.dynamicStatus = moduleNumber(information.value, kSecCodeInfoStatus);
+  result.entitlements = moduleEntitlements(information.value);
+  const auto team = CFDictionaryGetValue(information.value, kSecCodeInfoTeamIdentifier);
+  if (team) {
+    const auto text = string(team);
+    require(
+        text.size() == CFStringGetLength(static_cast<CFStringRef>(team)), "Embedded null in signed Team identifier"
+    );
+    result.teamIdentifier = text.toStdString();
+  }
+  // A certificate chain or a Team ID string is not by itself signer authority.
+  // Bind Apple's code-signing anchor AND the leaf's Team to the exact running
+  // code already checked above. No user-provided requirement text is accepted.
+  const auto certificates = CFDictionaryGetValue(information.value, kSecCodeInfoCertificates);
+  bool hasCertificates = false;
+  if (certificates) {
+    require(CFGetTypeID(certificates) == CFArrayGetTypeID(), "Invalid signing certificate metadata");
+    const auto chain = static_cast<CFArrayRef>(certificates);
+    const auto count = CFArrayGetCount(chain);
+    require(count > 0 && count <= 8, "Unsupported signing certificate chain");
+    for (CFIndex index = 0; index < count; ++index)
+      require(
+          CFGetTypeID(CFArrayGetValueAtIndex(chain, index)) == SecCertificateGetTypeID(),
+          "Malformed signing certificate chain"
+      );
+    hasCertificates = true;
+  }
+  result.appleIssuedSigner = false;
+  if (hasCertificates && result.teamIdentifier && validLocalInputModuleTeamIdentifier(*result.teamIdentifier)) {
+    const auto expression = cfString(QStringLiteral("anchor apple generic and certificate leaf[subject.OU] = \"%1\"")
+                                         .arg(QString::fromStdString(*result.teamIdentifier)));
+    CF<SecRequirementRef> appleTeam;
+    require(
+        SecRequirementCreateWithString(expression.value, kSecCSDefaultFlags, &appleTeam.value) == errSecSuccess,
+        "Cannot construct Apple-issued Team signing requirement"
+    );
+    result.appleIssuedSigner = SecCodeCheckValidity(code.value, kSecCSDefaultFlags, appleTeam.value) == errSecSuccess;
+  }
+  require(
+      SecCodeCheckValidity(code.value, kSecCSDefaultFlags, pin.exact.value) == errSecSuccess &&
+          SecCodeCheckValidity(code.value, kSecCSDefaultFlags, pin.designated.value) == errSecSuccess &&
+          process(expected.identity.pid) == expected,
+      "Running packaged code changed during library-admission inspection"
+  );
+  result.exactIdentityValidated = true;
+  return result;
+}
+void requireModulePolicy(const LocalInputModuleFacts &facts, std::string_view anchoredTeam)
+{
+  const auto failure = evaluateLocalInputModulePolicy(facts, anchoredTeam);
+  require(failure == LocalInputModulePolicyFailure::None, localInputModulePolicyFailureText(failure));
 }
 QByteArray nestedHash(CFDictionaryRef resources, const QString &name)
 {
@@ -512,6 +624,43 @@ bool LocalInputPeerTrust::verify(LocalInputProcess expected) const
     return true;
   } catch (...) {
     return false;
+  }
+}
+
+std::optional<LocalInputRestrictedLibraryAdmissionSnapshot>
+LocalInputPeerTrust::inspectRestrictedLibraryAdmission(LocalInputProcess expected, QString *error) const
+{
+  if (error)
+    error->clear();
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    // Preserve the existing packaged trust boundary. This method does not accept
+    // a replacement executable, signer, process, or claimed bundle root.
+    const auto before = process(expected.pid);
+    require(before.identity == expected, "Packaged peer birth identity mismatch");
+    if (m_impl->role == LocalInputRole::Host)
+      require(before.parent == getpid(), "Packaged host is not this core's direct child");
+    else
+      require(
+          m_impl->ancestry.front().parent == expected.pid && getppid() == expected.pid,
+          "Packaged core is not this host's live parent"
+      );
+    m_impl->verifyPackage();
+    const auto anchor = moduleFacts(m_impl->ancestry.back(), m_impl->root);
+    const auto team = anchor.teamIdentifier.value_or(std::string{});
+    requireModulePolicy(anchor, team);
+    requireModulePolicy(moduleFacts(m_impl->ancestry.front(), m_impl->self), team);
+    requireModulePolicy(moduleFacts(before, m_impl->peer), team);
+    m_impl->verifyPackage();
+    require(process(expected.pid) == before, "Packaged peer changed during library-admission inspection");
+    return LocalInputRestrictedLibraryAdmissionSnapshot(
+        m_impl->ancestry.front().identity, expected, m_impl->ancestry.back().identity, m_impl->role, m_impl->self.hash,
+        m_impl->peer.hash, m_impl->root.hash, QString::fromStdString(team), started, std::chrono::steady_clock::now()
+    );
+  } catch (const std::exception &failure) {
+    if (error)
+      *error = QString::fromUtf8(failure.what());
+    return std::nullopt;
   }
 }
 

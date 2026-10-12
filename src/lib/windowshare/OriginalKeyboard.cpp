@@ -291,12 +291,18 @@ OriginalKeyLedger::Result OriginalKeyLedger::route(const OriginalKeyEvent &event
     return result;
   if ((flagsFor(owner) & originalKey::momentaryFlags) != (sample.flags & originalKey::momentaryFlags)) {
     result.conflict = true;
-    // The up removed its ledger slot, but its original recipient still needs a
-    // release. Use only modifiers that recipient actually received.
+    // A rejected new down was never delivered. Retain only its physical
+    // tombstone; it must not manufacture a forced up for the proposed owner.
+    if (event.transition == OriginalKeyTransition::Down)
+      stored->owner = 0;
+    // Include a removed up in the same ordered cleanup, so ordinary keys
+    // release with the owner's delivered modifiers before those modifiers do.
     if (released)
-      result.releases.push_back({owner, released->sample, flagsFor(owner)});
+      stored = released;
     auto remaining = revokeAll();
     result.releases.insert(result.releases.end(), remaining.begin(), remaining.end());
+    if (released)
+      stored.reset(); // Its physical up already arrived; no tombstone remains.
     return result;
   }
   result.delivery = OriginalKeyDelivery{owner, pressSequence, event};

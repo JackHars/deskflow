@@ -300,10 +300,7 @@ void testReleaseFlagsAndDefenses()
   down.sample.timestampNs = ++stream.timestamp;
   down.sample.flags = leftCommand;
   result = ledger.route(down, 77);
-  check(
-      result.conflict && result.releases.size() == 1 && result.releases[0].flags == 0,
-      "unowned Command cannot leak into new target"
-  );
+  check(result.conflict && result.releases.empty(), "unowned Command cannot create an undelivered press's release");
   check(!result.delivery, "unowned modifier event suppressed");
 
   OriginalKeyLedger duplicates;
@@ -322,6 +319,73 @@ void testReleaseFlagsAndDefenses()
   OriginalKeyLedger capsLedger;
   result = capsLedger.route(caps.event(0x39, OriginalKeyKind::FlagsChanged, originalKey::capsLockFlag), 11);
   check(result.delivery && capsLedger.empty() && capsLedger.revokeAll().empty(), "Caps update has no release debt");
+}
+
+void testRejectedPressHasNoReleaseDebt()
+{
+  for (const bool priorPress : {false, true}) {
+    Stream stream;
+    OriginalKeyLedger ledger;
+    if (priorPress) {
+      const auto result = ledger.route({stream.sample(0, OriginalKeyKind::Down), OriginalKeyTransition::Down}, 7);
+      check(result.delivery && result.delivery->owner == 7, "prior press actually delivered");
+    }
+    // Exercise the ledger's independent defense: a well-shaped event can still
+    // name a modifier that this recipient never received. Do not use the
+    // tracker fixture here, since that separate layer rejects it earlier.
+    const auto down = OriginalKeyEvent{stream.sample(1, OriginalKeyKind::Down, leftShift), OriginalKeyTransition::Down};
+    const auto rejected = ledger.route(down, 7);
+    check(rejected.conflict && !rejected.delivery, "unowned modifier rejects a fresh down");
+    check(rejected.releases.size() == std::size_t(priorPress), "rejected down creates no release debt");
+    if (priorPress)
+      check(
+          rejected.releases[0].owner == 7 && rejected.releases[0].press.keyCode == 0,
+          "only the previously delivered press receives a forced release"
+      );
+    check(ledger.deliveredCount() == 0 && !ledger.empty(), "rejected press remains a physical tombstone");
+    const auto repeated =
+        ledger.route({stream.sample(1, OriginalKeyKind::Down, 0, true), OriginalKeyTransition::Repeat}, 8);
+    check(!repeated.delivery && repeated.releases.empty(), "rejected press repeat cannot acquire another owner");
+    const auto up = ledger.route({stream.sample(1, OriginalKeyKind::Up), OriginalKeyTransition::Up}, 8);
+    check(!up.delivery && up.releases.empty(), "rejected press up is consumed without release debt");
+    if (priorPress) {
+      const auto oldUp = ledger.route({stream.sample(0, OriginalKeyKind::Up), OriginalKeyTransition::Up}, 8);
+      check(!oldUp.delivery && oldUp.releases.empty(), "old forced release is not duplicated");
+    }
+    check(ledger.empty(), "physical ups clear both tombstones");
+  }
+}
+
+void testConflictingModifierUpReleaseOrder()
+{
+  Stream stream;
+  OriginalKeyLedger ledger;
+  const auto shiftDown = OriginalKeyEvent{
+      stream.sample(originalKey::leftShift, OriginalKeyKind::FlagsChanged, leftShift), OriginalKeyTransition::Down
+  };
+  check(ledger.route(shiftDown, 7).delivery.has_value(), "left Shift delivered to original owner");
+  const auto keyDown =
+      OriginalKeyEvent{stream.sample(0, OriginalKeyKind::Down, leftShift), OriginalKeyTransition::Down};
+  check(ledger.route(keyDown, 7).delivery.has_value(), "ordinary key delivered with left Shift");
+  // The event shape is valid, but right Shift was never delivered. Exercise
+  // the ledger directly because the independent tracker also rejects this.
+  const auto conflictingUp = OriginalKeyEvent{
+      stream.sample(originalKey::leftShift, OriginalKeyKind::FlagsChanged, rightShift), OriginalKeyTransition::Up
+  };
+  const auto result = ledger.route(conflictingUp, 8);
+  check(result.conflict && !result.delivery && result.releases.size() == 2, "conflicting modifier up drains owner");
+  check(
+      result.releases[0].owner == 7 && result.releases[0].press.keyCode == 0 && result.releases[0].flags == leftShift,
+      "ordinary key releases before removed modifier with its delivered flags"
+  );
+  check(
+      result.releases[1].owner == 7 && result.releases[1].press.keyCode == originalKey::leftShift &&
+          result.releases[1].flags == 0,
+      "removed modifier releases last without foreign right Shift"
+  );
+  check(ledger.deliveredCount() == 0 && !ledger.empty(), "held ordinary key remains a tombstone");
+  const auto keyUp = ledger.route({stream.sample(0, OriginalKeyKind::Up), OriginalKeyTransition::Up}, 8);
+  check(!keyUp.delivery && keyUp.releases.empty() && ledger.empty(), "physical key up clears the only tombstone");
 }
 
 void testEmergency()
@@ -505,6 +569,8 @@ int main()
     testDiscontinuities();
     testPressOwnership();
     testReleaseFlagsAndDefenses();
+    testRejectedPressHasNoReleaseDebt();
+    testConflictingModifierUpReleaseOrder();
     testEmergency();
     testDeterministicInterleavings();
     std::cout << "PASS: original keyboard state, recipient ownership, and emergency invariants\n";

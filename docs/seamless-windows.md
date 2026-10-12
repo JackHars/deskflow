@@ -95,6 +95,39 @@ without modifying it using:
 python3 deploy/windowshare/macos-bundle.py verify /path/to/DeskflowWindowShare-Experimental.app
 ```
 
+For a package that restricts loaded libraries to Apple or the app's signing Team,
+put `--restricted-libraries` before the build directory. This requires an
+Apple-issued signing identity; ad-hoc signatures are rejected:
+
+```sh
+MACDEPLOYQT=/path/to/this/Qt/bin/macdeployqt \
+  deploy/windowshare/package-macos.sh --restricted-libraries \
+  build/windowshare-app build/restricted-package-new "YOUR_SIGNING_IDENTITY"
+python3 deploy/windowshare/macos-bundle.py verify \
+  build/restricted-package-new/DeskflowWindowShare-Experimental.app --restricted-libraries
+```
+
+This mode signs all bundled dependencies with the same Team, enables hardened
+runtime and explicit library validation on the fixed executables, and audits
+every architecture's Apple-issued signature, Team and empty/absent entitlements.
+The ordinary packaging mode remains available for ad-hoc CI and development.
+Neither mode authorizes original input. Apple-or-same-Team library admission does
+not identify an exact set of permitted library hashes. See Apple's
+[library validation policy](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.cs.disable-library-validation)
+and [library constraints](https://developer.apple.com/documentation/security/defining-launch-environment-and-library-constraints).
+
+To test the OS policy without starting Deskflow or any native input/display code:
+
+```sh
+python3 deploy/windowshare/macos-library-admission-tests.py \
+  --signing-identity "YOUR_SIGNING_IDENTITY"
+```
+
+That test compiles disposable executable/dylib fixtures. It checks startup and
+later loading of same-Team, unsigned and ad-hoc libraries, including constructor
+suppression and an ordinary-loader control. It needs a real local signing identity
+and does not claim coverage for a different Apple Team or exact-image constraints.
+
 ## Packaged core companion
 
 The Mac opt-in core can launch the window host through a private inherited
@@ -268,6 +301,41 @@ blocking read. Cancellation takes effect before a following event can authorize;
 replacement waits for synchronous owner release. Reentrant controls use a bounded
 eight-value queue with one cancellation slot. Missing neutral-boundary, module
 integrity or ordered-input checks never authorize Prepare.
+
+Three additional foundations remain isolated from production input. The bounded
+`OriginalInputStream` carries keys, motion, buttons, scroll phases and checkpoints
+in one capture epoch and sequence, preserving each record's original flags. Its
+retained epoch evidence is revoked on overflow, discontinuity, emergency or stop.
+Neutral cutover requires an explicit trusted physical observation covering keys,
+buttons and scroll state, followed by an unchanged producer checkpoint. No OS
+snapshot/tap fence or native physical-state provider is implemented. Unknown
+startup state, held nonmodifier keys, pending momentum and missing coverage cannot
+be replaced with quiet time or empty flags. The press ledger retains original
+key/button owners and release tombstones; it does not authorize motion or scroll.
+Consumers must feed every mixed record through both the barrier and press ledger,
+apply the returned releases with their release-time flags before resuming a route,
+and require an empty ledger in addition to a committed physical neutral boundary.
+Scroll ownership must survive gesture end and any following momentum; silence or
+a checkpoint cannot redirect that momentum to a new viewport.
+
+`ViewportLease` validates one-output, axis-aligned X11 coordinate mappings and
+host-request-based freshness. The Deskflow injection space and viewer space must
+have the same explicitly bound identity and layout; matching desktop dimensions
+do not suffice. Geometry calculation is separate from delivery permission.
+Delivery additionally needs exact-sample validation and already-owned press
+evidence for drag/release clamping. Only synthetic test fixtures can create that
+validation today. There is no native X11 provider, pointer-fence implementation,
+or Wayland global-coordinate provider, and cached rectangles never grant clicks.
+
+`LocalInputPeerTrust::inspectRestrictedLibraryAdmission` optionally inspects the
+live anchor, core and host against their existing exact process/code pins. It
+requires Apple-issued matching Team signatures, hardened runtime, explicit
+library validation, no entitlements and valid/non-debugged dynamic status. Its
+result is a historical inspection snapshot, with start/end times, rather than
+retained authority. This synchronous Security-framework check must not run in an
+input tap. It establishes the limited Apple-or-same-Team admission policy, not
+exact loaded-image identity, and cannot satisfy the preflight module-integrity
+provider by itself.
 
 An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
 forwarding with an independent native admission fence. The viewer releases its

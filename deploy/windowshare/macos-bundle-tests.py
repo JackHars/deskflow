@@ -21,6 +21,37 @@ sys.modules[SPEC.name] = bundle_tool
 SPEC.loader.exec_module(bundle_tool)
 
 
+class SigningFactsTests(unittest.TestCase):
+    metadata = "CodeDirectory v=20500 size=256 flags=0x12000(library-validation,runtime) hashes=2+3 location=embedded\nTeamIdentifier=ABCDE12345\n"
+
+    def test_explicit_absent_or_empty_entitlements_only(self):
+        for entitlements in (b"", plistlib.dumps({})):
+            facts = bundle_tool.signing_facts(self.metadata, entitlements)
+            self.assertEqual(facts.team, "ABCDE12345")
+            self.assertEqual(facts.flags, bundle_tool.CS_RUNTIME | bundle_tool.CS_LIBRARY_VALIDATION)
+        for claims in ({"com.apple.security.cs.disable-library-validation": True},
+                       {"com.apple.security.get-task-allow": False}, {"unknown": False}, [], False):
+            with self.subTest(claims=claims), self.assertRaisesRegex(RuntimeError, "entitlements"):
+                bundle_tool.signing_facts(self.metadata, plistlib.dumps(claims))
+        with self.assertRaisesRegex(RuntimeError, "entitlements"):
+            bundle_tool.signing_facts(self.metadata, b"not a property list")
+
+    def test_missing_ambiguous_malformed_and_adhoc_facts_deny(self):
+        invalid = [
+            self.metadata.replace("TeamIdentifier=ABCDE12345\n", ""),
+            self.metadata + "TeamIdentifier=ABCDE12345\n",
+            self.metadata + "CodeDirectory flags=invalid\n",
+            self.metadata.replace("ABCDE12345", "not set"),
+            self.metadata.replace("0x12000", "invalid"),
+            self.metadata.replace("0x12000", "0x100012000"),
+            self.metadata.replace("0x12000", "0x12002"),
+            self.metadata.replace("0x12000", "0x32000"),
+        ]
+        for metadata in invalid:
+            with self.subTest(metadata=metadata), self.assertRaises(RuntimeError):
+                bundle_tool.signing_facts(metadata, b"")
+
+
 @unittest.skipUnless(sys.platform == "darwin", "Mach-O fixtures require macOS command-line tools")
 class BundleTests(unittest.TestCase):
     @classmethod
@@ -97,6 +128,9 @@ class BundleTests(unittest.TestCase):
         bundle_tool.command("codesign", "--force", "--sign", "-", str(self.app))
         before = self.hashes()
         self.assertEqual(bundle_tool.Bundle(self.app).verify()["errors"], [])
+        admission = bundle_tool.Bundle(self.app).verify(restricted_libraries=True)
+        self.assertTrue(any("Restricted library admission failed" in error for error in admission["errors"]))
+        self.assertIsNone(admission["restricted_library_admission"])
         self.assertEqual(self.hashes(), before, "verify must not rewrite signed files")
 
         (self.app / "Contents/Frameworks/libleaf.1.dylib").unlink()
@@ -132,6 +166,20 @@ class BundleTests(unittest.TestCase):
         helper.symlink_to(self.template / "Contents/MacOS/fixture")
         with self.assertRaisesRegex(RuntimeError, "Missing or external bundle executable"):
             bundle_tool.Bundle(self.app)
+
+    def test_restricted_audit_cannot_skip_a_non_mach_helper(self):
+        helper = self.app / "Contents/MacOS/deskflow-holding-display-helper"
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        bundle = bundle_tool.Bundle(self.app)
+        records = [bundle_tool.inspect(path) for path in bundle_tool.mach_files(self.app)]
+        with self.assertRaisesRegex(RuntimeError, "fixed executable is not a contained Mach-O"):
+            bundle.verify_restricted_library_admission(records)
+
+        helper.unlink()
+        helper.symlink_to("fixture")
+        records = [bundle_tool.inspect(path) for path in bundle_tool.mach_files(self.app)]
+        with self.assertRaisesRegex(RuntimeError, "fixed executable must be a contained regular file"):
+            bundle.verify_restricted_library_admission(records)
 
 
 if __name__ == "__main__":

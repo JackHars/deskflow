@@ -28,6 +28,7 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # Merely linking this library neither launches a companion nor enables input.
   add_library(windowshare-local-input STATIC
     "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp"
+    "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
     "${WS_ROOT}/LocalInputBootstrap.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
     "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp")
   target_compile_features(windowshare-local-input PUBLIC cxx_std_20)

@@ -3,8 +3,13 @@
 # SPDX-License-Identifier: MIT
 set -euo pipefail
 
+restricted_libraries=false
+if [ "${1:-}" = "--restricted-libraries" ]; then
+  restricted_libraries=true
+  shift
+fi
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
-  echo "Usage: $0 APP_BUILD_DIR NEW_OUTPUT_DIR [SIGNING_IDENTITY] [CORE_EXECUTABLE]" >&2
+  echo "Usage: $0 [--restricted-libraries] APP_BUILD_DIR NEW_OUTPUT_DIR [SIGNING_IDENTITY] [CORE_EXECUTABLE]" >&2
   exit 2
 fi
 build_dir="$1"
@@ -14,6 +19,14 @@ case "$build_dir" in /*) ;; *) build_dir="$PWD/$build_dir" ;; esac
 case "$output_dir" in /*) ;; *) output_dir="$PWD/$output_dir" ;; esac
 signing_identity="${3:--}"
 core_executable="${4:-}"
+executable_signing_options=(--force --sign "$signing_identity")
+if "$restricted_libraries"; then
+  if [ "$signing_identity" = "-" ]; then
+    echo "Restricted library admission requires an Apple-issued signing identity with a Team ID." >&2
+    exit 2
+  fi
+  executable_signing_options+=(--options runtime,library)
+fi
 if [ -n "$core_executable" ]; then
   case "$core_executable" in /*) ;; *) core_executable="$PWD/$core_executable" ;; esac
   if [ ! -f "$core_executable" ] || [ ! -x "$core_executable" ]; then
@@ -52,6 +65,10 @@ if [ -n "$core_executable" ]; then
   bundle_name="DeskflowSeamless-Core-Experimental"
 fi
 app_path="$output_dir/$bundle_name.app"
+verification_options=(verify "$app_path")
+if "$restricted_libraries"; then
+  verification_options+=(--restricted-libraries)
+fi
 ditto "$source_app" "$app_path"
 helper_path="$app_path/Contents/MacOS/deskflow-holding-display-helper"
 if [ ! -x "$helper_path" ]; then
@@ -111,12 +128,12 @@ done < <(find "$app_path/Contents" -type f -name '*.dylib' -print0)
 while IFS= read -r -d '' framework; do
   codesign --force --sign "$signing_identity" "$framework"
 done < <(find "$app_path/Contents" -depth -type d -name '*.framework' -print0)
-codesign --force --sign "$signing_identity" "$helper_path"
+codesign "${executable_signing_options[@]}" "$helper_path"
 if [ -n "$core_executable" ]; then
-  codesign --force --sign "$signing_identity" "$app_path/Contents/MacOS/deskflow-windowshare"
+  codesign "${executable_signing_options[@]}" "$app_path/Contents/MacOS/deskflow-windowshare"
 fi
-codesign --force --sign "$signing_identity" "$app_path"
-"$python_tool" "$script_dir/macos-bundle.py" verify "$app_path"
+codesign "${executable_signing_options[@]}" "$app_path"
+"$python_tool" "$script_dir/macos-bundle.py" "${verification_options[@]}"
 ditto -c -k --sequesterRsrc --keepParent "$app_path" "$output_dir/$bundle_name.zip"
 shasum -a 256 "$output_dir/$bundle_name.zip"
 echo "Packaged a separate experimental application; the installed Deskflow was not changed."

@@ -28,6 +28,46 @@ MACH_MAGICS = {
 LOAD_COMMANDS = {
     "LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB",
 }
+# Public Security.framework CodeDirectory flags. These inspect the signed file;
+# the live peer policy separately checks dynamic process status. No file audit
+# can attest the exact loaded-image set or authorize original input.
+CS_ADHOC, CS_LINKER_SIGNED = 0x2, 0x20000
+CS_LIBRARY_VALIDATION, CS_RUNTIME = 0x2000, 0x10000
+
+
+@dataclass(frozen=True)
+class SigningFacts:
+    team: str
+    flags: int
+
+
+def signing_facts(metadata, entitlements):
+    teams = re.findall(r"^TeamIdentifier=(.*)$", metadata, re.MULTILINE)
+    directories = re.findall(r"^CodeDirectory (.*)$", metadata, re.MULTILINE)
+    flags = re.search(r"^.* flags=(0x[0-9a-fA-F]+)(?:\([^\n]*\))? hashes=", directories[0]) if len(directories) == 1 else None
+    if len(teams) != 1 or not re.fullmatch(r"[A-Z0-9]{10}", teams[0]) or flags is None:
+        raise RuntimeError("Missing or malformed signed Team ID or CodeDirectory flags")
+    value = int(flags.group(1), 16)
+    if value > 0xffffffff or value & (CS_ADHOC | CS_LINKER_SIGNED):
+        raise RuntimeError("Ad-hoc or linker-only signatures cannot restrict library admission")
+    if entitlements:
+        try:
+            claims = plistlib.loads(entitlements)
+        except (ValueError, plistlib.InvalidFileException) as error:
+            raise RuntimeError("Cannot read signed entitlements") from error
+        if not isinstance(claims, dict) or claims:
+            raise RuntimeError("Restricted library admission requires absent or empty entitlements")
+    return SigningFacts(teams[0], value)
+
+
+def inspect_signing(path, architecture):
+    result = subprocess.run([
+        "codesign", "--display", "--verbose=4", "--architecture", architecture,
+        "--entitlements", "-", "--xml", str(path),
+    ], capture_output=True, check=False)
+    if result.returncode:
+        raise RuntimeError("Cannot inspect the signed library-admission policy: " + result.stderr.decode(errors="replace"))
+    return signing_facts(result.stderr.decode(errors="strict"), result.stdout)
 
 
 def command(*arguments):
@@ -283,7 +323,48 @@ class Bundle:
             plistlib.dump(self.plist, stream, sort_keys=False)
         return self.verify(signature=False)
 
-    def verify(self, signature=True):
+    def verify_restricted_library_admission(self, records):
+        # This is a file/package audit, not live process evidence. The two
+        # roles remain pinned separately at runtime, and original input stays
+        # disabled until its independent admission/ordering providers exist.
+        if not self.main_info.architectures or not self.main_info.architectures.issubset({"x86_64", "arm64"}):
+            raise RuntimeError("Restricted library admission supports only x86_64 and arm64 executables")
+        if version(str(self.plist.get("LSMinimumSystemVersion", "0.0"))) < (10, 14, 0):
+            raise RuntimeError("Restricted library admission requires macOS 10.14 or newer")
+        fixed_paths = {self.main, self.helper}
+        for name in ("deskflow-core", "deskflow-windowshare"):
+            candidate = self.executables / name
+            if candidate.exists():
+                fixed_paths.add(candidate)
+        for path in fixed_paths:
+            if path.is_symlink() or not path.is_file() or not inside(path, self.path):
+                raise RuntimeError("A fixed executable must be a contained regular file: " + str(path))
+        executables = {path.resolve() for path in fixed_paths}
+        missing = executables - {info.path for info in records}
+        if missing:
+            raise RuntimeError("A fixed executable is not a contained Mach-O binary: " +
+                               ", ".join(str(path) for path in sorted(missing)))
+        main_facts = inspect_signing(self.main, sorted(self.main_info.architectures)[0])
+        requirement = '=anchor apple generic and certificate leaf[subject.OU] = "{}"'.format(main_facts.team)
+        for info in records:
+            for architecture in sorted(info.architectures):
+                facts = inspect_signing(info.path, architecture)
+                if facts.team != main_facts.team:
+                    raise RuntimeError("Bundled code has a different Team ID: " + str(info.path.relative_to(self.path)))
+                required = CS_RUNTIME | CS_LIBRARY_VALIDATION
+                if info.path in executables and facts.flags & required != required:
+                    raise RuntimeError("Executable lacks hardened runtime or explicit library validation: " +
+                                       str(info.path.relative_to(self.path)))
+            command("codesign", "--verify", "--strict", "--all-architectures", "-R", requirement, str(info.path))
+        return {
+            "scope": "Apple-or-same-Team library admission", "team_id": main_facts.team,
+            "executables": sorted(path.relative_to(self.path).as_posix() for path in executables),
+            "exact_loaded_images_verified": False, "original_input_authorized": False,
+        }
+
+    def verify(self, signature=True, restricted_libraries=False):
+        if restricted_libraries and not signature:
+            raise RuntimeError("Restricted library admission cannot be audited before signing")
         records = [inspect(path) for path in mach_files(self.path)]
         binary_paths = {info.path for info in records}
         errors = []
@@ -319,11 +400,17 @@ class Bundle:
             signature_state = "valid" if result.returncode == 0 else "invalid"
             if result.returncode:
                 errors.append("Signature verification failed: " + result.stderr.strip())
+        admission = None
+        if restricted_libraries:
+            try:
+                admission = self.verify_restricted_library_admission(records)
+            except (RuntimeError, UnicodeError, ValueError) as error:
+                errors.append("Restricted library admission failed: " + str(error))
         return {
             "bundle": str(self.path), "mach_o_files": len(records), "architectures": sorted(main_architectures),
             "minimum_macos": version_text(effective), "declared_minimum_macos": version_text(declared),
             "copied_libraries": self.copied, "rewritten_dependencies": self.rewritten,
-            "signature": signature_state, "errors": errors,
+            "signature": signature_state, "restricted_library_admission": admission, "errors": errors,
         }
 
 
@@ -332,12 +419,18 @@ def main():
     parser.add_argument("mode", choices=("repair", "verify"))
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--search-root", action="append", default=[], metavar="DIRECTORY")
+    parser.add_argument("--restricted-libraries", action="store_true",
+                        help="audit Apple-issued same-Team signatures, executable runtime/library flags and no entitlements")
     arguments = parser.parse_args()
     if arguments.mode == "verify" and arguments.search_root:
         parser.error("verify never uses external library search roots")
+    if arguments.mode == "repair" and arguments.restricted_libraries:
+        parser.error("restricted library admission must be verified after signing")
     try:
         bundle = Bundle(arguments.bundle, arguments.search_root)
-        report = bundle.repair() if arguments.mode == "repair" else bundle.verify()
+        report = bundle.repair() if arguments.mode == "repair" else bundle.verify(
+            restricted_libraries=arguments.restricted_libraries,
+        )
         print(json.dumps(report, indent=2))
         return 1 if report["errors"] else 0
     except (OSError, RuntimeError, ValueError, plistlib.InvalidFileException) as error:

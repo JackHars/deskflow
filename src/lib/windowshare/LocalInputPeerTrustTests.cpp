@@ -12,9 +12,13 @@
 #include <QTemporaryDir>
 #include <QTextStream>
 #include <stdexcept>
+#include <sys/stat.h>
+#include <type_traits>
 #include <unistd.h>
 
 using namespace deskflow::windowshare;
+static_assert(!std::is_default_constructible_v<LocalInputRestrictedLibraryAdmissionSnapshot>);
+static_assert(!std::is_convertible_v<LocalInputRestrictedLibraryAdmissionSnapshot, bool>);
 namespace {
 void check(bool value, const char *reason)
 {
@@ -81,11 +85,45 @@ void hold()
   check(input.open(stdin, QIODevice::ReadOnly), "Cannot wait for fixture completion");
   check(input.readLine() == "done\n", "Unexpected fixture completion token");
 }
-int hostFixture(bool expectDenial)
+std::optional<LocalInputRestrictedLibraryAdmissionSnapshot>
+inspectAdmission(const LocalInputPeerTrust &trust, LocalInputProcess peer, LocalInputRole role, bool expectedAdmission)
+{
+  QString error = QStringLiteral("inspection did not replace the diagnostic");
+  const auto started = std::chrono::steady_clock::now();
+  auto snapshot = trust.inspectRestrictedLibraryAdmission(peer, &error);
+  if (expectedAdmission && !snapshot)
+    QTextStream(stderr) << "Restricted fixture: " << error << '\n';
+  check(bool(snapshot) == expectedAdmission, "Unexpected restricted-library-admission result");
+  if (snapshot) {
+    const auto self = currentLocalInputProcess();
+    check(error.isEmpty(), "Successful admission snapshot retained a failure diagnostic");
+    check(
+        self && snapshot->selfProcess() == *self && snapshot->peerProcess() == peer && snapshot->peerRole() == role &&
+            snapshot->anchorProcess() == (role == LocalInputRole::Host ? *self : peer),
+        "Admission snapshot does not bind both roles and the live bundle main"
+    );
+    check(
+        snapshot->selfCodeHash().size() == 20 && snapshot->peerCodeHash().size() == 20 &&
+            snapshot->anchorCodeHash().size() == 20 && snapshot->teamIdentifier().size() == 10,
+        "Admission snapshot lacks exact code hashes or its established Team identity"
+    );
+    check(
+        started <= snapshot->inspectionStartedAt() &&
+            snapshot->inspectionStartedAt() <= snapshot->inspectionFinishedAt() &&
+            snapshot->inspectionFinishedAt() <= std::chrono::steady_clock::now(),
+        "Admission snapshot has invalid monotonic observation bounds"
+    );
+  } else {
+    check(!error.isEmpty(), "Rejected admission has no diagnostic");
+  }
+  check(trust.verify(peer), "Optional stronger policy changed ordinary peer trust");
+  return snapshot;
+}
+int hostFixture(const QString &mode)
 {
   QString error;
   auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Core, &error);
-  if (expectDenial) {
+  if (mode == "deny") {
     check(!trust && !error.isEmpty(), "Direct nested host launch unexpectedly acquired packaged trust");
     QTextStream(stdout) << "DENIED\n";
     return 0;
@@ -95,9 +133,11 @@ int hostFixture(bool expectDenial)
   check(bool(trust), "Packaged child cannot establish exact core trust");
   const auto parent = localInputProcess(getppid());
   check(parent && trust->verify(*parent), "Packaged child rejected its exact live core parent");
+  inspectAdmission(*trust, *parent, LocalInputRole::Core, mode == "restricted-pass");
   auto wrong = *parent;
   ++wrong.startStamp;
   check(!trust->verify(wrong), "Packaged child accepted an incorrect parent birth identity");
+  check(!trust->inspectRestrictedLibraryAdmission(wrong), "Admission accepted an incorrect parent birth identity");
   check(!trust->verify(*currentLocalInputProcess()), "Packaged child accepted itself as core parent");
   hold();
   return 0;
@@ -118,17 +158,20 @@ int coreFixture(const QString &mode, const QString &otherPeer)
   const auto sibling = QFileInfo(QCoreApplication::applicationFilePath()).dir().filePath("deskflow-windowshare");
   check(trust->executable() == QFileInfo(sibling).canonicalFilePath(), "Trusted executable is not the fixed sibling");
   Child child;
-  child.start(trust->executable());
+  child.start(trust->executable(), {"--fixture-host", mode == "restricted-pass" ? mode : "restricted-deny"});
   const auto expected = localInputProcess(child.process.processId());
   check(expected && trust->verify(*expected), "Packaged core rejected its exact live child");
+  const auto retainedAdmission = inspectAdmission(*trust, *expected, LocalInputRole::Host, mode == "restricted-pass");
   auto wrong = *expected;
   ++wrong.startStamp;
   check(!trust->verify(wrong), "Packaged core accepted a stale child birth identity");
+  check(!trust->inspectRestrictedLibraryAdmission(wrong), "Admission accepted a stale child birth identity");
   check(!trust->verify(*currentLocalInputProcess()), "Core accepted its own PID as the host");
   if (mode == "tamper") {
     const auto resources = QFileInfo(QFileInfo(sibling).dir().path()).dir().filePath("Resources/proof.txt");
     write(resources, "altered-after-pin\n");
     check(!trust->verify(*expected), "Pinned trust ignored a changed sealed bundle resource");
+    check(!trust->inspectRestrictedLibraryAdmission(*expected), "Admission ignored a changed sealed bundle resource");
     write(resources, "sealed-fixture\n");
     check(trust->verify(*expected), "Exact restored sealed bundle did not verify with fresh static objects");
   }
@@ -137,6 +180,7 @@ int coreFixture(const QString &mode, const QString &otherPeer)
     copied.start(otherPeer, {"--fixture-hold"});
     const auto wrongPath = localInputProcess(copied.process.processId());
     check(wrongPath && !trust->verify(*wrongPath), "Same-user signed copied role at another path was accepted");
+    check(!trust->inspectRestrictedLibraryAdmission(*wrongPath), "Admission accepted a copied role at another path");
     copied.finish();
   }
   if (mode == "reseal") {
@@ -161,19 +205,37 @@ int coreFixture(const QString &mode, const QString &otherPeer)
   }
   child.finish();
   check(!trust->verify(*expected), "Exited packaged peer retained process trust");
+  check(!trust->inspectRestrictedLibraryAdmission(*expected), "Exited peer received a new admission snapshot");
+  if (retainedAdmission)
+    check(retainedAdmission->peerProcess() == *expected, "Historical snapshot changed after peer exit");
   QTextStream(stdout) << "VERIFIED\n";
   return 0;
 }
 QString makeBundle(const QString &directory, const QString &name)
 {
-  const auto bundle = QDir(directory).filePath(name + ".app");
+  const auto parent = QFileInfo(directory).canonicalFilePath();
+  struct stat parentInfo{};
+  check(
+      !parent.isEmpty() && ::lstat(parent.toUtf8().constData(), &parentInfo) == 0 && S_ISDIR(parentInfo.st_mode) &&
+          parentInfo.st_uid == geteuid() && (parentInfo.st_mode & 077) == 0 && !name.isEmpty() &&
+          QFileInfo(name).fileName() == name && name != "." && name != "..",
+      "Fixture bundle requires an existing private owned parent directory and a simple name"
+  );
+  const auto bundle = QDir(parent).filePath(name + ".app");
+  check(
+      !QFileInfo::exists(bundle) && !QFileInfo(bundle).isSymLink() && QDir().mkdir(bundle) &&
+          ::chmod(bundle.toUtf8().constData(), 0700) == 0,
+      "Fixture bundle must be a new private directory"
+  );
   const auto contents = bundle + "/Contents";
   check(
       QDir().mkpath(contents + "/MacOS") && QDir().mkpath(contents + "/Resources"),
       "Cannot create signed fixture bundle"
   );
   const auto source = QCoreApplication::applicationFilePath();
-  for (const auto &role : {"deskflow-core", "deskflow-windowshare"}) {
+  // The helper is a regular owned fixture executable for packaging closure;
+  // no test invokes it or creates a display.
+  for (const auto &role : {"deskflow-core", "deskflow-windowshare", "deskflow-holding-display-helper"}) {
     const auto path = contents + "/MacOS/" + role;
     check(QFile::copy(source, path), "Cannot copy peer trust fixture executable");
     check(
@@ -195,6 +257,8 @@ QString makeBundle(const QString &directory, const QString &name)
   write(contents + "/Resources/proof.txt", "sealed-fixture\n");
   run("/usr/bin/codesign", {"--force", "--sign", "-", "--identifier", "org.deskflow.test.input-host",
                             contents + "/MacOS/deskflow-windowshare"});
+  run("/usr/bin/codesign", {"--force", "--sign", "-", "--identifier", "org.deskflow.test.input-helper",
+                            contents + "/MacOS/deskflow-holding-display-helper"});
   run("/usr/bin/codesign", {"--force", "--sign", "-", bundle});
   run("/usr/bin/codesign", {"--verify", "--strict", "--deep", bundle});
   return bundle;
@@ -210,10 +274,28 @@ int main(int argc, char **argv)
       hold();
       return 0;
     }
-    if (arguments.size() >= 2 && arguments[1] == "--fixture-host")
-      return hostFixture(arguments.size() == 3 && arguments[2] == "deny");
-    if ((arguments.size() == 3 || arguments.size() == 4) && arguments[1] == "--fixture-core")
+    if (arguments.size() == 3 && arguments[1] == "--make-fixture-bundle") {
+      const QFileInfo target(arguments[2]);
+      check(
+          target.isAbsolute() && target.fileName().endsWith(".app"), "New fixture path must be an absolute .app path"
+      );
+      QTextStream(stdout) << makeBundle(target.dir().path(), target.fileName().chopped(4)) << '\n';
+      return 0;
+    }
+    if ((arguments.size() == 2 || arguments.size() == 3) && arguments[1] == "--fixture-host") {
+      const auto mode = arguments.value(2, "restricted-deny");
+      check(mode == "deny" || mode == "restricted-pass" || mode == "restricted-deny", "Invalid host fixture mode");
+      return hostFixture(mode);
+    }
+    if ((arguments.size() == 3 || arguments.size() == 4) && arguments[1] == "--fixture-core") {
+      check(
+          QStringList{"deny", "pass", "tamper", "wrong-path", "reseal", "restricted-pass", "restricted-deny"}.contains(
+              arguments[2]
+          ),
+          "Invalid core fixture mode"
+      );
       return coreFixture(arguments[2], arguments.value(3));
+    }
     check(arguments.size() == 1, "Unexpected peer trust fixture arguments");
     QString error;
     check(
@@ -231,6 +313,10 @@ int main(int argc, char **argv)
     const auto core = bundle + "/Contents/MacOS/deskflow-core";
     const auto host = bundle + "/Contents/MacOS/deskflow-windowshare";
     check(run(core, {"--fixture-core", "pass"}) == "VERIFIED\n", "Signed peer mutual verification failed");
+    check(
+        run(core, {"--fixture-core", "restricted-deny"}) == "VERIFIED\n",
+        "Ad-hoc signed peers acquired restricted library admission"
+    );
     check(run(core, {"--fixture-core", "tamper"}) == "VERIFIED\n", "Post-pin resource tamper was not rejected");
     check(run(core, {"--fixture-core", "reseal"}) == "VERIFIED\n", "Resealed bundle replaced live process authority");
     const auto copiedBundle = makeBundle(temporary.path(), "CopiedPeers");
@@ -253,7 +339,7 @@ int main(int argc, char **argv)
         "Unrelated same-user ad-hoc signed replacement was accepted"
     );
     QTextStream(stdout) << "PASS: signed packaged peer identity, live anchor, exact roles, birth checks, resource "
-                           "tampering and direct-launch denial\n";
+                           "tampering, direct-launch denial and restricted-admission denial\n";
     return 0;
   } catch (const std::exception &failure) {
     QTextStream(stderr) << "FAIL: " << failure.what() << '\n';

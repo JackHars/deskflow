@@ -26,4 +26,11 @@ bool LocalInputPeerTrust::verify(LocalInputProcess) const
 {
   return false;
 }
+std::optional<LocalInputRestrictedLibraryAdmissionSnapshot>
+LocalInputPeerTrust::inspectRestrictedLibraryAdmission(LocalInputProcess, QString *error) const
+{
+  if (error)
+    *error = QStringLiteral("Restricted Apple-or-same-Team library admission inspection requires macOS");
+  return std::nullopt;
+}
 } // namespace deskflow::windowshare
