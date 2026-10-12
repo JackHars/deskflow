@@ -4,12 +4,16 @@
 set -euo pipefail
 
 restricted_libraries=false
-if [ "${1:-}" = "--restricted-libraries" ]; then
-  restricted_libraries=true
-  shift
-fi
+exact_libraries=false
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --restricted-libraries) restricted_libraries=true; shift ;;
+    --exact-libraries) exact_libraries=true; restricted_libraries=true; shift ;;
+    *) break ;;
+  esac
+done
 if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
-  echo "Usage: $0 [--restricted-libraries] APP_BUILD_DIR NEW_OUTPUT_DIR [SIGNING_IDENTITY] [CORE_EXECUTABLE]" >&2
+  echo "Usage: $0 [--restricted-libraries | --exact-libraries] APP_BUILD_DIR NEW_OUTPUT_DIR [SIGNING_IDENTITY] [CORE_EXECUTABLE]" >&2
   exit 2
 fi
 build_dir="$1"
@@ -69,6 +73,9 @@ verification_options=(verify "$app_path")
 if "$restricted_libraries"; then
   verification_options+=(--restricted-libraries)
 fi
+if "$exact_libraries"; then
+  verification_options+=(--exact-libraries)
+fi
 ditto "$source_app" "$app_path"
 helper_path="$app_path/Contents/MacOS/deskflow-holding-display-helper"
 if [ ! -x "$helper_path" ]; then
@@ -122,12 +129,29 @@ ditto "$offscreen_plugin" "$app_path/Contents/PlugIns/platforms/libqoffscreen.dy
 "$python_tool" "$script_dir/macos-bundle.py" repair "$app_path" "${library_roots[@]}"
 # Sign nested libraries, frameworks and the owned helper before sealing the app.
 # macdeployqt does not reliably sign additional executables in Contents/MacOS.
-while IFS= read -r -d '' library; do
-  codesign --force --sign "$signing_identity" "$library"
-done < <(find "$app_path/Contents" -type f -name '*.dylib' -print0)
+if "$exact_libraries"; then
+  constraint_dir="$(mktemp -d "${TMPDIR:-/tmp}/deskflow-library-policy.XXXXXX")"
+  trap 'rm -rf "$constraint_dir"' EXIT
+  # Write first so parser failure cannot be hidden by process substitution.
+  "$python_tool" "$script_dir/macos-bundle.py" library-paths "$app_path" > "$constraint_dir/libraries"
+  while IFS= read -r -d '' library; do
+    codesign --force --sign "$signing_identity" "$library"
+  done < "$constraint_dir/libraries"
+else
+  while IFS= read -r -d '' library; do
+    codesign --force --sign "$signing_identity" "$library"
+  done < <(find "$app_path/Contents" -type f -name '*.dylib' -print0)
+fi
 while IFS= read -r -d '' framework; do
   codesign --force --sign "$signing_identity" "$framework"
 done < <(find "$app_path/Contents" -depth -type d -name '*.framework' -print0)
+if "$exact_libraries"; then
+  # Collect only FINAL library CDHashes. The manifest is sealed by the root
+  # signature; every fixed executable independently seals the same constraint.
+  "$python_tool" "$script_dir/macos-bundle.py" prepare-exact "$app_path" \
+    --constraint-output "$constraint_dir/policy.plist"
+  executable_signing_options+=(--library-constraint "$constraint_dir/policy.plist" --enforce-constraint-validity)
+fi
 codesign "${executable_signing_options[@]}" "$helper_path"
 if [ -n "$core_executable" ]; then
   codesign "${executable_signing_options[@]}" "$app_path/Contents/MacOS/deskflow-windowshare"

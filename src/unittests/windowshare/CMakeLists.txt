@@ -51,12 +51,15 @@ endif()
 add_test(NAME windowshare-original-keyboard COMMAND windowshare-original-keyboard-tests)
 
 find_package(Threads REQUIRED)
-foreach(check original-input viewport-lease module-policy)
+foreach(check original-input viewport-lease module-policy library-constraint)
   if(check STREQUAL "original-input")
     set(foundation_sources ../../lib/windowshare/OriginalInputTests.cpp
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
   elseif(check STREQUAL "viewport-lease")
     set(foundation_sources ../../lib/windowshare/ViewportLeaseTests.cpp ../../lib/windowshare/ViewportLease.cpp)
+  elseif(check STREQUAL "library-constraint")
+    set(foundation_sources ../../lib/windowshare/LocalInputLibraryConstraintTests.cpp
+      ../../lib/windowshare/LocalInputLibraryConstraint.cpp)
   else()
     set(foundation_sources ../../lib/windowshare/LocalInputModulePolicyTests.cpp
       ../../lib/windowshare/LocalInputModulePolicy.cpp)

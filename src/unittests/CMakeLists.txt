@@ -71,6 +71,7 @@ if(BUILD_WINDOWSHARE)
   set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests
     windowshare-core-tests windowshare-platform-markers-tests windowshare-input-routes-tests windowshare-original-keyboard-tests
     windowshare-original-input-tests windowshare-viewport-lease-tests windowshare-module-policy-tests
+    windowshare-library-constraint-tests
     windowshare-selected-peer-mailbox-tests windowshare-selected-peer-publisher-tests)
   if(TARGET windowshare-original-keyboard-mac-tests)
     set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests windowshare-original-keyboard-mac-tests)

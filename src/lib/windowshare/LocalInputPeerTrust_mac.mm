@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "LocalInputLibraryConstraint.h"
 #include "LocalInputModulePolicy.h"
 #include "LocalInputPeerTrust.h"
 
@@ -9,14 +10,23 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QOperatingSystemVersion>
 #include <QtEndian>
 #include <Security/Security.h>
+#include <algorithm>
 #include <cerrno>
 #include <fcntl.h>
 #include <libproc.h>
 #include <limits>
+#include <set>
+#include <span>
 #include <stdexcept>
 #include <sys/stat.h>
+#include <tuple>
 #include <unistd.h>
 #include <utility>
 #include <vector>
@@ -29,6 +39,8 @@ namespace {
 // Security framework performs executable, requirement, and nested-code checks.
 constexpr qsizetype maximumExecutable = 256 * 1024 * 1024;
 constexpr qsizetype maximumResources = 8 * 1024 * 1024;
+constexpr qsizetype maximumLibraryManifest = 256 * 1024;
+constexpr auto libraryManifestRelativePath = "Resources/deskflow-exact-libraries.json";
 constexpr SecCSFlags strictFlags =
     kSecCSStrictValidate | kSecCSCheckAllArchitectures | kSecCSCheckNestedCode | kSecCSRestrictSymlinks;
 static_assert(localInputModulePolicyBits::adHoc == kSecCodeSignatureAdhoc);
@@ -253,6 +265,247 @@ void sealedSlot(const QByteArray &directory, unsigned slot, const QByteArray &by
           QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).left(size),
       "Bundle metadata differs from the running anchor's resource seal"
   );
+}
+
+// Exact inspection uses a stricter bounded reader than the ordinary handshake:
+// every architecture, CodeDirectory variant and constraint must be accounted
+// for. This reads Apple's published signature representation, not private APIs.
+struct ExactCodeDirectory
+{
+  QByteArray bytes, hash;
+};
+struct ExactSlice
+{
+  std::uint32_t cpuType = 0, cpuSubtype = 0, fileType = 0;
+  std::vector<ExactCodeDirectory> directories;
+  QByteArray constraint;
+};
+std::vector<ExactSlice> exactSlices(const QByteArray &image, bool allowFat = true)
+{
+  const auto magic = number(image, 0);
+  if (magic == 0xcafebabe || magic == 0xbebafeca || magic == 0xcafebabf || magic == 0xbfbafeca) {
+    require(allowFat, "Nested universal exact-library image");
+    const bool big = magic == 0xcafebabe || magic == 0xcafebabf;
+    const bool wide = magic == 0xcafebabf || magic == 0xbfbafeca;
+    const auto count = number(image, 4, 4, big);
+    const auto entrySize = wide ? 32U : 20U;
+    require(count > 0 && count <= 16, "Unsupported exact-library architecture count");
+    const auto tableEnd = 8 + count * entrySize;
+    require(tableEnd <= quint64(image.size()), "Truncated exact-library architecture table");
+    std::vector<ExactSlice> result;
+    std::vector<std::pair<quint64, quint64>> ranges;
+    std::set<std::pair<std::uint32_t, std::uint32_t>> architectures;
+    for (quint64 index = 0; index < count; ++index) {
+      const auto at = 8 + index * entrySize;
+      const auto offset = number(image, at + 8, wide ? 8 : 4, big);
+      const auto length = number(image, at + (wide ? 16 : 12), wide ? 8 : 4, big);
+      require(offset >= tableEnd && length > 0, "Invalid exact-library architecture range");
+      auto slices = exactSlices(part(image, offset, length), false);
+      require(slices.size() == 1, "Invalid exact-library architecture image");
+      auto slice = std::move(slices.front());
+      require(
+          slice.cpuType == number(image, at, 4, big) && slice.cpuSubtype == number(image, at + 4, 4, big) &&
+              architectures.emplace(slice.cpuType, slice.cpuSubtype).second,
+          "Inconsistent or duplicate exact-library architecture"
+      );
+      for (const auto &[start, end] : ranges)
+        require(offset >= end || offset + length <= start, "Overlapping exact-library architecture images");
+      ranges.emplace_back(offset, offset + length);
+      result.push_back(std::move(slice));
+    }
+    return result;
+  }
+  const bool big = magic == 0xfeedface || magic == 0xfeedfacf;
+  const bool wide = magic == 0xfeedfacf || magic == 0xcffaedfe;
+  require(big || magic == 0xcefaedfe || magic == 0xcffaedfe, "Unsupported exact-library Mach-O format");
+  ExactSlice result;
+  result.cpuType = number(image, 4, 4, big);
+  result.cpuSubtype = number(image, 8, 4, big);
+  result.fileType = number(image, 12, 4, big);
+  const auto count = number(image, 16, 4, big), commands = number(image, 20, 4, big);
+  quint64 at = wide ? 32 : 28;
+  require(
+      count <= 4096 && at <= quint64(image.size()) && commands <= quint64(image.size()) - at,
+      "Invalid exact-library Mach-O commands"
+  );
+  const auto end = at + commands;
+  QByteArray signature;
+  for (quint64 index = 0; index < count; ++index) {
+    require(at + 8 <= end, "Truncated exact-library Mach-O command");
+    const auto kind = number(image, at, 4, big), size = number(image, at + 4, 4, big);
+    require(size >= 8 && size <= end - at, "Invalid exact-library Mach-O command size");
+    if (kind == 0x1d) { // LC_CODE_SIGNATURE
+      require(size == 16 && signature.isEmpty(), "Duplicate or malformed exact-library signature command");
+      const auto offset = number(image, at + 8, 4, big), length = number(image, at + 12, 4, big);
+      require(offset >= end && length >= 12, "Invalid exact-library signature range");
+      signature = part(image, offset, length);
+    }
+    at += size;
+  }
+  require(at == end && !signature.isEmpty(), "Missing or incomplete exact-library signature");
+  require(number(signature, 0) == 0xfade0cc0, "Missing exact-library signature superblob");
+  const auto length = number(signature, 4), blobs = number(signature, 8);
+  require(
+      length <= quint64(signature.size()) && blobs > 0 && blobs <= 64 && 12 + blobs * 8 <= length,
+      "Malformed exact-library signature superblob"
+  );
+  std::set<quint64> types;
+  std::vector<std::pair<quint64, quint64>> ranges;
+  for (quint64 index = 0; index < blobs; ++index) {
+    const auto type = number(signature, 12 + index * 8), offset = number(signature, 16 + index * 8);
+    require(
+        types.insert(type).second && offset >= 12 + blobs * 8 && offset + 8 <= length,
+        "Duplicate or invalid exact-library signature slot"
+    );
+    const auto blobMagic = number(signature, offset), blobLength = number(signature, offset + 4);
+    require(blobLength >= 8 && blobLength <= length - offset, "Invalid exact-library signature blob range");
+    for (const auto &[start, end] : ranges)
+      require(offset >= end || offset + blobLength <= start, "Overlapping exact-library signature blobs");
+    ranges.emplace_back(offset, offset + blobLength);
+    const auto bytes = part(signature, offset, blobLength);
+    if (type == 0 || (type >= 0x1000 && type < 0x1005)) {
+      require(blobMagic == 0xfade0c02 && bytes.size() >= 44, "Invalid exact-library CodeDirectory");
+      const auto hashType = static_cast<unsigned char>(bytes[37]);
+      const auto hashSize = static_cast<unsigned char>(bytes[36]);
+      require(
+          (hashType == 2 && hashSize == 32) || (hashType == 3 && hashSize == 20),
+          "Exact library identity requires SHA-256 CodeDirectory variants only"
+      );
+      const auto hash = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).left(20);
+      require(
+          std::none_of(
+              result.directories.begin(), result.directories.end(),
+              [&](const auto &directory) { return directory.hash == hash; }
+          ),
+          "Duplicate exact-library CodeDirectory identity"
+      );
+      result.directories.push_back({bytes, hash});
+    } else {
+      require(blobMagic != 0xfade0c02, "CodeDirectory occupies an invalid exact-library signature slot");
+      if (type == 11) {
+        require(
+            blobMagic == 0xfade8181 && blobLength <= maxLocalInputLibraryConstraintBytes,
+            "Invalid exact-library constraint blob"
+        );
+        result.constraint = bytes;
+      }
+    }
+  }
+  require(types.contains(0) && !result.directories.empty(), "Missing exact-library CodeDirectory");
+  return {std::move(result)};
+}
+
+struct LibraryRecord
+{
+  QString path;
+  std::uint32_t cpuType = 0, cpuSubtype = 0;
+  QByteArray hash;
+  auto key() const
+  {
+    return std::tuple{path.toUtf8(), cpuType, cpuSubtype, hash};
+  }
+};
+struct LibraryManifest
+{
+  QString team;
+  std::vector<LibraryRecord> records;
+  std::vector<QByteArray> hashes;
+};
+std::uint32_t manifestNumber(const QJsonValue &value)
+{
+  const auto integer = value.toInteger(-1);
+  require(
+      value.isDouble() && integer >= 0 && integer <= std::numeric_limits<std::uint32_t>::max() &&
+          value.toDouble() == double(integer),
+      "Malformed exact-library architecture number"
+  );
+  return static_cast<std::uint32_t>(integer);
+}
+LibraryManifest libraryManifest(const QByteArray &bytes)
+{
+  require(bytes.size() <= maximumLibraryManifest, "Oversized exact-library manifest");
+  QJsonParseError error;
+  const auto document = QJsonDocument::fromJson(bytes, &error);
+  require(
+      error.error == QJsonParseError::NoError && document.isObject() &&
+          document.toJson(QJsonDocument::Compact) == bytes,
+      "Exact-library manifest is not canonical compact JSON"
+  ); // Re-encoding also rejects duplicate object keys and alternate number forms.
+  const auto object = document.object();
+  require(
+      object.keys() == QStringList{"libraries", "policy", "schema", "teamIdentifier"} &&
+          manifestNumber(object.value("schema")) == 1 && object.value("policy") == "same-team-cdhash-v1" &&
+          object.value("teamIdentifier").isString() && object.value("libraries").isArray(),
+      "Unsupported exact-library manifest schema"
+  );
+  LibraryManifest result;
+  result.team = object.value("teamIdentifier").toString();
+  require(validLocalInputModuleTeamIdentifier(result.team.toStdString()), "Invalid exact-library manifest Team");
+  const auto entries = object.value("libraries").toArray();
+  require(
+      !entries.isEmpty() && entries.size() <= qsizetype(maxLocalInputLibraryConstraintHashes),
+      "Unsupported exact-library manifest record count"
+  );
+  for (const auto &entry : entries) {
+    require(entry.isObject(), "Invalid exact-library manifest record");
+    const auto record = entry.toObject();
+    require(
+        record.keys() == QStringList{"cdhash", "cpuSubtype", "cpuType", "path"} && record.value("cdhash").isString() &&
+            record.value("path").isString(),
+        "Invalid exact-library record fields"
+    );
+    LibraryRecord item;
+    item.path = record.value("path").toString();
+    item.cpuType = manifestNumber(record.value("cpuType"));
+    item.cpuSubtype = manifestNumber(record.value("cpuSubtype"));
+    const auto hex = record.value("cdhash").toString().toLatin1();
+    item.hash = QByteArray::fromHex(hex);
+    require(hex.size() == 40 && item.hash.size() == 20 && item.hash.toHex() == hex, "Invalid manifest CDHash");
+    require(
+        item.path.startsWith("Contents/") && item.path.toUtf8().size() <= 4096 &&
+            QDir::cleanPath(item.path) == item.path && !item.path.contains('\\') &&
+            std::none_of(item.path.begin(), item.path.end(), [](QChar value) { return value.unicode() < 32; }) &&
+            !item.path.endsWith('/'),
+        "Invalid exact-library manifest relative path"
+    );
+    require(
+        result.records.empty() || result.records.back().key() < item.key(),
+        "Unsorted or duplicate exact-library manifest records"
+    );
+    result.hashes.push_back(item.hash);
+    result.records.push_back(std::move(item));
+  }
+  std::sort(result.hashes.begin(), result.hashes.end());
+  result.hashes.erase(std::unique(result.hashes.begin(), result.hashes.end()), result.hashes.end());
+  return result;
+}
+
+void requireExactConstraint(const QByteArray &image, const QByteArray &liveHash, const LibraryManifest &manifest)
+{
+  std::size_t matched = 0;
+  for (const auto &slice : exactSlices(image)) {
+    require(slice.fileType == 2, "Exact permitted-library policy requires executable roles"); // MH_EXECUTE
+    require(!slice.constraint.isEmpty(), "Pinned executable has no library constraint");
+    const auto parsed = parseLocalInputLibraryConstraint(
+        std::span(
+            reinterpret_cast<const std::uint8_t *>(slice.constraint.constData()), std::size_t(slice.constraint.size())
+        )
+    );
+    require(parsed.has_value(), "Pinned executable has an unsupported library constraint");
+    std::vector<QByteArray> hashes;
+    for (const auto &hash : parsed->cdHashes)
+      hashes.emplace_back(reinterpret_cast<const char *>(hash.data()), hash.size());
+    require(
+        parsed->teamIdentifier == manifest.team.toStdString() && hashes == manifest.hashes,
+        "Pinned executable library constraint differs from the sealed manifest"
+    );
+    for (const auto &directory : slice.directories) {
+      sealedSlot(directory.bytes, 11, slice.constraint);
+      if (directory.hash == liveHash)
+        ++matched;
+    }
+  }
+  require(matched == 1, "Exact library constraint does not belong to the pinned live CodeDirectory");
 }
 struct Process
 {
@@ -492,7 +745,90 @@ QByteArray nestedHash(CFDictionaryRef resources, const QString &name)
   require(entry && CFGetTypeID(entry) == CFDictionaryGetTypeID(), "Fixed peer is not sealed as nested bundle code");
   return data(CFDictionaryGetValue(static_cast<CFDictionaryRef>(entry), CFSTR("cdhash")));
 }
+void requireManifestSeal(const QByteArray &resourceBytes, const QByteArray &manifestBytes)
+{
+  const auto resources = plist(resourceBytes);
+  const auto files = CFDictionaryGetValue(resources.value, CFSTR("files2"));
+  require(files && CFGetTypeID(files) == CFDictionaryGetTypeID(), "Exact-library manifest has no resource seal");
+  const auto key = cfString(QString::fromLatin1(libraryManifestRelativePath));
+  const auto entry = CFDictionaryGetValue(static_cast<CFDictionaryRef>(files), key.value);
+  require(entry && CFGetTypeID(entry) == CFDictionaryGetTypeID(), "Exact-library manifest is not a sealed resource");
+  const auto digest = CFDictionaryGetValue(static_cast<CFDictionaryRef>(entry), CFSTR("hash2"));
+  require(
+      digest && CFGetTypeID(digest) == CFDataGetTypeID() && CFDataGetLength(static_cast<CFDataRef>(digest)) == 32,
+      "Exact-library manifest lacks its SHA-256 resource seal"
+  );
+  const auto hash = static_cast<CFDataRef>(digest);
+  require(
+      QByteArray(reinterpret_cast<const char *>(CFDataGetBytePtr(hash)), CFDataGetLength(hash)) ==
+          QCryptographicHash::hash(manifestBytes, QCryptographicHash::Sha256),
+      "Exact-library manifest differs from the live anchor's resource seal"
+  );
+}
+std::size_t requireManifestLibraries(const QString &bundle, const LibraryManifest &manifest)
+{
+  const auto expression =
+      cfString(QStringLiteral("anchor apple generic and certificate leaf[subject.OU] = \"%1\"").arg(manifest.team));
+  CF<SecRequirementRef> requirement;
+  require(
+      SecRequirementCreateWithString(expression.value, kSecCSDefaultFlags, &requirement.value) == errSecSuccess,
+      "Cannot construct exact-library signing requirement"
+  );
+  std::size_t sliceCount = 0;
+  for (std::size_t index = 0; index < manifest.records.size();) {
+    const auto &path = manifest.records[index].path;
+    const auto absolute = canonical(QDir(bundle).filePath(path));
+    require(absolute.startsWith(bundle + "/Contents/"), "Exact-library manifest escaped its bundle");
+    const auto image = readFile(absolute, maximumExecutable);
+    std::vector<LibraryRecord> actual;
+    for (const auto &slice : exactSlices(image)) {
+      require(
+          slice.fileType == 6 || slice.fileType == 8,
+          "Exact-library manifest permits an executable or non-library image"
+      ); // MH_DYLIB or MH_BUNDLE, never executable-role hashes.
+      ++sliceCount;
+      for (const auto &directory : slice.directories)
+        actual.push_back({path, slice.cpuType, slice.cpuSubtype, directory.hash});
+    }
+    std::sort(actual.begin(), actual.end(), [](const auto &a, const auto &b) { return a.key() < b.key(); });
+    std::size_t limit = index;
+    while (limit < manifest.records.size() && manifest.records[limit].path == path)
+      ++limit;
+    require(actual.size() == limit - index, "Exact-library manifest omits or adds a signed library variant");
+    for (std::size_t variant = 0; variant < actual.size(); ++variant)
+      require(
+          actual[variant].key() == manifest.records[index + variant].key(),
+          "Exact-library manifest differs from a signed library architecture or CDHash"
+      );
+    const auto code = staticCode(absolute);
+    require(
+        SecStaticCodeCheckValidity(code.value, strictFlags, requirement.value) == errSecSuccess,
+        "Exact permitted library failed Apple-issued same-Team signature validation"
+    );
+    index = limit;
+  }
+  return sliceCount;
+}
 } // namespace
+
+#if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
+// Linked only when this file is a direct source of the peer-test executable.
+// No public declaration or production symbol: this exercises the bounded
+// container reader independently of Security.framework's earlier validation.
+bool testLocalInputExactImage(const QByteArray &image, QString *error) noexcept
+{
+  try {
+    exactSlices(image);
+    if (error)
+      error->clear();
+    return true;
+  } catch (const std::exception &failure) {
+    if (error)
+      *error = QString::fromUtf8(failure.what());
+    return false;
+  }
+}
+#endif
 
 struct LocalInputPeerTrust::Impl
 {
@@ -656,6 +992,62 @@ LocalInputPeerTrust::inspectRestrictedLibraryAdmission(LocalInputProcess expecte
     return LocalInputRestrictedLibraryAdmissionSnapshot(
         m_impl->ancestry.front().identity, expected, m_impl->ancestry.back().identity, m_impl->role, m_impl->self.hash,
         m_impl->peer.hash, m_impl->root.hash, QString::fromStdString(team), started, std::chrono::steady_clock::now()
+    );
+  } catch (const std::exception &failure) {
+    if (error)
+      *error = QString::fromUtf8(failure.what());
+    return std::nullopt;
+  }
+}
+
+std::optional<LocalInputExactPermittedLibrariesSnapshot>
+LocalInputPeerTrust::inspectExactPermittedLibraries(LocalInputProcess expected, QString *error) const
+{
+  if (error)
+    error->clear();
+  const auto started = std::chrono::steady_clock::now();
+  try {
+    require(
+        QOperatingSystemVersion::current().majorVersion() >= 14,
+        "Exact permitted-library inspection requires macOS 14 or later"
+    );
+    QString diagnostic;
+    const auto before = inspectRestrictedLibraryAdmission(expected, &diagnostic);
+    if (!before)
+      throw std::runtime_error(("Exact permitted-library admission rejected: " + diagnostic).toStdString());
+    const auto manifestPath = QFileInfo(m_impl->infoPath).dir().filePath(libraryManifestRelativePath);
+    const auto bytes = readFile(manifestPath, maximumLibraryManifest);
+    // The captured CodeResources was authenticated against the live root's
+    // exact CodeDirectory during construction. Revalidate that same chain here
+    // rather than trusting the manifest merely because its path is in a bundle.
+    const auto rootImage = readFile(m_impl->root.executable, maximumExecutable);
+    sealedSlot(codeDirectory(rootImage, m_impl->root.hash), 3, m_impl->resourceBytes);
+    requireManifestSeal(m_impl->resourceBytes, bytes);
+    const auto manifest = libraryManifest(bytes);
+    require(manifest.team == before->teamIdentifier(), "Exact-library manifest differs from the anchored Team");
+    requireExactConstraint(rootImage, m_impl->root.hash, manifest);
+    std::set<QString> checked{m_impl->root.executable};
+    for (const auto *pin : {&m_impl->self, &m_impl->peer}) {
+      if (checked.insert(pin->executable).second)
+        requireExactConstraint(readFile(pin->executable, maximumExecutable), pin->hash, manifest);
+    }
+    const auto sliceCount = requireManifestLibraries(m_impl->root.path, manifest);
+    require(
+        readFile(manifestPath, maximumLibraryManifest) == bytes, "Exact-library manifest changed during inspection"
+    );
+    const auto after = inspectRestrictedLibraryAdmission(expected, &diagnostic);
+    if (!after)
+      throw std::runtime_error(("Exact permitted-library final validation rejected: " + diagnostic).toStdString());
+    require(
+        before->selfProcess() == after->selfProcess() && before->peerProcess() == after->peerProcess() &&
+            before->anchorProcess() == after->anchorProcess() && before->selfCodeHash() == after->selfCodeHash() &&
+            before->peerCodeHash() == after->peerCodeHash() && before->anchorCodeHash() == after->anchorCodeHash() &&
+            before->teamIdentifier() == after->teamIdentifier(),
+        "Exact permitted-library process identities changed during inspection"
+    );
+    return LocalInputExactPermittedLibrariesSnapshot(
+        *after, QCryptographicHash::hash(bytes, QCryptographicHash::Sha256), manifest.hashes, manifest.records.size(),
+        sliceCount, started, std::chrono::steady_clock::now()
     );
   } catch (const std::exception &failure) {
     if (error)

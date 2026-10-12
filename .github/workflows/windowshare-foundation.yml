@@ -67,6 +67,8 @@ jobs:
           -DWINDOWSHARE_SANITIZERS=ON
       - run: cmake --build build/core --parallel 2
       - run: ctest --test-dir build/core --output-on-failure
+      - name: Verify platform-independent library policy parsers
+        run: python3 deploy/windowshare/macos-bundle-tests.py ExactPolicyTests SigningFactsTests
   transport:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

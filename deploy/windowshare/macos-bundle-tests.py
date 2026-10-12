@@ -5,6 +5,7 @@
 
 import hashlib
 import importlib.util
+import os
 from pathlib import Path
 import plistlib
 import shutil
@@ -12,9 +13,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 sys.dont_write_bytecode = True
+import macos_library_policy as policy
 SPEC = importlib.util.spec_from_file_location("macos_bundle", Path(__file__).with_name("macos-bundle.py"))
 bundle_tool = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = bundle_tool
@@ -50,6 +53,123 @@ class SigningFactsTests(unittest.TestCase):
         for metadata in invalid:
             with self.subTest(metadata=metadata), self.assertRaises(RuntimeError):
                 bundle_tool.signing_facts(metadata, b"")
+
+
+class ExactPolicyTests(unittest.TestCase):
+    # Actual full slot-11 blob extracted from codesign on macOS 26.1. The
+    # fixture's public Team/hash are identities only, never signing secrets.
+    constraint = bytes.fromhex(
+        "fade818100000084707a020101b07530090c046363617402010030090c04636f6d70020101"
+        "30520c0472657173b04a30290c06636468617368b01f301d0c0324696e30160414"
+        "b6318e78379c45a23075b227c9d1b2254b344f50"
+        "301d0c0f7465616d2d6964656e7469666965720c0a4d4d3550424a39443459"
+        "30090c0476657273020101"
+    )
+    cdhash = "b6318e78379c45a23075b227c9d1b2254b344f50"
+
+    def manifest(self):
+        return {"schema": 1, "policy": "same-team-cdhash-v1", "teamIdentifier": "MM5PBJ9D4Y",
+                "libraries": [{"path": "Contents/Frameworks/library.dylib", "cpuType": 0x1000007,
+                               "cpuSubtype": 0x80000003, "cdhash": self.cdhash}]}
+
+    def test_authentic_constraint_and_fail_closed_mutations(self):
+        self.assertEqual(policy.parse_constraint(self.constraint), ("MM5PBJ9D4Y", [self.cdhash]))
+        for length in range(len(self.constraint)):
+            with self.subTest(length=length), self.assertRaises(ValueError):
+                policy.parse_constraint(self.constraint[:length])
+        malformed = [self.constraint + b"\0", self.constraint * 1000,
+                     self.constraint.replace(b"$in", b"$or"), self.constraint.replace(b"ccat", b"xxxx"),
+                     self.constraint.replace(b"MM5PBJ9D4Y", b"mm5pbj9d4y"),
+                     self.constraint[:-1] + b"\x02", self.constraint.replace(b"\x04\x14", b"\x0c\x14")]
+        for blob in malformed:
+            with self.subTest(blob=blob[:16]), self.assertRaises(ValueError):
+                policy.parse_constraint(blob)
+
+    def test_der_rejects_indefinite_nonminimal_and_trailing_values(self):
+        for data in (b"\x30\x80\0\0", b"\x30\x81\x01\0", b"\x30\x82\0\x80" + bytes(128),
+                     b"\x30\x83\x01\0\0", b"\x30\x82\x01\0"):
+            with self.subTest(data=data[:5]), self.assertRaises(ValueError):
+                policy.DER(data).take(0x30)
+        reader = policy.DER(b"\x30\0\0")
+        self.assertEqual(reader.take(0x30), b"")
+        with self.assertRaises(ValueError):
+            reader.done()
+
+    def test_manifest_canonical_form_and_all_hash_variants(self):
+        manifest = self.manifest()
+        second = dict(manifest["libraries"][0], cdhash="c" * 40)
+        manifest["libraries"].append(second)
+        data = policy.canonical_json(manifest)
+        self.assertEqual(policy.parse_manifest(data), manifest)
+        self.assertEqual(policy.manifest_hashes(manifest), [self.cdhash, "c" * 40])
+        for altered in (data + b"\n", data.replace(b'"schema":1', b'"schema":1.0'),
+                        data.replace(b'"schema":1', b'"schema":1,"schema":1'),
+                        json_bytes(manifest, indent=2)):
+            with self.subTest(data=altered[:30]), self.assertRaises(ValueError):
+                policy.parse_manifest(altered)
+
+    def test_manifest_rejects_unknown_duplicate_unsafe_and_ambiguous_records(self):
+        for field, value in (("path", "Contents/../escape"), ("path", "Contents//library"),
+                             ("path", "Contents/library/"), ("path", "Contents/lib\0"),
+                             ("path", "Contents/lib\\evil"), ("cpuType", True), ("cpuSubtype", -1),
+                             ("cpuSubtype", 0x100000000), ("cpuType", 7.0), ("cdhash", self.cdhash.upper())):
+            manifest = self.manifest()
+            manifest["libraries"][0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                policy.parse_manifest(policy.canonical_json(manifest))
+        for count in (0, 2, policy.MAX_RECORDS + 1):
+            manifest = self.manifest()
+            manifest["libraries"] *= count
+            with self.assertRaises(ValueError):
+                policy.parse_manifest(policy.canonical_json(manifest))
+        manifest = self.manifest()
+        manifest["unrecognized"] = False
+        with self.assertRaises(ValueError):
+            policy.parse_manifest(policy.canonical_json(manifest))
+
+    def test_bounded_binary_reader_rejects_malformed_containers(self):
+        for data in (b"", bytes(32), b"\xca\xfe\xba\xbe\0\0\0\x11", b"\xca\xfe\xba\xbe\0\0\0\x01",
+                     b"\xcf\xfa\xed\xfe" + bytes(28)):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                policy.slices(data)
+        for offset, size in ((-1, 1), (1, -1), (5, 0), (3, 2)):
+            with self.assertRaises(ValueError):
+                policy.part(b"1234", offset, size)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO check requires a Unix filesystem")
+    def test_bounded_file_reader_rejects_fifo_without_waiting_for_writer(self):
+        with tempfile.TemporaryDirectory(prefix="deskflow-policy-fifo-") as directory:
+            path = Path(directory) / "manifest"
+            os.mkfifo(path)
+            result = subprocess.run([
+                sys.executable, "-B", "-c",
+                "import sys; import macos_library_policy as p; p.read_file(sys.argv[1], 1024)", str(path),
+            ], cwd=Path(__file__).parent, capture_output=True, timeout=5)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b"Invalid bounded policy file", result.stderr)
+
+    def test_inventory_denies_external_dangling_directories_and_scan_failure(self):
+        with tempfile.TemporaryDirectory(prefix="deskflow-policy-scan-") as directory:
+            root = Path(directory)
+            bundle = root / "bundle"
+            bundle.mkdir()
+            link = bundle / "external"
+            link.symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(RuntimeError, "directory symlink"):
+                bundle_tool.mach_files(bundle)
+            link.unlink()
+            link.symlink_to(root / "missing", target_is_directory=True)
+            with self.assertRaises(OSError):
+                bundle_tool.mach_files(bundle)
+            link.unlink()
+            with mock.patch.object(os, "scandir", side_effect=PermissionError("unreadable inventory")):
+                with self.assertRaisesRegex(RuntimeError, "Cannot inspect bundle directory"):
+                    bundle_tool.mach_files(bundle)
+
+
+def json_bytes(value, **options):
+    import json
+    return json.dumps(value, **options).encode("utf-8")
 
 
 @unittest.skipUnless(sys.platform == "darwin", "Mach-O fixtures require macOS command-line tools")
@@ -181,6 +301,40 @@ class BundleTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fixed executable must be a contained regular file"):
             bundle.verify_restricted_library_admission(records)
 
+    def test_signed_constraints_manifest_and_special_slot_binding(self):
+        bundle = bundle_tool.Bundle(self.app, self.search_roots)
+        self.assertEqual(bundle.repair()["errors"], [])
+        libraries = bundle.exact_library_paths()
+        for path in libraries:
+            bundle_tool.command("codesign", "--force", "--sign", "-", str(path))
+        data = policy.manifest_for(bundle.path, libraries, "MM5PBJ9D4Y")
+        manifest = policy.parse_manifest(data)
+        destination = self.app / policy.MANIFEST
+        destination.parent.mkdir(parents=True)
+        destination.write_bytes(data)
+        constraint = self.root / (self.id().split(".")[-1] + ".plist")
+        constraint.write_bytes(plistlib.dumps({
+            "team-identifier": manifest["teamIdentifier"],
+            "cdhash": {"$in": [bytes.fromhex(value) for value in policy.manifest_hashes(manifest)]},
+        }))
+        options = ["--force", "--sign", "-", "--options", "runtime,library", "--library-constraint", str(constraint),
+                   "--enforce-constraint-validity"]
+        bundle_tool.command("codesign", *options, str(bundle.helper))
+        bundle_tool.command("codesign", *options, str(self.app))
+        info = bundle.plist_path.read_bytes()
+        resources = (self.app / "Contents/_CodeSignature/CodeResources").read_bytes()
+        policy.verify_executable(bundle.main, manifest, info=info, resources=resources)
+        policy.verify_executable(bundle.helper, manifest)
+        with self.assertRaisesRegex(ValueError, "special slot"):
+            policy.verify_executable(bundle.main, manifest, resources=resources + b"\n")
+        manifest["teamIdentifier"] = "ABCDE12345"
+        with self.assertRaisesRegex(ValueError, "differs"):
+            policy.verify_executable(bundle.helper, manifest)
+        # A correct embedded policy cannot convert an ad-hoc fixture into
+        # Apple-issued restricted/exact admission. These files are never run.
+        report = bundle_tool.Bundle(self.app).verify(exact_libraries=True)
+        self.assertTrue(report["errors"])
+        self.assertIsNone(report["exact_library_admission"])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

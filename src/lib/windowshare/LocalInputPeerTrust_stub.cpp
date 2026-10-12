@@ -33,4 +33,11 @@ LocalInputPeerTrust::inspectRestrictedLibraryAdmission(LocalInputProcess, QStrin
     *error = QStringLiteral("Restricted Apple-or-same-Team library admission inspection requires macOS");
   return std::nullopt;
 }
+std::optional<LocalInputExactPermittedLibrariesSnapshot>
+LocalInputPeerTrust::inspectExactPermittedLibraries(LocalInputProcess, QString *error) const
+{
+  if (error)
+    *error = QStringLiteral("Exact permitted-library identity inspection requires macOS 14 or later");
+  return std::nullopt;
+}
 } // namespace deskflow::windowshare

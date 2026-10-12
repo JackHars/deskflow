@@ -29,6 +29,7 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_library(windowshare-local-input STATIC
     "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp"
     "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
+    "${WS_ROOT}/LocalInputLibraryConstraint.cpp"
     "${WS_ROOT}/LocalInputBootstrap.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
     "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp")
   target_compile_features(windowshare-local-input PUBLIC cxx_std_20)
@@ -79,7 +80,13 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
     add_test(NAME windowshare-companion COMMAND windowshare-companion-tests)
     set_tests_properties(windowshare-companion PROPERTIES TIMEOUT 60)
     if(APPLE)
-      add_executable(windowshare-peer-trust-tests "${WS_ROOT}/LocalInputPeerTrustTests.cpp")
+      # Compile the verifier here once with a private malformed-image test
+      # seam. The archive's ordinary verifier object is not pulled into this
+      # target; the seam is absent from every production executable/library.
+      add_executable(windowshare-peer-trust-tests
+        "${WS_ROOT}/LocalInputPeerTrustTests.cpp" "${WS_ROOT}/LocalInputPeerTrust_mac.mm")
+      target_compile_definitions(windowshare-peer-trust-tests PRIVATE DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING=1)
+      set_target_properties(windowshare-peer-trust-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       target_link_libraries(windowshare-peer-trust-tests PRIVATE windowshare-local-input)
       add_test(NAME windowshare-peer-trust COMMAND windowshare-peer-trust-tests)
       set_tests_properties(windowshare-peer-trust PROPERTIES TIMEOUT 60)

@@ -128,6 +128,37 @@ later loading of same-Team, unsigned and ad-hoc libraries, including constructor
 suppression and an ordinary-loader control. It needs a real local signing identity
 and does not claim coverage for a different Apple Team or exact-image constraints.
 
+For a sealed set of permitted non-Apple library identities, use
+`--exact-libraries` instead. It implies restricted admission and requires macOS
+14 or newer. The packaging script signs all libraries first, records every
+architecture and supported SHA-256 CodeDirectory variant in
+`Contents/Resources/deskflow-exact-libraries.json`, then signs the fixed
+executables with the same Team-and-CDHash constraint:
+
+```sh
+MACDEPLOYQT=/path/to/this/Qt/bin/macdeployqt \
+  deploy/windowshare/package-macos.sh --exact-libraries \
+  build/windowshare-app build/exact-package-new "YOUR_SIGNING_IDENTITY"
+python3 deploy/windowshare/macos-bundle.py verify \
+  build/exact-package-new/DeskflowWindowShare-Experimental.app --exact-libraries
+python3 deploy/windowshare/macos-library-constraint-tests.py \
+  --signing-identity "YOUR_SIGNING_IDENTITY"
+```
+
+The audit independently parses the embedded constraint's narrow supported DER
+schema, verifies its CodeDirectory slot 11 seal, checks the root resource seal
+and compares the manifest with the complete bundled library inventory. It rejects
+unknown encodings, missing or duplicate records and unsupported digest variants.
+The disposable OS suite checks native Intel x86_64 startup and later loading:
+listed hashes load; excluded same-Team/same-identifier code and omitted transitive
+dependencies fail before constructors; otherwise identical unconstrained controls
+load them. Full-list transitive controls and an explicitly unlisted system library
+check the policy's boundary. The suite does not establish arm64 or Rosetta behavior.
+
+Apple/system libraries remain exempt. An allowed hash does not restrict a
+library's path, enumerate currently loaded images or attest uncompromised process
+memory. Exact packaging does not enable original-input capture or preflight.
+
 ## Packaged core companion
 
 The Mac opt-in core can launch the window host through a private inherited
@@ -336,6 +367,27 @@ retained authority. This synchronous Security-framework check must not run in an
 input tap. It establishes the limited Apple-or-same-Team admission policy, not
 exact loaded-image identity, and cannot satisfy the preflight module-integrity
 provider by itself.
+
+`inspectExactPermittedLibraries` adds a historical snapshot of the stronger
+permitted-library policy. It verifies the canonical root-sealed manifest, all
+declared library slices, and matching Team/CDHash constraints on the pinned live
+root, self and peer. It authenticates slot 11 through each pinned CodeDirectory,
+and rechecks process identities and restricted dynamic policy around the read.
+Absent, stale, malformed, mismatched or restricted-only evidence denies this
+inspection. The snapshot records observation times, manifest SHA-256, permitted
+hashes, record count and distinct slice count; it supplies no retained capability
+or production preflight provider. It must never run in an event tap.
+
+The signed peer checks are reproducible without a native host: build
+`windowshare-peer-trust-tests`, use its `--make-fixture-bundle` option with a new
+`deskflow-windowshare.app` path inside a private directory, and package those
+fixture executables with `--exact-libraries`. Run
+`deploy/windowshare/macos-peer-constraint-tests.py FIXTURE_BUNDLE NEW_OUTPUT
+--signing-identity YOUR_SIGNING_IDENTITY` against that disposable package. It
+checks both roles, altered policy, absent/noncanonical manifests, wrong slice
+records, resource tampering, stale identities and a replaced live anchor. The
+driver requires the fixture's proof resource and never runs a display helper;
+do not substitute a production app for the fixture.
 
 An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
 forwarding with an independent native admission fence. The viewer releases its

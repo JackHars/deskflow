@@ -11,20 +11,216 @@
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QtEndian>
+#include <algorithm>
+#include <limits>
 #include <stdexcept>
 #include <sys/stat.h>
 #include <type_traits>
 #include <unistd.h>
 
 using namespace deskflow::windowshare;
+#if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
+namespace deskflow::windowshare {
+bool testLocalInputExactImage(const QByteArray &image, QString *error) noexcept;
+}
+#endif
 static_assert(!std::is_default_constructible_v<LocalInputRestrictedLibraryAdmissionSnapshot>);
 static_assert(!std::is_convertible_v<LocalInputRestrictedLibraryAdmissionSnapshot, bool>);
+static_assert(!std::is_default_constructible_v<LocalInputExactPermittedLibrariesSnapshot>);
+static_assert(!std::is_convertible_v<LocalInputExactPermittedLibrariesSnapshot, bool>);
 namespace {
+QByteArray run(const QString &program, const QStringList &arguments, int expectedExit);
 void check(bool value, const char *reason)
 {
   if (!value)
     throw std::runtime_error(reason);
 }
+#if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
+void put32(QByteArray &bytes, qsizetype offset, quint32 value, bool big = true)
+{
+  check(offset >= 0 && offset + 4 <= bytes.size(), "Invalid reader test field offset");
+  auto *destination = reinterpret_cast<uchar *>(bytes.data() + offset);
+  if (big)
+    qToBigEndian(value, destination);
+  else
+    qToLittleEndian(value, destination);
+}
+void put64(QByteArray &bytes, qsizetype offset, quint64 value)
+{
+  check(offset >= 0 && offset + 8 <= bytes.size(), "Invalid reader test wide field offset");
+  qToBigEndian(value, reinterpret_cast<uchar *>(bytes.data() + offset));
+}
+QByteArray readerDirectory(unsigned hashType = 2)
+{
+  QByteArray result(44, '\0');
+  put32(result, 0, 0xfade0c02);
+  put32(result, 4, result.size());
+  result[36] = hashType == 2 ? 32 : 20;
+  result[37] = hashType;
+  return result;
+}
+QByteArray readerThin(quint32 cpu = 0x01000007, bool alternate = false)
+{
+  // Minimal container fixtures exercise structure only, never signature trust.
+  // The production caller separately requires Security.framework validation.
+  const auto directory = readerDirectory();
+  const auto second = alternate ? readerDirectory(3) : QByteArray::fromHex("fade818100000008");
+  QByteArray result(48 + 28, '\0');
+  put32(result, 0, 0xfeedfacf, false);
+  put32(result, 4, cpu, false);
+  put32(result, 8, 3, false);
+  put32(result, 12, 2, false);
+  put32(result, 16, 1, false);
+  put32(result, 20, 16, false);
+  put32(result, 32, 0x1d, false);
+  put32(result, 36, 16, false);
+  put32(result, 40, 48, false);
+  put32(result, 44, 28 + directory.size() + second.size(), false);
+  put32(result, 48, 0xfade0cc0);
+  put32(result, 52, 28 + directory.size() + second.size());
+  put32(result, 56, 2);
+  put32(result, 60, 0);
+  put32(result, 64, 28);
+  put32(result, 68, alternate ? 0x1000 : 11);
+  put32(result, 72, 28 + directory.size());
+  result += directory;
+  result += second;
+  return result;
+}
+QByteArray readerFat(const QByteArray &first, const QByteArray &second, bool wide = false)
+{
+  const qsizetype entry = wide ? 32 : 20, end = 8 + 2 * entry;
+  QByteArray result(end, '\0');
+  put32(result, 0, wide ? 0xcafebabf : 0xcafebabe);
+  put32(result, 4, 2);
+  qsizetype index = 0;
+  for (const auto *slice : {&first, &second}) {
+    const auto at = 8 + index * entry;
+    put32(result, at, qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(slice->constData() + 4)));
+    put32(result, at + 4, qFromLittleEndian<quint32>(reinterpret_cast<const uchar *>(slice->constData() + 8)));
+    const auto offset = index ? end + first.size() : end;
+    if (wide) {
+      put64(result, at + 8, offset);
+      put64(result, at + 16, slice->size());
+    } else {
+      put32(result, at + 8, offset);
+      put32(result, at + 12, slice->size());
+    }
+    ++index;
+  }
+  result += first;
+  result += second;
+  return result;
+}
+void exactImageReaderTests()
+{
+  const auto accept = [](const QByteArray &image) {
+    QString error;
+    const bool accepted = testLocalInputExactImage(image, &error);
+    if (!accepted)
+      QTextStream(stderr) << error << '\n';
+    check(accepted && error.isEmpty(), "Reader rejected a valid container fixture");
+  };
+  const auto reject = [](const QByteArray &image, const char *message) {
+    QString error;
+    check(!testLocalInputExactImage(image, &error), "Reader accepted a malformed container fixture");
+    if (!error.contains(QString::fromLatin1(message))) {
+      QTextStream(stderr) << "Unexpected reader rejection: " << error << '\n';
+      check(false, "Malformed container did not exercise its intended validation");
+    }
+  };
+  QTemporaryDir signedImage;
+  check(signedImage.isValid(), "Cannot create isolated signed container fixture");
+  const auto signedPath = signedImage.filePath("reader-executable");
+  check(QFile::copy(QCoreApplication::applicationFilePath(), signedPath), "Cannot copy actual test executable");
+  run("/usr/bin/codesign", {"--force", "--sign", "-", signedPath}, 0);
+  QFile executable(signedPath);
+  check(executable.open(QIODevice::ReadOnly), "Cannot read actual signed test executable");
+  accept(executable.readAll());
+  const auto thin = readerThin(), other = readerThin(0x0100000c);
+  accept(thin);
+  accept(readerThin(0x01000007, true));
+  for (qsizetype size = 0; size < thin.size(); ++size) {
+    QString error;
+    check(!testLocalInputExactImage(thin.left(size), &error), "Truncated container was accepted");
+  }
+  auto image = thin;
+  put32(image, 16, 4097, false);
+  reject(image, "Mach-O commands");
+  image = thin;
+  put32(image, 36, 7, false);
+  reject(image, "command size");
+  image = thin;
+  put32(image, 40, 47, false);
+  reject(image, "signature range");
+  image = thin;
+  put32(image, 44, 0xffffffff, false);
+  reject(image, "signature bounds");
+  image = thin;
+  image.insert(48, thin.mid(32, 16));
+  put32(image, 16, 2, false);
+  put32(image, 20, 32, false);
+  put32(image, 40, 64, false);
+  put32(image, 56, 64, false);
+  reject(image, "Duplicate or malformed exact-library signature command");
+  image = thin;
+  put32(image, 56, 65);
+  reject(image, "signature superblob");
+  image = thin;
+  put32(image, 68, 0);
+  reject(image, "signature slot");
+  image = thin;
+  put32(image, 72, 28);
+  reject(image, "Overlapping exact-library signature blobs");
+  image = thin;
+  put32(image, 72, 0xffffffff);
+  reject(image, "signature slot");
+  image = thin;
+  put32(image, 80, 0xffffffff);
+  reject(image, "signature blob range");
+  image = thin;
+  image[76 + 37] = 1;
+  reject(image, "SHA-256 CodeDirectory");
+  image = thin;
+  image[76 + 36] = 20;
+  reject(image, "SHA-256 CodeDirectory");
+  image = thin;
+  put32(image, 60, 0x2000);
+  reject(image, "CodeDirectory occupies an invalid");
+  image = readerThin(0x01000007, true);
+  image.replace(120, 44, image.mid(76, 44));
+  reject(image, "Duplicate exact-library CodeDirectory identity");
+  image = thin;
+  put32(image, 120, 0xfade0000);
+  reject(image, "constraint blob");
+  const auto fat = readerFat(thin, other);
+  accept(fat);
+  accept(readerFat(thin, other, true));
+  reject(readerFat(thin, thin), "duplicate exact-library architecture");
+  image = fat;
+  put32(image, 8, 0x0100000c);
+  reject(image, "Inconsistent or duplicate exact-library architecture");
+  image = fat;
+  put32(image, 20, thin.size() + 1);
+  reject(image, "Overlapping exact-library architecture images");
+  image = fat;
+  put32(image, 16, 47);
+  reject(image, "architecture range");
+  image = fat;
+  put32(image, 40, 0xffffffff);
+  reject(image, "signature bounds");
+  image = fat;
+  put32(image, 4, 17);
+  reject(image, "architecture count");
+  image = readerFat(thin, other, true);
+  put64(image, 48, std::numeric_limits<quint64>::max());
+  reject(image, "signature bounds");
+  image = fat;
+  put32(image, 48, 0xcafebabe);
+  reject(image, "Nested universal exact-library image");
+}
+#endif
 void write(const QString &path, const QByteArray &bytes)
 {
   QFile file(path);
@@ -119,7 +315,63 @@ inspectAdmission(const LocalInputPeerTrust &trust, LocalInputProcess peer, Local
   check(trust.verify(peer), "Optional stronger policy changed ordinary peer trust");
   return snapshot;
 }
-int hostFixture(const QString &mode)
+std::optional<LocalInputExactPermittedLibrariesSnapshot> inspectExact(
+    const LocalInputPeerTrust &trust, LocalInputProcess peer, LocalInputRole role, bool expectedAdmission,
+    const QString &expectedFailure = {}
+)
+{
+  QString error = QStringLiteral("inspection did not replace the diagnostic");
+  const auto started = std::chrono::steady_clock::now();
+  auto snapshot = trust.inspectExactPermittedLibraries(peer, &error);
+  if (expectedAdmission && !snapshot)
+    QTextStream(stderr) << "Exact-library fixture: " << error << '\n';
+  check(bool(snapshot) == expectedAdmission, "Unexpected exact permitted-library inspection result");
+  if (snapshot) {
+    const auto &restricted = snapshot->restrictedAdmission();
+    const auto self = currentLocalInputProcess();
+    check(error.isEmpty(), "Successful exact-library snapshot retained a failure diagnostic");
+    check(
+        self && restricted.selfProcess() == *self && restricted.peerProcess() == peer &&
+            restricted.peerRole() == role &&
+            restricted.anchorProcess() == (role == LocalInputRole::Host ? *self : peer),
+        "Exact-library snapshot does not bind both roles and their live anchor"
+    );
+    const auto &hashes = snapshot->permittedCodeHashes();
+    check(
+        snapshot->manifestHash().size() == 32 && !hashes.empty() && hashes.size() <= 1024 &&
+            std::is_sorted(hashes.begin(), hashes.end()) &&
+            std::adjacent_find(hashes.begin(), hashes.end()) == hashes.end() &&
+            std::all_of(hashes.begin(), hashes.end(), [](const auto &hash) { return hash.size() == 20; }) &&
+            snapshot->manifestRecordCount() >= hashes.size() && snapshot->manifestRecordCount() <= 1024 &&
+            snapshot->librarySliceCount() > 0 && snapshot->librarySliceCount() <= snapshot->manifestRecordCount(),
+        "Exact-library snapshot has invalid identities or record/slice counts"
+    );
+    check(
+        started <= snapshot->inspectionStartedAt() &&
+            snapshot->inspectionStartedAt() <= restricted.inspectionStartedAt() &&
+            restricted.inspectionFinishedAt() <= snapshot->inspectionFinishedAt() &&
+            snapshot->inspectionFinishedAt() <= std::chrono::steady_clock::now(),
+        "Exact-library snapshot has invalid monotonic observation bounds"
+    );
+  } else {
+    check(!error.isEmpty(), "Rejected exact-library inspection has no diagnostic");
+    if (!expectedFailure.isEmpty() && !error.contains(expectedFailure)) {
+      QTextStream(stderr) << "Exact-library rejection: " << error << '\n';
+      check(false, "Exact-library fixture failed for an unintended reason");
+    }
+  }
+  check(trust.verify(peer), "Optional exact-library inspection changed ordinary peer trust");
+  return snapshot;
+}
+bool expectsRestricted(const QString &mode)
+{
+  return mode == "restricted-pass" || mode.startsWith("exact-");
+}
+bool expectsExact(const QString &mode)
+{
+  return mode == "exact-pass" || mode == "exact-tamper" || mode == "exact-reseal";
+}
+int hostFixture(const QString &mode, const QString &expectedFailure)
 {
   QString error;
   auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Core, &error);
@@ -133,11 +385,13 @@ int hostFixture(const QString &mode)
   check(bool(trust), "Packaged child cannot establish exact core trust");
   const auto parent = localInputProcess(getppid());
   check(parent && trust->verify(*parent), "Packaged child rejected its exact live core parent");
-  inspectAdmission(*trust, *parent, LocalInputRole::Core, mode == "restricted-pass");
+  inspectAdmission(*trust, *parent, LocalInputRole::Core, expectsRestricted(mode));
+  inspectExact(*trust, *parent, LocalInputRole::Core, expectsExact(mode), expectedFailure);
   auto wrong = *parent;
   ++wrong.startStamp;
   check(!trust->verify(wrong), "Packaged child accepted an incorrect parent birth identity");
   check(!trust->inspectRestrictedLibraryAdmission(wrong), "Admission accepted an incorrect parent birth identity");
+  check(!trust->inspectExactPermittedLibraries(wrong), "Exact-library inspection accepted a stale parent identity");
   check(!trust->verify(*currentLocalInputProcess()), "Packaged child accepted itself as core parent");
   hold();
   return 0;
@@ -158,22 +412,42 @@ int coreFixture(const QString &mode, const QString &otherPeer)
   const auto sibling = QFileInfo(QCoreApplication::applicationFilePath()).dir().filePath("deskflow-windowshare");
   check(trust->executable() == QFileInfo(sibling).canonicalFilePath(), "Trusted executable is not the fixed sibling");
   Child child;
-  child.start(trust->executable(), {"--fixture-host", mode == "restricted-pass" ? mode : "restricted-deny"});
+  QStringList childArguments{"--fixture-host", expectsRestricted(mode) ? mode : "restricted-deny"};
+  if (mode == "exact-deny" && !otherPeer.isEmpty())
+    childArguments.push_back(otherPeer);
+  child.start(trust->executable(), childArguments);
   const auto expected = localInputProcess(child.process.processId());
   check(expected && trust->verify(*expected), "Packaged core rejected its exact live child");
-  const auto retainedAdmission = inspectAdmission(*trust, *expected, LocalInputRole::Host, mode == "restricted-pass");
+  const auto retainedAdmission = inspectAdmission(*trust, *expected, LocalInputRole::Host, expectsRestricted(mode));
+  const auto retainedExact = inspectExact(
+      *trust, *expected, LocalInputRole::Host, expectsExact(mode), mode == "exact-deny" ? otherPeer : QString{}
+  );
   auto wrong = *expected;
   ++wrong.startStamp;
   check(!trust->verify(wrong), "Packaged core accepted a stale child birth identity");
   check(!trust->inspectRestrictedLibraryAdmission(wrong), "Admission accepted a stale child birth identity");
+  check(!trust->inspectExactPermittedLibraries(wrong), "Exact-library inspection accepted a stale child identity");
   check(!trust->verify(*currentLocalInputProcess()), "Core accepted its own PID as the host");
   if (mode == "tamper") {
     const auto resources = QFileInfo(QFileInfo(sibling).dir().path()).dir().filePath("Resources/proof.txt");
     write(resources, "altered-after-pin\n");
     check(!trust->verify(*expected), "Pinned trust ignored a changed sealed bundle resource");
     check(!trust->inspectRestrictedLibraryAdmission(*expected), "Admission ignored a changed sealed bundle resource");
+    check(!trust->inspectExactPermittedLibraries(*expected), "Exact-library inspection ignored resource tampering");
     write(resources, "sealed-fixture\n");
     check(trust->verify(*expected), "Exact restored sealed bundle did not verify with fresh static objects");
+  }
+  if (mode == "exact-tamper") {
+    const auto manifest =
+        QFileInfo(QFileInfo(sibling).dir().path()).dir().filePath("Resources/deskflow-exact-libraries.json");
+    QFile original(manifest);
+    check(original.open(QIODevice::ReadOnly), "Cannot read exact-library fixture manifest");
+    const auto bytes = original.readAll();
+    original.close();
+    write(manifest, "{}");
+    check(!trust->inspectExactPermittedLibraries(*expected), "Exact-library inspection accepted altered sealed policy");
+    write(manifest, bytes);
+    check(bool(trust->inspectExactPermittedLibraries(*expected)), "Restored exact-library policy did not verify");
   }
   if (mode == "wrong-path") {
     Child copied;
@@ -181,9 +455,10 @@ int coreFixture(const QString &mode, const QString &otherPeer)
     const auto wrongPath = localInputProcess(copied.process.processId());
     check(wrongPath && !trust->verify(*wrongPath), "Same-user signed copied role at another path was accepted");
     check(!trust->inspectRestrictedLibraryAdmission(*wrongPath), "Admission accepted a copied role at another path");
+    check(!trust->inspectExactPermittedLibraries(*wrongPath), "Exact-library inspection accepted a copied role");
     copied.finish();
   }
-  if (mode == "reseal") {
+  if (mode == "reseal" || mode == "exact-reseal") {
     const auto contents = QFileInfo(QFileInfo(sibling).dir().path()).dir();
     const auto bundle = QFileInfo(contents.path()).dir().path();
     QTemporaryDir replacement(QFileInfo(bundle).dir().filePath("replacement-XXXXXX"));
@@ -195,19 +470,26 @@ int coreFixture(const QString &mode, const QString &otherPeer)
     run("/usr/bin/codesign", {"--verify", "--strict", "--deep", clone});
     check(QDir().rename(bundle, retired) && QDir().rename(clone, bundle), "Cannot replace fixture bundle atomically");
     const bool acceptedReplacement = trust->verify(*expected);
+    const bool acceptedExactReplacement = bool(trust->inspectExactPermittedLibraries(*expected));
     const bool acceptedNewAnchor = bool(LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Host));
     check(
         QDir().rename(bundle, clone) && QDir().rename(retired, bundle), "Cannot restore original running fixture bundle"
     );
     check(!acceptedReplacement, "Resealed disk bundle replaced the already-running bundle anchor");
+    check(!acceptedExactReplacement, "Resealed disk policy replaced the live exact-library anchor");
     check(!acceptedNewAnchor, "Factory accepted a newly resealed disk bundle as the live process anchor");
     check(trust->verify(*expected), "Restored exact live bundle anchor did not verify");
   }
   child.finish();
   check(!trust->verify(*expected), "Exited packaged peer retained process trust");
   check(!trust->inspectRestrictedLibraryAdmission(*expected), "Exited peer received a new admission snapshot");
+  check(!trust->inspectExactPermittedLibraries(*expected), "Exited peer received a new exact-library snapshot");
   if (retainedAdmission)
     check(retainedAdmission->peerProcess() == *expected, "Historical snapshot changed after peer exit");
+  if (retainedExact)
+    check(
+        retainedExact->restrictedAdmission().peerProcess() == *expected, "Historical exact snapshot changed after exit"
+    );
   QTextStream(stdout) << "VERIFIED\n";
   return 0;
 }
@@ -270,6 +552,13 @@ int main(int argc, char **argv)
   QCoreApplication application(argc, argv);
   try {
     const auto arguments = application.arguments();
+#if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
+    if (arguments.size() == 2 && arguments[1] == "--reader-only") {
+      exactImageReaderTests();
+      QTextStream(stdout) << "PASS: bounded exact-library Mach-O and signature container reader\n";
+      return 0;
+    }
+#endif
     if (arguments.size() == 2 && arguments[1] == "--fixture-hold") {
       hold();
       return 0;
@@ -282,21 +571,33 @@ int main(int argc, char **argv)
       QTextStream(stdout) << makeBundle(target.dir().path(), target.fileName().chopped(4)) << '\n';
       return 0;
     }
-    if ((arguments.size() == 2 || arguments.size() == 3) && arguments[1] == "--fixture-host") {
+    if (arguments.size() >= 2 && arguments.size() <= 4 && arguments[1] == "--fixture-host") {
       const auto mode = arguments.value(2, "restricted-deny");
-      check(mode == "deny" || mode == "restricted-pass" || mode == "restricted-deny", "Invalid host fixture mode");
-      return hostFixture(mode);
+      check(
+          QStringList{
+              "deny", "restricted-pass", "restricted-deny", "exact-pass", "exact-deny", "exact-tamper", "exact-reseal"
+          }
+              .contains(mode),
+          "Invalid host fixture mode"
+      );
+      check(arguments.size() < 4 || mode == "exact-deny", "Unexpected host fixture diagnostic argument");
+      return hostFixture(mode, arguments.value(3));
     }
     if ((arguments.size() == 3 || arguments.size() == 4) && arguments[1] == "--fixture-core") {
       check(
-          QStringList{"deny", "pass", "tamper", "wrong-path", "reseal", "restricted-pass", "restricted-deny"}.contains(
-              arguments[2]
-          ),
+          QStringList{
+              "deny", "pass", "tamper", "wrong-path", "reseal", "restricted-pass", "restricted-deny", "exact-pass",
+              "exact-deny", "exact-tamper", "exact-reseal"
+          }
+              .contains(arguments[2]),
           "Invalid core fixture mode"
       );
       return coreFixture(arguments[2], arguments.value(3));
     }
     check(arguments.size() == 1, "Unexpected peer trust fixture arguments");
+#if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
+    exactImageReaderTests();
+#endif
     QString error;
     check(
         !LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Host, &error) && !error.isEmpty(),

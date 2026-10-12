@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <utility>
+#include <vector>
 
 namespace deskflow::windowshare {
 
@@ -86,6 +87,66 @@ private:
   std::chrono::steady_clock::time_point m_started, m_finished;
 };
 
+// Historical inspection of the exact non-Apple library identities permitted by
+// each live role's authenticated executable signature. The OS's Apple/system
+// exception remains; hashes identify code, not its loading path, a loaded-image
+// inventory, or uncompromised process memory. This is not retained authority or
+// a LocalInputPreflight::Checks::moduleIntegrity provider.
+class LocalInputExactPermittedLibrariesSnapshot final
+{
+public:
+  const LocalInputRestrictedLibraryAdmissionSnapshot &restrictedAdmission() const
+  {
+    return m_restricted;
+  }
+  const QByteArray &manifestHash() const
+  {
+    return m_manifestHash;
+  }
+  const std::vector<QByteArray> &permittedCodeHashes() const
+  {
+    return m_hashes;
+  }
+  std::size_t manifestRecordCount() const
+  {
+    return m_records;
+  }
+  std::size_t librarySliceCount() const
+  {
+    return m_slices;
+  }
+  std::chrono::steady_clock::time_point inspectionStartedAt() const
+  {
+    return m_started;
+  }
+  std::chrono::steady_clock::time_point inspectionFinishedAt() const
+  {
+    return m_finished;
+  }
+
+private:
+  friend class LocalInputPeerTrust;
+  LocalInputExactPermittedLibrariesSnapshot(
+      LocalInputRestrictedLibraryAdmissionSnapshot restricted, QByteArray manifestHash, std::vector<QByteArray> hashes,
+      std::size_t records, std::size_t slices, std::chrono::steady_clock::time_point started,
+      std::chrono::steady_clock::time_point finished
+  )
+      : m_restricted(std::move(restricted)),
+        m_manifestHash(std::move(manifestHash)),
+        m_hashes(std::move(hashes)),
+        m_records(records),
+        m_slices(slices),
+        m_started(started),
+        m_finished(finished)
+  {
+  }
+  LocalInputRestrictedLibraryAdmissionSnapshot m_restricted;
+  QByteArray m_manifestHash;
+  std::vector<QByteArray> m_hashes;
+  std::size_t m_records, m_slices;
+  std::chrono::steady_clock::time_point m_started, m_finished;
+};
+
 // Packaged-code integrity, not publisher or user authorization. Trust originates
 // in the current running signed bundle main (self or a live ancestor), never in
 // peer-provided paths, process IDs, environment, or a same-user signature alone.
@@ -110,6 +171,17 @@ public:
   // input tap or be treated as an atomic, continuously fresh runtime attestation.
   std::optional<LocalInputRestrictedLibraryAdmissionSnapshot>
   inspectRestrictedLibraryAdmission(LocalInputProcess expected, QString *error = nullptr) const;
+
+  // Requires macOS 14+, the stronger policy above, a root-sealed canonical
+  // Resources/deskflow-exact-libraries.json manifest, and an independently parsed
+  // library constraint (signature special slot 11) in the pinned anchor, self
+  // and peer. Each constraint must express exactly the manifest's Team AND its
+  // SHA-256 CodeDirectory hash set. Manifest library slices are checked against
+  // their actual signed files. No private Security APIs or executable helpers
+  // are invoked. This bounded synchronous inspection is unsuitable for a tap;
+  // its result does not assert atomic or ongoing process integrity.
+  std::optional<LocalInputExactPermittedLibrariesSnapshot>
+  inspectExactPermittedLibraries(LocalInputProcess expected, QString *error = nullptr) const;
 
 private:
   struct Impl;
