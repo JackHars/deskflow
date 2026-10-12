@@ -46,6 +46,18 @@ CoreArgParser::CoreArgParser(const QStringList &args)
       m_error = "--windowshare-observe-x11 requires client mode";
   }
 #endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+  if (windowShareGnomeEnabled()) {
+    const auto modes = m_parser.positionalArguments();
+    if (modes.size() != 1 || modes.front().compare("client", Qt::CaseInsensitive) != 0 || help() || version() ||
+        m_parser.values(CoreArgs::windowShareGnomeOption).size() != 1 || windowShareGnomeConfig().isEmpty())
+      m_error = "--windowshare-gnome-config requires client mode and one configuration file";
+#ifdef WINDOWSHARE_X11_OBSERVER
+    if (windowShareObserveX11())
+      m_error = "Choose one WindowShare backend: GNOME or X11 observation";
+#endif
+  }
+#endif
 }
 
 void CoreArgParser::parse()
@@ -119,6 +131,17 @@ bool CoreArgParser::singleInstanceOnly() const
 {
   return m_singleInstance;
 }
+
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+bool CoreArgParser::windowShareGnomeEnabled() const
+{
+  return m_parser.isSet(CoreArgs::windowShareGnomeOption);
+}
+QString CoreArgParser::windowShareGnomeConfig() const
+{
+  return m_parser.value(CoreArgs::windowShareGnomeOption);
+}
+#endif
 
 #ifdef WINDOWSHARE_CORE_COMPANION
 QString CoreArgParser::windowShareHostConfig() const

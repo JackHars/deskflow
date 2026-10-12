@@ -8,6 +8,7 @@
 #pragma once
 
 #include "EventTypes.h"
+#include "windowshare/OriginalInputStamp.h"
 
 #include <assert.h>
 #include <cstdlib>
@@ -69,9 +70,19 @@ public:
       : m_type(type),
         m_target(target),
         m_data(data),
-        m_flags(flags)
+        m_flags(flags),
+        m_originalInputStamp(inputStamp(type))
   {
     // do nothing
+  }
+
+  Event(EventTypes type, void *target, void *data, Flags flags, deskflow::windowshare::OriginalInputStamp stamp)
+      : m_type(type),
+        m_target(target),
+        m_data(data),
+        m_flags(flags),
+        m_originalInputStamp(stamp)
+  {
   }
 
   Event(EventTypes type, void *target, EventData *dataObject) : m_type(type), m_target(target), m_dataObject(dataObject)
@@ -166,12 +177,41 @@ public:
     return m_flags;
   }
 
+  deskflow::windowshare::OriginalInputStamp originalInputStamp() const noexcept
+  {
+    return m_originalInputStamp;
+  }
+  void setOriginalInputStamp(deskflow::windowshare::OriginalInputStamp stamp) noexcept
+  {
+    m_originalInputStamp = stamp;
+  }
+
   //@}
 
 private:
+  static deskflow::windowshare::OriginalInputStamp inputStamp(EventTypes type) noexcept
+  {
+    using enum EventTypes;
+    switch (type) {
+    case KeyStateKeyDown:
+    case KeyStateKeyUp:
+    case KeyStateKeyRepeat:
+    case PrimaryComputerButtonDown:
+    case PrimaryComputerButtonUp:
+    case PrimaryComputerMotionOnPrimary:
+    case PrimaryComputerMotionOnSecondary:
+    case PrimaryComputerWheel:
+    case PrimaryComputerHotkeyDown:
+    case PrimaryComputerHotkeyUp:
+      return deskflow::windowshare::OriginalInputStampScope::next();
+    default:
+      return {};
+    }
+  }
   EventTypes m_type = EventTypes::Unknown;
   void *m_target = nullptr;
   void *m_data = nullptr;
   Flags m_flags = EventFlags::NoFlags;
   EventData *m_dataObject = nullptr;
+  deskflow::windowshare::OriginalInputStamp m_originalInputStamp;
 };

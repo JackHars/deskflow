@@ -18,6 +18,7 @@
 #include <climits>
 #include <libei.h>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -29,6 +30,13 @@ struct ei_device;
 class EventQueueTimer;
 
 namespace deskflow {
+
+#ifdef BUILD_WINDOWSHARE
+namespace windowshare {
+class GnomeProviderClient;
+class GnomeProviderConfig;
+} // namespace windowshare
+#endif
 
 class EiKeyState;
 class PortalRemoteDesktop;
@@ -43,6 +51,11 @@ class EiComputer : public PlatformComputer
 {
 public:
   EiComputer(bool isPrimary, IEventQueue *events, bool usePortal);
+#ifdef BUILD_WINDOWSHARE
+  EiComputer(
+      bool isPrimary, IEventQueue *events, bool usePortal, const windowshare::GnomeProviderConfig *configuration
+  );
+#endif
   ~EiComputer() override;
 
   // IComputer overrides
@@ -129,7 +142,12 @@ private:
 
   void handleConnectedToEisEvent(const Event &event);
   void handlePortalSessionClosed();
+#ifdef BUILD_WINDOWSHARE
+  void handleGnomeProviderChanged();
+  void stopGnomeProvider(const char *reason);
+#endif
   void ensureEmulating() const;
+  bool inputSessionLive() const noexcept;
   void stopEmulating() const;
   void cancelIdleEmulationTimer() const;
   void updatePortalGlobalShortcuts();
@@ -198,6 +216,12 @@ private:
   PortalRemoteDesktop *m_portalRemoteDesktop = nullptr;
   PortalInputCapture *m_portalInputCapture = nullptr;
   PortalGlobalShortcuts *m_portalGlobalShortcuts = nullptr;
+#ifdef BUILD_WINDOWSHARE
+  std::unique_ptr<windowshare::GnomeProviderClient> m_gnomeProvider;
+  EventQueueTimer *m_gnomeProviderStartTimer = nullptr;
+  bool m_gnomeProviderEnabled = false;
+  bool m_gnomeProviderStopped = false;
+#endif
 
   bool m_activated = false;
 

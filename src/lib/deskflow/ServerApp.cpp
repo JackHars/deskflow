@@ -547,6 +547,10 @@ Server *ServerApp::openServer(ServerConfig &config, PrimaryClient *primaryClient
 {
   auto *server = new Server(config, primaryClient, m_serverComputer, getEvents());
   try {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE && defined(Q_OS_MACOS)
+    if (m_originalInputCapture)
+      server->setOriginalInputRoutes(m_originalInputCapture->routes());
+#endif
     getEvents()->addHandler(EventTypes::ServerComputerSwitched, server, [this](const auto &) {
       handleComputerSwitched();
     });

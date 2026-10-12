@@ -3,6 +3,64 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Input-route observation and GNOME client integration (2026-10-12)
+
+The project remains before the first verified interactive Mac window on Ubuntu.
+Original-event delivery is still disabled. The roadmap in
+`docs/seamless-windows.md` distinguishes the completed transport, packaging and
+test foundation from the remaining single-window, multi-window/two-monitor,
+bidirectional drag, compatibility, recovery and performance milestones.
+
+Captured Mac event identities now survive the actual Event, InputFilter and
+Server route. A bounded core-to-Qt queue records the authenticated selected peer,
+actual recipient and core coordinates; a bounded historical join pairs those
+decisions with completed capture records. Filtered, expanded, uncertain, local,
+broadcast, missing and late routes deny original-input eligibility. Retained
+route decisions share terminal revocation. This observes real core decisions;
+it does not install a production original-input authorizer or establish the
+remaining physical-neutral boundary, coordinate authority or pointer fence.
+
+The explicit Linux client option `--windowshare-gnome-config FILE` now selects
+the experimental GNOME 50 provider. Its closed configuration fixes the viewer
+arguments. A private GIO worker requires the provider and GNOME Shell to share
+one unique bus owner, receives the provider-owned EIS descriptor and launches
+the provider-owned native Wayland viewer. The worker starts only after the
+Deskflow event queue is ready. Startup failure, owner loss and EIS disconnect
+retire the session and exit unsuccessfully without a portal replacement; queued
+input cannot restart emulation. Ordinary client startup remains unchanged.
+Clipboard integration is not implemented for this experimental mode.
+
+Local verification passed: 14/14 standalone application suites (214.43 seconds),
+58/58 integrated suites (167.01 seconds), and an ordinary Mac core build.
+Focused route, capture, session and Server tests passed strict and ASan/UBSan
+builds; the bounded route queue also passed its 20,000-record TSan exercise.
+Five private-bus GNOME client protocol/lifetime cases passed strict and
+ASan/UBSan builds. Linux-only CLI branches were compiled and tested on macOS;
+that is parser coverage, not Linux backend execution. Evidence is in
+`build/gnome-route-*.log`, `build/gnome-client-agent/`,
+`build/original-route-agent*/` and `build/original-route-server-*/`.
+
+The new native headless GNOME 50 CI fixture passed on `d9dfa15a9`, run
+`38284680572`: the real provider and EIS devices, caller/generation isolation,
+provider-owned Wayland viewer binding, three motion/PONG/immediate native-hit
+rounds matching actual GTK surface events, stale-revision denial, caller-loss
+EIS revocation and viewer termination, and a fresh session after revocation.
+This establishes compositor observations, not pointer-device attribution, Qt
+viewport mapping or production delivery authority. The initial compositor cursor
+at (0,0) triggered GNOME's hot-corner barrier; fixture setup now moves away before
+the measured assertions. The combined source still requires its exact Linux and
+Mac CI results. These tests use private buses, runtime/settings and software
+rendering, without a user's display or devices. Retained logs and results are in
+`build/gnome-provider-harness/ci-38284680572/` and its adjacent `.log` file.
+
+The installed experimental Mac package remains the earlier `b2aa37e9b` milestone
+described below until the new source is packaged and verified. That milestone
+passed all five then-existing CI jobs. Home Ubuntu's recorded 52/52 integrated
+and 9/9 application results apply to the earlier `aab8467fb` revision. SSH to
+`192.168.1.12` still times out before authentication and routes through the
+local gateway; no new home-Ubuntu run was claimed. No live Mac capture or input
+tests ran with the lid closed. The full goal remains incomplete.
+
 ## Latest pairing and code-admission integration (2026-10-12)
 
 The roadmap is now summarized near the top of `docs/seamless-windows.md`. The

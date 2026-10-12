@@ -35,6 +35,10 @@ public:
   {
     m_windowShareX11Observation = enabled;
   }
+  void setWindowShareGnomeConfig(const QString &path)
+  {
+    m_windowShareGnomeConfig = path;
+  }
 #endif
 
   //
@@ -95,6 +99,7 @@ public:
 private:
 #if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
   bool m_windowShareX11Observation = false;
+  QString m_windowShareGnomeConfig;
 #endif
   ISocketFactory *getSocketFactory() const;
   NetworkAddress &getCurrentServerAddress();

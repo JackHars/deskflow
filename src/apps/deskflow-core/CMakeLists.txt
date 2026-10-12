@@ -39,12 +39,15 @@ target_link_libraries(
   Qt6::Widgets
   ${libs})
 
-if(BUILD_WINDOWSHARE AND (APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND BUILD_X11_SUPPORT)))
+if(BUILD_WINDOWSHARE AND (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux"))
   if(APPLE)
     set(windowshare_core_definition WINDOWSHARE_CORE_COMPANION=1)
     target_link_libraries(${target} windowshare-local-input)
   else()
-    set(windowshare_core_definition WINDOWSHARE_X11_OBSERVER=1)
+    set(windowshare_core_definition WINDOWSHARE_GNOME_PROVIDER=1)
+    if(BUILD_X11_SUPPORT)
+      list(APPEND windowshare_core_definition WINDOWSHARE_X11_OBSERVER=1)
+    endif()
   endif()
   target_compile_definitions(${target} PRIVATE ${windowshare_core_definition})
   add_executable(windowshare-core-args-tests CoreArgParserTests.cpp CoreArgParser.cpp)

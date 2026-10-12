@@ -14,18 +14,56 @@ pointer, scrolling and return, using the Mac keyboard and trackpad.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | Mac capture/encode/decode has run live; authenticated transport, independent viewers and reconnect pass automated tests. | Repeat the complete flow across the two machines with interactive input. |
-| Original input integration | Ordered capture records, press bookkeeping, private channel and handoff coordinator pass tests. Delivery remains disabled. | Connect real source ownership, coordinate validation, pointer fencing and integrity checks to the production coordinator. |
+| Original input integration | Ordered capture records now join the actual Server recipient and coordinate decision; press bookkeeping, private channel and handoff coordinator pass tests. Delivery remains disabled. | Finish remote coordinate validation, pointer fencing and production coordinator integration. |
 | Linux and two monitors | Ubuntu builds, 52 integrated suites and private X11 tests pass. The inspected desktop is GNOME Wayland with one active monitor. | Establish Wayland coordinate handling and verify both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
 | Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
 
-The Ubuntu results above cover `aab8467fb`. The later companion-startup fix
-`bc88d6e83` passed all five CI jobs, including Linux, but its home-Ubuntu rerun
-was interrupted by loss of the tunnel route. Hardware tests still require the
-reachable Ubuntu desktop and an open, unlocked Mac. See `WORK_STATE.md` for test
-logs, package details and the distinction between completed and unverified work.
+The home-Ubuntu results above cover `aab8467fb`. The later pairing/code-admission
+milestone `b2aa37e9b` passed all five CI jobs, including Linux. Its home-Ubuntu
+rerun was blocked by loss of the tunnel route. Current work adds an explicit
+GNOME 50 provider and isolated tests against the real native headless compositor.
+Those tests now pass EIS/Wayland ownership, native pointer targeting and
+caller-loss cleanup. They do not establish the two-machine interactive flow. Hardware tests
+still require the reachable Ubuntu desktop and an open, unlocked Mac. See
+`WORK_STATE.md` for test logs, package details and remaining acceptance tests.
+
+### Experimental GNOME client configuration
+
+The opt-in Linux core accepts `client --windowshare-gnome-config FILE` on a
+Wayland desktop. The version-pinned provider must already be enabled in GNOME
+Shell 50; the build does not install or enable it. The core owns a private D-Bus
+connection, adopts that provider's EIS descriptor and launches the configured
+viewer through Mutter's dedicated native Wayland client. Provider, caller,
+viewer or EIS loss ends this explicit client session. It does not reconnect via
+a replacement portal. Clipboard portal integration is not implemented in this
+mode. Ordinary builds and invocations continue to use their existing backend.
+
+The JSON configuration has a closed schema. `version`, `viewerExecutable`,
+`connect`, `identity` and `peerPin` are required. `port` defaults to 24810 and
+`screen` to 0. `exportWindow` is an optional nonzero uint32 decimal string.
+The executable must be an existing absolute executable path; identity must be
+an absolute path, and the pinned fingerprint must have 64 hexadecimal characters
+and cannot be all zeroes. Arguments and environment overrides cannot be supplied
+in this file.
+
+```json
+{
+  "version": 1,
+  "viewerExecutable": "/absolute/path/to/deskflow-windowshare",
+  "connect": "mac-hostname",
+  "identity": "/absolute/path/to/viewer-identity",
+  "peerPin": "REPLACE_WITH_THE_MAC_WINDOWSHARE_CERTIFICATE_FINGERPRINT",
+  "exportWindow": "123"
+}
+```
+
+The example requires the real paths, host, certificate fingerprint and catalog
+window ID. Session setup and native observations do not authorize original-input
+delivery. See `deploy/windowshare/gnome-provider/README.md` for the supported
+compositor boundary and the remaining pointer/viewport checks.
 
 ## Current behavior
 

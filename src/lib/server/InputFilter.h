@@ -14,6 +14,9 @@
 #include "deskflow/MouseTypes.h"
 
 #include <set>
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/OriginalInputRoute.h"
+#endif
 
 class PrimaryClient;
 class Event;
@@ -385,6 +388,13 @@ public:
   // if client is nullptr.
   void setPrimaryClient(PrimaryClient *client);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  void setOriginalInputRoutes(std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> routes)
+  {
+    m_originalInputRoutes = std::move(routes);
+  }
+#endif
+
   // convert rules to a string
   std::string format(const std::string_view &linePrefix) const;
 
@@ -399,6 +409,9 @@ private:
   void handleEvent(const Event &);
 
 private:
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> m_originalInputRoutes;
+#endif
   RuleList m_ruleList;
   PrimaryClient *m_primaryClient = nullptr;
   IEventQueue *m_events;

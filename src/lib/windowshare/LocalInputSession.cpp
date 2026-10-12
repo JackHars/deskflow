@@ -125,6 +125,8 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
 LocalInputCoreSession::~LocalInputCoreSession()
 {
 #ifdef __APPLE__
+  *m_callbackLifetime = false;
+  onRoutedInput = {};
   m_captureTimer.stop();
   if (m_captureSource)
     m_captureSource->stop();
@@ -200,19 +202,43 @@ void LocalInputCoreSession::drainCapturedInput()
   }
   if (!m_captureBarrier)
     m_captureBarrier = std::make_unique<OriginalInputNeutralBarrier>(epoch);
-  for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
-    const auto input = source->pop();
-    if (!input)
+  if (!m_captureJoin)
+    m_captureJoin = std::make_unique<OriginalInputRouteJoin>(epoch, source->routes());
+  // Core dispatch can win the race with capture completion, or lose it. Drain
+  // both bounded streams on this same consumer and join explicit stamps only.
+  for (std::size_t count = 0; count < OriginalInputRoutes::capacity; ++count) {
+    const auto decision = source->routes()->pop();
+    if (!decision)
       break;
-    if (!m_captureBarrier->observe(*input)) {
-      // Revoke delivery continuity, but leave the producer running so a later
-      // raw emergency can still shut down the companion.
+    if (!m_captureJoin->decision(*decision))
+      break;
+  }
+  for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
+    const auto captured = source->popCaptured();
+    if (!captured)
+      break;
+    if (!m_captureBarrier->observe(captured->input)) {
+      // Keep the native observer alive for a later raw emergency.
       m_captureBarrier.reset();
+      m_captureJoin->revoke();
       break;
     }
+    if (m_captureJoin->live())
+      m_captureJoin->capture(*captured);
   }
-  // No trusted physical observation, cutover or delivery provider exists yet.
-  // Observing an empty queue therefore never enables a route or posts input.
+  for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
+    const auto joined = m_captureJoin->pop();
+    if (!joined)
+      break;
+    const auto callback = onRoutedInput;
+    const auto lifetime = m_callbackLifetime;
+    if (callback)
+      callback(*joined);
+    if (!*lifetime)
+      return;
+  }
+  // A joined dispatch is not a remote cursor/viewport acknowledgment, a
+  // physical-neutral proof, or input authority. Original posting stays off.
 }
 #endif
 int localInputCoreProbe(LocalInputSocketPair pair)

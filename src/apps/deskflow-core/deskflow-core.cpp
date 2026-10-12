@@ -115,6 +115,10 @@ int main(int argc, char **argv)
     if (parser.windowShareObserveX11())
       return s_exitArgs;
 #endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+    if (parser.windowShareGnomeEnabled())
+      return s_exitArgs;
+#endif
   }
 
   if (parser.help()) {
@@ -205,6 +209,10 @@ int main(int argc, char **argv)
   const auto processName = QFileInfo(argv[0]).fileName();
 
   App *coreApp = createApp(parser, events, processName);
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+  if (parser.windowShareGnomeEnabled())
+    static_cast<ClientApp *>(coreApp)->setWindowShareGnomeConfig(parser.windowShareGnomeConfig());
+#endif
 #ifdef WINDOWSHARE_X11_OBSERVER
   if (parser.windowShareObserveX11())
     static_cast<ClientApp *>(coreApp)->setWindowShareX11Observation(true);

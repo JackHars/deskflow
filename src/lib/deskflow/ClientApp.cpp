@@ -35,6 +35,9 @@
 
 #if WINAPI_LIBEI
 #include "platform/EiComputer.h"
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+#include "windowshare/GnomeProviderConfig.h"
+#endif
 #endif
 
 #if defined(Q_OS_MACOS)
@@ -120,11 +123,21 @@ deskflow::Computer *ClientApp::createComputer()
 #endif
 #if WINAPI_LIBEI
     LOG_INFO("detected wayland platform");
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+    if (!m_windowShareGnomeConfig.isEmpty()) {
+      const auto configuration = deskflow::windowshare::GnomeProviderConfig::load(m_windowShareGnomeConfig);
+      return new deskflow::Computer(new deskflow::EiComputer(false, getEvents(), true, &configuration), getEvents());
+    }
+#endif
     return new deskflow::Computer(new deskflow::EiComputer(false, getEvents(), true), getEvents());
 #else
     throw XNoEiSupport();
 #endif
   }
+#if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)
+  if (!m_windowShareGnomeConfig.isEmpty())
+    throw std::runtime_error("--windowshare-gnome-config requires the Wayland input backend");
+#endif
 #if WINAPI_XWINDOWS
   LOG_INFO("detected X11 platform");
 #if defined(BUILD_WINDOWSHARE) && defined(Q_OS_LINUX)

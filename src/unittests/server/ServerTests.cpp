@@ -12,11 +12,13 @@
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "../deskflow/MockEventQueue.h"
 #include "../deskflow/MockKeyState.h"
+#include "deskflow/AppUtil.h"
 #include "deskflow/Computer.h"
 #include "deskflow/PlatformComputer.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #include "io/IStream.h"
 #include "server/ClientProxy1_1.h"
+#include "server/InputFilter.h"
 #include "server/PrimaryClient.h"
 
 #include <QTemporaryDir>
@@ -315,10 +317,30 @@ private:
 class RoutingEventQueue : public MockEventQueue
 {
 public:
+  void addHandler(EventTypes type, void *target, const EventHandler &handler) override
+  {
+    handlers[{type, target}] = handler;
+  }
+  bool dispatchEvent(const Event &event) override
+  {
+    const auto found = handlers.find({event.getType(), event.getTarget()});
+    if (found == handlers.end())
+      return false;
+    const auto handler = found->second;
+    handler(event);
+    return true;
+  }
+  void addEvent(Event &&event) override
+  {
+    if (event.getFlags() & Event::EventFlags::DeliverImmediately)
+      dispatchEvent(event);
+  }
+  std::map<std::pair<EventTypes, void *>, EventHandler> handlers;
   void removeHandler(EventTypes type, void *target) override
   {
     if (watchedSelection && watchedSelection->live())
       sawLiveSelection = true;
+    handlers.erase({type, target});
     MockEventQueue::removeHandler(type, target);
   }
   bool sawLiveSelection = false;
@@ -365,6 +387,24 @@ struct RoutingFixture
 void ServerTests::initTestCase()
 {
   m_arch.init();
+  // Production key handlers consult AppUtil. Supply only a fixed language;
+  // do not query an OS keyboard layout or initialize a native application.
+  struct RoutingAppUtil : AppUtil
+  {
+    int run() override
+    {
+      return 0;
+    }
+    std::vector<std::string> getKeyboardLayoutList() override
+    {
+      return {"en"};
+    }
+    std::string getCurrentLanguageCode() override
+    {
+      return "en";
+    }
+  };
+  static RoutingAppUtil appUtil;
   // Config and Computer consult Settings. Give this process disposable files
   // before constructing either, so tests never run configured enter/exit commands.
   static QTemporaryDir settings;
@@ -376,6 +416,237 @@ void ServerTests::initTestCase()
   Settings::setStateFile(settings.filePath("routing.state"));
   // Core IPC receives notifications but never listens on a socket in these tests.
   new deskflow::core::ipc::CoreIpcServer(this);
+}
+
+void ServerTests::originalCapture_legacyKeyExpansion()
+{
+  using namespace deskflow::windowshare;
+  struct Keys : MockEventQueue
+  {
+    std::vector<Event> events;
+    void addEvent(Event &&event) override
+    {
+      events.push_back(std::move(event));
+    }
+    ~Keys() override
+    {
+      for (const auto &event : events)
+        delete static_cast<IKeyState::KeyInfo *>(event.getData());
+    }
+  } events;
+  MockKeyState keys(events);
+  keys.setHalfDuplexMask(KeyModifierCapsLock);
+  {
+    OriginalInputStampScope scope({81, 1, 0});
+    keys.sendKeyEvent(nullptr, true, false, kKeyCapsLock, KeyModifierCapsLock, 1, 57);
+    QCOMPARE(scope.translation().parts, std::uint16_t(2));
+    QCOMPARE(events.events.size(), std::size_t(2));
+    QCOMPARE(events.events[0].getType(), EventTypes::KeyStateKeyDown);
+    QCOMPARE(events.events[1].getType(), EventTypes::KeyStateKeyUp);
+    QCOMPARE(events.events[0].originalInputStamp(), (OriginalInputStamp{81, 1, 1}));
+    QCOMPARE(events.events[1].originalInputStamp(), (OriginalInputStamp{81, 1, 2}));
+  }
+  {
+    OriginalInputStampScope scope({81, 2, 0});
+    keys.sendKeyEvent(nullptr, true, true, kKeyCapsLock, KeyModifierCapsLock, 3, 57);
+    QCOMPARE(scope.translation().parts, std::uint16_t(0));
+    QCOMPARE(events.events.size(), std::size_t(2));
+  }
+  {
+    OriginalInputStampScope scope({81, 3, 0});
+    keys.sendKeyEvent(nullptr, true, true, 'a', 0, 5, 30);
+    QCOMPARE(scope.translation().parts, std::uint16_t(1));
+    QCOMPARE(events.events.back().getType(), EventTypes::KeyStateKeyRepeat);
+    QCOMPARE(events.events.back().originalInputStamp(), (OriginalInputStamp{81, 3, 1}));
+    QCOMPARE(static_cast<IKeyState::KeyInfo *>(events.events.back().getData())->m_count, 5);
+  }
+}
+
+void ServerTests::originalCapture_exactDispatchAndOwnership()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  auto routes = std::make_shared<OriginalInputRoutes>();
+  auto &server = *f.server;
+  QVERIFY(server.setOriginalInputRoutes(routes));
+  f.first->authenticate();
+  f.second->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  const auto firstRecipient = server.m_inputRecipients.at(f.firstClient);
+  const auto secondRecipient = server.m_inputRecipients.at(f.secondClient);
+  f.clear();
+  std::uint64_t sequence = 0;
+  const auto dispatch = [&](EventTypes type, void *data) {
+    Event event(
+        type, f.primary.getEventTarget(), data, Event::EventFlags::DontFreeData, OriginalInputStamp{37, ++sequence, 1}
+    );
+    return f.events.dispatchEvent(event);
+  };
+  IPlatformComputer::KeyInfo key{'a', 0, 0x1e, 1, ""};
+  QVERIFY(dispatch(EventTypes::KeyStateKeyDown, &key));
+  auto down = routes->pop();
+  QVERIFY(down && down->outcome == OriginalInputRouteOutcome::Dispatched);
+  QCOMPARE(down->stamp, (OriginalInputStamp{37, 1, 1}));
+  QCOMPARE(down->recipient, firstRecipient);
+  QCOMPARE(down->ticket.incarnation(), f.first->identity->ticket()->incarnation());
+  QCOMPARE(f.first->take(), "DKDN" + QByteArray::fromHex("0061 0000 001e"));
+  QVERIFY(!routes->pop()); // InputFilter forwarding must not manufacture a part.
+
+  IPlatformComputer::MotionInfo motion{7, -3};
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion));
+  auto moved = routes->pop();
+  QVERIFY(moved && moved->pointKnown && moved->outcome == OriginalInputRouteOutcome::Dispatched);
+  QCOMPARE(moved->x, 107);
+  QCOMPARE(moved->y, 97);
+  QCOMPARE(f.first->take(), "DMMV" + QByteArray::fromHex("006b 0061"));
+  IPlatformComputer::ButtonInfo button(1, 0);
+  QVERIFY(dispatch(EventTypes::PrimaryComputerButtonDown, &button));
+  auto pressed = routes->pop();
+  QVERIFY(pressed && pressed->kind == OriginalInputRouteKind::Button && pressed->pointKnown);
+  QCOMPARE(pressed->x, 107);
+  QCOMPARE(pressed->y, 97);
+  server.switchComputer(f.secondClient, 300, 400, false);
+  f.clear();
+  QVERIFY(dispatch(EventTypes::KeyStateKeyRepeat, &key));
+  auto repeated = routes->pop();
+  QVERIFY(repeated && repeated->outcome == OriginalInputRouteOutcome::Dispatched && !repeated->pointKnown);
+  QCOMPARE(repeated->recipient, firstRecipient); // Held press, not latest selected peer.
+  QVERIFY(dispatch(EventTypes::KeyStateKeyUp, &key));
+  QCOMPARE(routes->pop()->recipient, firstRecipient);
+  QVERIFY(dispatch(EventTypes::PrimaryComputerButtonUp, &button));
+  auto released = routes->pop();
+  QVERIFY(released && released->outcome == OriginalInputRouteOutcome::Uncorrelated && !released->pointKnown);
+  QCOMPARE(released->recipient, firstRecipient); // Old owner has no current pointer decision.
+  QVERIFY(f.second->take().isEmpty());
+  IPlatformComputer::WheelInfo wheel{-120, 240};
+  QVERIFY(dispatch(EventTypes::PrimaryComputerWheel, &wheel));
+  auto scrolled = routes->pop();
+  QVERIFY(scrolled && scrolled->outcome == OriginalInputRouteOutcome::Dispatched && scrolled->pointKnown);
+  QCOMPARE(scrolled->recipient, secondRecipient);
+  QCOMPARE(scrolled->x, 300);
+  QCOMPARE(scrolled->y, 400);
+  f.second->identity->revoke();
+  QVERIFY(!scrolled->ticket.live());
+  server.revokeSelectedPeer();
+  QVERIFY(!routes->live());
+}
+
+void ServerTests::originalCapture_motionCrossingUsesEnterDecision()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  f.first->authenticate();
+  f.second->authenticate();
+  QVERIFY(f.config.connect("first", Direction::Right, 0, 1, "second", 0, 1));
+  auto routes = std::make_shared<OriginalInputRoutes>();
+  auto &server = *f.server;
+  QVERIFY(server.setOriginalInputRoutes(routes));
+  server.switchComputer(f.firstClient, 990, 200, false);
+  f.clear();
+  IPlatformComputer::MotionInfo motion{20, 0};
+  Event event(
+      EventTypes::PrimaryComputerMotionOnSecondary, f.primary.getEventTarget(), &motion,
+      Event::EventFlags::DontFreeData, OriginalInputStamp{51, 1, 1}
+  );
+  QVERIFY(f.events.dispatchEvent(event));
+  const auto result = routes->pop();
+  QVERIFY(result && result->outcome == OriginalInputRouteOutcome::Dispatched && result->pointKnown);
+  QCOMPARE(result->recipient, server.m_inputRecipients.at(f.secondClient));
+  QCOMPARE(result->x, 10);
+  QCOMPARE(result->y, 200);
+  QVERIFY(f.second->take().startsWith("CINN" + QByteArray::fromHex("000a 00c8")));
+  QVERIFY(!routes->pop());
+}
+
+void ServerTests::originalCapture_filterAndAmbiguityDenials()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  auto routes = std::make_shared<OriginalInputRoutes>();
+  auto &server = *f.server;
+  QVERIFY(server.setOriginalInputRoutes(routes));
+  f.first->authenticate();
+  f.second->authenticate();
+  server.switchComputer(f.firstClient, 999, 999, false);
+  f.clear();
+  std::uint64_t sequence = 0;
+  const auto dispatch = [&](EventTypes type, void *data) {
+    Event event(
+        type, f.primary.getEventTarget(), data, Event::EventFlags::DontFreeData, OriginalInputStamp{61, ++sequence, 1}
+    );
+    return f.events.dispatchEvent(event);
+  };
+  IPlatformComputer::MotionInfo motion{5, 5};
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion));
+  QCOMPARE(routes->pop()->outcome, OriginalInputRouteOutcome::NoSend);
+  QVERIFY(f.first->take().isEmpty()); // Clamping preserved ordinary zero-send behavior.
+  server.m_relativeMoves = true;
+  server.m_lockedToComputer = true;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion));
+  auto relative = routes->pop();
+  QVERIFY(relative && relative->outcome == OriginalInputRouteOutcome::Relative && !relative->pointKnown);
+  server.m_relativeMoves = false;
+  server.m_lockedToComputer = false;
+  server.m_keyboardBroadcasting = true;
+  IPlatformComputer::KeyInfo key{'b', 0, 0x30, 1, ""};
+  QVERIFY(dispatch(EventTypes::KeyStateKeyDown, &key));
+  QCOMPARE(routes->pop()->outcome, OriginalInputRouteOutcome::Ambiguous);
+  QVERIFY(!f.first->take().isEmpty() && !f.second->take().isEmpty());
+  server.m_keyboardBroadcasting = false;
+
+  // Exercise real rule matching/action dispatch. The configured action has no
+  // physical provenance even if this test dispatches while a capture scope is
+  // active, as an immediate queue could do.
+  struct Always : InputFilter::Condition
+  {
+    Condition *clone() const override
+    {
+      return new Always;
+    }
+    std::string format() const override
+    {
+      return "always";
+    }
+    InputFilter::FilterStatus match(const Event &) override
+    {
+      return InputFilter::FilterStatus::Activate;
+    }
+  };
+  struct Generated : InputFilter::Action
+  {
+    RoutingEventQueue *events;
+    IPlatformComputer::KeyInfo key{'c', 0, 0x2e, 1, ""};
+    explicit Generated(RoutingEventQueue *events) : events(events)
+    {
+    }
+    Action *clone() const override
+    {
+      return new Generated(events);
+    }
+    std::string format() const override
+    {
+      return "generated";
+    }
+    void perform(const Event &event) override
+    {
+      events->addEvent(Event(
+          EventTypes::KeyStateKeyDown, event.getTarget(), &key,
+          Event::EventFlags::DeliverImmediately | Event::EventFlags::DontFreeData
+      ));
+    }
+  };
+  InputFilter::Rule rule(new Always);
+  rule.adoptAction(new Generated(&f.events), true);
+  server.m_inputFilter->addFilterRule(rule);
+  OriginalInputStampScope scope({61, ++sequence, 0});
+  Event physical(EventTypes::KeyStateKeyDown, f.primary.getEventTarget(), &key, Event::EventFlags::DontFreeData);
+  QVERIFY(f.events.dispatchEvent(physical));
+  auto filtered = routes->pop();
+  QVERIFY(filtered && filtered->outcome == OriginalInputRouteOutcome::Filtered);
+  QCOMPARE(filtered->stamp, physical.originalInputStamp());
+  QCOMPARE(scope.translation().parts, std::uint16_t(1));
+  QVERIFY(!routes->pop());
+  QCOMPARE(f.first->take(), "DKDN" + QByteArray::fromHex("0063 0000 002e"));
 }
 
 void ServerTests::inputRoutes_keepPressRecipientAcrossSwitch()

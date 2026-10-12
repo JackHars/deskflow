@@ -229,6 +229,7 @@ Server::~Server()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   revokeSelectedPeer();
+  m_inputFilter->setOriginalInputRoutes({});
 #endif
   // remove event handlers and timers
   using enum EventTypes;
@@ -590,6 +591,9 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
     if (m_active != m_primaryClient)
       enterMask &= routedToggleModifiers;
 #endif
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    observeOriginalSend(m_active);
+#endif
     m_active->enter(x, y, m_seqNum, enterMask, forScreensaver);
 
     if (m_enableClipboard) {
@@ -606,6 +610,9 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
     auto *info = new Server::SwitchToComputerInfo(m_active->getName());
     m_events->addEvent(Event(EventTypes::ServerComputerSwitched, this, info));
   } else {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    observeOriginalSend(m_active);
+#endif
     m_active->mouseMove(x, y);
   }
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
@@ -1329,6 +1336,9 @@ void Server::handleClipboardChanged(const Event &event, BaseClientProxy *client)
 
 void Server::handleKeyDownEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Key);
+#endif
   const auto *info = static_cast<IPlatformComputer::KeyInfo *>(event.getData());
   auto lang = AppUtil::instance().getCurrentLanguageCode();
   onKeyDown(info->m_key, info->m_mask, info->m_button, lang, info->m_computers.c_str());
@@ -1336,12 +1346,18 @@ void Server::handleKeyDownEvent(const Event &event)
 
 void Server::handleKeyUpEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Key);
+#endif
   auto *info = static_cast<IPlatformComputer::KeyInfo *>(event.getData());
   onKeyUp(info->m_key, info->m_mask, info->m_button, info->m_computers.c_str());
 }
 
 void Server::handleKeyRepeatEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Key);
+#endif
   const auto *info = static_cast<IPlatformComputer::KeyInfo *>(event.getData());
   auto lang = AppUtil::instance().getCurrentLanguageCode();
   onKeyRepeat(info->m_key, info->m_mask, info->m_count, info->m_button, lang);
@@ -1349,30 +1365,45 @@ void Server::handleKeyRepeatEvent(const Event &event)
 
 void Server::handleButtonDownEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Button);
+#endif
   const auto *info = static_cast<IPlatformComputer::ButtonInfo *>(event.getData());
   onMouseDown(info->m_button);
 }
 
 void Server::handleButtonUpEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Button);
+#endif
   const auto *info = static_cast<IPlatformComputer::ButtonInfo *>(event.getData());
   onMouseUp(info->m_button);
 }
 
 void Server::handleMotionPrimaryEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Motion);
+#endif
   const auto *info = static_cast<IPlatformComputer::MotionInfo *>(event.getData());
   onMouseMovePrimary(info->m_x, info->m_y);
 }
 
 void Server::handleMotionSecondaryEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Motion);
+#endif
   const auto *info = static_cast<IPlatformComputer::MotionInfo *>(event.getData());
   onMouseMoveSecondary(info->m_x, info->m_y);
 }
 
 void Server::handleWheelEvent(const Event &event)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  OriginalRouteObservation observation(*this, event, deskflow::windowshare::OriginalInputRouteKind::Scroll);
+#endif
   const auto *info = static_cast<IPlatformComputer::WheelInfo *>(event.getData());
   onMouseWheel(info->m_xDelta, info->m_yDelta);
 }
@@ -1659,6 +1690,80 @@ void Server::onScreensaver(bool activated)
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool Server::setOriginalInputRoutes(std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> routes) noexcept
+{
+  if (!routes || m_originalInputRoutes || m_selectionShutdown || !routes->bind(m_serverIncarnation))
+    return false;
+  m_originalInputRoutes = std::move(routes);
+  m_inputFilter->setOriginalInputRoutes(m_originalInputRoutes);
+  return true;
+}
+Server::OriginalRouteObservation::OriginalRouteObservation(
+    Server &owner, const Event &event, deskflow::windowshare::OriginalInputRouteKind kind
+)
+    : server(owner),
+      previous(owner.m_originalRouteObservation),
+      exceptions(std::uncaught_exceptions())
+{
+  decision.stamp = event.originalInputStamp();
+  decision.kind = kind;
+  decision.server = server.m_serverIncarnation;
+  if (server.m_active == server.m_primaryClient)
+    decision.outcome = deskflow::windowshare::OriginalInputRouteOutcome::Local;
+  server.m_originalRouteObservation = this;
+}
+Server::OriginalRouteObservation::~OriginalRouteObservation()
+{
+  server.m_originalRouteObservation = previous;
+  if (!decision.stamp || !server.m_originalInputRoutes)
+    return;
+  if (std::uncaught_exceptions() != exceptions)
+    decision.outcome = deskflow::windowshare::OriginalInputRouteOutcome::Failed;
+  server.m_originalInputRoutes->publish(std::move(decision));
+}
+void Server::observeOriginalSend(BaseClientProxy *client, bool relative) noexcept
+{
+  using namespace deskflow::windowshare;
+  auto *observation = m_originalRouteObservation;
+  if (!observation || !observation->decision.stamp || !m_originalInputRoutes)
+    return;
+  auto &decision = observation->decision;
+  if (++observation->sends != 1) {
+    decision.outcome = OriginalInputRouteOutcome::Ambiguous;
+    decision.pointKnown = false;
+    return;
+  }
+  if (client == m_primaryClient) {
+    decision.outcome = OriginalInputRouteOutcome::Local;
+    return;
+  }
+  const auto recipient = m_inputRecipients.find(client);
+  if (recipient == m_inputRecipients.end()) {
+    decision.outcome = OriginalInputRouteOutcome::Uncorrelated;
+    return;
+  }
+  decision.recipient = recipient->second;
+  decision.pointKnown = client == m_active && !relative && !(m_relativeMoves && isLockedToComputerServer());
+  if (decision.pointKnown) {
+    decision.x = m_x;
+    decision.y = m_y;
+  }
+  try {
+    const auto *stream = client->getStream();
+    const auto ticket = stream ? stream->authenticatedPeerTicket() : std::nullopt;
+    if (!ticket || !ticket->live()) {
+      decision.outcome = OriginalInputRouteOutcome::Unauthenticated;
+      return;
+    }
+    decision.ticket = *ticket;
+    decision.outcome = relative ? OriginalInputRouteOutcome::Relative : OriginalInputRouteOutcome::Dispatched;
+    if (!decision.pointKnown && decision.kind != OriginalInputRouteKind::Key)
+      decision.outcome = relative ? OriginalInputRouteOutcome::Relative : OriginalInputRouteOutcome::Uncorrelated;
+  } catch (...) {
+    decision.outcome = OriginalInputRouteOutcome::Failed;
+  }
+}
+
 std::optional<deskflow::windowshare::SelectedPeer> Server::selectedPeer() const
 {
   // No lazy publication: a failed switch or an in-progress transition must
@@ -1677,6 +1782,8 @@ void Server::invalidateSelectedPeer() noexcept
 void Server::revokeSelectedPeer() noexcept
 {
   m_selectionShutdown = true;
+  if (m_originalInputRoutes)
+    m_originalInputRoutes->revoke();
   invalidateSelectedPeer();
 }
 
@@ -1803,6 +1910,7 @@ void Server::routeModifierCommand(KeyID id, KeyModifierMask mask, const std::str
         m_inputRoutes.observeModifiers(recipient, routedMask & routedMomentaryModifiers);
       else
         m_inputRoutes.forgetModifiers(recipient, routedMask);
+      observeOriginalSend(client);
       client->keyDown(id, routedMask, 0, lang);
     }
 }
@@ -1826,6 +1934,7 @@ void Server::onKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const s
         m_inputRoutes.observeModifiers(recipient, mask & routedMomentaryModifiers);
         // Repeated downs retain the original recipient. Some keyboard layouts send
         // multiple symbols per physical down; the client already handles these.
+        observeOriginalSend(client);
         client->keyDown(id, mask, button, lang);
       }
 #else
@@ -1858,12 +1967,16 @@ void Server::onKeyUp(KeyID id, KeyModifierMask mask, KeyButton button, const cha
   const auto route = m_inputRoutes.up(InputRoutes::keyControl(id, button));
   if (route)
     for (auto recipient : route->recipients)
-      if (auto *client = inputRecipient(recipient))
+      if (auto *client = inputRecipient(recipient)) {
+        observeOriginalSend(client);
         client->keyUp(id, mask, button);
+      }
   const auto releasedModifier = modifierForRoutedKey(route ? route->key : id) & ~mask;
   for (const auto &release : m_inputRoutes.releaseModifiers(releasedModifier))
-    if (auto *client = inputRecipient(release.recipient))
+    if (auto *client = inputRecipient(release.recipient)) {
+      observeOriginalSend(client);
       client->keyDown(kKeyClearModifiers, release.mask, 0, {});
+    }
 #else
   // relay
   if (!m_keyboardBroadcasting && IKeyState::KeyInfo::isDefault(computers)) {
@@ -1898,6 +2011,7 @@ void Server::onKeyRepeat(KeyID id, KeyModifierMask mask, int32_t count, KeyButto
     for (auto recipient : route->recipients)
       if (auto *client = inputRecipient(recipient)) {
         m_inputRoutes.observeModifiers(recipient, mask & routedMomentaryModifiers);
+        observeOriginalSend(client);
         client->keyRepeat(id, mask, count, button, lang);
       }
 #else
@@ -1921,8 +2035,10 @@ void Server::onMouseDown(ButtonID id)
   const auto route = m_inputRoutes.down({InputRoutes::Kind::Button, id}, 0, 0, id, std::move(recipients));
   if (route)
     for (auto recipient : route->recipients)
-      if (auto *client = inputRecipient(recipient))
+      if (auto *client = inputRecipient(recipient)) {
+        observeOriginalSend(client);
         client->mouseDown(id);
+      }
 #else
   m_active->mouseDown(id);
 #endif
@@ -1937,8 +2053,10 @@ void Server::onMouseUp(ButtonID id)
   const auto route = m_inputRoutes.up({InputRoutes::Kind::Button, id});
   if (route)
     for (auto recipient : route->recipients)
-      if (auto *client = inputRecipient(recipient))
+      if (auto *client = inputRecipient(recipient)) {
+        observeOriginalSend(client);
         client->mouseUp(id);
+      }
 #else
   m_active->mouseUp(id);
 #endif
@@ -2073,6 +2191,9 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
   // have no idea where it really is.
   if (m_relativeMoves && isLockedToComputerServer()) {
     LOG_VERBOSE("relative move on %s by %d,%d", getName(m_active).c_str(), dx, dy);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    observeOriginalSend(m_active, true);
+#endif
     m_active->mouseRelativeMove(dx, dy);
     return;
   }
@@ -2208,6 +2329,9 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
     // warp cursor if it moved.
     if (m_x != xOld || m_y != yOld) {
       LOG_VERBOSE("move on %s to %d,%d", getName(m_active).c_str(), m_x, m_y);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      observeOriginalSend(m_active);
+#endif
       m_active->mouseMove(m_x, m_y);
     }
   }
@@ -2219,6 +2343,9 @@ void Server::onMouseWheel(int32_t xDelta, int32_t yDelta)
   assert(m_active != nullptr);
 
   // relay
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  observeOriginalSend(m_active);
+#endif
   m_active->mouseWheel(xDelta, yDelta);
 }
 

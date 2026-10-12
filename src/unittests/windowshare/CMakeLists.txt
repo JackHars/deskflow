@@ -51,9 +51,12 @@ endif()
 add_test(NAME windowshare-original-keyboard COMMAND windowshare-original-keyboard-tests)
 
 find_package(Threads REQUIRED)
-foreach(check original-input viewport-lease module-policy library-constraint)
+foreach(check original-input original-input-route viewport-lease module-policy library-constraint)
   if(check STREQUAL "original-input")
     set(foundation_sources ../../lib/windowshare/OriginalInputTests.cpp
+      ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
+  elseif(check STREQUAL "original-input-route")
+    set(foundation_sources OriginalInputRouteTests.cpp ../../lib/windowshare/OriginalInputRoute.cpp
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
   elseif(check STREQUAL "viewport-lease")
     set(foundation_sources ../../lib/windowshare/ViewportLeaseTests.cpp ../../lib/windowshare/ViewportLease.cpp)
@@ -65,7 +68,7 @@ foreach(check original-input viewport-lease module-policy library-constraint)
       ../../lib/windowshare/LocalInputModulePolicy.cpp)
   endif()
   add_executable(windowshare-${check}-tests ${foundation_sources})
-  target_include_directories(windowshare-${check}-tests PRIVATE ../../lib/windowshare)
+  target_include_directories(windowshare-${check}-tests PRIVATE ../../lib/windowshare ../../lib)
   target_compile_features(windowshare-${check}-tests PRIVATE cxx_std_20)
   target_link_libraries(windowshare-${check}-tests PRIVATE Threads::Threads)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -125,7 +128,8 @@ if(APPLE)
     add_executable(windowshare-${check}-mac-tests ${mac_test}
       ../../lib/platform/OriginalInput_mac.mm ../../lib/platform/OriginalKeyboard_mac.mm
       ../../lib/platform/OriginalInputCaptureSource_mac.mm
-      ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
+      ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalInputRoute.cpp
+      ../../lib/windowshare/OriginalKeyboard.cpp)
     target_include_directories(windowshare-${check}-mac-tests PRIVATE ../../lib)
     target_compile_features(windowshare-${check}-mac-tests PRIVATE cxx_std_20)
     set_target_properties(windowshare-${check}-mac-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)

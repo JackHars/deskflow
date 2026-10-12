@@ -1,0 +1,636 @@
+/*
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+ * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
+ */
+#include "GnomeProviderClient.h"
+
+#include <QCoreApplication>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
+#include <QTemporaryDir>
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <fcntl.h>
+#include <gio/gio.h>
+#include <gio/gunixfdlist.h>
+#include <memory>
+#include <stdexcept>
+#include <string>
+#include <sys/socket.h>
+#include <thread>
+#include <unistd.h>
+#include <utility>
+
+// This is a private-bus protocol/lifetime fixture. Its socketpair is deliberately
+// not an EIS server, and its replies are not compositor or input-authority proof.
+// The separate isolated GNOME harness tests the real Shell/Mutter provider.
+using deskflow::windowshare::GnomeProviderClient;
+using deskflow::windowshare::GnomeProviderConfig;
+using namespace std::chrono_literals;
+
+namespace {
+constexpr auto serviceName = "org.deskflow.Seamless.Gnome50";
+constexpr auto objectPath = "/org/deskflow/Seamless/Gnome50";
+constexpr auto sessionId = "fixture-session";
+constexpr auto viewerId = "fixture-viewer";
+constexpr guint generation = 7;
+constexpr auto introspection = R"xml(
+<node>
+  <interface name="org.deskflow.Seamless.Gnome50">
+    <method name="GetCapabilities">
+      <arg type="u" direction="out"/><arg type="s" direction="out"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
+    <method name="CreateSession">
+      <arg type="s" direction="out"/><arg type="u" direction="out"/>
+      <arg type="h" direction="out"/>
+    </method>
+    <method name="LaunchViewer">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/>
+      <arg type="s" direction="in"/><arg type="as" direction="in"/>
+      <arg type="s" direction="out"/>
+    </method>
+    <method name="CloseSession">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/>
+    </method>
+    <signal name="Closed"><arg type="s"/><arg type="u"/><arg type="s"/></signal>
+  </interface>
+</node>)xml";
+
+void check(bool condition, const char *message)
+{
+  if (!condition)
+    throw std::runtime_error(message);
+}
+
+struct Descriptor
+{
+  int value = -1;
+  explicit Descriptor(int value = -1) : value(value)
+  {
+  }
+  ~Descriptor()
+  {
+    reset();
+  }
+  void reset(int replacement = -1)
+  {
+    if (value >= 0)
+      ::close(value);
+    value = replacement;
+  }
+  Descriptor(const Descriptor &) = delete;
+  Descriptor &operator=(const Descriptor &) = delete;
+};
+
+struct Error
+{
+  GError *value = nullptr;
+  ~Error()
+  {
+    g_clear_error(&value);
+  }
+};
+
+template <typename Predicate>
+void waitUntil(Predicate predicate, const char *message, std::chrono::milliseconds timeout = 3000ms)
+{
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  for (;;) {
+    // Only the fake service uses the default context. The actual client owns
+    // and dispatches its separate context on its production worker thread.
+    for (unsigned i = 0; i < 32 && g_main_context_pending(nullptr); ++i)
+      g_main_context_iteration(nullptr, false);
+    if (predicate())
+      return;
+    if (std::chrono::steady_clock::now() >= deadline)
+      throw std::runtime_error(message);
+    std::this_thread::sleep_for(1ms);
+  }
+}
+
+struct PrivateBus
+{
+  QTemporaryDir directory;
+  QProcess daemon;
+  QByteArray busAddress;
+  QByteArray previousAddress = qgetenv("DBUS_SESSION_BUS_ADDRESS");
+  bool hadAddress = qEnvironmentVariableIsSet("DBUS_SESSION_BUS_ADDRESS"), changedEnvironment = false;
+  PrivateBus()
+  {
+    try {
+      // Explicitly own/reap the daemon rather than GTestDBus's extra forked
+      // watcher (whose EOF path crashes in macOS GLib 2.88 under ASan).
+      // No installed configuration or service activation directory is read.
+      check(directory.isValid(), "Cannot create private bus directory");
+      const auto path = directory.filePath("bus.conf");
+      QFile file(path);
+      constexpr auto configuration = R"xml(<busconfig>
+  <type>session</type>
+  <listen>unix:tmpdir=/tmp</listen>
+  <auth>EXTERNAL</auth>
+  <policy context="default">
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow eavesdrop="true"/>
+    <allow own="*"/>
+  </policy>
+</busconfig>)xml";
+      check(
+          file.open(QIODevice::WriteOnly) &&
+              file.write(configuration) == static_cast<qint64>(std::strlen(configuration)),
+          "Cannot write private bus configuration"
+      );
+      file.close();
+      daemon.start("dbus-daemon", {"--nofork", "--print-address=1", "--config-file=" + path});
+      check(daemon.waitForStarted(3000), "Cannot start the owned private dbus-daemon");
+      const auto deadline = std::chrono::steady_clock::now() + 3000ms;
+      while (!daemon.canReadLine()) {
+        const auto left =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        check(
+            left.count() > 0 && daemon.waitForReadyRead(static_cast<int>(left.count())),
+            "Private bus did not publish its address"
+        );
+      }
+      busAddress = daemon.readLine(1025).trimmed();
+      check(busAddress.startsWith("unix:") && busAddress.size() <= 1024, "Private bus returned an invalid address");
+      check(qputenv("DBUS_SESSION_BUS_ADDRESS", busAddress), "Cannot select the owned private bus");
+      changedEnvironment = true;
+    } catch (...) {
+      stopDaemon();
+      throw;
+    }
+  }
+  ~PrivateBus()
+  {
+    stopDaemon();
+    if (changedEnvironment) {
+      if (hadAddress)
+        qputenv("DBUS_SESSION_BUS_ADDRESS", previousAddress);
+      else
+        qunsetenv("DBUS_SESSION_BUS_ADDRESS");
+    }
+  }
+  const char *address() const
+  {
+    return busAddress.constData();
+  }
+  void stopDaemon() noexcept
+  {
+    if (daemon.state() == QProcess::NotRunning)
+      return;
+    daemon.terminate();
+    if (!daemon.waitForFinished(1000)) {
+      daemon.kill();
+      daemon.waitForFinished(1000);
+    }
+  }
+};
+
+struct Wake
+{
+  std::atomic<unsigned> count = 0;
+  unsigned consumed = 0;
+  void changed() noexcept
+  {
+    count.fetch_add(1, std::memory_order_release);
+  }
+  GnomeProviderClient::Update next(GnomeProviderClient &client)
+  {
+    waitUntil([&] { return count.load(std::memory_order_acquire) != consumed; }, "Client notification timed out");
+    consumed = count.load(std::memory_order_acquire);
+    return client.takeUpdate();
+  }
+};
+
+struct Configuration
+{
+  QTemporaryDir directory;
+  GnomeProviderConfig load()
+  {
+    check(directory.isValid(), "Cannot create private fixture configuration directory");
+    const auto executable = directory.filePath("never-executed-viewer");
+    QFile viewer(executable);
+    check(
+        viewer.open(QIODevice::WriteOnly) && viewer.write("fixture, never executed\n") > 0, "Cannot write fixture file"
+    );
+    viewer.close();
+    check(
+        viewer.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner),
+        "Cannot set fixture executable mode"
+    );
+    const QJsonObject object{
+        {"version", 1},
+        {"viewerExecutable", executable},
+        {"connect", "192.0.2.1"},
+        {"identity", directory.filePath("identity")},
+        {"peerPin", QString(64, 'a')}
+    };
+    const auto bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    const auto path = directory.filePath("provider.json");
+    QFile file(path);
+    check(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "Cannot write fixture configuration");
+    file.close();
+    return GnomeProviderConfig::load(path);
+  }
+};
+
+struct Service
+{
+  enum class Mode
+  {
+    Normal,
+    OwnerMismatch,
+    CloseDuringSetup,
+    DelayedCreate
+  };
+
+  GDBusConnection *connection = nullptr, *otherOwner = nullptr;
+  GDBusNodeInfo *description = nullptr;
+  GDBusMethodInvocation *pendingCreate = nullptr;
+  guint registration = 0, nameWatch = 0;
+  Descriptor peer;
+  Mode mode;
+  std::string caller, failure;
+  unsigned capabilities = 0, creates = 0, launches = 0, closes = 0;
+  bool callerGone = false;
+
+  Service(const PrivateBus &bus, Mode mode = Mode::Normal) : mode(mode)
+  {
+    try {
+      connection = connect(bus.address());
+      own(connection, serviceName);
+      if (mode == Mode::OwnerMismatch) {
+        otherOwner = connect(bus.address());
+        own(otherOwner, "org.gnome.Shell");
+      } else {
+        own(connection, "org.gnome.Shell");
+      }
+      Error error;
+      description = g_dbus_node_info_new_for_xml(introspection, &error.value);
+      check(description, "Invalid fixture D-Bus introspection");
+      static const GDBusInterfaceVTable vtable{method, nullptr, nullptr, {nullptr}};
+      registration = g_dbus_connection_register_object(
+          connection, objectPath, description->interfaces[0], &vtable, this, nullptr, &error.value
+      );
+      check(registration, "Cannot register private fixture service");
+      nameWatch = g_dbus_connection_signal_subscribe(
+          connection, "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged", "/org/freedesktop/DBus",
+          nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+          [](GDBusConnection *, const gchar *, const gchar *, const gchar *, const gchar *, GVariant *parameters,
+             gpointer data) {
+            auto &self = *static_cast<Service *>(data);
+            const char *name = nullptr, *before = nullptr, *after = nullptr;
+            g_variant_get(parameters, "(&s&s&s)", &name, &before, &after);
+            if (!self.caller.empty() && self.caller == name && !*after) {
+              self.callerGone = true;
+              self.peer.reset();
+            }
+          },
+          this, nullptr
+      );
+    } catch (...) {
+      cleanup();
+      throw;
+    }
+  }
+  ~Service()
+  {
+    cleanup();
+  }
+  Service(const Service &) = delete;
+  Service &operator=(const Service &) = delete;
+
+  static GDBusConnection *connect(const char *address)
+  {
+    Error error;
+    auto *result = g_dbus_connection_new_for_address_sync(
+        address,
+        static_cast<GDBusConnectionFlags>(
+            G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT | G_DBUS_CONNECTION_FLAGS_MESSAGE_BUS_CONNECTION
+        ),
+        nullptr, nullptr, &error.value
+    );
+    check(result, "Cannot connect to private fixture bus");
+    g_dbus_connection_set_exit_on_close(result, false);
+    check(
+        g_dbus_connection_get_capabilities(result) & G_DBUS_CAPABILITY_FLAGS_UNIX_FD_PASSING,
+        "Private bus does not support Unix descriptor passing"
+    );
+    return result;
+  }
+  static void own(GDBusConnection *connection, const char *name)
+  {
+    Error error;
+    auto *reply = g_dbus_connection_call_sync(
+        connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "RequestName",
+        g_variant_new("(su)", name, 4u), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, &error.value
+    );
+    check(reply, "Cannot own fixture bus name");
+    guint result = 0;
+    g_variant_get(reply, "(u)", &result);
+    g_variant_unref(reply);
+    check(result == 1, "Fixture bus name was already owned");
+  }
+  void loseProviderName()
+  {
+    Error error;
+    auto *reply = g_dbus_connection_call_sync(
+        connection, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ReleaseName",
+        g_variant_new("(s)", serviceName), G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, 1000, nullptr, &error.value
+    );
+    check(reply, "Cannot release fixture provider name");
+    guint result = 0;
+    g_variant_get(reply, "(u)", &result);
+    g_variant_unref(reply);
+    check(result == 1, "Fixture did not own provider name before release");
+  }
+  void created(GDBusMethodInvocation *invocation)
+  {
+    int descriptors[2]{-1, -1};
+    check(::socketpair(AF_UNIX, SOCK_STREAM, 0, descriptors) == 0, "Cannot create fixture socketpair");
+    Descriptor delivered(descriptors[0]);
+    peer.reset(descriptors[1]);
+    check(
+        ::fcntl(delivered.value, F_SETFD, FD_CLOEXEC) == 0 && ::fcntl(peer.value, F_SETFD, FD_CLOEXEC) == 0,
+        "Cannot make fixture descriptors close-on-exec"
+    );
+    Error error;
+    auto *list = g_unix_fd_list_new();
+    const auto handle = g_unix_fd_list_append(list, delivered.value, &error.value);
+    if (handle != 0) {
+      g_object_unref(list);
+      throw std::runtime_error("Cannot append fixture descriptor");
+    }
+    g_dbus_method_invocation_return_value_with_unix_fd_list(
+        invocation, g_variant_new("(suh)", sessionId, generation, handle), list
+    );
+    g_object_unref(list);
+  }
+  void replyLate()
+  {
+    check(pendingCreate, "Fixture has no delayed request");
+    auto *invocation = std::exchange(pendingCreate, nullptr);
+    try {
+      created(invocation);
+    } catch (...) {
+      g_object_unref(invocation);
+      throw;
+    }
+    g_object_unref(invocation);
+  }
+  void handle(const char *name, GVariant *parameters, GDBusMethodInvocation *invocation)
+  {
+    if (!std::strcmp(name, "GetCapabilities")) {
+      ++capabilities;
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      for (const auto *key : {"exactWaylandClientBinding", "eisSessionOwned", "nativeHitTesting"})
+        g_variant_builder_add(&values, "{sv}", key, g_variant_new_boolean(true));
+      g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
+      g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
+    } else if (!std::strcmp(name, "CreateSession")) {
+      check(creates++ == 0, "Client repeated CreateSession");
+      caller = g_dbus_method_invocation_get_sender(invocation);
+      if (mode == Mode::DelayedCreate)
+        pendingCreate = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
+      else
+        created(invocation);
+    } else if (!std::strcmp(name, "LaunchViewer")) {
+      ++launches;
+      const char *id = nullptr, *executable = nullptr;
+      guint value = 0;
+      GVariant *arguments = nullptr;
+      g_variant_get(parameters, "(&su&s@as)", &id, &value, &executable, &arguments);
+      const bool valid = std::strcmp(id, sessionId) == 0 && value == generation && *executable == '/' &&
+                         g_variant_n_children(arguments) > 0 &&
+                         caller == g_dbus_method_invocation_get_sender(invocation);
+      g_variant_unref(arguments);
+      check(valid, "Client changed session or sent invalid viewer arguments");
+      if (mode == Mode::CloseDuringSetup) {
+        Error error;
+        check(
+            g_dbus_connection_emit_signal(
+                connection, caller.c_str(), objectPath, serviceName, "Closed",
+                g_variant_new("(sus)", sessionId, generation, "closed-before-launch-reply"), &error.value
+            ),
+            "Cannot emit fixture close during setup"
+        );
+      }
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
+    } else if (!std::strcmp(name, "CloseSession")) {
+      ++closes;
+      const char *id = nullptr;
+      guint value = 0;
+      g_variant_get(parameters, "(&su)", &id, &value);
+      check(
+          std::strcmp(id, sessionId) == 0 && value == generation &&
+              caller == g_dbus_method_invocation_get_sender(invocation),
+          "Client closed a different session"
+      );
+      peer.reset();
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+    } else {
+      throw std::runtime_error("Unexpected client method");
+    }
+  }
+  static void method(
+      GDBusConnection *, const gchar *, const gchar *, const gchar *, const gchar *name, GVariant *parameters,
+      GDBusMethodInvocation *invocation, gpointer data
+  ) noexcept
+  {
+    auto &self = *static_cast<Service *>(data);
+    try {
+      self.handle(name, parameters, invocation);
+    } catch (const std::exception &error) {
+      self.failure = error.what();
+      g_dbus_method_invocation_return_dbus_error(invocation, "org.deskflow.Test.FixtureFailure", error.what());
+    }
+  }
+  void cleanup() noexcept
+  {
+    if (pendingCreate) {
+      g_dbus_method_invocation_return_dbus_error(pendingCreate, "org.deskflow.Test.Ended", "Fixture ended");
+      g_object_unref(std::exchange(pendingCreate, nullptr));
+    }
+    peer.reset();
+    if (connection) {
+      if (nameWatch)
+        g_dbus_connection_signal_unsubscribe(connection, nameWatch);
+      if (registration)
+        g_dbus_connection_unregister_object(connection, registration);
+      g_dbus_connection_close_sync(connection, nullptr, nullptr);
+      g_object_unref(std::exchange(connection, nullptr));
+    }
+    if (otherOwner) {
+      g_dbus_connection_close_sync(otherOwner, nullptr, nullptr);
+      g_object_unref(std::exchange(otherOwner, nullptr));
+    }
+    if (description)
+      g_dbus_node_info_unref(std::exchange(description, nullptr));
+  }
+};
+
+void ownerMismatch(const PrivateBus &bus)
+{
+  Service service(bus, Service::Mode::OwnerMismatch);
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto update = wake.next(client);
+  Descriptor descriptor(update.descriptor);
+  check(update.closed && !update.ready && !client.live(), "Mismatched Shell owner was accepted");
+  check(descriptor.value == -1 && service.creates == 0 && service.capabilities == 0, "Owner mismatch reached setup");
+  check(update.error.find("not owned") != std::string::npos, "Owner mismatch lost its diagnostic");
+  check(service.failure.empty(), "Private service failed");
+}
+
+void closeDuringSetup(const PrivateBus &bus)
+{
+  Service service(bus, Service::Mode::CloseDuringSetup);
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto update = wake.next(client);
+  Descriptor descriptor(update.descriptor);
+  check(update.closed && !update.ready && !client.live(), "Queued setup close was overwritten by Ready");
+  check(descriptor.value == -1, "Setup close leaked the unadopted descriptor to the consumer");
+  waitUntil([&] { return service.callerGone; }, "Setup close did not retire the private client connection");
+  const auto final = client.takeUpdate();
+  Descriptor finalDescriptor(final.descriptor);
+  check(!final.ready && final.closed && !client.live() && finalDescriptor.value == -1, "Setup close later revived");
+  check(
+      service.creates == 1 && service.launches == 1 && service.closes == 1, "Setup close did not clean up exactly once"
+  );
+  check(service.failure.empty(), "Private service failed");
+}
+
+void transferredDescriptor(const PrivateBus &bus)
+{
+  Service service(bus);
+  Configuration configuration;
+  Wake wake;
+  auto client = std::make_unique<GnomeProviderClient>(configuration.load(), [&] { wake.changed(); });
+  const auto update = wake.next(*client);
+  Descriptor descriptor(update.descriptor);
+  check(update.ready && !update.closed && client->live() && descriptor.value >= 0, "Client did not become Ready");
+  check(
+      update.session == sessionId && update.viewer == viewerId && update.generation == generation,
+      "Ready changed the provider's session identity"
+  );
+  check((::fcntl(descriptor.value, F_GETFD) & FD_CLOEXEC) != 0, "Transferred descriptor is inheritable");
+  check(::send(service.peer.value, "x", 1, 0) == 1, "Cannot write fixture socket peer");
+  char byte = 0;
+  waitUntil(
+      [&] { return ::recv(descriptor.value, &byte, 1, MSG_DONTWAIT) == 1; },
+      "Transferred descriptor is not the peer socket"
+  );
+  check(byte == 'x', "Transferred descriptor corrupted data");
+  const auto second = client->takeUpdate();
+  Descriptor duplicate(second.descriptor);
+  check(duplicate.value == -1, "Descriptor ownership was transferred twice");
+  client->stop();
+  client->stop();
+  check(!client->live(), "stop() did not revoke Ready immediately");
+  waitUntil([&] { return service.callerGone; }, "stop() did not close the private caller connection");
+  client.reset();
+  check(::fcntl(descriptor.value, F_GETFD) >= 0, "Client destruction closed the consumer-owned descriptor");
+  waitUntil(
+      [&] { return ::recv(descriptor.value, &byte, 1, MSG_DONTWAIT) == 0; },
+      "Session stop did not close its socket peer"
+  );
+  check(service.closes == 1 && service.creates == 1 && service.launches == 1, "stop() repeated setup or cleanup");
+  check(service.failure.empty(), "Private service failed");
+}
+
+void ownerLossAfterReady(const PrivateBus &bus)
+{
+  Service service(bus);
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  check(ready.ready && client.live() && descriptor.value >= 0, "Owner-loss fixture did not become Ready");
+  service.loseProviderName();
+  const auto closed = wake.next(client);
+  Descriptor duplicate(closed.descriptor);
+  check(
+      closed.closed && !closed.ready && !client.live() && duplicate.value == -1,
+      "Provider owner loss did not revoke Ready"
+  );
+  waitUntil([&] { return service.callerGone; }, "Owner loss did not close the original caller connection");
+  check(::fcntl(descriptor.value, F_GETFD) >= 0, "Owner loss closed the consumer-owned descriptor");
+  char byte = 0;
+  check(::recv(descriptor.value, &byte, 1, MSG_DONTWAIT) == 0, "Owner loss left the session socket peer open");
+  Service::own(service.connection, serviceName);
+  const auto final = client.takeUpdate();
+  Descriptor finalDescriptor(final.descriptor);
+  check(
+      !final.ready && final.closed && !client.live() && finalDescriptor.value == -1,
+      "Provider reappearance revived a terminal client"
+  );
+  check(
+      service.creates == 1 && service.launches == 1 && service.closes == 1, "Owner loss replayed setup or lost cleanup"
+  );
+  check(service.failure.empty(), "Private service failed");
+}
+
+void stopDuringDelayedSetup(const PrivateBus &bus)
+{
+  Service service(bus, Service::Mode::DelayedCreate);
+  Configuration configuration;
+  Wake wake;
+  auto client = std::make_unique<GnomeProviderClient>(configuration.load(), [&] { wake.changed(); });
+  waitUntil([&] { return service.pendingCreate != nullptr; }, "Client did not reach delayed CreateSession");
+  const auto start = std::chrono::steady_clock::now();
+  client->stop();
+  check(!client->live(), "Stopped setup client became live");
+  waitUntil([&] { return service.callerGone; }, "Canceled setup retained its private connection", 2000ms);
+  const auto update = wake.next(*client);
+  Descriptor descriptor(update.descriptor);
+  check(update.closed && !update.ready && descriptor.value == -1, "Canceled setup published a descriptor");
+  service.replyLate();
+  check(g_dbus_connection_flush_sync(service.connection, nullptr, nullptr), "Cannot flush deliberately late reply");
+  client.reset();
+  check(std::chrono::steady_clock::now() - start < 2000ms, "Canceled setup waited for the normal method timeout");
+  check(
+      service.creates == 1 && service.launches == 0 && service.closes == 0,
+      "Late creation reply restarted or closed an unknown session"
+  );
+  check(service.failure.empty(), "Private service failed");
+}
+} // namespace
+
+int main(int argc, char **argv)
+{
+  auto *daemon = g_find_program_in_path("dbus-daemon");
+  if (!daemon) {
+    std::puts("SKIP: private D-Bus lifecycle tests require dbus-daemon (no desktop bus is used)");
+    return 77;
+  }
+  g_free(daemon);
+  QCoreApplication application(argc, argv);
+  try {
+    PrivateBus bus;
+    ownerMismatch(bus);
+    std::puts("PASS: provider and Shell must have the same unique owner");
+    closeDuringSetup(bus);
+    std::puts("PASS: queued close before launch reply cannot publish Ready");
+    transferredDescriptor(bus);
+    std::puts("PASS: descriptor transfers once and remains consumer-owned through stop/destruction");
+    ownerLossAfterReady(bus);
+    std::puts("PASS: provider owner loss retires the exact session without reconnect");
+    stopDuringDelayedSetup(bus);
+    std::puts("PASS: delayed setup cancellation closes the caller and ignores a late descriptor reply");
+    return 0;
+  } catch (const std::exception &error) {
+    std::fprintf(stderr, "FAIL: %s\n", error.what());
+    return 1;
+  }
+}

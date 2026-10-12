@@ -18,6 +18,10 @@ private Q_SLOTS:
   void KeyboardBroadcastInfo_alloc_stateAndComputers();
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   void initTestCase();
+  void originalCapture_legacyKeyExpansion();
+  void originalCapture_exactDispatchAndOwnership();
+  void originalCapture_motionCrossingUsesEnterDecision();
+  void originalCapture_filterAndAmbiguityDenials();
   void inputRoutes_keepPressRecipientAcrossSwitch();
   void inputRoutes_localPressDoesNotAcquireRemoteRecipient();
   void inputRoutes_disconnectDoesNotRetargetHeldInput();

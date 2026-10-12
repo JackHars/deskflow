@@ -70,19 +70,22 @@ if(BUILD_WINDOWSHARE)
   add_subdirectory(windowshare)
   set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests
     windowshare-core-tests windowshare-platform-markers-tests windowshare-input-routes-tests windowshare-original-keyboard-tests
-    windowshare-original-input-tests windowshare-viewport-lease-tests windowshare-module-policy-tests
+    windowshare-original-input-tests windowshare-original-input-route-tests windowshare-viewport-lease-tests windowshare-module-policy-tests
     windowshare-library-constraint-tests
     windowshare-selected-peer-mailbox-tests windowshare-selected-peer-publisher-tests)
   if(TARGET windowshare-original-keyboard-mac-tests)
     set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests windowshare-original-keyboard-mac-tests)
   endif()
-  foreach(check transport viewer bridge holding native local-input code-admission preflight bootstrap companion peer-trust core-args)
+  foreach(check transport viewer bridge holding native local-input code-admission preflight bootstrap companion peer-trust core-args gnome-config gnome-client)
     if(TARGET windowshare-${check}-tests)
       add_test(NAME windowshare-${check} COMMAND $<TARGET_FILE:windowshare-${check}-tests>)
       set_tests_properties(windowshare-${check} PROPERTIES TIMEOUT 60)
       set_property(GLOBAL APPEND PROPERTY ${CMAKE_PROJECT_NAME}_tests windowshare-${check}-tests)
     endif()
   endforeach()
+  if(TARGET windowshare-gnome-client-tests)
+    set_tests_properties(windowshare-gnome-client PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
+  endif()
   if(TARGET windowshare-local-input-tests)
     set_tests_properties(windowshare-local-input PROPERTIES TIMEOUT 90)
   endif()

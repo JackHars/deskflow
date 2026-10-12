@@ -18,6 +18,7 @@
 #include "server/Config.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputRouteState.h"
+#include "windowshare/OriginalInputRoute.h"
 #include "windowshare/SelectedPeer.h"
 #endif
 
@@ -215,6 +216,9 @@ public:
   // Terminal shutdown fence. Call before entering any shutdown nested loop.
   // A subsequent client/configuration event cannot publish new authority.
   void revokeSelectedPeer() noexcept;
+  // Bind once on the core thread before dispatch; failure denies observation
+  // without changing ordinary routing. Server shutdown revokes retained joins.
+  bool setOriginalInputRoutes(std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> routes) noexcept;
 #endif
 
   //@}
@@ -409,6 +413,22 @@ private:
   BaseClientProxy *m_active = nullptr;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  class OriginalRouteObservation
+  {
+  public:
+    OriginalRouteObservation(Server &server, const Event &event, deskflow::windowshare::OriginalInputRouteKind kind);
+    ~OriginalRouteObservation();
+    OriginalRouteObservation(const OriginalRouteObservation &) = delete;
+    OriginalRouteObservation &operator=(const OriginalRouteObservation &) = delete;
+    Server &server;
+    OriginalRouteObservation *previous;
+    deskflow::windowshare::OriginalInputRouteDecision decision;
+    unsigned sends = 0;
+    int exceptions;
+  };
+  void observeOriginalSend(BaseClientProxy *client, bool relative = false) noexcept;
+  OriginalRouteObservation *m_originalRouteObservation = nullptr;
+  std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> m_originalInputRoutes;
   InputRoutes m_inputRoutes;
   std::map<BaseClientProxy *, InputRoutes::Recipient> m_inputRecipients;
   std::map<InputRoutes::Recipient, BaseClientProxy *> m_inputClients;

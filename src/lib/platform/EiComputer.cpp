@@ -11,6 +11,7 @@
 #include "base/IEventQueue.h"
 #include "base/Log.h"
 #include "common/Constants.h"
+#include "common/ExitCodes.h"
 #include "common/Settings.h"
 #include "deskflow/App.h"
 #include "deskflow/IComputer.h"
@@ -20,6 +21,9 @@
 #include "platform/EiKeyState.h"
 #include "platform/PortalInputCapture.h"
 #include "platform/PortalRemoteDesktop.h"
+#ifdef BUILD_WINDOWSHARE
+#include "windowshare/GnomeProviderClient.h"
+#endif
 
 #include <algorithm>
 #include <bit>
@@ -27,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 // Values are in fractional wheel-click units (1.0 == one full 120-unit click) for trackpad
@@ -40,6 +45,15 @@ struct ScrollRemainder
 namespace deskflow {
 
 EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
+#ifdef BUILD_WINDOWSHARE
+    : EiComputer(isPrimary, events, usePortal, nullptr)
+{
+}
+
+EiComputer::EiComputer(
+    bool isPrimary, IEventQueue *events, bool usePortal, const windowshare::GnomeProviderConfig *configuration
+)
+#endif
     : PlatformComputer{events},
       m_isPrimary{isPrimary},
       m_events{events},
@@ -47,6 +61,10 @@ EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
       m_h{1},
       m_isOnComputer{isPrimary}
 {
+#ifdef BUILD_WINDOWSHARE
+  if (configuration && (isPrimary || !usePortal))
+    throw std::runtime_error("GNOME provider requires an experimental Wayland client");
+#endif
   initEi();
   m_keyState = new EiKeyState(this, events);
   // install event handlers
@@ -54,7 +72,47 @@ EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
     handleSystemEvent(e);
   });
 
-  if (usePortal) {
+#ifdef BUILD_WINDOWSHARE
+  if (configuration) {
+    m_gnomeProviderEnabled = true;
+    m_events->addHandler(EventTypes::EIGnomeProviderChanged, getEventTarget(), [this](const auto &) {
+      handleGnomeProviderChanged();
+    });
+    try {
+      m_clipboard = new EiClipboard(kClipboardClipboard);
+      // Start from the queue's first timer dispatch. Its pre-loop pending
+      // queue is not safe for worker publication during this constructor.
+      m_gnomeProviderStartTimer = m_events->newOneShotTimer(0.001, nullptr);
+      m_events->addHandler(EventTypes::Timer, m_gnomeProviderStartTimer, [this, config = *configuration](const auto &) {
+        m_events->removeHandler(EventTypes::Timer, m_gnomeProviderStartTimer);
+        m_events->deleteTimer(std::exchange(m_gnomeProviderStartTimer, nullptr));
+        try {
+          // The worker only wakes the consumer; it never borrows platform
+          // state, passes raw descriptors in events, or changes libei.
+          auto wake = [events = m_events, target = getEventTarget()] {
+            events->addEvent(Event(EventTypes::EIGnomeProviderChanged, target));
+          };
+          m_gnomeProvider = std::make_unique<windowshare::GnomeProviderClient>(config, std::move(wake));
+        } catch (const std::exception &error) {
+          stopGnomeProvider(error.what());
+        }
+      });
+    } catch (...) {
+      if (m_gnomeProviderStartTimer) {
+        m_events->removeHandler(EventTypes::Timer, m_gnomeProviderStartTimer);
+        m_events->deleteTimer(std::exchange(m_gnomeProviderStartTimer, nullptr));
+      }
+      m_events->removeHandler(EventTypes::EIGnomeProviderChanged, getEventTarget());
+      m_events->removeHandler(EventTypes::System, m_events->getSystemTarget());
+      m_events->adoptBuffer(nullptr);
+      cleanupEi();
+      delete m_keyState;
+      delete m_clipboard;
+      throw;
+    }
+  } else
+#endif
+      if (usePortal) {
     m_events->addHandler(EventTypes::EIConnected, getEventTarget(), [this](const auto &e) {
       handleConnectedToEisEvent(e);
     });
@@ -90,6 +148,15 @@ EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
 
 EiComputer::~EiComputer()
 {
+#ifdef BUILD_WINDOWSHARE
+  if (m_gnomeProviderStartTimer) {
+    m_events->removeHandler(EventTypes::Timer, m_gnomeProviderStartTimer);
+    m_events->deleteTimer(std::exchange(m_gnomeProviderStartTimer, nullptr));
+  }
+  // Join the sole producer before removing its target or destroying libei.
+  m_gnomeProvider.reset();
+  m_events->removeHandler(EventTypes::EIGnomeProviderChanged, getEventTarget());
+#endif
   m_events->adoptBuffer(nullptr);
   m_events->removeHandler(EventTypes::System, m_events->getSystemTarget());
 
@@ -313,6 +380,8 @@ void EiComputer::getCursorCenter(int32_t &x, int32_t &y) const
 
 void EiComputer::fakeMouseButton(ButtonID button, bool press)
 {
+  if (!inputSessionLive())
+    return;
   uint32_t code;
 
   if (!m_eiPointer)
@@ -340,6 +409,8 @@ void EiComputer::fakeMouseButton(ButtonID button, bool press)
 
 void EiComputer::fakeMouseMove(int32_t x, int32_t y)
 {
+  if (!inputSessionLive())
+    return;
   // We get one motion event before enter() with the target position
   if (!m_isOnComputer) {
     m_cursorX = x;
@@ -357,6 +428,8 @@ void EiComputer::fakeMouseMove(int32_t x, int32_t y)
 
 void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
 {
+  if (!inputSessionLive())
+    return;
   if (!m_eiPointer)
     return;
 
@@ -367,6 +440,8 @@ void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
 
 void EiComputer::fakeMouseWheel(ScrollDelta delta) const
 {
+  if (!inputSessionLive())
+    return;
   if (!m_eiPointer)
     return;
 
@@ -381,6 +456,8 @@ void EiComputer::fakeMouseWheel(ScrollDelta delta) const
 
 void EiComputer::fakeKey(uint32_t keycode, bool isDown) const
 {
+  if (!inputSessionLive())
+    return;
   if (!m_eiKeyboard)
     return;
 
@@ -411,9 +488,18 @@ void EiComputer::cancelIdleEmulationTimer() const
   }
 }
 
+bool EiComputer::inputSessionLive() const noexcept
+{
+#ifdef BUILD_WINDOWSHARE
+  return !m_gnomeProviderEnabled || (!m_gnomeProviderStopped && m_gnomeProvider && m_gnomeProvider->live());
+#else
+  return true;
+#endif
+}
+
 void EiComputer::ensureEmulating() const
 {
-  if (m_isPrimary || !m_isOnComputer)
+  if (!inputSessionLive() || m_isPrimary || !m_isOnComputer)
     return;
 
   if (!m_isEmulating) {
@@ -947,6 +1033,46 @@ void EiComputer::handlePortalSessionClosed()
   initEi();
 }
 
+#ifdef BUILD_WINDOWSHARE
+void EiComputer::handleGnomeProviderChanged()
+{
+  const std::scoped_lock lock(m_mutex);
+  if (!m_gnomeProvider)
+    return;
+  const auto update = m_gnomeProvider->takeUpdate();
+  if (update.closed || !update.ready || !m_gnomeProvider->live() || m_gnomeProviderStopped) {
+    if (update.descriptor >= 0)
+      ::close(update.descriptor);
+    stopGnomeProvider(update.error.empty() ? "GNOME input session ended" : update.error.c_str());
+    return;
+  }
+  if (update.descriptor < 0)
+    return;
+  // libei takes ownership even on failure and closes at context teardown.
+  const auto result = ei_setup_backend_fd(m_ei, update.descriptor);
+  if (result != 0) {
+    LOG_ERR("failed to adopt GNOME EIS session: %s", strerror(-result));
+    stopGnomeProvider("Cannot adopt GNOME EIS session");
+    return;
+  }
+  LOG_INFO("connected experimental GNOME input session and owned Wayland viewer");
+}
+
+void EiComputer::stopGnomeProvider(const char *reason)
+{
+  if (m_gnomeProviderStopped)
+    return;
+  m_gnomeProviderStopped = true;
+  if (m_gnomeProvider)
+    m_gnomeProvider->stop();
+  stopEmulating();
+  LOG_ERR("experimental GNOME session stopped: %s", reason);
+  // A replacement portal/session would silently replace the retained native
+  // identity. Exit this explicit client and let normal teardown release libei.
+  m_events->addEvent(Event(EventTypes::Quit, nullptr, new ExitEventData(s_exitFailed)));
+}
+#endif
+
 void EiComputer::handleSystemEvent(const Event &)
 {
   std::scoped_lock lock{m_mutex};
@@ -992,6 +1118,12 @@ void EiComputer::handleSystemEvent(const Event &)
       }
       break;
     case EI_EVENT_DISCONNECT:
+#ifdef BUILD_WINDOWSHARE
+      if (m_gnomeProvider) {
+        stopGnomeProvider("EIS disconnected");
+        break;
+      }
+#endif
       // We're using libei which emulates the various seat/device remove events
       // so by the time we get here our EiComputer should be in a neutral state.
       //

@@ -74,6 +74,12 @@ bool LocalInputPeerTrust::verify(LocalInputProcess expected) const
 #ifdef __APPLE__
 struct LocalInputCoreSessionTestAccess
 {
+  static std::unique_ptr<LocalInputCoreSession> captureOnly()
+  {
+    auto session = std::unique_ptr<LocalInputCoreSession>(new LocalInputCoreSession);
+    session->m_captureSource = std::make_shared<OriginalInputCaptureSource>();
+    return session;
+  }
   static void drain(LocalInputCoreSession &session)
   {
     session.drainCapturedInput();
@@ -713,6 +719,67 @@ struct CaptureFixture
   }
 };
 
+void coreSessionRouteJoin()
+{
+  auto session = LocalInputCoreSessionTestAccess::captureOnly();
+  const auto source = session->captureSource();
+  check(source->start() && source->routes()->bind(91), "session route fixture startup");
+  CaptureFixture fixture;
+  deskflow::AuthenticatedPeerIssuer issuer;
+  deskflow::AuthenticatedPeerTicket::Fingerprint fingerprint{};
+  fingerprint.fill(0x76);
+  const auto ticket = *issuer.issue(fingerprint);
+  std::vector<OriginalInputRouted> joined;
+  session->onRoutedInput = [&](const auto &value) { joined.push_back(value); };
+  const auto stamp = source->beginCapture(kCGEventMouseMoved, fixture.event);
+  source->completeCapture({stamp, 1, false});
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(joined.empty(), "session must wait for actual core route");
+  OriginalInputRouteDecision decision{
+      {stamp.epoch, stamp.sequence, 1},
+      OriginalInputRouteKind::Motion,
+      OriginalInputRouteOutcome::Dispatched,
+      91,
+      19,
+      ticket,
+      812,
+      227,
+      true
+  };
+  check(source->routes()->publish(decision), "core route publication");
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      joined.size() == 1 && joined.back().live() && joined.back().route.x == 812 &&
+          joined.back().input.record.sequence == stamp.sequence &&
+          joined.back().route.ticket.incarnation() == ticket.incarnation(),
+      "session joins exact route instead of querying current peer/cursor"
+  );
+  source->capture(kCGEventMouseMoved, fixture.event);
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      joined.size() == 2 && joined.back().route.outcome == OriginalInputRouteOutcome::NoTranslation,
+      "session accounts for zero legacy translations"
+  );
+  const auto expanded = source->beginCapture(kCGEventMouseMoved, fixture.event);
+  source->completeCapture({expanded, 2, false});
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      joined.size() == 3 && joined.back().route.outcome == OriginalInputRouteOutcome::Expanded,
+      "session never treats several translated parts as one input"
+  );
+  source->capture(kCGEventMouseMoved, fixture.event);
+  session->onRoutedInput = [&](const auto &value) {
+    check(value.live(), "callback entered with retained evidence");
+    session.reset();
+    check(!value.live(), "destroying session revokes callback-owned evidence");
+  };
+  LocalInputCoreSessionTestAccess::drain(*session);
+  check(
+      !session && !joined.front().live() && !source->epoch().live(),
+      "callback destruction returns without accessing session and revokes retained joins"
+  );
+}
+
 void coreSessionEmergency()
 {
   enum class Before
@@ -941,6 +1008,7 @@ int main(int argc, char **argv)
     coreSessionMailboxClosure();
     coreSessionCustomDrain();
 #ifdef __APPLE__
+    coreSessionRouteJoin();
     coreSessionEmergency();
     coreSessionEmergencyCallbacks();
     QTextStream(stdout) << "PASS: asynchronous capture emergency after overflow/barrier revocation, core continuation, "

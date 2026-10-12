@@ -887,20 +887,45 @@ bool InputFilter::operator==(const InputFilter &x) const
 
 void InputFilter::handleEvent(const Event &event)
 {
-  // copy event and adjust target
+  deskflow::windowshare::OriginalInputStampScope::Pause untrackedActions;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  const auto rejected = [&] {
+    if (event.originalInputStamp() && m_originalInputRoutes) {
+      deskflow::windowshare::OriginalInputRouteDecision decision;
+      decision.stamp = event.originalInputStamp();
+      decision.outcome = deskflow::windowshare::OriginalInputRouteOutcome::Filtered;
+      decision.kind = event.getType() == EventTypes::PrimaryComputerButtonDown ||
+                              event.getType() == EventTypes::PrimaryComputerButtonUp
+                          ? deskflow::windowshare::OriginalInputRouteKind::Button
+                          : deskflow::windowshare::OriginalInputRouteKind::Key;
+      m_originalInputRoutes->publish(std::move(decision));
+    }
+  };
+#endif
+  // copy event and adjust target, preserving its explicit provenance
   Event myEvent(
       event.getType(), this, event.getData(),
-      event.getFlags() | Event::EventFlags::DontFreeData | Event::EventFlags::DeliverImmediately
+      event.getFlags() | Event::EventFlags::DontFreeData | Event::EventFlags::DeliverImmediately,
+      event.originalInputStamp()
   );
 
   // let each rule try to match the event until one does
   for (auto rule = m_ruleList.begin(); rule != m_ruleList.end(); ++rule) {
     if (rule->handleEvent(myEvent)) {
       // handled
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      rejected();
+#endif
       return;
     }
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Unhandled registered hotkeys have no Server input handler.
+  if (event.getType() == EventTypes::PrimaryComputerHotkeyDown ||
+      event.getType() == EventTypes::PrimaryComputerHotkeyUp)
+    rejected();
+#endif
   // not handled so pass through
   m_events->addEvent(std::move(myEvent));
 }

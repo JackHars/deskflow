@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "base/Event.h"
 #include "platform/OSXEventTapRunLoop.h"
 #include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/PlatformMarkers.h"
@@ -99,6 +100,31 @@ void lifecycleAndOrdering()
   OriginalInputCaptureSource stopped;
   stopped.stop();
   check(!stopped.start() && !stopped.epoch().live(), "stop before start is terminal");
+}
+
+void translationCompletion()
+{
+  EventFixture event;
+  OriginalInputCaptureSource source;
+  check(source.start(), "translation source start");
+  const auto stamp = source.beginCapture(kCGEventMouseMoved, event.event);
+  check(bool(stamp) && !source.popCaptured(), "raw capture waits for translation completion");
+  OriginalInputStampScope scope(stamp);
+  Event translated(deskflow::EventTypes::PrimaryComputerMotionOnSecondary);
+  source.completeCapture(scope.translation());
+  const auto captured = source.popCaptured();
+  check(
+      captured && captured->translation.parts == 1 && captured->translation.stamp == stamp &&
+          translated.originalInputStamp() == OriginalInputStamp{stamp.epoch, stamp.sequence, 1},
+      "same source epoch/sequence joins the actual Event"
+  );
+  check(
+      std::get<OriginalInputMotion>(captured->input.record.payload).dx == -7, "translation cannot replace source deltas"
+  );
+  const auto unfinished = source.beginCapture(kCGEventMouseMoved, event.event);
+  check(bool(unfinished), "next capture start");
+  source.beginCapture(kCGEventMouseMoved, event.event);
+  check(!captured->input.live(), "missing completion loses continuity rather than mixing captures");
 }
 
 void discontinuitiesAndEmergency()
@@ -302,6 +328,7 @@ int main()
 {
   try {
     lifecycleAndOrdering();
+    translationCompletion();
     discontinuitiesAndEmergency();
     emergencyRecognition();
     concurrentStartStop();

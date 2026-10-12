@@ -236,6 +236,9 @@ enum class EventTypes : uint32_t
   /// Start libei
   EIConnected,
 
+  /// Wake the experimental provider consumer; descriptors stay owned by the client.
+  EIGnomeProviderChanged,
+
   /// Stop libei
   EISessionClosed,
 };

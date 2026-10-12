@@ -767,6 +767,11 @@ void OSXComputer::enable()
       // Use a semaphore to ensure m_eventTapRunLoop is set before enable() returns.
       auto sem = dispatch_semaphore_create(0);
       m_eventTapThread = std::thread([this, sem]() {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+        // Materialize trivial TLS before entering the tap run loop. Each
+        // callback nests its numbered scope without allocating TLS storage.
+        deskflow::windowshare::OriginalInputStampScope untrackedThread({});
+#endif
         m_eventTapRunLoop = CFRunLoopGetCurrent();
         CFRetain(m_eventTapRunLoop);
         CFRunLoopAddSource(m_eventTapRunLoop, m_eventTapRLSR, kCFRunLoopDefaultMode);
@@ -1049,6 +1054,9 @@ void OSXComputer::handleSystemEvent(const Event &event)
 bool OSXComputer::onMouseMove(CGEventRef event)
 {
   if (m_isOnComputer) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    deskflow::windowshare::OriginalInputStampScope::uncertain();
+#endif
     // motion on primary computer.  the event may have been queued a while, so
     // query the live cursor position rather than the stale event position.
     CGEventRef posEvent = CGEventCreate(NULL);
@@ -1787,8 +1795,23 @@ CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType ty
   OSXComputer *computer = (OSXComputer *)refcon;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
-  if (computer->m_originalInputCapture)
-    computer->m_originalInputCapture->capture(type, event);
+  auto *source = computer->m_originalInputCapture.get();
+  deskflow::windowshare::OriginalInputStampScope stampScope(
+      source ? source->beginCapture(type, event) : deskflow::windowshare::OriginalInputStamp{}
+  );
+  struct CompleteTranslation
+  {
+    deskflow::windowshare::OriginalInputCaptureSource *source;
+    deskflow::windowshare::OriginalInputStampScope &scope;
+    int exceptions = std::uncaught_exceptions();
+    ~CompleteTranslation()
+    {
+      if (std::uncaught_exceptions() != exceptions)
+        deskflow::windowshare::OriginalInputStampScope::uncertain();
+      if (source)
+        source->completeCapture(scope.translation());
+    }
+  } completeTranslation{source, stampScope};
 #endif
 
   switch (type) {

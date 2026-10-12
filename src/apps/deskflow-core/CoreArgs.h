@@ -26,16 +26,32 @@ struct CoreArgs
   inline static const auto windowShareHostOption = QCommandLineOption(
       "windowshare-host-config", "Launch the experimental packaged window host in server mode", "file"
   );
-  inline static const auto options = {helpOption,   versionOption,          multiInstanceOption,
-                                      configOption, windowShareProbeOption, windowShareHostOption};
-#elif defined(WINDOWSHARE_X11_OBSERVER)
+#endif
+#ifdef WINDOWSHARE_X11_OBSERVER
   inline static const auto windowShareX11Option = QCommandLineOption(
       "windowshare-observe-x11", "Observe the experimental client's native X11 coordinate space (no original input)"
   );
-  inline static const auto options = {
-      helpOption, versionOption, multiInstanceOption, configOption, windowShareX11Option
-  };
-#else
-  inline static const auto options = {helpOption, versionOption, multiInstanceOption, configOption};
 #endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+  inline static const auto windowShareGnomeOption = QCommandLineOption(
+      "windowshare-gnome-config", "Use the experimental GNOME 50 input session and its owned viewer in client mode",
+      "file"
+  );
+#endif
+  inline static const QList<QCommandLineOption> options = {
+      helpOption,
+      versionOption,
+      multiInstanceOption,
+      configOption,
+#ifdef WINDOWSHARE_CORE_COMPANION
+      windowShareProbeOption,
+      windowShareHostOption,
+#endif
+#ifdef WINDOWSHARE_X11_OBSERVER
+      windowShareX11Option,
+#endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+      windowShareGnomeOption,
+#endif
+  };
 };

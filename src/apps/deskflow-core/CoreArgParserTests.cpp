@@ -43,7 +43,8 @@ int main(int argc, char **argv)
       check(!CoreArgParser(arguments).errorText().isEmpty(), "Invalid core companion invocation was accepted");
     const CoreArgParser configured({"core", "server", "--windowshare-host-config=/tmp/a b.json"});
     check(configured.windowShareHostConfig() == "/tmp/a b.json", "Core configuration path changed during parsing");
-#elif defined(WINDOWSHARE_X11_OBSERVER)
+#endif
+#ifdef WINDOWSHARE_X11_OBSERVER
     for (const auto &arguments :
          {QStringList{"core", "client", "--windowshare-observe-x11"},
           {"core", "client", "--windowshare-observe-x11", "--settings", "/tmp/core.ini"}}) {
@@ -59,6 +60,34 @@ int main(int argc, char **argv)
           {"core", "client", "--windowshare-observe-x11", "--version"},
           {"core", "client", "--windowshare-observe-x11=yes"}})
       check(!CoreArgParser(arguments).errorText().isEmpty(), "Invalid X11 observation invocation was accepted");
+#endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+    const CoreArgParser gnome({"core", "client", "--windowshare-gnome-config=/tmp/a b.json"});
+    check(
+        gnome.errorText().isEmpty() && gnome.windowShareGnomeEnabled() &&
+            gnome.windowShareGnomeConfig() == "/tmp/a b.json",
+        "GNOME configuration option changed"
+    );
+    check(!CoreArgParser({"core", "client"}).windowShareGnomeEnabled(), "GNOME provider enabled by default");
+    for (const auto &arguments : {
+             QStringList{"core", "server", "--windowshare-gnome-config=/tmp/test.json"},
+             {"core", "--windowshare-gnome-config=/tmp/test.json"},
+             {"core", "client", "server", "--windowshare-gnome-config=/tmp/test.json"},
+             {"core", "client", "--windowshare-gnome-config="},
+             {"core", "client", "--windowshare-gnome-config"},
+             {"core", "client", "--windowshare-gnome-config=/tmp/test.json", "--help"},
+             {"core", "client", "--windowshare-gnome-config=/tmp/test.json", "--version"},
+             {"core", "client", "--windowshare-gnome-config=/tmp/a", "--windowshare-gnome-config=/tmp/b"},
+         })
+      check(!CoreArgParser(arguments).errorText().isEmpty(), "Invalid GNOME invocation accepted");
+#ifdef WINDOWSHARE_X11_OBSERVER
+    check(
+        !CoreArgParser({"core", "client", "--windowshare-gnome-config=/tmp/test.json", "--windowshare-observe-x11"})
+             .errorText()
+             .isEmpty(),
+        "GNOME and X11 backends selected together"
+    );
+#endif
 #endif
     std::puts("Opt-in core argument tests passed");
     return 0;

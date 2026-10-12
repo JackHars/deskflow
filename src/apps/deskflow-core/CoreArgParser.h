@@ -40,6 +40,10 @@ public:
 #ifdef WINDOWSHARE_X11_OBSERVER
   bool windowShareObserveX11() const;
 #endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+  bool windowShareGnomeEnabled() const;
+  QString windowShareGnomeConfig() const;
+#endif
 
 private:
   [[noreturn]] void showHelpText() const;

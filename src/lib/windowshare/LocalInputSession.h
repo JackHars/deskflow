@@ -5,6 +5,7 @@
 #pragma once
 
 #include "LocalInputCompanion.h"
+#include "OriginalInputRoute.h"
 #include "SelectedPeerMailbox.h"
 
 namespace deskflow::windowshare {
@@ -32,6 +33,10 @@ public:
   std::shared_ptr<SelectedPeerMailbox> selectedPeerMailbox() const;
 #ifdef __APPLE__
   std::shared_ptr<OriginalInputCaptureSource> captureSource() const;
+  // Owner-thread observations only. This callback reports a historical exact
+  // join (or denial); it neither suppresses legacy input nor grants delivery.
+  // It may stop/destroy the session synchronously.
+  std::function<void(const OriginalInputRouted &)> onRoutedInput;
 #endif
   std::function<void(QString)> onStopped;
 
@@ -48,6 +53,8 @@ private:
   bool m_captureEmergencyHandled = false;
   std::shared_ptr<OriginalInputCaptureSource> m_captureSource;
   std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;
+  std::unique_ptr<OriginalInputRouteJoin> m_captureJoin;
+  std::shared_ptr<bool> m_callbackLifetime = std::make_shared<bool>(true);
   QTimer m_captureTimer;
 #endif
 };

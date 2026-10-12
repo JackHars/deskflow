@@ -5,6 +5,7 @@
 #pragma once
 
 #include "OriginalInput_mac.h"
+#include "windowshare/OriginalInputRoute.h"
 
 namespace deskflow::windowshare {
 
@@ -22,11 +23,20 @@ public:
 
   // Producer thread only. No allocation, wait, tap registration or OS posting.
   bool start() noexcept;
+  // Production brackets existing legacy translation with begin/complete. The
+  // convenience capture() records an explicitly untranslated sample.
+  OriginalInputStamp beginCapture(CGEventType type, CGEventRef event) noexcept;
+  void completeCapture(OriginalInputTranslation translation) noexcept;
   void capture(CGEventType type, CGEventRef event) noexcept;
   bool checkpoint(std::uint64_t timestampNs, std::uint64_t flags) noexcept;
 
   // Exactly one consumer, outside the tap. Check live evidence on every use.
+  std::optional<OriginalInputCaptured> popCaptured() noexcept;
   std::optional<OriginalInputDelivery> pop() noexcept;
+  std::shared_ptr<OriginalInputRoutes> routes() const noexcept
+  {
+    return m_routes;
+  }
   // Thread-safe. Empty until started, or once continuity is lost. Previously
   // returned tokens remain revoked even after this object is destroyed.
   OriginalInputEpoch epoch() const noexcept;
@@ -43,6 +53,10 @@ private:
   OriginalInputStream m_stream;
   std::atomic<State> m_state{State::Ready};
   std::uint64_t m_sequence = 0;
+  OriginalInputStamp m_openStamp;
+  std::array<OriginalInputTranslation, OriginalInputStream::capacity> m_completed;
+  std::atomic<std::uint64_t> m_completedWritten{0}, m_completedRead{0};
+  std::shared_ptr<OriginalInputRoutes> m_routes = std::make_shared<OriginalInputRoutes>();
 };
 
 } // namespace deskflow::windowshare

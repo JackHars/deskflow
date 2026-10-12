@@ -4,6 +4,7 @@
  */
 #include "LocalInputBootstrap.h"
 #include "LocalInputPeerTrust.h"
+#include "UniqueJson.h"
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
@@ -61,36 +62,6 @@ int integerField(const QJsonObject &object, const QString &key, int minimum, int
       "Invalid WindowShare configuration integer"
   );
   return static_cast<int>(number);
-}
-void requireUniqueKeys(const QByteArray &json)
-{
-  // QJsonDocument has already validated syntax. Track each object's strings
-  // independently, including policy rows and equivalent Unicode escapes.
-  std::vector<QSet<QString>> objects;
-  for (qsizetype i = 0; i < json.size(); ++i) {
-    const auto c = json[i];
-    if (c == '{')
-      objects.emplace_back();
-    else if (c == '}')
-      objects.pop_back();
-    else if (c == '"') {
-      const auto start = i++;
-      for (; i < json.size() && json[i] != '"'; ++i)
-        if (json[i] == '\\')
-          ++i;
-      auto next = i + 1;
-      while (next < json.size() && (json[next] == ' ' || json[next] == '\t' || json[next] == '\r' || json[next] == '\n')
-      )
-        ++next;
-      if (!objects.empty() && next < json.size() && json[next] == ':') {
-        const auto decoded = QJsonDocument::fromJson('[' + json.mid(start, i - start + 1) + ']');
-        const auto key = decoded.array().first().toString();
-        auto &keys = objects.back();
-        require(!keys.contains(key), "Duplicate WindowShare configuration field");
-        keys.insert(key);
-      }
-    }
-  }
 }
 LocalInputPin fingerprint(const QString &text)
 {
@@ -159,7 +130,7 @@ ParsedPeerPairs peerPairs(const QByteArray &json)
   require(
       error.error == QJsonParseError::NoError && document.isArray(), "WindowShare input peer pairs must be a JSON array"
   );
-  requireUniqueKeys(json);
+  requireUniqueJsonKeys(json);
   return peerPairs(document.array());
 }
 } // namespace
@@ -322,7 +293,7 @@ LocalInputHostConfiguration LocalInputHostConfiguration::load(const QString &con
   require(
       error.error == QJsonParseError::NoError && document.isObject(), "Invalid WindowShare host configuration JSON"
   );
-  requireUniqueKeys(bytes);
+  requireUniqueJsonKeys(bytes);
   const auto object = document.object();
   const QSet<QString> allowed{"version", "listen",         "port",     "identity",      "peerPin",
                               "journal", "holdingDisplay", "headless", "inputPeerPairs"};
