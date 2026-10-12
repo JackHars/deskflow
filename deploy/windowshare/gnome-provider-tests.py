@@ -441,6 +441,15 @@ def run_fixture(arguments):
             provider.call("GetCapabilities")
             ei.sync("S {request}")
             report["callerAndGenerationIsolation"] = True
+            # A fresh headless seat starts at the Shell hot corner (0, 0).
+            # Its real pressure barrier may consume the first x movement and
+            # open the overview. Establish a cursor in the monitor interior
+            # before the measured rounds; do not disable or bypass barriers.
+            region_x, region_y, region_width, region_height = report["eiDevice"]["region"]
+            initial_x = region_x + region_width / 2
+            initial_y = region_y + region_height / 2
+            ei.sync(f"M {{request}} {region_x} {initial_y}")
+            ei.sync(f"M {{request}} {initial_x} {initial_y}")
             ei.sync("E {request}")
             viewer_log = output / "viewer.jsonl"
             token, = provider.call(
@@ -459,6 +468,8 @@ def run_fixture(arguments):
             require(observation.get("viewer") == token and observation.get("session") == session
                     and observation.get("generation") == generation, "Viewer observation binding mismatch")
             require(observation.get("window") and observation.get("surface"), "Native window/surface identity absent")
+            require(observation.get("pointerX") == initial_x and observation.get("pointerY") == initial_y,
+                    f"Fixture cursor did not leave the initial hot corner: {observation}")
             report["nativeWaylandClientBound"] = True
             report["initialViewerObservation"] = observation
             frame = observation.get("frameRect")
