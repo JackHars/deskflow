@@ -128,6 +128,29 @@ jobs:
           ctest --test-dir build/integrated/src/unittests -R '^windowshare-(core-args|x11-viewport-.*)$' --output-on-failure
       - name: Exercise the real core observer on a private Xvfb
         run: python3 deploy/windowshare/x11-core-smoke.py build/integrated/bin/deskflow-core
+  gnome-provider:
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:26.04
+      options: --init
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise the real native headless GNOME 50 provider
+        # Private buses/runtime/settings and software Mesa; no host display,
+        # input devices, GPU, privileged mode, or production authority grants.
+        run: bash deploy/windowshare/gnome-provider-container.sh "$PWD" "$PWD/build/gnome-provider"
+      - name: Retain actual compositor and EIS results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gnome-provider-headless
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build/gnome-provider/*.log
+            build/gnome-provider/*.json
+            build/gnome-provider/*.jsonl
   mac-app:
     runs-on: macos-15
     timeout-minutes: 30

@@ -1,0 +1,8 @@
+{
+  "uuid": "seamless-windows@deskflow.org",
+  "name": "Deskflow Seamless Windows observation provider",
+  "description": "Experimental, opt-in Mutter 50 native Wayland observations. Does not authorize original input delivery.",
+  "shell-version": ["50"],
+  "version": 1,
+  "url": "https://github.com/deskflow/deskflow"
+}
