@@ -1,0 +1,116 @@
+/*
+ * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+ * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
+ */
+#include "Core.h"
+#include <iostream>
+#include <limits>
+#include <random>
+#include <string_view>
+using namespace deskflow::windowshare;
+namespace {
+unsigned checks = 0;
+void check(bool condition, const char *what) {
+  ++checks;
+  if (!condition) throw std::runtime_error(what);
+}
+template<class Fn> void rejects(Fn fn) {
+  bool rejected = false;
+  try { fn(); } catch (const std::exception &) { rejected = true; }
+  check(rejected, "expected rejection");
+}
+}
+int main() {
+  try {
+    Rect source{-800, -50, 800, 600};
+    auto p = mapPoint({210, 170}, {10, 20, 400, 300}, source);
+    check(p && p->x == -400 && p->y == 250, "retina / negative-origin mapping");
+    check(!mapPoint({0, 0}, {10, 20, 400, 300}, source), "black bars reject clicks");
+    check(!mapPoint({std::numeric_limits<double>::quiet_NaN(), 0}, {0,0,10,10}, source), "NaN rejected");
+    check(!Rect{0,0,0,100}.valid(), "zero size rejected");
+    check(!Rect{0,0,20000,100}.valid(), "excessive size rejected");
+    p = mapPoint({900, 900}, {0,0,100,100}, source, true);
+    check(p && p->x <= 0 && p->y <= 550, "drag clamp");
+    const auto r = fitInside({900, 900, 800, 600}, {-100,0,1024,768});
+    check(r.x == 124 && r.y == 168, "recover after monitor removal");
+    Session s; s.id = 42;
+    rejects([&]{ s.prepare(1, source, source); });
+    s.journaled = true; s.prepare(1, source, source);
+    check(!s.acceptsInput(1,1), "preparing not interactive");
+    rejects([&]{ s.commit(1); });
+    rejects([&]{ s.frameReady(2); });
+    s.frameReady(1); s.commit(1);
+    check(s.acceptsInput(1,1), "remote input allowed");
+    check(!s.acceptsInput(2,1) && !s.acceptsInput(1,2), "stale input rejected");
+    s.suspend(); check(!s.acceptsInput(1,1), "suspend revokes input");
+    s.beginReturn(); s.restored();
+    check(s.phase == Phase::Local && !s.journaled, "restore transaction");
+    s.journaled = true; rejects([&]{ s.prepare(1, source, source); });
+    InputLedger ledger;
+    const Owner a{1,1}, b{2,1};
+    check(ledger.down(true, 12, a), "key down");
+    check(!ledger.down(true, 12, b), "no double key down");
+    check(!ledger.up(true,12,b) && ledger.ownerOf(true,12) == a, "wrong owner cannot consume release");
+    check(ledger.up(true,12,a) == a, "up belongs to original owner");
+    check(!ledger.up(true,12), "duplicate up ignored");
+    check(ledger.down(false, 1, a) && ledger.down(true, 1, b), "key/button namespaces");
+    check(ledger.release(a).size() == 1 && ledger.size() == 1, "owner release");
+    check(ledger.release().size() == 1 && ledger.size() == 0, "disconnect release");
+    check(!ledger.down(true, 70000, a), "invalid key rejected");
+    FocusLease focus;
+    auto rev = focus.request(a);
+    check(!focus.permits(a,rev), "focus pending");
+    check(focus.acknowledge(a,rev) && focus.permits(a,rev), "focus ack");
+    auto next = focus.request(b);
+    check(!focus.acknowledge(a,rev) && !focus.permits(a,rev), "stale focus ack");
+    check(focus.acknowledge(b,next), "new focus ack");
+    focus.revoke(); check(!focus.permits(b,next), "focus revoked");
+    SequenceGate gate;
+    check(!gate.accept(0) && gate.accept(2) && !gate.accept(1) && !gate.accept(2) && gate.accept(3), "replay gate");
+    Packet packet{MessageType::Frame, 55, 3, 1, {0,1,2,3,255}};
+    const auto encoded = encode(packet);
+    check(encoded.size() == headerSize + 5, "wire length");
+    for (std::size_t split = 0; split <= encoded.size(); ++split) {
+      Decoder decoder; unsigned received = 0;
+      auto receive = [&](Packet got) {
+        ++received;
+        check(got.session == packet.session && got.epoch == packet.epoch && got.sequence == 1 &&
+              got.type == packet.type && got.payload == packet.payload, "fragmented roundtrip");
+      };
+      decoder.feed(std::span(encoded).first(split), receive);
+      decoder.feed(std::span(encoded).subspan(split), receive);
+      check(received == 1 && decoder.buffered() == 0, "one complete packet");
+    }
+    auto coalesced = encoded; coalesced.insert(coalesced.end(), encoded.begin(), encoded.end());
+    Decoder multiple; unsigned count = 0;
+    multiple.feed(coalesced, [&](Packet){ ++count; }); check(count == 2, "coalesced packets");
+    for (unsigned offset : {0u, 8u, 10u, 36u}) {
+      auto bad = encoded; bad[offset] = 255; Decoder decoder;
+      rejects([&]{ decoder.feed(bad, [](Packet){}); });
+      check(decoder.failed() && decoder.buffered() == 0, "failed decoder clears buffer");
+      rejects([&]{ decoder.feed(encoded, [](Packet){}); });
+    }
+    auto oversized = encoded;
+    oversized[4] = 0x7f;
+    Decoder decoder; rejects([&]{ decoder.feed(oversized, [](Packet){}); });
+    Packet empty{MessageType::Ping,0,0,9,{}};
+    Decoder d0; count = 0; d0.feed(encode(empty), [&](Packet){ ++count; });
+    check(count == 1, "empty payload");
+    std::mt19937 random(37);
+    for (unsigned i = 0; i < 10000; ++i) {
+      const double width = 1 + random() % 8000, height = 1 + random() % 8000;
+      const double x = random() % static_cast<unsigned>(width), y = random() % static_cast<unsigned>(height);
+      auto mapped = mapPoint({x,y}, {0,0,width,height}, source);
+      check(mapped && source.contains(*mapped), "random point remains inside source");
+      auto mutated = encoded;
+      mutated[random() % headerSize] ^= static_cast<std::uint8_t>(1 + random() % 255);
+      Decoder fuzz;
+      try { fuzz.feed(mutated, [](Packet){}); } catch (const std::exception &) {}
+      check(fuzz.buffered() <= maxPayload + headerSize, "bounded decoder");
+    }
+    std::cout << "PASS: " << checks << " checks\n";
+    return 0;
+  } catch (const std::exception &e) {
+    std::cerr << "FAIL: " << e.what() << '\n'; return 1;
+  }
+}

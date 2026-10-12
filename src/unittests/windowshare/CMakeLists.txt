@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
+cmake_minimum_required(VERSION 3.24)
+project(deskflow_windowshare_core_tests LANGUAGES CXX)
+enable_testing()
+option(WINDOWSHARE_SANITIZERS "Enable ASan/UBSan" OFF)
+add_executable(windowshare-core-tests CoreTests.cpp ../../lib/windowshare/Core.cpp)
+target_include_directories(windowshare-core-tests PRIVATE ../../lib/windowshare)
+target_compile_features(windowshare-core-tests PRIVATE cxx_std_20)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(windowshare-core-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  if(WINDOWSHARE_SANITIZERS)
+    target_compile_options(windowshare-core-tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(windowshare-core-tests PRIVATE -fsanitize=address,undefined)
+  endif()
+endif()
+add_test(NAME windowshare-core COMMAND windowshare-core-tests)
