@@ -32,7 +32,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends \
   gnome-shell mutter gjs python3 python3-gi gir1.2-gtk-4.0 \
-  libei-dev libeis-dev gcc pkg-config dbus-daemon dbus-bin libglib2.0-bin \
+  libei-dev libeis-dev build-essential pkg-config dbus-daemon dbus-bin libglib2.0-bin \
   libgl1-mesa-dri libegl-mesa0 fonts-dejavu-core nodejs
 dbus-uuidgen --ensure=/etc/machine-id
 
