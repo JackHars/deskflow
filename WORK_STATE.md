@@ -62,6 +62,16 @@ forbidden input/session fallback in the private-bus core smoke. Full job logs
 and exact source revisions are retained under `build/gnome-route-ci/`; focused
 passes alone must not be interpreted as a passing all-job run.
 
+The corrected revision `6d96b1546c728ac3a8273f17ffd0f04492bc3f13` subsequently
+passed all six jobs in CI run `38287148997`: GCC core, Clang core, transport,
+Linux application, Mac application and the native headless GNOME provider.
+The Linux job passed 12 application suites, three targeted integrated suites,
+the private-bus provider-absence check, and private Xvfb core/viewer checks.
+The GNOME job passed its logic tests and real EIS/Wayland motion and lifecycle
+checks. Full logs and a result summary are retained in
+`build/gnome-route-ci/38287148997/`. These results apply to that exact source
+revision and do not establish physical two-machine input or drag handoff.
+
 The updated exact-library experimental package is installed at
 `~/Applications/DeskflowSeamless-Core-Experimental.app`. Staged and installed
 bundle audits passed with 77 permitted library records/slices. Both copies
@@ -75,12 +85,44 @@ with SHA-256
 It still requires Intel macOS 26 and is not notarized. The ordinary installation
 was not replaced. The local verification record is `build/gnome-route-evidence.json`.
 
-Home Ubuntu's recorded 52/52 integrated and 9/9 application results apply to the
-earlier `aab8467fb` revision. The later `b2aa37e9b` milestone passed all five
-then-existing CI jobs. SSH to
-`192.168.1.12` still times out before authentication and routes through the
-local gateway; no new home-Ubuntu run was claimed. No live Mac capture or input
-tests ran with the lid closed. The full goal remains incomplete.
+WiFiman access was restored later on 2026-10-12. A targeted port check and SSH
+through the tunnel reached `jack@192.168.1.12`; the remote hostname is `jack`.
+Existing key authentication worked. A fresh tracked-source snapshot of
+`6d96b1546c728ac3a8273f17ffd0f04492bc3f13` was transferred and verified against
+all 998 tracked files, with no extra source files. Its archive SHA-256 is
+`dbb4d30e2257d053d49916f740d9316a5bebc93b5a94905b807dbd0865c0a061`.
+
+The current home-Ubuntu validation passed:
+
+- The full experimental integrated build, then all 56 integrated suites across
+  the initial run and a focused correction run. Initially 54 passed and the two
+  GNOME fixture suites rejected their temporary executable files because Docker
+  mounted the private `/tmp` with `noexec`. Adding `exec` only to that disposable
+  container mount made both pass; no source change or integrated rebuild was
+  required. The initial failure and corrected commands are retained.
+- The standalone application build and all 12 application suites (47.21 seconds
+  in CTest).
+- All 11 foundation suites: ten instrumented with ASan/UBSan and one marker-only
+  suite without sanitizer instrumentation.
+- Real Linux core startup with an absent GNOME provider on a private bus,
+  private Xvfb core observer/default-off behavior, and the actual viewer's
+  mutually pinned TLS, reconnect and clean-exit smoke.
+
+These builds and tests ran on Ubuntu 26.04.1 in isolated dependency containers
+with private displays/buses and no real desktop input. D-Bus test dependencies
+were added to a separate container image. The ordinary installed/running
+Deskflow was preserved. Remote sources/builds/logs remain under
+`/home/jack/src/deskflow-seamless-x11-20261012/`; local evidence and copied logs
+are under `build/ubuntu-home-6d96b1546/`.
+
+Read-only inspection found GNOME 50.1 on Wayland and one active Samsung C32F391
+HDMI display at 1920×1080, 60 Hz, scale 1. Mutter and DRM report no second
+connected output. The Mac lid is now open, and the installed experimental app's
+read-only probe reports Screen Recording and Accessibility permission. No
+physical input, two-monitor handoff or drag-back was verified in this run.
+The next implementation joins the provider's native surface/hit observations
+to the production Qt viewer's last painted viewport, before the remaining
+pointer fence and original-input coordinator. The full goal remains incomplete.
 
 ## Previous pairing and code-admission integration (2026-10-12)
 

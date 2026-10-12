@@ -15,20 +15,22 @@ pointer, scrolling and return, using the Mac keyboard and trackpad.
 | --- | --- | --- |
 | Capture, viewer and transport | Mac capture/encode/decode has run live; authenticated transport, independent viewers and reconnect pass automated tests. | Repeat the complete flow across the two machines with interactive input. |
 | Original input integration | Ordered capture records now join the actual Server recipient and coordinate decision; press bookkeeping, private channel and handoff coordinator pass tests. Delivery remains disabled. | Finish remote coordinate validation, pointer fencing and production coordinator integration. |
-| Linux and two monitors | Ubuntu builds, 52 integrated suites and private X11 tests pass. The inspected desktop is GNOME Wayland with one active monitor. | Establish Wayland coordinate handling and verify both physical monitor destinations. |
+| Linux and two monitors | The current revision builds on home Ubuntu; all 56 integrated suites pass. The desktop is GNOME 50.1 Wayland with one active monitor. | Finish Wayland viewport/input integration and verify both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
 | Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
 
-The home-Ubuntu results above cover `aab8467fb`. The later pairing/code-admission
-milestone `b2aa37e9b` passed all five CI jobs, including Linux. Its home-Ubuntu
-rerun was blocked by loss of the tunnel route. Current work adds an explicit
-GNOME 50 provider and isolated tests against the real native headless compositor.
-Those tests now pass EIS/Wayland ownership, native pointer targeting and
-caller-loss cleanup. They do not establish the two-machine interactive flow. Hardware tests
-still require the reachable Ubuntu desktop and an open, unlocked Mac. See
-`WORK_STATE.md` for test logs, package details and remaining acceptance tests.
+WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
+hostname `jack`. The fresh build and integrated tests cover exact revision
+`6d96b1546c728ac3a8273f17ffd0f04492bc3f13`. That revision also passed all six CI
+jobs, including the real native headless GNOME 50 tests for EIS/Wayland ownership,
+native pointer targeting and caller-loss cleanup. These results do not establish
+the physical two-machine interactive flow. Read-only display inspection currently
+lists one active Samsung HDMI display at 1920×1080 and no second connected output.
+The Mac lid is open and the experimental app has Screen Recording and
+Accessibility permission; physical input and two-monitor handoff remain untested.
+See `WORK_STATE.md` for test logs, package details and remaining acceptance tests.
 
 ### Experimental GNOME client configuration
 

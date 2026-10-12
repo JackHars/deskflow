@@ -1,10 +1,13 @@
 # Authenticated coordinate integration plan
 
-This is a proposed integration following `bc88d6e83`, not an enabled input path.
-The smallest useful X11 slice is a native namespace witness carried over the two
-authenticated connections, followed by sequence-bound pointer validation and an
-ordered forwarding fence. Matching observations alone must not enable original
-input. GNOME Wayland needs a different compositor-backed provider.
+This plan began after `bc88d6e83`; original-input delivery remains disabled.
+Since then, the Mac capture-to-Server route join and an explicit GNOME 50
+provider/client have been implemented. The remaining X11 integration needs a
+native namespace witness carried over the two authenticated connections,
+followed by sequence-bound pointer validation and an ordered forwarding fence.
+The GNOME provider now supplies native compositor observations, but still needs
+the Qt viewport join and input ordering described below. Matching observations
+alone must not enable original input.
 
 ## Supported boundary
 
@@ -90,20 +93,23 @@ without acquiring coordinate authority.
 
 ## Original sequence and pointer ownership
 
-The current path loses the association that delivery needs. Capture records have
-epoch/sequence, but `IPrimaryComputer::{Motion,Button,Wheel}Info` do not.
-`Server::onMouseMoveSecondary` applies adjustment, switching and clamping, while
-`ServerProxy` may compress motion before `XTest`/`XWarpPointer`. Qt mouse events do
-not carry the source record token. Timestamp proximity, current `Server::m_x/y`,
-X request serials or a latest cached cursor position cannot join these streams.
+The Mac path now carries capture epoch/sequence/part through `Event` and
+`InputFilter` to the actual `Server` decision. `OriginalInputRoute` joins that
+decision with the completed capture record and retains the authenticated peer,
+recipient and routed point. Missing, expanded, filtered and uncertain routes
+deny eligibility. This association still needs to reach the remote validator:
+`ServerProxy` may compress motion before native injection, and Qt mouse events
+do not carry the source record token. Timestamp proximity, current
+`Server::m_x/y`, X request serials or a latest cached cursor position cannot
+recover that association from the resulting native events.
 
 For transparent overlapping windows, use `SequenceValidatedViewer` semantics:
 
-1. Carry capture epoch/sequence through the existing core event path to the
-   actual Server routing/absolute-coordinate decision. Publish the point and
-   selected recipient with that exact record. Explicitly account for ignored,
-   zero-motion, filtered and switch events; do not assume one captured record
-   always produces one legacy event. Reject relative/locked-pointer mode initially.
+1. Use the implemented capture-to-Server route join to publish the routed point
+   and selected recipient with the exact record. Preserve its rejection of
+   ignored, expanded, filtered, uncertain, local, broadcast and relative routes;
+   do not reconstruct the decision from the latest cursor or assume one
+   captured record always produces one legacy event.
 2. Enter a generation-bound pointer fence on both the Linux injection path and
    Viewer. Release existing owners, require no held buttons, stop new legacy
    button/wheel injection, and suppress queued/new Qt forwarding. Retain
@@ -166,7 +172,7 @@ above for the first normal-window implementation.
 | Deskflow publication | `ProtocolTypes`, `OptionTypes`, `Client`/`ServerProxy`, `ClientProxy1_0` and `Server`: negotiated messages, bounded decoding, exact TLS-ticket association and revoke-on-disconnect. |
 | Core to Qt owner | Extend the selected-peer publication/coordinator boundary with retained coordinate evidence; no borrowed proxy or cross-thread native X calls. |
 | WindowShare | `Core` message validation, `Transport`/Bridge negotiation, Viewer witness/viewport responses and exact connection-generation guards. |
-| Ordered pointer route | `OriginalInputCaptureSource`, `OSXComputer`, `IPrimaryComputer` event metadata, Server routing, Session/Preflight and Viewer pointer fence. No extra SPSC consumer. |
+| Ordered pointer route | Extend the implemented capture/Event/Server historical join through Session/Preflight and the remote validator; add the Viewer and Linux injection pointer fence. No extra SPSC consumer. |
 | Actual delivery | Reviewed native point validator plus `ViewportLease` production factory, exact sequence/press ledger and NativeHost delivery. A successful witness cannot call this factory alone. |
 
 Keep the next implementation connected: actual TLS/core proxy -> actual XCB
@@ -196,19 +202,30 @@ is not present. See [libei regions](https://libinput.pages.freedesktop.org/libei
 [portal mapping IDs](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.ScreenCast.html)
 and [EI region mapping](https://libinput.pages.freedesktop.org/libei/interfaces/ei_device/index.html).
 
-For ordinary movable, overlapping windows, implement a versioned GNOME/Mutter
-provider (potentially a narrowly scoped Shell extension) that binds the actual
-EIS session/device/region, viewer native surface and compositor input target,
-and returns ordered validation/invalidation to the authenticated coordinator.
-Its concrete supported API and permission model still require investigation;
-no such provider exists in this tree. A combined RemoteDesktop/ScreenCast portal
-session can establish region-to-stream mapping, but cannot alone supply that
-surface/hit-test contract. Standard [Wayland pointer events](https://wayland.freedesktop.org/docs/html/apa.html)
+The version-pinned provider in `deploy/windowshare/gnome-provider/` now owns an
+EIS session and launches one native Wayland viewer through Mutter. It validates
+the exact caller, session, viewer surface and current native hit. The production
+`GnomeProviderClient` starts that session on its private D-Bus connection, adopts
+the EIS descriptor and ends on owner or session loss. Private native GNOME 50
+tests cover ownership, motion/PONG/native-hit agreement and revocation.
+
+The next connected slice must join those native observations to the production
+Qt viewer's last painted viewport through the existing owned launch. It must
+account for decorations and scaling, retain the source geometry and focus
+revision, and invalidate on repaint mapping, surface, focus or connection
+changes. Native pointer-device attribution and an ordered fence remain separate
+requirements before publishing delivery authority. Current capabilities report
+`deliveryReady=false`.
+
+A combined RemoteDesktop/ScreenCast portal session can establish
+region-to-stream mapping, but cannot alone supply that surface/hit-test
+contract. Standard [Wayland pointer events](https://wayland.freedesktop.org/docs/html/apa.html)
 provide surface-local coordinates and serials, not our original capture token.
 
 An explicit fixed-owner relative-control mode is another possible product scope,
 with compositor-supported pointer constraints and deliberate capture/release;
 it must not be presented as transparent free-moving windows. Qt global positions,
 Xwayland root bounds, monitor names and equal EIS rectangles are not fallbacks.
-Until the compositor provider or that explicit interaction is implemented, the
-GNOME Wayland original-pointer route remains unavailable even when X11 tests pass.
+Until the compositor observations, painted viewport and ordered input path are
+joined, the GNOME Wayland original-pointer route remains unavailable even when
+the individual GNOME and X11 tests pass.
