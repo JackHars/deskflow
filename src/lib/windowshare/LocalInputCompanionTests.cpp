@@ -95,7 +95,7 @@ struct LocalInputCoreSessionTestAccess
 } // namespace deskflow::windowshare
 
 namespace {
-constexpr LocalInputCompanionLimits limits{1000, 40, 80, {20, 400}};
+constexpr LocalInputCompanionLimits limits{1000, 40, 80, {20, 400, 400}};
 std::vector<LocalInputSocketPair> pairs;
 
 void check(bool condition, const char *message)
@@ -169,7 +169,12 @@ int hostFixture(QCoreApplication &application, int descriptor, const QString &mo
   }
   const auto parent = localInputProcess(getppid());
   check(parent.has_value(), "Fixture parent has no kernel birth identity");
-  auto channel = LocalInputChannel::adoptHost(descriptor, *parent, limits.channel);
+  auto channelLimits = limits.channel;
+  if (mode == "slow-verification" || mode == "slow-adoption")
+    channelLimits.handshakeMs = 1600;
+  if (mode == "slow-adoption")
+    QThread::msleep(600);
+  auto channel = LocalInputChannel::adoptHost(descriptor, *parent, channelLimits);
   check((fcntl(descriptor, F_GETFD) & FD_CLOEXEC) != 0, "Adopted descriptor is inheritable");
   bool authenticated = false;
   channel->onClosed = [&](QString) {
@@ -179,6 +184,7 @@ int hostFixture(QCoreApplication &application, int descriptor, const QString &mo
       application.quit();
   };
   channel->onAuthenticated = [&] {
+    check(channel->authenticated(), "Host authenticated callback inherited bootstrap age");
     authenticated = true;
     if (mode == "auth-exit")
       QTimer::singleShot(100, &application, &QCoreApplication::quit);
@@ -244,6 +250,12 @@ void refusedLaunches()
   resetTrust();
   trust.executable = "relative-companion";
   check(!LocalInputCompanion::create(pair(), &error, limits), "Relative executable was accepted");
+  resetTrust();
+  for (const int handshakeMs : {-1, 0, 99, 30001}) {
+    auto invalid = limits;
+    invalid.channel.handshakeMs = handshakeMs;
+    check(!LocalInputCompanion::create(pair(), &error, invalid), "Companion accepted invalid handshake budget");
+  }
   for (const auto &arguments :
        {QStringList{"--core-input-fd=9"}, QStringList{"--core-input-fd", "9"}, QStringList{"-core-input-fd=9"},
         QStringList{QString("name") + QChar('\0') + "tail"}}) {
@@ -286,6 +298,7 @@ void startupAndDeath()
   auto deadlines = limits;
   deadlines.startupMs = 160;
   deadlines.channel.timeoutMs = 600;
+  deadlines.channel.handshakeMs = 600;
   auto launcher = companion(deadlines);
   std::unique_ptr<LocalInputChannel> channel;
   QString reason;
@@ -293,16 +306,25 @@ void startupAndDeath()
   launcher->onStopped = [&](QString value) { reason = value; };
   check(launcher->start({"--fixture=idle"}), "Handshake timeout fixture did not launch");
   stopped(*launcher);
-  check(reason.contains("handshake") && channel && !channel->authenticated(), "Startup did not bound the handshake");
+  check(
+      reason.contains("stage=private-handshake") && reason.contains("elapsed=") && channel && !channel->authenticated(),
+      "Startup did not bound or diagnose the handshake"
+  );
 
   resetTrust();
   trust.delayMs = 200;
   launcher = companion(deadlines);
   bool delivered = false;
+  reason.clear();
   launcher->onChannel = [&](std::unique_ptr<LocalInputChannel>) { delivered = true; };
+  launcher->onStopped = [&](QString value) { reason = value; };
   check(launcher->start({"--fixture=normal"}), "Slow verification fixture did not launch");
   stopped(*launcher);
   check(!delivered, "Verification delivered a capability after the startup deadline expired");
+  check(
+      reason.contains("stage=peer-verification") && reason.contains("elapsed="),
+      "Slow verification timeout omitted its stage and elapsed age"
+  );
 
   resetTrust();
   launcher = companion();
@@ -323,6 +345,38 @@ void startupAndDeath()
   );
   channel->close("Fixture lost local authority");
   stopped(*launcher);
+}
+
+void coldStartupAllowance()
+{
+  static_assert(LocalInputCompanionLimits{}.startupMs == 15000);
+  static_assert(LocalInputCompanionLimits{}.channel.handshakeMs == LocalInputLimits{}.handshakeMs);
+  for (const QString mode : {"slow-verification", "slow-adoption"}) {
+    resetTrust();
+    if (mode == "slow-verification")
+      trust.delayMs = 600;
+    auto deadlines = limits;
+    deadlines.startupMs = 1600;
+    deadlines.channel.handshakeMs = 1600;
+    auto launcher = companion(deadlines);
+    std::unique_ptr<LocalInputChannel> channel;
+    bool freshInCallback = false;
+    launcher->onChannel = [&](std::unique_ptr<LocalInputChannel> value) {
+      channel = std::move(value);
+      channel->onAuthenticated = [&] { freshInCallback = channel->authenticated(); };
+    };
+    QElapsedTimer age;
+    age.start();
+    check(launcher->start({QStringLiteral("--fixture=") + mode}), "Delayed bootstrap fixture did not launch");
+    check(
+        until([&] { return launcher->state() == LocalInputCompanion::State::Running; }) && age.elapsed() >= 600 &&
+            freshInCallback && channel->authenticated(),
+        "Valid cold startup was limited by authenticated heartbeat age"
+    );
+    launcher->stop();
+    stopped(*launcher);
+    check(!channel->authenticated(), "Cold-start allowance changed terminal authority cleanup");
+  }
 }
 
 void reentrantOwnership()
@@ -863,7 +917,7 @@ int main(int argc, char **argv)
   }
   // Every pair used by this suite exists before Qt starts any helper thread.
   if (descriptor < 0)
-    for (int i = 0; i < 40; ++i)
+    for (int i = 0; i < 48; ++i)
       pairs.push_back(LocalInputSocketPair::create());
   QCoreApplication application(argc, argv);
   try {
@@ -880,6 +934,7 @@ int main(int argc, char **argv)
     normalLaunchAndStop();
     refusedLaunches();
     startupAndDeath();
+    coldStartupAllowance();
     reentrantOwnership();
     environmentIsolation();
     coreSessionOwnership();
@@ -893,12 +948,14 @@ int main(int argc, char **argv)
 #endif
     childExitEvidence();
     eventLoopExit();
-    QTextStream(stdout) << "PASS: fixed verified companion, exclusive inheritance, handshake deadline, child death, "
-                           "bounded stop, callback deletion/stop/drop/throw, no restart, loader environment isolation, "
-                           "startup expiry at use, detached reaping, event-loop exit, core session default-deny, "
-                           "failure drain, deletion during stop, selected-peer mailbox closure, configured shutdown "
-                           "budget, graceful EOF drain "
-                           "and child exit evidence\n";
+    QTextStream(
+        stdout
+    ) << "PASS: fixed verified companion, exclusive inheritance, cold-start and handshake deadlines, child death, "
+         "bounded stop, callback deletion/stop/drop/throw, no restart, loader environment isolation, "
+         "startup expiry at use, detached reaping, event-loop exit, core session default-deny, "
+         "failure drain, deletion during stop, selected-peer mailbox closure, configured shutdown "
+         "budget, graceful EOF drain "
+         "and child exit evidence\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

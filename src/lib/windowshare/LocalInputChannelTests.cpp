@@ -53,6 +53,18 @@ struct LocalInputChannelTestAccess
   {
     channel.m_timer.stop();
   }
+  static int handshake(const LocalInputChannel &channel)
+  {
+    return channel.m_handshake;
+  }
+  static void read(LocalInputChannel &channel)
+  {
+    channel.read();
+  }
+  static void ready(LocalInputChannel &channel)
+  {
+    channel.bootstrap(static_cast<LocalInputChannel::Type>(3), {});
+  }
   static void flush(LocalInputChannel &channel)
   {
     channel.m_socket.flush();
@@ -94,7 +106,7 @@ struct LocalInputChannelTestAccess
 } // namespace deskflow::windowshare
 
 namespace {
-constexpr LocalInputLimits limits{20, 400};
+constexpr LocalInputLimits limits{20, 400, 400};
 void check(bool value, const char *message)
 {
   if (!value)
@@ -429,12 +441,64 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     ping[6] = 4;
     ping.replace(8, 4, QByteArray(4, '\0'));
     frame += ping; // Reuses sequence 1 after the valid HostHello.
-  } else if (mode != "raw-silent")
+  } else if (mode == "raw-slow-hello")
+    QThread::msleep(600);
+  else if (mode != "raw-silent")
     check(false, "Unknown raw fixture mode");
   if (mode != "raw-silent")
     check(::write(descriptor, frame.constData(), frame.size()) == frame.size(), "Raw fixture write failed");
   QTimer::singleShot(2500, &application, &QCoreApplication::quit);
   return application.exec();
+}
+
+int delayedReadyChild(QCoreApplication &application, int descriptor, LocalInputProcess core, const QString &mode)
+{
+  // The core replies promptly; delay servicing its Ready while keeping the
+  // endpoint/process alive. Cover both sides of the absolute bootstrap bound.
+  const bool withinBudget = mode == "slow-ready";
+  auto host = LocalInputChannel::adoptHost(
+      descriptor, core, withinBudget ? LocalInputLimits{20, 200, 1600} : LocalInputLimits{20, 2000, 400}
+  );
+  LocalInputChannelTestAccess::freeze(*host);
+  bool authenticated = false, closed = false;
+  QString reason;
+  host->onAuthenticated = [&] { authenticated = host->authenticated(); };
+  host->onClosed = [&](QString value) {
+    reason = value;
+    closed = true;
+  };
+  QTimer::singleShot(100, &application, [&] {
+    try {
+      LocalInputChannelTestAccess::read(*host);
+      check(LocalInputChannelTestAccess::handshake(*host) == 1, "Late Ready fixture did not accept CoreHello");
+      LocalInputChannelTestAccess::flush(*host);
+      // CoreHello restarted lastRead above, but must not restart handshakeAge.
+      QThread::msleep(350);
+      if (mode != "late-ready")
+        LocalInputChannelTestAccess::ready(*host);
+      else
+        LocalInputChannelTestAccess::read(*host);
+      if (withinBudget)
+        check(
+            !closed && authenticated && host->authenticated(),
+            "Host transition callback inherited the older bootstrap read age"
+        );
+      else
+        check(
+            closed && !authenticated && !host->authenticated() && reason.contains("stage=ready") &&
+                reason.contains("elapsed="),
+            "Expired Ready revived bootstrap or intermediate traffic extended its absolute age"
+        );
+      application.quit();
+    } catch (const std::exception &error) {
+      QTextStream(stderr) << "FAIL: " << error.what() << '\n';
+      application.exit(1);
+    }
+  });
+  const auto result = application.exec();
+  host->onClosed = {};
+  host->close();
+  return result;
 }
 #endif
 
@@ -447,8 +511,11 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     return wireChild(descriptor);
   const auto expectedCore = localInputProcess(getppid());
   check(expectedCore.has_value(), "Controlled fixture launcher is unavailable");
-  auto host =
-      LocalInputChannel::adoptHost(descriptor, *expectedCore, mode == "patient" ? LocalInputLimits{20, 2000} : limits);
+  if (mode == "late-ready" || mode == "late-ready-transition" || mode == "slow-ready")
+    return delayedReadyChild(application, descriptor, *expectedCore, mode);
+  auto host = LocalInputChannel::adoptHost(
+      descriptor, *expectedCore, mode == "patient" ? LocalInputLimits{20, 2000, 2000} : limits
+  );
   check((fcntl(descriptor, F_GETFD) & FD_CLOEXEC) != 0, "Adopted child capability is inheritable");
   if (mode == "synthetic")
     LocalInputChannelTestAccess::stopTimer(*host);
@@ -776,7 +843,7 @@ void preflightRoundtrip()
 }
 void preflightWireLayout()
 {
-  Fixture fixture("wire-v3", {1000, 4000});
+  Fixture fixture("wire-v3", {1000, 4000, 4000});
   LocalInputChannelTestAccess::stopTimer(*fixture.core);
   int replies = 0, cancellations = 0;
   const auto receive = [&](const LocalInputLease &lease) {
@@ -1068,6 +1135,57 @@ void malformedBootstrap()
     );
   }
 }
+void handshakeDeadlines()
+{
+  static_assert(LocalInputLimits{}.handshakeMs == 15000 && LocalInputLimits{}.timeoutMs == 2500);
+  {
+    Fixture fixture("raw-slow-hello", {20, 200, 1600});
+    bool freshInCallback = false;
+    fixture.core->onAuthenticated = [&] {
+      freshInCallback = fixture.core->authenticated();
+      fixture.ready = true;
+    };
+    fixture.establish();
+    check(freshInCallback, "Authenticated callback inherited the older bootstrap read age");
+    // The longer handshake allowance ends at authentication. A queued Ping
+    // after a loop stall must not borrow that allowance or revive freshness.
+    LocalInputChannelTestAccess::freeze(*fixture.core);
+    QThread::msleep(250);
+    LocalInputChannelTestAccess::incoming(*fixture.core, 4);
+    check(
+        fixture.closed && !fixture.core->authenticated() && fixture.reason.contains("heartbeat"),
+        "Handshake allowance extended the authenticated timeout"
+    );
+  }
+  {
+    Fixture fixture("raw-silent", {20, 2000, 200});
+    check(
+        until([&] { return LocalInputChannelTestAccess::handshake(*fixture.core) == 1; }),
+        "Late hello fixture did not send CoreHello"
+    );
+    LocalInputChannelTestAccess::freeze(*fixture.core);
+    const auto self = currentLocalInputProcess(), child = localInputProcess(fixture.child.processId());
+    check(self && child, "Late hello fixture lost a process identity");
+    QByteArray payload;
+    for (const auto identity : {*self, *child}) {
+      number(payload, identity.pid, 4);
+      number(payload, identity.startStamp, 8);
+    }
+    QThread::msleep(250);
+    LocalInputChannelTestAccess::incoming(*fixture.core, 2, payload);
+    check(
+        fixture.closed && !fixture.ready && !fixture.core->authenticated() &&
+            fixture.reason.contains("stage=host-hello") && fixture.reason.contains("elapsed="),
+        "Queued late HostHello revived expired bootstrap"
+    );
+  }
+  for (const QString mode : {"late-ready", "late-ready-transition", "slow-ready"}) {
+    Fixture fixture(mode, {20, 2000, 2000});
+    fixture.establish();
+    fixture.childExitedCleanly();
+    check(until([&] { return fixture.closed; }), "Late Ready fixture did not close its endpoint");
+  }
+}
 void changedBindings()
 {
   for (int field = 0; field < 15; ++field) {
@@ -1179,7 +1297,7 @@ void expiryAtUse()
     );
     fixture.childExitedCleanly();
   }
-  Fixture original("expired-original", {20, 2000});
+  Fixture original("expired-original", {20, 2000, 2000});
   original.activate();
   check(until([&] { return original.closed; }) && original.revoked == 1, "Expired receiver retained its lease");
   original.childExitedCleanly(); // Child asserts zero original delivery after its loop stall.
@@ -1755,6 +1873,18 @@ void descriptorAndIdentityGuards()
     rejected = true;
   }
   check(rejected, "Wrong process birth stamp was accepted");
+  for (const int handshakeMs : {-1, 0, 99, 30001, std::numeric_limits<int>::max()}) {
+    auto invalidPair = LocalInputSocketPair::create();
+    auto invalidLimits = limits;
+    invalidLimits.handshakeMs = handshakeMs;
+    rejected = false;
+    try {
+      invalidPair.adoptCore(*identity, invalidLimits);
+    } catch (...) {
+      rejected = true;
+    }
+    check(rejected, "Invalid absolute handshake budget was accepted");
+  }
   child.kill();
   child.waitForFinished(2000);
 #endif
@@ -1834,6 +1964,7 @@ int main(int argc, char **argv)
     roundtrip();
     authoritativeCommit();
     malformedBootstrap();
+    handshakeDeadlines();
     changedBindings();
     expiryAtUse();
     reentrantAuthorization();
@@ -1846,7 +1977,7 @@ int main(int argc, char **argv)
     QTextStream(
         stdout
     ) << "PASS: inherited IPC, process/role/incarnation binding, version 3 preflight isolation and framing, "
-         "authoritative leases, "
+         "absolute bootstrap deadlines, independent authenticated expiry, authoritative leases, "
          "original-event framing, stale/replayed/malformed rejection, bounded queues and owner revocation\n";
     return 0;
   } catch (const std::exception &error) {

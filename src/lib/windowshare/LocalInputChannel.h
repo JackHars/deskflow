@@ -97,6 +97,9 @@ struct LocalInputLimits
 {
   int heartbeatMs = 500;
   int timeoutMs = 2500;
+  // Absolute adoption-to-authentication budget, never extended by traffic.
+  // Independent of the authenticated heartbeat timeout; valid range 100–30000.
+  int handshakeMs = 15000;
 };
 
 class LocalInputSocketPair;
@@ -201,7 +204,7 @@ private:
   bool m_authorizing = false, m_authorityInvalidated = false;
   LocalInputPhase m_phase = LocalInputPhase::Idle;
   std::optional<LocalInputLease> m_lease, m_lastRevoked;
-  QElapsedTimer m_lastRead;
+  QElapsedTimer m_lastRead, m_handshakeAge;
   QTimer m_timer;
 };
 

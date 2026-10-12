@@ -242,7 +242,10 @@ int localInputHostProbe(std::unique_ptr<LocalInputChannel> channel)
   bool authenticated = false, closed = false;
   channel->onAuthenticated = [&] { authenticated = true; };
   channel->onClosed = [&](QString) { closed = true; };
-  const bool finished = waitFor([&] { return closed; }, 8000);
+  // A cold signed bundle can spend several seconds validating nested code
+  // before the other endpoint adopts its channel. Cover that bounded startup
+  // budget and orderly probe shutdown without changing authenticated liveness.
+  const bool finished = waitFor([&] { return closed; }, LocalInputCompanionLimits{}.startupMs + 5000);
   channel->onAuthenticated = {};
   channel->onClosed = {};
   channel->close();

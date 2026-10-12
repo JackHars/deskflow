@@ -23,7 +23,7 @@ def run(executable, arguments, *, success, descriptors=()):
             del environment[key]
     environment["QT_QPA_PLATFORM"] = "offscreen"
     result = subprocess.run([str(executable), *arguments], env=environment,
-                            pass_fds=descriptors, capture_output=True, text=True, timeout=20)
+                            pass_fds=descriptors, capture_output=True, text=True, timeout=45)
     if result.returncode < 0 or (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {result.stdout[-1000:]} {result.stderr[-1000:]}")
     return result

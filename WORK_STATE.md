@@ -3,7 +3,93 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
-## Latest emergency-restore integration (2026-10-12)
+## Latest Linux observation and active input handoff (2026-10-12)
+
+SSH key access through the home-network tunnel was verified, and an isolated
+source/build directory was created at
+`~/src/deskflow-seamless-x11-20261012`. The machine runs Ubuntu 26.04.1 with a GNOME
+Wayland session and an RTX 4090. Read-only display inspection found one active
+1920×1080 Samsung display, not a verified two-monitor arrangement. Build
+dependencies live in a separate Docker image; the ordinary running Deskflow
+installation and system binaries have not been replaced.
+
+The opt-in Linux core can now observe its actual Xlib/XCB injection connection
+with `client --windowshare-observe-x11`. The viewer independently observes its
+actual Qt native connection and painted surface. Bounded, expiring observations
+include native root/client-pointer identity, RandR topology, window origin,
+focus, DPR and letterbox geometry. The observer preserves event-queue ownership
+and existing root masks. Its private notification watcher is verified before
+publishing observations, including when initial notifications invalidate the
+pending setup. A native regression caught and removed a GetInputFocus query
+that could implicitly select an unset XI client pointer.
+
+These are local observations, not authenticated cross-connection coordinate
+authority. Unix peer credentials do not prove an X-server incarnation. Xwayland
+evidence is rejected, but its absence does not prove native Xorg. No Wayland
+coordinate provider, pointer fence or production original-input controller is
+enabled.
+
+The tunnel route later disappeared and SSH timed out before the final startup
+correction could be copied to Ubuntu. The recorded Ubuntu results below cover
+the Linux observation/active-handoff milestone (`aab8467fb`); the subsequent
+bootstrap deadline correction was checked locally. Consult the final commit's
+CI results for additional Linux validation.
+
+The host now distinguishes quiesced, activating and active original-input
+ownership. Private Commit must activate the exact binding before acknowledging;
+active ownership survives the setup timeout and remains checked through the
+existing channel heartbeat while keys/buttons are held. Reentrant cancellation,
+expiry, focus/geometry loss and terminal shutdown revoke ownership. This closes
+an integration gap without enabling original event delivery.
+
+Recorded checks:
+
+- Ubuntu: all 10 foundation suites passed with ASan/UBSan in the build container,
+  and the same binaries passed directly on the Ubuntu host.
+- Ubuntu: all nine standalone application suites passed, including real private
+  Xvfb viewport tests at 100% and 125% scale. All seven non-Xvfb suites also passed
+  directly on the host. The native viewport tests passed with ASan/UBSan.
+- The real Linux core compiled and passed argument checks and a private-Xvfb
+  lifecycle smoke: observation is off by default, explicit opt-in reads the
+  actual backend, and both clients shut down cleanly through their own IPC.
+- The complete Linux application/core build and all 52 integrated CTest suites
+  passed in 46.82 seconds, including both newly registered native viewport suites.
+- The Ubuntu viewer passed the direct-host mutually pinned TLS, refused-connect,
+  reconnect and clean-exit smoke.
+- Mac: the full opt-in build and 55 integrated suites passed; the standalone app
+  and all 12 suites passed. Both Bridge TLS backends and private preflight passed
+  strict and sanitizer checks. The ordinary core also compiled.
+- REUSE passed for 946/946 files. Logs are retained under
+  `build/x11-active-linux/` and `build/x11-active-*.log`.
+- A final read-only review of Preflight activation, active heartbeat and Bridge
+  authorization found no actionable defects. Changed C++ files pass the
+  repository's clang-format 20.1.0 check.
+
+Xvfb does not implement SetCrtcTransform on this machine: current and pending
+transform fields were read, but transform mutation was not exercised. These
+tests did not use or alter the user's Wayland desktop. The Mac lid is still
+closed; live capture, physical input, holding-display and window restoration
+tests remain pending. There is still no verified interactive Mac window on
+Ubuntu, and the full goal remains incomplete.
+
+The packaged smoke then exposed a startup deadline issue: concurrent signed-code
+verification could outlast the old five-second companion budget. Bootstrap now
+uses separate absolute 15-second startup and handshake budgets, capped at
+30 seconds. Handshake traffic cannot extend its budget; authenticated heartbeat
+expiry remains 2.5 seconds. Every signature/identity check remains, and deadline
+admission is rechecked after synchronous validation and before authentication.
+Diagnostics report the stage and elapsed time.
+
+The correction passed both strict and ASan/UBSan channel/companion suites,
+including late queued hello/Ready rejection, delayed valid authentication,
+callback freshness and post-verification expiry. The rebuilt Mac app passed all
+12 suites in 169.99 seconds. The expanded sanitizer channel suite took 57.30
+seconds under shared build load, so its CTest harness timeout is now 90 seconds;
+production deadlines are unchanged by that harness setting. A separate read-only
+review found no actionable defects. Logs use `build/cold-start-*.log` and
+`build/bootstrap-budget-*.log`.
+
+## Previous emergency-restore integration (2026-10-12)
 
 The companion-enabled core now turns a captured Control–Option–Shift–Escape press
 into terminal companion shutdown. The Qt consumer checks the sticky emergency
@@ -367,19 +453,26 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
 
 ## Local package
 
-The new signed core-main bundle is
-`build/packages/emergency-restore-20261012/DeskflowSeamless-Core-Experimental.app`,
+The signed core-main bundle is
+`build/packages/x11-active-handoff-v2-20261012/DeskflowSeamless-Core-Experimental.app`,
 with its ZIP beside it. The dependency/signature audit and exact permitted-library
 audit pass for signing Team `MM5PBJ9D4Y`: 77 library records, slices and allowed
 CDHashes, sealed by the fixed executables' same-Team/CDHash constraints.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`879778729e60944e45bb3f03261455928fe2ccaf2fea63bd61e4b8bf335ad85b`.
+`a383e4a1204e2fed41046944bdc513128cfc78550fe3fd275ce86935cddf0fe5`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
-The package and installed copy passed recursive dependency/signature verification,
-the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
-smoke, with original input delivery disabled. The preceding mixed-input
-installation is preserved in `build/packages/emergency-restore-installed-backup-20261012/`.
+The package, staged copy and installed copy passed recursive dependency/signature
+verification. Both the new package's first launch and the installed copy's first
+launch passed the private handshake/bootstrap-rejection suite; both also passed
+viewer-only TLS/reconnect checks. Original input delivery remains disabled. The
+previous emergency-restore installation is retained in
+`build/packages/x11-active-handoff-v2-installed-backup-20261012/`.
+
+The first candidate exposed the old five-second startup timeout; a measured
+failed probe took 7.66 seconds including prelaunch checks. It was rolled back
+before installing the corrected bundle, and is retained at
+`build/packages/x11-active-handoff-startup-timeout-20261012.app` for comparison.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 
@@ -402,19 +495,21 @@ Earlier TLS and native installations remain in their respective
 Launch with the explicit options documented in `docs/seamless-windows.md`; it is
 an experimental command-line-configured app, not yet the final integrated GUI.
 
-The Ubuntu host was unreachable over SSH: the WiFiman Teleport connection is down.
-No Linux desktop session, GPU, monitor arrangement, installation, or real
-cross-machine input behavior has been verified in this environment.
+Ubuntu SSH access and isolated builds/tests are now verified as recorded above.
+The active desktop is GNOME Wayland with one active monitor. Real cross-machine
+window input, two-monitor behavior and an installed Linux release remain unproven.
 
 ## Remaining milestones
 
-1. Prove the single-window native capture/input/return path and owned holding
-   display lifecycle on the Intel Mac.
-2. Build and deploy the viewer to Ubuntu; test X11/Wayland, both monitors,
-   focus changes, shortcuts and loop-free input using the Mac keyboard/trackpad.
-3. Integrate the private original-keyboard route, dual-connection authentication,
-   viewer quiescence and authoritative pointer modifiers; validate the integrated
-   core emergency chord on the live desktop.
+1. Complete the original mixed-input route: authenticated coordinate publication,
+   ordered pointer/press/scroll ownership, live integrity checks and production
+   preflight wiring. Prove one Mac window's capture, keyboard, pointer, scroll and
+   return path on Ubuntu; validate the emergency chord on an unlocked Mac.
+2. Prove holding-display lifecycle, multiple exported windows, focus changes,
+   shortcuts and both monitor destinations. Linux builds and headless X11 tests
+   are done; real Wayland behavior and the two-monitor arrangement remain open.
+3. Complete compositor-specific coordinate handling and cross-machine input
+   fencing for the supported Linux session types.
 4. Implement transactional edge-drag export and drag-back using Deskflow topology.
 5. Handle associated dialogs, menus, clipboard and browser/Electron behavior.
 6. Complete automatic crash recovery, scheduling and performance work.

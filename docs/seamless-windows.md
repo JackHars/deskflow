@@ -186,6 +186,14 @@ packaged child, completes its private handshake, and checks its shutdown before
 returning. It starts no input hooks, capture host, network listener or ordinary
 Deskflow shared state, and can run with `QT_QPA_PLATFORM=offscreen`.
 
+Companion startup and the private unauthenticated handshake each have an absolute
+15-second default budget, separate from the authenticated channel's unchanged
+2.5-second heartbeat timeout. Incoming handshake traffic never extends its
+deadline. Successful authentication starts fresh heartbeat timing before
+callbacks run. Signed-code validation remains synchronous and cannot be
+preempted by a Qt timer; admission checks the deadline again after validation.
+Timeout diagnostics identify the startup stage and elapsed time.
+
 For a real host launch, supply `server --windowshare-host-config /absolute/host.json`
 to that packaged core. The file must be a regular JSON file of at most 16 KiB:
 

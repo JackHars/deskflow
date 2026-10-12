@@ -14,7 +14,9 @@ class LocalInputPeerTrust;
 
 struct LocalInputCompanionLimits
 {
-  int startupMs = 5000;
+  // Covers child launch, synchronous code verification, and private handshake.
+  // Verification cannot be preempted; its return is checked against this age.
+  int startupMs = 15000;
   int gracefulMs = 300;
   int terminateMs = 1000;
   LocalInputLimits channel;

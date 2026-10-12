@@ -429,7 +429,7 @@ LocalInputChannel::LocalInputChannel(
   require(role == LocalInputRole::Core || role == LocalInputRole::Host, "Invalid local input role");
   require(
       limits.heartbeatMs >= 10 && limits.heartbeatMs <= 1000 && limits.timeoutMs >= 3 * limits.heartbeatMs &&
-          limits.timeoutMs <= 10000,
+          limits.timeoutMs <= 10000 && limits.handshakeMs >= 100 && limits.handshakeMs <= 30000,
       "Invalid local input deadlines"
   );
   require(privateEndpoint(descriptor), "Local input requires an unnamed inherited Unix socketpair");
@@ -448,6 +448,7 @@ LocalInputChannel::LocalInputChannel(
       [this](QLocalSocket::LocalSocketError) { close("Local input socket failed"); }, Qt::QueuedConnection
   );
   m_lastRead.start();
+  m_handshakeAge.start();
   m_timer.setInterval(limits.heartbeatMs);
   connect(&m_timer, &QTimer::timeout, this, [this] { tick(); }, Qt::QueuedConnection);
   m_timer.start();
@@ -494,8 +495,24 @@ bool LocalInputChannel::fresh()
 {
   if (m_closed)
     return false;
-  if (m_socket.state() != QLocalSocket::ConnectedState || !peerAlive() || m_lastRead.elapsed() >= m_limits.timeoutMs) {
-    close(QStringLiteral("Local input peer lost or heartbeat expired"));
+  if (m_socket.state() != QLocalSocket::ConnectedState || !peerAlive()) {
+    close(QStringLiteral("Local input peer lost"));
+    return false;
+  }
+  if (!m_authenticated && m_handshakeAge.elapsed() >= m_limits.handshakeMs) {
+    const auto stage = m_role == LocalInputRole::Core ? QStringLiteral("host-hello")
+                       : m_handshake == 0             ? QStringLiteral("core-hello")
+                                                      : QStringLiteral("ready");
+    close(QStringLiteral("Local input handshake timed out (stage=%1, elapsed=%2ms, budget=%3ms)")
+              .arg(stage)
+              .arg(m_handshakeAge.elapsed())
+              .arg(m_limits.handshakeMs));
+    return false;
+  }
+  if (m_authenticated && m_lastRead.elapsed() >= m_limits.timeoutMs) {
+    close(QStringLiteral("Local input heartbeat expired (elapsed=%1ms, budget=%2ms)")
+              .arg(m_lastRead.elapsed())
+              .arg(m_limits.timeoutMs));
     return false;
   }
   return true;
@@ -652,6 +669,11 @@ void LocalInputChannel::bootstrap(Type type, const QByteArray &payload)
         "Unexpected local input handshake message"
     );
   }
+  // Recheck the absolute bootstrap age after validation and any reply write.
+  // Start authenticated freshness before callbacks can inspect or use it.
+  if (!fresh())
+    return;
+  m_lastRead.restart();
   m_handshake = 2;
   m_authenticated = true;
   notify(this, onAuthenticated);

@@ -39,7 +39,7 @@ struct LocalInputCompanion::Run final : QObject
   QProcess process;
   QTimer startup, graceful, escalation, observation;
   QElapsedTimer startupAge, stopAge;
-  QString reason;
+  QString reason, startupStage = QStringLiteral("process-start");
   int gracefulMs, terminateMs;
   bool stopping = false, finished = false, launched = false;
 
@@ -49,6 +49,7 @@ struct LocalInputCompanion::Run final : QObject
         terminateMs(companion->m_limits.terminateMs)
   {
     startup.setSingleShot(true);
+    startup.setTimerType(Qt::PreciseTimer);
     graceful.setSingleShot(true);
     escalation.setSingleShot(true);
     graceful.setTimerType(Qt::PreciseTimer);
@@ -100,7 +101,7 @@ struct LocalInputCompanion::Run final : QObject
         &startup, &QTimer::timeout, this,
         [this] {
           if (owner && owner->m_state == State::Starting)
-            stop(QStringLiteral("Trusted companion startup or private handshake timed out"));
+            stop(startupTimeout());
         },
         Qt::QueuedConnection
     );
@@ -128,6 +129,13 @@ struct LocalInputCompanion::Run final : QObject
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, [this] {
       stop(QStringLiteral("Application is shutting down"), true);
     });
+  }
+
+  QString startupTimeout() const
+  {
+    return QStringLiteral("Trusted companion startup or private handshake timed out (stage=%1, elapsed=%2ms)")
+        .arg(startupStage)
+        .arg(startupAge.elapsed());
   }
 
   void stop(const QString &cause, bool immediate = false)
@@ -206,7 +214,7 @@ LocalInputCompanion::create(LocalInputSocketPair pair, QString *error, LocalInpu
   if (limits.startupMs < 100 || limits.startupMs > 30000 || limits.gracefulMs < 0 || limits.gracefulMs > 5000 ||
       limits.terminateMs < 10 || limits.terminateMs > 10000 || limits.channel.heartbeatMs < 10 ||
       limits.channel.heartbeatMs > 1000 || limits.channel.timeoutMs < 3 * limits.channel.heartbeatMs ||
-      limits.channel.timeoutMs > 10000)
+      limits.channel.timeoutMs > 10000 || limits.channel.handshakeMs < 100 || limits.channel.handshakeMs > 30000)
     return failed(QStringLiteral("Invalid trusted companion deadlines"));
   try {
     pair.childDescriptor();
@@ -266,8 +274,8 @@ bool LocalInputCompanion::start(QStringList arguments)
     arguments.append(QStringLiteral("--core-input-fd=%1").arg(m_pair->childDescriptor()));
     m_run = new Run(this);
     m_pair->configureChild(m_run->process);
-    m_run->startup.start(m_limits.startupMs);
     m_run->startupAge.start();
+    m_run->startup.start(m_limits.startupMs);
     m_run->observation.start();
     m_run->process.start(m_trust->executable(), arguments);
   } catch (...) {
@@ -286,19 +294,21 @@ void LocalInputCompanion::started()
     return;
   const QPointer<LocalInputCompanion> alive(this);
   try {
-    if (m_run->startupAge.hasExpired(m_limits.startupMs)) {
-      m_run->stop(QStringLiteral("Trusted companion startup or private handshake timed out"));
+    if (m_run->startupAge.elapsed() >= m_limits.startupMs) {
+      m_run->stop(m_run->startupTimeout());
       return;
     }
+    m_run->startupStage = QStringLiteral("peer-verification");
     const auto child = localInputProcess(m_run->process.processId());
     if (!child || !m_trust->verify(*child)) {
       m_run->stop(QStringLiteral("Companion process identity verification failed"));
       return;
     }
-    if (m_run->startupAge.hasExpired(m_limits.startupMs)) {
-      m_run->stop(QStringLiteral("Trusted companion startup or private handshake timed out"));
+    if (m_run->startupAge.elapsed() >= m_limits.startupMs) {
+      m_run->stop(m_run->startupTimeout());
       return;
     }
+    m_run->startupStage = QStringLiteral("private-handshake");
     m_child = child;
     auto channel = m_pair->adoptCore(*child, m_limits.channel);
     m_pair.reset();
@@ -325,8 +335,8 @@ void LocalInputCompanion::observeChannel()
 {
   if (!m_run || (m_state != State::Starting && m_state != State::Running))
     return;
-  if (m_state == State::Starting && m_run->startupAge.hasExpired(m_limits.startupMs)) {
-    m_run->stop(QStringLiteral("Trusted companion startup or private handshake timed out"));
+  if (m_state == State::Starting && m_run->startupAge.elapsed() >= m_limits.startupMs) {
+    m_run->stop(m_run->startupTimeout());
     return;
   }
   if (!m_channel) {
