@@ -30,6 +30,23 @@ and no held input. Evidence is
 `build/native-smoke-20261012/bounded-receipt-regression/`. This automated local
 check does not replace the pending physical two-machine test.
 
+The second session confirmed that the user could see the source and type into
+it, but physical Control+Option+Shift arrows did not switch to Ubuntu. The source
+recorded the exact physical chord while Linux received zero legacy packets and
+the source received zero returned synthetic events. Cleanup and gap-free receipt
+collection passed. This isolated a hotkey mismatch: registration reversed Option
+and Command compared with ordinary key mapping and the event-tap matcher.
+
+`OSXKeyState::mapDeskflowHotKeyToMac` now maps `alt` to Option and `super` to
+Command. A regression using the exact physical flags from the failed test has
+five failing cases before the fix and all ten selected cases passing afterward;
+the tests use an in-memory key map and never post native input. The integrated
+core builds, and CI runs only those mapping slots from `OSXKeyStateTests`.
+Existing configurations that compensated for the reversed hotkeys need their
+Alt/Super hotkey modifiers adjusted. Ordinary input remaps are unchanged.
+Evidence is `build/physical-input-20261012/hotkey-fix-validation.json` and
+`session-2/`. This result does not establish an event-tap or permission failure.
+
 ## Actual Mac/Ubuntu synthetic round trip (2026-10-12)
 
 Overall completion is now approximately 50%. WiFiman SSH again reaches hostname
@@ -101,6 +118,9 @@ Both native runs observe `viewer-not-focused` while the independent child retain
 focus. CI now runs the new regressions and retains their log. Evidence is under
 `build/gnome-focus-readiness/`; the failed CI log and artifact remain under
 `build/gnome-startup-readiness/ci-38303125940/`.
+The focus correction and bounded recorder commit `eea9bcb49` subsequently passed
+all six CI jobs in run `38305082628`; complete metadata and logs are retained in
+`build/gnome-focus-readiness/ci-38305082628/`.
 
 ## Mac targeted pointer coordinates (2026-10-12)
 

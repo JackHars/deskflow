@@ -16,6 +16,22 @@
 #define A_CHAR_ID 0x00000061
 #define A_CHAR_BUTTON 001
 
+namespace {
+
+// Keep the mapping regressions independent of the current keyboard layout and
+// physical state. These tests never call updateKeyMap or any fakeKey method.
+class FixedLayoutKeyState final : public OSXKeyState
+{
+public:
+  using OSXKeyState::OSXKeyState;
+  int32_t pollActiveGroup() const override
+  {
+    return 0;
+  }
+};
+
+} // namespace
+
 void OSXKeyStateTests::initTestCase()
 {
   m_arch.init();
@@ -53,6 +69,69 @@ void OSXKeyStateTests::mapModifiersFromOSX_OSXMask()
   uint32_t numMask = 0 | kCGEventFlagMaskNumericPad;
   outMask = keyState.mapModifiersFromOSX(numMask);
   QCOMPARE(outMask, KeyModifierNumLock);
+}
+
+void OSXKeyStateTests::mapHotkeyModifiersToMac_data()
+{
+  QTest::addColumn<uint32_t>("key");
+  QTest::addColumn<uint32_t>("virtualKey");
+  QTest::addColumn<uint32_t>("deskflowMask");
+  QTest::addColumn<uint32_t>("physicalFlags");
+  QTest::addColumn<uint32_t>("carbonMask");
+
+  QTest::newRow("alt-is-option") << uint32_t(kKeyRight) << uint32_t(kVK_RightArrow) << uint32_t(KeyModifierAlt)
+                                 << uint32_t(kCGEventFlagMaskAlternate) << uint32_t(optionKey);
+  QTest::newRow("super-is-command") << uint32_t(kKeyRight) << uint32_t(kVK_RightArrow) << uint32_t(KeyModifierSuper)
+                                    << uint32_t(kCGEventFlagMaskCommand) << uint32_t(cmdKey);
+  QTest::newRow("alt-and-super") << uint32_t(kKeyLeft) << uint32_t(kVK_LeftArrow)
+                                 << uint32_t(KeyModifierAlt | KeyModifierSuper)
+                                 << uint32_t(kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand)
+                                 << uint32_t(optionKey | cmdKey);
+  QTest::newRow("control-shift-option-right")
+      << uint32_t(kKeyRight) << uint32_t(kVK_RightArrow)
+      << uint32_t(KeyModifierControl | KeyModifierShift | KeyModifierAlt)
+      // Exact physical flags from the failed shortcut receipt, including device
+      // side bits, numeric-pad and secondary-Fn flags that the matcher excludes.
+      << uint32_t(0xae0123) << uint32_t(controlKey | shiftKey | optionKey);
+  QTest::newRow("control-shift-option-left") << uint32_t(kKeyLeft) << uint32_t(kVK_LeftArrow)
+                                             << uint32_t(KeyModifierControl | KeyModifierShift | KeyModifierAlt)
+                                             << uint32_t(0xae0123) << uint32_t(controlKey | shiftKey | optionKey);
+  QTest::newRow(
+      "control-shift-command"
+  ) << uint32_t(kKeyRight)
+    << uint32_t(kVK_RightArrow) << uint32_t(KeyModifierControl | KeyModifierShift | KeyModifierSuper)
+    << uint32_t(kCGEventFlagMaskControl | kCGEventFlagMaskShift | kCGEventFlagMaskCommand)
+    << uint32_t(controlKey | shiftKey | cmdKey);
+  QTest::newRow("control-shift-unchanged")
+      << uint32_t(kKeyLeft) << uint32_t(kVK_LeftArrow) << uint32_t(KeyModifierControl | KeyModifierShift)
+      << uint32_t(kCGEventFlagMaskControl | kCGEventFlagMaskShift) << uint32_t(controlKey | shiftKey);
+}
+
+void OSXKeyStateTests::mapHotkeyModifiersToMac()
+{
+  QFETCH(uint32_t, key);
+  QFETCH(uint32_t, virtualKey);
+  QFETCH(uint32_t, deskflowMask);
+  QFETCH(uint32_t, physicalFlags);
+  QFETCH(uint32_t, carbonMask);
+
+  deskflow::KeyMap keyMap;
+  deskflow::KeyMap::KeyItem item;
+  item.m_id = key;
+  item.m_button = static_cast<KeyButton>(virtualKey + 1);
+  keyMap.addKeyEntry(item);
+  keyMap.finish();
+  EventQueue eventQueue;
+  FixedLayoutKeyState keyState(&eventQueue, keyMap, {"en"}, true);
+
+  uint32_t mappedKey = 0;
+  uint32_t registeredMask = 0;
+  QVERIFY(keyState.mapDeskflowHotKeyToMac(key, deskflowMask, mappedKey, registeredMask));
+  QCOMPARE(mappedKey, virtualKey);
+  QCOMPARE(registeredMask, carbonMask);
+  // This is the actual tap-side hotkey comparison. Registration must agree
+  // with the physical event's Carbon mask, rather than swapping Alt/Super.
+  QCOMPARE(registeredMask, keyState.mapModifiersToCarbon(physicalFlags) & 0xff00u);
 }
 
 void OSXKeyStateTests::fakePollShift()

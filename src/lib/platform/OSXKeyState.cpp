@@ -878,11 +878,12 @@ bool OSXKeyState::mapDeskflowHotKeyToMac(
   if ((mask & KeyModifierControl) != 0) {
     macModifierMask |= controlKey;
   }
+  // Match the ordinary Option/Command mappings and the tap's Carbon mask.
   if ((mask & KeyModifierAlt) != 0) {
-    macModifierMask |= cmdKey;
+    macModifierMask |= optionKey;
   }
   if ((mask & KeyModifierSuper) != 0) {
-    macModifierMask |= optionKey;
+    macModifierMask |= cmdKey;
   }
   if ((mask & KeyModifierCapsLock) != 0) {
     macModifierMask |= alphaLock;

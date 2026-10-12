@@ -45,6 +45,12 @@ The test closed cleanly and preserved the ordinary installations. Its native
 source recorder now exposes bounded event histories and monotonic sequences
 so a collector can detect any missing input receipts.
 
+A later physical test exposed reversed Mac hotkey modifiers. Registration now
+uses `alt` for Option and `super` for Command, matching ordinary key capture.
+Configurations that worked around the previous reversal need their hotkey
+modifiers adjusted. The mapping regressions pass, but a complete physical input
+round trip remains unverified.
+
 ### Actual two-machine synthetic acceptance
 
 The coordinator exports only its own disposable Mac source window. A private

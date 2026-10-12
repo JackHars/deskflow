@@ -12,6 +12,8 @@ on:
       - '.github/workflows/windowshare-foundation.yml'
       - 'src/lib/platform/OSXComputer.mm'
       - 'src/lib/platform/OSXComputer.h'
+      - 'src/lib/platform/OSXKeyState.*'
+      - 'src/unittests/platform/OSXKeyStateTests.*'
       - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/XWindowsComputer.*'
       - 'src/lib/platform/EiComputer.*'
@@ -40,6 +42,8 @@ on:
       - '.github/workflows/windowshare-foundation.yml'
       - 'src/lib/platform/OSXComputer.mm'
       - 'src/lib/platform/OSXComputer.h'
+      - 'src/lib/platform/OSXKeyState.*'
+      - 'src/unittests/platform/OSXKeyStateTests.*'
       - 'src/lib/platform/OSXEventTapRunLoop.h'
       - 'src/lib/platform/XWindowsComputer.*'
       - 'src/lib/platform/EiComputer.*'
@@ -180,8 +184,12 @@ jobs:
       - run: ctest --test-dir build/app --output-on-failure
       - name: Configure opt-in Deskflow integration
         run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-      - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests ServerTests SecurePeerIdentityTests --parallel 3
+      - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests ServerTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
       - run: ctest --test-dir build/integrated/src/unittests -R '^(ServerTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
+      - name: Verify Mac hotkey modifier mapping without posting input
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: build/integrated/src/unittests/platform/OSXKeyStateTests mapModifiersFromOSX_OSXMask mapHotkeyModifiersToMac
       - name: Verify mixed input state, capture lifecycle and private CGEvent construction
         run: |
           cmake -S src/unittests/windowshare -B build/keyboard -DWINDOWSHARE_SANITIZERS=ON

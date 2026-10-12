@@ -382,7 +382,8 @@ uint32_t OSXComputer::registerHotKey(KeyID key, KeyModifierMask mask)
   m_hotKeys.try_emplace(id, HotKeyItem(ref, macKey, macMask));
 
   LOG_DEBUG(
-      "registered hotkey %s (id=%04x mask=%04x) as id=%d", deskflow::KeyMap::formatKey(key, mask).c_str(), key, mask, id
+      "registered hotkey %s (id=%04x mask=%04x macKey=%u macMask=%04x) as id=%d",
+      deskflow::KeyMap::formatKey(key, mask).c_str(), key, mask, macKey, macMask, id
   );
   return id;
 }
