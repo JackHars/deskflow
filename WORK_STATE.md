@@ -47,6 +47,23 @@ Alt/Super hotkey modifiers adjusted. Ordinary input remaps are unchanged.
 Evidence is `build/physical-input-20261012/hotkey-fix-validation.json` and
 `session-2/`. This result does not establish an event-tap or permission failure.
 
+A third attempt used the unchanged installed binary's actual Command shortcut,
+but received no physical input before expiry. It remains inconclusive. Linux
+closed normally through its private IPC and the source was restored and neutral;
+the Mac host subsequently exceeded the eight-second termination deadline and
+required SIGKILL. This shutdown needs follow-up and is not a graceful-stop pass.
+The actual exit statuses and joint evidence are retained under `session-3/`.
+
+Packaging the hotkey fix stopped before signing: macOS explicitly denied
+`kTCCServiceSystemPolicyAppBundles` to `com.openai.codex`, whose responsible app
+was `/Applications/ChatGPT.app`. The user has been asked to enable App Management
+for ChatGPT/Codex. Do not work around that OS permission or replace the installed
+experimental bundle until it is resolved. The partial package and failed early
+launch check remain under `build/packages/hotkey-modifiers-20261012/` and
+`build/physical-input-20261012/package-*.log`; the existing installation is intact.
+A retry must use a fresh output directory and finish packaging/verification before
+running its launch tests. The source fix is committed as `f55fe8012`.
+
 ## Actual Mac/Ubuntu synthetic round trip (2026-10-12)
 
 Overall completion is now approximately 50%. WiFiman SSH again reaches hostname
