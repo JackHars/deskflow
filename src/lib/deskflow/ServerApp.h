@@ -38,7 +38,13 @@ class ISocketFactory;
 
 namespace deskflow {
 class ServerArgs;
-}
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+namespace windowshare {
+class SelectedPeerMailbox;
+class SelectedPeerPublisher;
+} // namespace windowshare
+#endif
+} // namespace deskflow
 
 class ServerApp : public App
 {
@@ -46,7 +52,12 @@ class ServerApp : public App
 
 public:
   explicit ServerApp(IEventQueue *events, const QString &processName = QString());
-  ~ServerApp() override = default;
+  ~ServerApp() override;
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Set once on the creating thread before run() moves the app to its worker.
+  void setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox);
+#endif
 
   //
   // IApp overrides
@@ -105,6 +116,11 @@ private:
   void handleComputerSwitched() const;
   std::unique_ptr<ISocketFactory> getSocketFactory() const;
   NetworkAddress getAddress(const NetworkAddress &address) const;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  void stopSelectedPeerPublication();
+  std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> m_selectedPeerMailbox;
+  std::unique_ptr<deskflow::windowshare::SelectedPeerPublisher> m_selectedPeerPublisher;
+#endif
 
   bool m_suspended = false;
   Server *m_server = nullptr;

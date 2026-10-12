@@ -66,6 +66,42 @@ KeyModifierMask modifierForRoutedKey(KeyID id)
   }
 }
 } // namespace
+
+std::uint64_t Server::reserveServerIncarnation(std::atomic<std::uint64_t> &next) noexcept
+{
+  auto current = next.load(std::memory_order_relaxed);
+  while (current != std::numeric_limits<std::uint64_t>::max()) {
+    if (next.compare_exchange_weak(current, current + 1, std::memory_order_relaxed))
+      return current + 1;
+  }
+  return 0; // Never wrap an incarnation into a previously issued value.
+}
+
+// Nested configuration/removal/saver operations must not publish an
+// intermediate selection. Exceptions and failed switches leave no authority.
+class Server::SelectionChange final
+{
+public:
+  explicit SelectionChange(Server &server) noexcept : m_server(server), m_nested(server.m_selectionChanging)
+  {
+    m_server.invalidateSelectedPeer();
+    m_server.m_selectionChanging = true;
+  }
+  ~SelectionChange()
+  {
+    m_server.m_selectionChanging = m_nested;
+    if (m_complete && !m_nested)
+      m_server.publishSelectedPeer();
+  }
+  void complete() noexcept
+  {
+    m_complete = true;
+  }
+
+private:
+  Server &m_server;
+  bool m_nested, m_complete = false;
+};
 #endif
 
 //
@@ -80,6 +116,13 @@ Server::Server(ServerConfig &config, PrimaryClient *primaryClient, deskflow::Com
       m_computer(computer),
       m_events(events)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // In-process snapshots outlive Server objects, but never survive this
+  // process. Saturate rather than reuse an earlier Server incarnation.
+  static std::atomic<std::uint64_t> nextServer{0};
+  m_serverIncarnation = reserveServerIncarnation(nextServer);
+  m_selectionShutdown = m_serverIncarnation == 0;
+#endif
   // must have a primary client and it must have a canonical name
   assert(m_primaryClient != nullptr);
   assert(config.isComputer(primaryClient->getName()));
@@ -184,6 +227,9 @@ Server::Server(ServerConfig &config, PrimaryClient *primaryClient, deskflow::Com
 
 Server::~Server()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  revokeSelectedPeer();
+#endif
   // remove event handlers and timers
   using enum EventTypes;
   m_events->removeHandler(KeyStateKeyDown, m_inputFilter);
@@ -241,6 +287,10 @@ bool Server::setConfig(const ServerConfig &config)
     return false;
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+#endif
+
   // close clients that are connected but being dropped from the
   // configuration.
   closeClients(config);
@@ -271,6 +321,9 @@ bool Server::setConfig(const ServerConfig &config)
     sendOptions(client);
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
   return true;
 }
 
@@ -317,6 +370,9 @@ void Server::adoptClient(BaseClientProxy *client)
 
 void Server::disconnect()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this); // Never publish from nested client closes.
+#endif
   // close all secondary clients
   if (m_clients.size() > 1 || !m_oldClients.empty()) {
     Config emptyConfig(m_events);
@@ -430,6 +486,10 @@ int32_t Server::getJumpZoneSize(const BaseClientProxy *client) const
 void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool forScreensaver)
 {
   assert(dst != nullptr);
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+#endif
 
   int32_t dx;
   int32_t dy;
@@ -548,6 +608,10 @@ void Server::switchComputer(BaseClientProxy *dst, int32_t x, int32_t y, bool for
   } else {
     m_active->mouseMove(x, y);
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (!forScreensaver)
+    selection.complete();
+#endif
 }
 
 void Server::jumpToComputer(BaseClientProxy *newComputer)
@@ -1328,6 +1392,9 @@ void Server::handleSwitchWaitTimeout()
 
 void Server::handleClientDisconnected(BaseClientProxy *client)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+#endif
   // client has disconnected.  it might be an old client or an
   // active client.  we don't care so just handle it both ways.
   removeActiveClient(client);
@@ -1339,6 +1406,9 @@ void Server::handleClientDisconnected(BaseClientProxy *client)
   sendConnectedClientsIpc();
 
   delete client;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
 }
 
 void Server::handleClientCloseTimeout(BaseClientProxy *client)
@@ -1435,12 +1505,18 @@ void Server::handleKeyboardBroadcastEvent(const Event &event)
 
   // enter new state
   if (newState != m_keyboardBroadcasting || info->m_computers != m_keyboardBroadcastingComputers) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    SelectionChange selection(*this);
+#endif
     m_keyboardBroadcasting = newState;
     m_keyboardBroadcastingComputers = info->m_computers;
     LOG(
         (CLOG_DEBUG "keyboard broadcasting %s: %s", m_keyboardBroadcasting ? "on" : "off",
          m_keyboardBroadcastingComputers.c_str())
     );
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    selection.complete();
+#endif
   }
 }
 
@@ -1523,6 +1599,13 @@ void Server::onScreensaver(bool activated)
 {
   LOG_DEBUG("onScreenSaver %s", activated ? "activated" : "deactivated");
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+  // m_activeSaver may be cleared when that client disconnects. Keep an
+  // independent guard until the actual screensaver-deactivation event.
+  m_selectionScreensaver = activated;
+#endif
+
   if (activated) {
     // save current computer and position
     m_activeSaver = m_active;
@@ -1570,9 +1653,64 @@ void Server::onScreensaver(bool activated)
     BaseClientProxy *client = index->second;
     client->screensaver(activated);
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+std::optional<deskflow::windowshare::SelectedPeer> Server::selectedPeer() const
+{
+  // No lazy publication: a failed switch or an in-progress transition must
+  // stay ineligible even when m_active still points to its previous client.
+  return m_selectedPeer && m_selectedPeer->live() ? m_selectedPeer : std::nullopt;
+}
+
+void Server::invalidateSelectedPeer() noexcept
+{
+  if (m_selectionRevoked)
+    m_selectionRevoked->store(true, std::memory_order_release);
+  m_selectionRevoked.reset();
+  m_selectedPeer.reset();
+}
+
+void Server::revokeSelectedPeer() noexcept
+{
+  m_selectionShutdown = true;
+  invalidateSelectedPeer();
+}
+
+void Server::publishSelectedPeer() noexcept
+{
+  invalidateSelectedPeer();
+  if (m_selectionShutdown || m_selectionChanging || !m_serverIncarnation || m_selectionScreensaver || m_activeSaver ||
+      m_keyboardBroadcasting || !m_active || m_active == m_primaryClient || !m_clientSet.contains(m_active))
+    return;
+  const auto recipient = m_inputRecipients.find(m_active);
+  if (recipient == m_inputRecipients.end() || !recipient->second)
+    return;
+  if (m_selectionGeneration == std::numeric_limits<std::uint64_t>::max()) {
+    revokeSelectedPeer();
+    return;
+  }
+  try {
+    const auto *stream = m_active->getStream();
+    const auto ticket = stream ? stream->authenticatedPeerTicket() : std::nullopt;
+    if (!ticket || !ticket->live())
+      return;
+    auto revoked = std::make_shared<std::atomic_bool>(false);
+    deskflow::windowshare::SelectedPeer selected{
+        m_serverIncarnation, recipient->second, ++m_selectionGeneration, *ticket, revoked
+    };
+    m_selectionRevoked = std::move(revoked);
+    m_selectedPeer = std::move(selected);
+  } catch (...) {
+    // Credential/allocator failures cannot leave an old selection valid or
+    // escape a transition guard's destructor. Restart the Server to recover.
+    revokeSelectedPeer();
+  }
+}
+
 Server::InputRoutes::Recipients Server::inputRecipients(const char *computers) const
 {
   InputRoutes::Recipients recipients;
@@ -2091,6 +2229,19 @@ bool Server::addClient(BaseClientProxy *client)
     return false;
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  InputRoutes::Recipient recipient = 0;
+  if (client != m_primaryClient) {
+    try {
+      recipient = m_inputRoutes.attach();
+    } catch (const std::overflow_error &) {
+      revokeSelectedPeer();
+      LOG_ERR("input recipient sequence exhausted; refusing new client");
+      return false;
+    }
+  }
+#endif
+
   // add event handlers
   m_events->addHandler(EventTypes::ComputerShapeChanged, client->getEventTarget(), [this, client](const auto &) {
     handleShapeChanged(client);
@@ -2108,7 +2259,6 @@ bool Server::addClient(BaseClientProxy *client)
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   if (client != m_primaryClient) {
-    const auto recipient = m_inputRoutes.attach();
     m_inputRecipients.emplace(client, recipient);
     m_inputClients.emplace(recipient, client);
   }
@@ -2136,6 +2286,7 @@ bool Server::removeClient(BaseClientProxy *client)
   }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
   // This path also runs after an unexpected disconnect. Never write releases
   // through a dead proxy or redirect them to the new active computer.
   forgetInputRecipient(client, false);
@@ -2150,6 +2301,9 @@ bool Server::removeClient(BaseClientProxy *client)
   m_clients.erase(getName(client));
   m_clientSet.erase(i);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
   return true;
 }
 
@@ -2157,6 +2311,10 @@ void Server::closeClient(BaseClientProxy *client, const char *msg)
 {
   assert(client != m_primaryClient);
   assert(msg != nullptr);
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+#endif
 
   // send message to client.  this message should cause the client
   // to disconnect.  we add this client to the closed client list
@@ -2191,6 +2349,9 @@ void Server::closeClient(BaseClientProxy *client, const char *msg)
   // if this client is the active computer then we have to
   // jump off of it
   forceLeaveClient(client);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
 }
 
 void Server::closeClients(const ServerConfig &config)
@@ -2243,6 +2404,9 @@ void Server::removeOldClient(BaseClientProxy *client)
 
 void Server::forceLeaveClient(const BaseClientProxy *client)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  SelectionChange selection(*this);
+#endif
   if (const auto *active = (m_activeSaver != nullptr) ? m_activeSaver : m_active; active == client) {
     // record new position (center of primary computer)
     m_primaryClient->getCursorCenter(m_x, m_y);
@@ -2278,4 +2442,7 @@ void Server::forceLeaveClient(const BaseClientProxy *client)
 
   // tell primary client about the active sides
   m_primaryClient->reconfigure(getActivePrimarySides());
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  selection.complete();
+#endif
 }

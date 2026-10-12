@@ -5,6 +5,7 @@
 #pragma once
 
 #include "LocalInputCompanion.h"
+#include "SelectedPeerMailbox.h"
 
 namespace deskflow::windowshare {
 
@@ -22,10 +23,12 @@ public:
   bool stop();
   LocalInputChannel *channel() const;
   std::optional<LocalInputCompanion::ExitResult> exitResult() const;
+  std::shared_ptr<SelectedPeerMailbox> selectedPeerMailbox() const;
   std::function<void(QString)> onStopped;
 
 private:
   LocalInputCoreSession() = default;
+  std::shared_ptr<SelectedPeerMailbox> m_selectedPeerMailbox = std::make_shared<SelectedPeerMailbox>();
   std::unique_ptr<LocalInputChannel> m_channel;
   std::unique_ptr<LocalInputCompanion> m_companion;
   int m_stopWaitMs = 2000;

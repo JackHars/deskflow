@@ -52,6 +52,10 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   result->m_stopWaitMs = limits.gracefulMs + limits.terminateMs + 700;
   auto *self = result.get();
   result->m_companion->onChannel = [self](std::unique_ptr<LocalInputChannel> channel) {
+    channel->onClosed = [weak = std::weak_ptr<SelectedPeerMailbox>(self->m_selectedPeerMailbox)](const QString &) {
+      if (const auto mailbox = weak.lock())
+        mailbox->close();
+    };
     self->m_channel = std::move(channel);
   };
   QString failure;
@@ -76,6 +80,7 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
     return {};
   }
   result->m_companion->onStopped = [self](QString reason) {
+    self->m_selectedPeerMailbox->close();
     const auto callback = self->onStopped;
     if (callback)
       callback(std::move(reason));
@@ -86,6 +91,7 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
 }
 LocalInputCoreSession::~LocalInputCoreSession()
 {
+  m_selectedPeerMailbox->close();
   onStopped = {};
   if (m_companion) {
     m_companion->onChannel = {};
@@ -95,6 +101,7 @@ LocalInputCoreSession::~LocalInputCoreSession()
 }
 bool LocalInputCoreSession::stop()
 {
+  m_selectedPeerMailbox->close();
   const QPointer<LocalInputCompanion> companion(m_companion.get());
   const int waitMs = m_stopWaitMs;
   if (!companion)
@@ -113,6 +120,10 @@ LocalInputChannel *LocalInputCoreSession::channel() const
 std::optional<LocalInputCompanion::ExitResult> LocalInputCoreSession::exitResult() const
 {
   return m_companion ? m_companion->exitResult() : std::nullopt;
+}
+std::shared_ptr<SelectedPeerMailbox> LocalInputCoreSession::selectedPeerMailbox() const
+{
+  return m_selectedPeerMailbox;
 }
 int localInputCoreProbe(LocalInputSocketPair pair)
 {

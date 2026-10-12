@@ -16,8 +16,16 @@ private Q_SLOTS:
   void initTestCase();
   void authenticatedIdentity_data();
   void authenticatedIdentity();
+  void outboundIdentity_data();
+  void outboundIdentity();
   void activeClose();
   void plainStreamHasNoIdentity();
+  void ticketIssuer();
+  void ticketIncarnationExhaustion();
+  void ticketIssueRevokeRace();
+  void ticketLifecycle_data();
+  void ticketLifecycle();
+  void samePinReconnect();
 
 private:
   Arch m_arch;

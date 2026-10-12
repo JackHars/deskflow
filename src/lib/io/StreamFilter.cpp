@@ -81,6 +81,11 @@ std::optional<deskflow::IStream::PeerFingerprint> StreamFilter::authenticatedPee
   return getStream()->authenticatedPeerFingerprint();
 }
 
+std::optional<deskflow::AuthenticatedPeerTicket> StreamFilter::authenticatedPeerTicket() const
+{
+  return getStream()->authenticatedPeerTicket();
+}
+
 deskflow::IStream *StreamFilter::getStream() const
 {
   return m_stream;

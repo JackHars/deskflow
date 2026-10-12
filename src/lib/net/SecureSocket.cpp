@@ -59,6 +59,7 @@ SecureSocket::SecureSocket(
     IEventQueue *events, SocketMultiplexer *socketMultiplexer, ArchSocket socket, SecurityLevel securityLevel
 )
     : TCPSocket(events, socketMultiplexer, socket),
+      m_connectStarted{true},
       m_securityLevel{securityLevel}
 {
   // do nothing
@@ -76,17 +77,40 @@ void SecureSocket::close()
   TCPSocket::close();
 }
 
+void SecureSocket::shutdownInput()
+{
+  revokePeerIdentity();
+  TCPSocket::shutdownInput();
+}
+
+void SecureSocket::shutdownOutput()
+{
+  revokePeerIdentity();
+  TCPSocket::shutdownOutput();
+}
+
 void SecureSocket::connect(const NetworkAddress &addr)
 {
   {
     std::scoped_lock ssl_lock{ssl_mutex_};
-    m_peerIdentityLive = false;
-    m_verifiedPeerFingerprint.reset();
+    // A socket and its issuer represent one connection. Reconnect using a new
+    // socket; never rearm retained evidence on this one, even for the same pin.
+    if (m_closing || m_connectStarted || (m_ssl && m_ssl->m_ssl)) {
+      isFatal(true);
+      disconnect();
+      return;
+    }
+    m_connectStarted = true;
   }
   getEvents()->addHandler(EventTypes::DataSocketConnected, getEventTarget(), [this](const auto &e) {
     handleTCPConnected(e);
   });
-  TCPSocket::connect(addr);
+  try {
+    TCPSocket::connect(addr);
+  } catch (...) {
+    revokePeerIdentity();
+    throw;
+  }
 }
 
 ISocketMultiplexerJob *SecureSocket::newJob()
@@ -316,7 +340,16 @@ std::optional<deskflow::IStream::PeerFingerprint> SecureSocket::authenticatedPee
   std::scoped_lock ssl_lock{ssl_mutex_};
   if (m_closing || !m_peerIdentityLive || !m_secureReady || m_fatal || !m_ssl || !m_ssl->m_ssl)
     return std::nullopt;
+  if (m_securityLevel == SecurityLevel::PeerAuth && !m_peerIdentityIssuer.ticket())
+    return std::nullopt;
   return m_verifiedPeerFingerprint;
+}
+
+std::optional<deskflow::AuthenticatedPeerTicket> SecureSocket::authenticatedPeerTicket() const
+{
+  if (m_closing || !m_secureReady || m_fatal)
+    return std::nullopt;
+  return m_peerIdentityIssuer.ticket();
 }
 
 void SecureSocket::initSsl(bool server)
@@ -324,6 +357,15 @@ void SecureSocket::initSsl(bool server)
   std::scoped_lock ssl_lock{ssl_mutex_};
   if (m_closing)
     return;
+
+  // TLS reset is terminal for an existing connection. Retain the old SSL state
+  // for normal teardown instead of overwriting it and leaking its resources.
+  if (m_ssl) {
+    isFatal(true);
+    m_secureReady = false;
+    disconnect();
+    return;
+  }
 
   m_peerIdentityLive = false;
   m_verifiedPeerFingerprint.reset();
@@ -424,8 +466,8 @@ void SecureSocket::createSSL()
 
 void SecureSocket::freeSSL()
 {
+  revokePeerIdentity();
   m_closing = true;
-  m_peerIdentityLive = false;
   isFatal(true);
   // Removal waits for active callbacks, which may still need ssl_mutex_. Never
   // hold that mutex while waiting for the multiplexer to release its job list.
@@ -486,6 +528,8 @@ int SecureSocket::secureAccept(int socket)
       disconnect();
       return -1; // Fail
     }
+    if (!issuePeerTicket())
+      return -1;
     m_secureReady = true;
     LOG_INFO("accepted secure socket");
     SslLogger::logSecureCipherInfo(m_ssl->m_ssl);
@@ -502,6 +546,8 @@ int SecureSocket::secureAccept(int socket)
 
   // no good state exists here
   LOG_ERR("unexpected state attempting to accept connection");
+  isFatal(true);
+  disconnect();
   return -1; // Fail
 }
 
@@ -544,8 +590,7 @@ int SecureSocket::secureConnect(int socket)
   }
 
   retry = 0;
-  // No error, set ready, process and return ok
-  m_secureReady = true;
+  // Publish readiness only after authentication and ticket issuance finish.
   if (verifyCertFingerprint(Settings::tlsTrustedServersDb())) {
     LOG_INFO("connected to secure socket");
     if (!showCertificate()) {
@@ -557,6 +602,9 @@ int SecureSocket::secureConnect(int socket)
     disconnect();
     return -1; // Fingerprint failed, error
   }
+  if (!issuePeerTicket())
+    return -1;
+  m_secureReady = true;
   LOG_VERBOSE("connected secure socket");
   SslLogger::logSecureCipherInfo(m_ssl->m_ssl);
   SslLogger::logSecureConnectInfo(m_ssl->m_ssl);
@@ -670,6 +718,8 @@ bool SecureSocket::verifyCertFingerprint(const QString &FingerprintDatabasePath)
 {
   // Called with ssl_mutex_ held by the handshake. Cache proof only after the
   // exact leaf has passed the existing trusted-fingerprint database check.
+  if (m_verifiedPeerFingerprint)
+    revokePeerIdentity();
   m_peerIdentityLive = false;
   m_verifiedPeerFingerprint.reset();
   const std::unique_ptr<X509, decltype(&X509_free)> cert(SSL_get_peer_certificate(m_ssl->m_ssl), X509_free);
@@ -713,14 +763,37 @@ bool SecureSocket::verifyCertFingerprint(const QString &FingerprintDatabasePath)
   return true;
 }
 
+bool SecureSocket::issuePeerTicket()
+{
+  // Called with ssl_mutex_ held only after the complete handshake and existing
+  // leaf pin checks. Encryption-only streams never acquire input authority.
+  if (m_securityLevel != SecurityLevel::PeerAuth)
+    return true;
+  if (m_verifiedPeerFingerprint && m_peerIdentityIssuer.issue(*m_verifiedPeerFingerprint))
+    return true;
+  isFatal(true);
+  disconnect();
+  return false;
+}
+
+void SecureSocket::revokePeerIdentity()
+{
+  // No TLS lock: this runs from SSL error paths with ssl_mutex_ already held,
+  // and before close waits for callbacks that still need that mutex.
+  m_peerIdentityIssuer.revoke();
+  m_peerIdentityLive = false;
+}
+
 void SecureSocket::sendEvent(EventTypes type)
 {
   // Revoke before publishing failure, including plain TCP poll errors that do
   // not pass through SSL_get_error(). This can run with ssl_mutex_ held, so the
-  // live flag is atomic rather than taking the TLS mutex recursively.
+  // issuer has its own lock rather than taking the TLS mutex recursively.
   if (type == EventTypes::SocketDisconnected || type == EventTypes::StreamInputShutdown ||
-      type == EventTypes::StreamOutputShutdown || type == EventTypes::StreamOutputError)
-    m_peerIdentityLive = false;
+      type == EventTypes::StreamOutputShutdown || type == EventTypes::StreamOutputError ||
+      type == EventTypes::StreamInputFormatError || type == EventTypes::DataSocketConnectionFailed ||
+      type == EventTypes::ClientListenerDisconnectedOnAccept)
+    revokePeerIdentity();
   TCPSocket::sendEvent(type);
 }
 

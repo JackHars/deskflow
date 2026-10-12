@@ -97,6 +97,11 @@ target_link_libraries(${lib_name}
     platform
 )
 
+if(BUILD_WINDOWSHARE)
+  target_compile_definitions(${lib_name} PUBLIC BUILD_WINDOWSHARE=1)
+  target_link_libraries(${lib_name} PRIVATE windowshare-selection)
+endif()
+
 if(UNIX AND NOT APPLE)
   target_link_libraries(${lib_name} PRIVATE server ${LIBXKBREGISTRY_LINK_LIBRARIES})
 endif()

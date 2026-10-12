@@ -22,6 +22,12 @@ private Q_SLOTS:
   void inputRoutes_localPressDoesNotAcquireRemoteRecipient();
   void inputRoutes_disconnectDoesNotRetargetHeldInput();
   void inputRoutes_orderlyCloseReleasesBeforeClosing();
+  void selectedPeer_requiresCurrentAuthenticatedRemote();
+  void selectedPeer_revokesBeforeSwitchAndFailedLeave();
+  void selectedPeer_reconnectDoesNotReviveCachedSelection();
+  void selectedPeer_revokesBeforeRemoveCloseAndForceLeave();
+  void selectedPeer_configBroadcastAndScreensaverFence();
+  void selectedPeer_shutdownAndOverflowAreTerminal();
 
 private:
   Arch m_arch;

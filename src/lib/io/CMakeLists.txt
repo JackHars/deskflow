@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: MIT
 
 add_library(io STATIC
+  AuthenticatedPeerTicket.h
   IOException.cpp
   IOException.h
   IStream.h

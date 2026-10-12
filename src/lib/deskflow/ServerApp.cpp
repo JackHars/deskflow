@@ -27,6 +27,10 @@
 #include "server/Config.h"
 #include "server/PrimaryClient.h"
 #include "server/Server.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/SelectedPeerMailbox.h"
+#include "windowshare/SelectedPeerPublisher.h"
+#endif
 
 // must be before computer header includes
 #include <QFileInfo>
@@ -60,6 +64,38 @@ ServerApp::ServerApp(IEventQueue *events, const QString &processName) : App(even
   m_name = Settings::value(Settings::Core::ComputerName).toString().toStdString();
   // do nothing
 }
+
+ServerApp::~ServerApp()
+{
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // The core worker is joined before App destruction. The normal core cleanup
+  // already removed the publisher; close also denies after an exceptional exit.
+  if (m_selectedPeerMailbox)
+    m_selectedPeerMailbox->close();
+#endif
+}
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+void ServerApp::setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox)
+{
+  if (!mailbox || m_selectedPeerMailbox || m_serverState != ServerState::Uninitialized ||
+      thread() != QThread::currentThread())
+    throw std::logic_error("Selected peer mailbox must be configured once before core startup");
+  m_selectedPeerMailbox = std::move(mailbox);
+}
+
+void ServerApp::stopSelectedPeerPublication()
+{
+  if (m_server)
+    m_server->revokeSelectedPeer();
+  // Invalidate before the nested disconnect loop can run another timer callback.
+  if (m_selectedPeerPublisher)
+    m_selectedPeerPublisher->stop();
+  m_selectedPeerPublisher.reset();
+  if (m_selectedPeerMailbox)
+    m_selectedPeerMailbox->clear();
+}
+#endif
 
 void ServerApp::parseArgs()
 {
@@ -154,6 +190,12 @@ void ServerApp::closeServer(Server *server)
     return;
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  server->revokeSelectedPeer();
+  if (server == m_server)
+    stopSelectedPeerPublication();
+#endif
+
   // tell all clients to disconnect
   server->disconnect();
 
@@ -196,6 +238,9 @@ void ServerApp::closeClientListener(ClientListener *listen)
 
 void ServerApp::stopServer()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  stopSelectedPeerPublication();
+#endif
   using enum ServerState;
   if (m_serverState == Started) {
     closeServer(m_server);
@@ -376,6 +421,14 @@ bool ServerApp::startServer()
     LOG_DEBUG("started server, waiting for clients");
     ipcSendConnectionState(deskflow::core::ConnectionState::Listening);
     m_serverState = Started;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (m_selectedPeerMailbox) {
+      m_selectedPeerPublisher =
+          std::make_unique<deskflow::windowshare::SelectedPeerPublisher>(*getEvents(), m_selectedPeerMailbox, [this] {
+            return m_server->selectedPeer();
+          });
+    }
+#endif
     return true;
   } catch (SocketAddressInUseException &e) {
     LOG_CRIT("cannot listen for clients: %s", e.what());

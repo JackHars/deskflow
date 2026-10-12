@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include <array>
+#include "io/AuthenticatedPeerTicket.h"
+
 #include <cstdint>
 #include <optional>
 
@@ -23,7 +24,7 @@ Defines the interface for all streams.
 class IStream
 {
 public:
-  using PeerFingerprint = std::array<std::uint8_t, 32>;
+  using PeerFingerprint = AuthenticatedPeerTicket::Fingerprint;
   IStream() = default;
   virtual ~IStream() = default;
   //! @name manipulators
@@ -109,6 +110,14 @@ public:
   // Encryption alone, a claimed computer name, and a presented certificate do
   // not establish this identity. Plain streams deliberately return no proof.
   virtual std::optional<PeerFingerprint> authenticatedPeerFingerprint() const
+  {
+    return std::nullopt;
+  }
+
+  // Retained proof must remain revocable after this stream or its filters are
+  // destroyed. Implementations that only supply a fingerprint do not establish
+  // the authenticated connection lifetime required by this stronger API.
+  virtual std::optional<AuthenticatedPeerTicket> authenticatedPeerTicket() const
   {
     return std::nullopt;
   }

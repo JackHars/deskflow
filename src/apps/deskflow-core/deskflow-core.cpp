@@ -172,6 +172,13 @@ int main(int argc, char **argv)
   const auto processName = QFileInfo(argv[0]).fileName();
 
   App *coreApp = createApp(parser, events, processName);
+#ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputSession) {
+    // The factory and companion arguments have already required server mode.
+    // Configure the value-only mailbox before moving App onto its core thread.
+    static_cast<ServerApp *>(coreApp)->setSelectedPeerMailbox(inputSession->selectedPeerMailbox());
+  }
+#endif
 
   const auto ipcServer = new deskflow::core::ipc::CoreIpcServer(&app); // NOSONAR - Qt managed
   QObject::connect(

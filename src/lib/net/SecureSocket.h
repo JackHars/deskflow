@@ -46,6 +46,8 @@ public:
 
   // ISocket overrides
   void close() override;
+  void shutdownInput() override;
+  void shutdownOutput() override;
 
   // IDataSocket overrides
   void connect(const NetworkAddress &) override;
@@ -57,10 +59,13 @@ public:
   }
   void isFatal(bool b)
   {
+    if (b)
+      revokePeerIdentity();
     m_fatal = b;
   }
   bool isSecureReady() const;
   std::optional<PeerFingerprint> authenticatedPeerFingerprint() const override;
+  std::optional<deskflow::AuthenticatedPeerTicket> authenticatedPeerTicket() const override;
   void secureConnect();
   void secureAccept();
   int secureRead(void *buffer, int size, int &read);
@@ -81,6 +86,8 @@ private:
   void checkResult(int n, int &retry);
   void disconnect();
   bool verifyCertFingerprint(const QString &FingerprintDatabasePath);
+  bool issuePeerTicket();
+  void revokePeerIdentity();
 
   ISocketMultiplexerJob *serviceConnect(ISocketMultiplexerJob *const socket, bool, bool, bool);
 
@@ -104,6 +111,8 @@ private:
 
   std::unique_ptr<Ssl> m_ssl;
   std::optional<PeerFingerprint> m_verifiedPeerFingerprint;
+  deskflow::AuthenticatedPeerIssuer m_peerIdentityIssuer;
+  bool m_connectStarted = false;
   std::atomic_bool m_peerIdentityLive = false;
   std::atomic_bool m_secureReady = false;
   std::atomic_bool m_fatal = false;

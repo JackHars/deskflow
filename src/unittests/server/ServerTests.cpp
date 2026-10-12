@@ -20,6 +20,7 @@
 #include "server/PrimaryClient.h"
 
 #include <QTemporaryDir>
+#include <limits>
 #include <memory>
 #include <utility>
 
@@ -53,10 +54,12 @@ public:
   }
   void getCursorCenter(int32_t &x, int32_t &y) const override
   {
+    observeSelection();
     x = y = 500;
   }
   void reconfigure(uint32_t) override
   {
+    observeSelection();
   }
   uint32_t activeSides() override
   {
@@ -113,13 +116,16 @@ public:
   }
   void disable() override
   {
+    observeSelection();
   }
   void enter() override
   {
+    observeSelection();
   }
   bool canLeave() override
   {
-    return true;
+    observeSelection();
+    return mayLeave;
   }
   void leave() override
   {
@@ -159,6 +165,15 @@ public:
   }
 
   KeyModifierMask modifiers = 0;
+  bool mayLeave = true;
+  mutable bool sawLiveSelection = false;
+  std::optional<deskflow::windowshare::SelectedPeer> watchedSelection;
+
+  void observeSelection() const
+  {
+    if (watchedSelection && watchedSelection->live())
+      sawLiveSelection = true;
+  }
 
 protected:
   void updateButtons() override
@@ -180,6 +195,25 @@ struct WireCapture
 {
   QByteArray bytes;
   bool destroyed = false;
+  bool fingerprintOnly = false, sawLiveSelection = false;
+  unsigned observations = 0;
+  std::unique_ptr<deskflow::AuthenticatedPeerIssuer> identity;
+  std::optional<deskflow::windowshare::SelectedPeer> watchedSelection;
+
+  void authenticate()
+  {
+    identity = std::make_unique<deskflow::AuthenticatedPeerIssuer>();
+    deskflow::AuthenticatedPeerTicket::Fingerprint fingerprint{};
+    fingerprint.fill(0x5a);
+    if (!identity->issue(fingerprint))
+      throw std::runtime_error("Cannot issue fake stream authentication ticket");
+  }
+  void observeSelection()
+  {
+    ++observations;
+    if (watchedSelection && watchedSelection->live())
+      sawLiveSelection = true;
+  }
   QByteArray take()
   {
     return std::exchange(bytes, {});
@@ -194,10 +228,14 @@ public:
   }
   ~RoutingStream() override
   {
+    m_capture->observeSelection();
+    if (m_capture->identity)
+      m_capture->identity->revoke();
     m_capture->destroyed = true;
   }
   void write(const void *buffer, uint32_t n) override
   {
+    m_capture->observeSelection();
     m_capture->bytes.append(static_cast<const char *>(buffer), n);
   }
   void close() override
@@ -228,6 +266,18 @@ public:
   {
     return 0;
   }
+  std::optional<deskflow::AuthenticatedPeerTicket> authenticatedPeerTicket() const override
+  {
+    return m_capture->identity ? m_capture->identity->ticket() : std::nullopt;
+  }
+  std::optional<PeerFingerprint> authenticatedPeerFingerprint() const override
+  {
+    if (!m_capture->fingerprintOnly)
+      return std::nullopt;
+    PeerFingerprint fingerprint{};
+    fingerprint.fill(0x5a);
+    return fingerprint;
+  }
 
 private:
   std::shared_ptr<WireCapture> m_capture;
@@ -237,7 +287,8 @@ class RoutingClient : public ClientProxy1_1
 {
 public:
   RoutingClient(const char *name, IEventQueue *events, const std::shared_ptr<WireCapture> &capture)
-      : ClientProxy1_1(name, new RoutingStream(capture), events)
+      : ClientProxy1_1(name, new RoutingStream(capture), events),
+        m_capture(capture)
   {
   }
 
@@ -250,11 +301,33 @@ public:
   {
     x = y = 500;
   }
+  bool leave() override
+  {
+    m_capture->observeSelection();
+    return mayLeave && ClientProxy1_1::leave();
+  }
+  bool mayLeave = true;
+
+private:
+  std::shared_ptr<WireCapture> m_capture;
+};
+
+class RoutingEventQueue : public MockEventQueue
+{
+public:
+  void removeHandler(EventTypes type, void *target) override
+  {
+    if (watchedSelection && watchedSelection->live())
+      sawLiveSelection = true;
+    MockEventQueue::removeHandler(type, target);
+  }
+  bool sawLiveSelection = false;
+  std::optional<deskflow::windowshare::SelectedPeer> watchedSelection;
 };
 
 struct RoutingFixture
 {
-  MockEventQueue events;
+  RoutingEventQueue events;
   deskflow::server::Config config{&events};
   RoutingPlatform *platform = new RoutingPlatform(&events);
   deskflow::Computer computer{platform, &events};
@@ -410,6 +483,238 @@ void ServerTests::inputRoutes_orderlyCloseReleasesBeforeClosing()
   server.onMouseUp(1);
   QVERIFY(f.first->take().isEmpty());
   QVERIFY(f.second->take().isEmpty());
+}
+
+void ServerTests::selectedPeer_requiresCurrentAuthenticatedRemote()
+{
+  RoutingFixture f;
+  auto &server = *f.server;
+  QVERIFY(!server.selectedPeer());
+  server.switchComputer(f.firstClient, 100, 100, false);
+  QVERIFY(!server.selectedPeer());
+  f.first->fingerprintOnly = true;
+  server.switchComputer(f.firstClient, 100, 100, false);
+  QVERIFY(!server.selectedPeer()); // A legacy fingerprint copy is insufficient.
+  f.first->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  const auto selected = server.selectedPeer();
+  QVERIFY(selected && selected->live());
+  QVERIFY(selected->serverIncarnation() != 0);
+  QCOMPARE(selected->recipient(), server.m_inputRecipients.at(f.firstClient));
+  QVERIFY(selected->generation() != 0);
+  QCOMPARE(selected->ticket().incarnation(), f.first->identity->ticket()->incarnation());
+  QVERIFY(selected->sameSelection(*server.selectedPeer()));
+
+  f.first->identity->revoke(); // Independent TLS-thread revocation needs no Server event.
+  QVERIFY(!selected->live());
+  QVERIFY(!server.selectedPeer());
+  server.switchComputer(f.firstClient, 100, 100, false);
+  QVERIFY(!server.selectedPeer());
+  server.switchComputer(&f.primary, 100, 100, false);
+  QVERIFY(!server.selectedPeer());
+}
+
+void ServerTests::selectedPeer_revokesBeforeSwitchAndFailedLeave()
+{
+  RoutingFixture f;
+  auto &server = *f.server;
+  f.first->authenticate();
+  f.second->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  const auto first = server.selectedPeer();
+  QVERIFY(first);
+  f.first->watchedSelection = first;
+  f.second->watchedSelection = first;
+  f.firstClient->mayLeave = false;
+  server.switchComputer(f.secondClient, 100, 100, false);
+  QVERIFY(!first->live());
+  QVERIFY(!f.first->sawLiveSelection);
+  QCOMPARE(server.m_active, static_cast<BaseClientProxy *>(f.firstClient));
+  QVERIFY(!server.selectedPeer()); // Failed leave never republishes the old lease.
+
+  f.firstClient->mayLeave = true;
+  server.switchComputer(f.secondClient, 100, 100, false);
+  const auto second = server.selectedPeer();
+  QVERIFY(second && second->live());
+  QVERIFY(second->generation() > first->generation());
+  QVERIFY(second->recipient() != first->recipient());
+  QVERIFY(!second->sameSelection(*first));
+  QVERIFY(!f.first->sawLiveSelection);
+  QVERIFY(!f.second->sawLiveSelection);
+  f.second->watchedSelection = second;
+  server.switchComputer(&f.primary, 100, 100, false);
+  QVERIFY(!second->live());
+  QVERIFY(!f.second->sawLiveSelection);
+  QVERIFY(!server.selectedPeer());
+}
+
+void ServerTests::selectedPeer_reconnectDoesNotReviveCachedSelection()
+{
+  RoutingFixture f;
+  auto &server = *f.server;
+  f.first->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  const auto old = server.selectedPeer();
+  QVERIFY(old);
+  f.first->watchedSelection = old;
+  server.handleClientDisconnected(f.firstClient);
+  QVERIFY(!old->live());
+  QVERIFY(!f.first->sawLiveSelection);
+  QVERIFY(!server.selectedPeer());
+
+  auto replacement = std::make_shared<WireCapture>();
+  replacement->authenticate(); // Same name and exact pin, fresh authenticated connection.
+  auto *client = new RoutingClient("first", &f.events, replacement);
+  server.adoptClient(client);
+  server.switchComputer(client, 100, 100, false);
+  const auto current = server.selectedPeer();
+  QVERIFY(current && current->live());
+  QCOMPARE(current->serverIncarnation(), old->serverIncarnation());
+  QCOMPARE(current->ticket().fingerprint(), old->ticket().fingerprint());
+  QVERIFY(current->recipient() != old->recipient());
+  QVERIFY(current->ticket().incarnation() != old->ticket().incarnation());
+  QVERIFY(current->generation() > old->generation());
+  QVERIFY(!old->live());
+
+  RoutingFixture fresh;
+  fresh.first->authenticate();
+  fresh.server->switchComputer(fresh.firstClient, 100, 100, false);
+  const auto restarted = fresh.server->selectedPeer();
+  QVERIFY(restarted);
+  QVERIFY(restarted->serverIncarnation() != current->serverIncarnation());
+  QVERIFY(!restarted->sameSelection(*current));
+}
+
+void ServerTests::selectedPeer_revokesBeforeRemoveCloseAndForceLeave()
+{
+  for (int operation = 0; operation < 3; ++operation) {
+    RoutingFixture f;
+    auto &server = *f.server;
+    f.first->authenticate();
+    server.switchComputer(f.firstClient, 100, 100, false);
+    const auto selected = server.selectedPeer();
+    QVERIFY(selected);
+    f.first->watchedSelection = selected;
+    f.platform->watchedSelection = selected;
+    f.events.watchedSelection = selected;
+    if (operation == 0) {
+      QVERIFY(server.removeClient(f.firstClient));
+      QVERIFY(!selected->live());
+      QVERIFY(selected->ticket().live()); // Selection revokes before stream destruction.
+      server.forceLeaveClient(f.firstClient);
+      server.handleClientDisconnected(f.firstClient);
+    } else if (operation == 1) {
+      server.closeClient(f.firstClient, kMsgCClose);
+      QVERIFY(selected->ticket().live());
+    } else {
+      server.forceLeaveClient(f.firstClient);
+      QVERIFY(selected->ticket().live());
+    }
+    QVERIFY(!selected->live());
+    QVERIFY(!server.selectedPeer());
+    QVERIFY(!f.first->sawLiveSelection);
+    QVERIFY(!f.platform->sawLiveSelection);
+    QVERIFY(!f.events.sawLiveSelection);
+  }
+}
+
+void ServerTests::selectedPeer_configBroadcastAndScreensaverFence()
+{
+  RoutingFixture f;
+  auto &server = *f.server;
+  f.first->authenticate();
+  f.second->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  auto selected = server.selectedPeer();
+  QVERIFY(selected);
+  deskflow::server::Config rejected(&f.events);
+  rejected.addComputer("first");
+  QVERIFY(!server.setConfig(rejected));
+  QVERIFY(selected->live());
+  QVERIFY(server.selectedPeer()->sameSelection(*selected));
+
+  f.platform->watchedSelection = selected;
+  f.first->watchedSelection = selected;
+  QVERIFY(server.setConfig(f.config));
+  QVERIFY(!selected->live());
+  QVERIFY(!f.platform->sawLiveSelection);
+  QVERIFY(!f.first->sawLiveSelection);
+  const auto configured = server.selectedPeer();
+  QVERIFY(configured && configured->generation() > selected->generation());
+
+  const auto broadcast = [&](Server::KeyboardBroadcastInfo::State state, const char *scope) {
+    Server::KeyboardBroadcastInfo info(state, scope);
+    server.handleKeyboardBroadcastEvent(
+        Event(EventTypes::ServerKeyboardBroadcast, nullptr, static_cast<void *>(&info), Event::EventFlags::DontFreeData)
+    );
+  };
+  broadcast(Server::KeyboardBroadcastInfo::kOn, "first");
+  QVERIFY(!configured->live());
+  QVERIFY(!server.selectedPeer());
+  server.switchComputer(f.secondClient, 100, 100, false);
+  QVERIFY(!server.selectedPeer());
+  broadcast(Server::KeyboardBroadcastInfo::kOn, "second");
+  QVERIFY(!server.selectedPeer());
+  broadcast(Server::KeyboardBroadcastInfo::kOff, "second");
+  selected = server.selectedPeer();
+  QVERIFY(selected && selected->live());
+  broadcast(Server::KeyboardBroadcastInfo::kOff, "first"); // Scope changes fence even while off.
+  QVERIFY(!selected->live());
+  selected = server.selectedPeer();
+  QVERIFY(selected && selected->live());
+  f.second->watchedSelection = selected;
+  server.onScreensaver(true);
+  QVERIFY(!selected->live());
+  QVERIFY(!f.second->sawLiveSelection);
+  QVERIFY(!server.selectedPeer());
+  server.handleClientDisconnected(f.secondClient); // Clears m_activeSaver while saver stays active.
+  server.switchComputer(f.firstClient, 100, 100, false);
+  QVERIFY(!server.selectedPeer());
+  broadcast(Server::KeyboardBroadcastInfo::kOff, "second");
+  QVERIFY(!server.selectedPeer());
+  server.onScreensaver(false);
+  QVERIFY(server.selectedPeer());
+}
+
+void ServerTests::selectedPeer_shutdownAndOverflowAreTerminal()
+{
+  std::atomic<std::uint64_t> next{std::numeric_limits<std::uint64_t>::max() - 1};
+  QCOMPARE(Server::reserveServerIncarnation(next), std::numeric_limits<std::uint64_t>::max());
+  QCOMPARE(Server::reserveServerIncarnation(next), std::uint64_t{0});
+  QCOMPARE(Server::reserveServerIncarnation(next), std::uint64_t{0});
+  for (int operation = 0; operation < 4; ++operation) {
+    RoutingFixture f;
+    auto &server = *f.server;
+    f.first->authenticate();
+    server.switchComputer(f.firstClient, 100, 100, false);
+    const auto selected = server.selectedPeer();
+    QVERIFY(selected);
+    f.first->watchedSelection = selected;
+    f.platform->watchedSelection = selected;
+    if (operation == 0) {
+      server.revokeSelectedPeer();
+      server.revokeSelectedPeer();
+      server.switchComputer(f.firstClient, 100, 100, false);
+      QVERIFY(server.setConfig(f.config));
+      QVERIFY(!server.selectedPeer());
+    } else if (operation == 1) {
+      server.m_selectionGeneration = std::numeric_limits<std::uint64_t>::max();
+      server.switchComputer(f.firstClient, 100, 100, false);
+      QVERIFY(server.m_selectionShutdown);
+      QVERIFY(!server.selectedPeer());
+      server.switchComputer(&f.primary, 100, 100, false);
+      server.switchComputer(f.firstClient, 100, 100, false);
+      QVERIFY(!server.selectedPeer());
+    } else if (operation == 2) {
+      server.disconnect();
+      QVERIFY(!server.selectedPeer());
+    } else {
+      f.server.reset();
+    }
+    QVERIFY(!selected->live());
+    QVERIFY(!f.first->sawLiveSelection);
+    QVERIFY(!f.platform->sawLiveSelection);
+  }
 }
 #endif
 

@@ -445,6 +445,11 @@ void coreSessionOwnership()
       session->channel() && session->channel()->authenticated() && !session->channel()->authorize,
       "Core session did not retain a default-deny authenticated channel"
   );
+  const auto mailbox = session->selectedPeerMailbox();
+  check(
+      mailbox && !mailbox->read().closed && !mailbox->read().selected,
+      "Core session began with a selected-peer identity before core publication"
+  );
   LocalInputLease lease;
   lease.deskflowClientIncarnation[0] = 1;
   lease.windowShareClientIncarnation[0] = 2;
@@ -457,11 +462,15 @@ void coreSessionOwnership()
   );
   const auto firstChild = trust.observed;
   int completions = 0;
-  session->onStopped = [&](QString) { ++completions; };
+  bool mailboxClosedBeforeCallback = false;
+  session->onStopped = [&](QString) {
+    ++completions;
+    mailboxClosedBeforeCallback = mailbox->read().closed;
+  };
   check(session->stop() && session->stop(), "Core session could not drain its stopped child");
   check(
-      completions == 1 && firstChild && localInputProcess(firstChild->pid) != firstChild &&
-          !session->channel()->authenticated(),
+      completions == 1 && mailboxClosedBeforeCallback && firstChild &&
+          localInputProcess(firstChild->pid) != firstChild && !session->channel()->authenticated(),
       "Core session stop did not revoke and reap its exact child once"
   );
   check(
@@ -469,6 +478,7 @@ void coreSessionOwnership()
       "Core session lost graceful authenticated child exit evidence"
   );
   session.reset();
+  check(mailbox->read().closed && !mailbox->clear(), "Retained mailbox reopened after session stop/destruction");
 
   resetTrust();
   trust.verify = false;
@@ -492,6 +502,30 @@ void coreSessionOwnership()
       notified && !session && !drained && lastChild && localInputProcess(lastChild->pid) != lastChild,
       "Deleting a session during its stop callback accessed a dead owner or claimed a retained drain"
   );
+}
+
+void coreSessionMailboxClosure()
+{
+  for (const bool destroy : {false, true}) {
+    resetTrust();
+    QString error;
+    auto session = LocalInputCoreSession::start(pair(), {"--fixture=normal"}, &error);
+    check(bool(session), qPrintable(error));
+    const auto mailbox = session->selectedPeerMailbox();
+    const auto child = trust.observed;
+    check(mailbox && !mailbox->read().closed, "Connected session mailbox was unexpectedly closed");
+    if (destroy)
+      session.reset();
+    else
+      session->channel()->close("Fixture closed private authority");
+    check(
+        mailbox->read().closed && !mailbox->read().selected && !mailbox->clear(),
+        "Channel close or session destruction failed to close the retained mailbox synchronously"
+    );
+    if (session)
+      check(session->stop(), "Closed-channel session did not reap its companion");
+    check(child && until([&] { return localInputProcess(child->pid) != child; }), "Session closure left child alive");
+  }
 }
 
 void childExitEvidence()
@@ -614,13 +648,15 @@ int main(int argc, char **argv)
     reentrantOwnership();
     environmentIsolation();
     coreSessionOwnership();
+    coreSessionMailboxClosure();
     coreSessionCustomDrain();
     childExitEvidence();
     eventLoopExit();
     QTextStream(stdout) << "PASS: fixed verified companion, exclusive inheritance, handshake deadline, child death, "
                            "bounded stop, callback deletion/stop/drop/throw, no restart, loader environment isolation, "
                            "startup expiry at use, detached reaping, event-loop exit, core session default-deny, "
-                           "failure drain, deletion during stop, configured shutdown budget, graceful EOF drain "
+                           "failure drain, deletion during stop, selected-peer mailbox closure, configured shutdown "
+                           "budget, graceful EOF drain "
                            "and child exit evidence\n";
     return 0;
   } catch (const std::exception &error) {

@@ -230,8 +230,20 @@ helpers now support the explicit packaged companion launch above; they do not
 register an original-input tap or enable original OS input.
 The eventual route must bind the current Deskflow client and window-share client
 to an explicit pair of approved fingerprints and connection incarnations. The
-core exposes a fingerprint only after its existing trusted-peer check succeeds;
-ordinary encryption-only clients provide no authentication proof for this route.
+core supplies a revocable ticket only after its complete trusted-peer handshake;
+ordinary encryption-only clients provide no ticket for this route. Tickets bind
+the leaf fingerprint to a fresh connection incarnation, so a same-pin reconnect
+cannot revive a retained identity.
+
+Selected-client snapshots also bind a server incarnation, recipient token and
+selection generation. They are revoked before destination, configuration,
+broadcast, screensaver and shutdown transitions. The core's event thread
+publishes only immutable values to the Qt-owned Session's one-value mailbox;
+no proxy or stream pointer crosses threads. Publication starts with the first
+20 ms core timer dispatch. Observations expire after 250 ms independently of
+timer delivery and remain invalid after mailbox replacement, closure or either
+underlying revocation. This is identity infrastructure; it does not authorize
+original input or perform the pending dual-connection preflight.
 
 An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
 forwarding with an independent native admission fence. The viewer releases its

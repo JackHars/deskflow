@@ -18,6 +18,7 @@
 #include "server/Config.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputRouteState.h"
+#include "windowshare/SelectedPeer.h"
 #endif
 
 #include <climits>
@@ -206,6 +207,16 @@ public:
   void sendConnectedClientsIpc() const;
   size_t getMaximumClipboardSizeBytes() const;
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  // Core event-queue thread only. The copied value contains no client/stream
+  // pointers and remains safe to inspect after this Server is destroyed.
+  std::optional<deskflow::windowshare::SelectedPeer> selectedPeer() const;
+
+  // Terminal shutdown fence. Call before entering any shutdown nested loop.
+  // A subsequent client/configuration event cannot publish new authority.
+  void revokeSelectedPeer() noexcept;
+#endif
+
   //@}
 
 private:
@@ -348,6 +359,10 @@ private:
   BaseClientProxy *inputRecipient(InputRoutes::Recipient recipient) const;
   void forgetInputRecipient(BaseClientProxy *client, bool sendReleases);
   void routeModifierCommand(KeyID id, KeyModifierMask mask, const std::string &lang, const char *computers);
+  class SelectionChange;
+  static std::uint64_t reserveServerIncarnation(std::atomic<std::uint64_t> &next) noexcept;
+  void invalidateSelectedPeer() noexcept;
+  void publishSelectedPeer() noexcept;
 #endif
 
   // add client to list and attach event handlers for client
@@ -397,6 +412,13 @@ private:
   InputRoutes m_inputRoutes;
   std::map<BaseClientProxy *, InputRoutes::Recipient> m_inputRecipients;
   std::map<InputRoutes::Recipient, BaseClientProxy *> m_inputClients;
+  std::uint64_t m_serverIncarnation = 0;
+  std::uint64_t m_selectionGeneration = 0;
+  std::shared_ptr<std::atomic_bool> m_selectionRevoked;
+  std::optional<deskflow::windowshare::SelectedPeer> m_selectedPeer;
+  bool m_selectionShutdown = false;
+  bool m_selectionScreensaver = false;
+  bool m_selectionChanging = false;
 #endif
 
   // current configuration

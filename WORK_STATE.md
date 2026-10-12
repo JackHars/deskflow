@@ -25,9 +25,11 @@ and cleanup before accepting a replacement connection. Authentication/protocol
 failures stop automatic retries. Old viewer callbacks cannot affect a new
 connection, and closing the last viewer preserves a headless connection.
 
-The core exposes the authenticated leaf fingerprint only after its existing
-trusted-peer check succeeds, and revokes that proof before connection-loss
-notifications. Encryption-only clients provide no such proof. A TLS close
+The core now exposes a retainable authenticated peer ticket after the complete
+trusted-peer handshake. Each ticket has a fresh connection incarnation and an
+atomic revocation fence; retained copies become invalid before connection-loss
+notifications, half-close, fatal errors, reset and destruction. Encryption-only
+clients provide no ticket. A TLS close
 deadlock found during this work is fixed by quiescing multiplexer callbacks
 before locking and destroying TLS state.
 
@@ -68,15 +70,24 @@ never names or proxy pointers across threads. Original keys and pointer intent
 must share capture order; current OS-to-Qt mouse delivery cannot preserve a source
 token. Resolve that ordering before activation rather than using latest flags.
 
-Start the next slice with a shared immutable TLS ticket containing the approved
-pin, a fresh connection incarnation and an atomic revocation cell. Revoke it
-inside SecureSocket before disconnect/error events, without taking a recursive
-SSL lock. Server snapshots must invalidate before selection, disconnect,
-broadcast/configuration, screensaver and shutdown transitions. A bounded mailbox
-polled by the core's existing event timer and Qt's main timer avoids queued calls
-to the blocked core thread and EventQueue's unsynchronized pre-ready addEvent
-path. Preflight must also bind `focusRequest`, which the current private lease
-does not contain. No original activation before pointer ordering is resolved.
+The selected-client foundation now copies only server/recipient incarnations,
+selection generation and the TLS ticket. Selection changes, disconnects,
+configuration/broadcast changes, screensaver transitions and shutdown revoke
+retained snapshots before callbacks or mutations. A failed switch leaves no
+authority; nested transitions publish only their completed final selection.
+The core publishes one latest immutable value through a bounded mailbox every
+20 ms after its event loop starts. Each observation expires after 250 ms even
+when timers stall; refresh cannot extend an already retained observation.
+The Qt-owned companion Session closes the mailbox before channel/child/session
+teardown, while ServerApp clears it before nested shutdown loops. No proxies,
+streams, queued Qt calls or pre-ready EventQueue events cross this boundary.
+This foundation remains inactive input metadata: no original authorizer or
+Offer/Candidate/Quiesced coordinator has been installed.
+
+The next preflight must bind the independent WindowShare connection, the explicit
+approved dual-pin mapping, and `focusRequest`, which the current private lease
+does not contain. Add bounded commands/replies and exact Offer/Candidate/Quiesced
+echoes before Prepare. No original activation before pointer ordering is resolved.
 
 ## Recorded validation
 
@@ -88,6 +99,23 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   tests also pass. The keyboard suite checks 12,000 deterministic interleavings
   against an independent recipient model, and Mac tests construct private
   CGEvents in memory. Neither is hardware/layout/IME proof.
+- All seven isolated suites pass; the new selected-peer mailbox and core timer
+  publisher use strict warnings and ASan/UBSan. Mailbox
+  concurrency tests also pass TSan. Tests cover immutable freshness, replacement,
+  immediate revocation, terminal closure/overflow, startup readiness, stale timer
+  callbacks, reader failure, reentrant destruction and restart. Companion/Session
+  regressions verify mailbox closure before callbacks and after channel loss or
+  Session destruction; strict and sanitizer runs pass.
+- After the ticket and mailbox changes, the complete default-off Deskflow build
+  passed all 30 existing CTest suites, and the standalone experimental app passed
+  all 11 suites. The full opt-in integrated build then passed all 48 suites.
+  These are separate from desktop input/display validation.
+- All 26 real TLS identity cases and all 14 fake-platform Server cases pass
+  normally and with ASan/UBSan instrumentation of the changed implementation and
+  test sources. Retained TLS proofs are invalid before error publication; same-pin
+  reconnects have distinct incarnations; half-close/reset/fatal paths are terminal.
+  Server tests cover failed switches, independent TLS loss, removal, configuration,
+  broadcast, screensaver, shutdown and counter exhaustion.
 - TLS tests pass with both OpenSSL and SecureTransport, including wrong pins,
   invalid dates, wrong certificate purpose in both peer roles, and explicit
   certificate errors. Identity generation also passed with Apple's LibreSSL.
@@ -175,22 +203,24 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   disposable loopback TLS fixture: initial refusal, recovery, authenticated
   disconnect/reconnect, fresh negotiation and clean exit. This newer smoke test
   never starts NativeHost, registers a tap, exports a window or changes displays.
-- All five GitHub Actions jobs passed for `b6cd13f418d537f2360a3b8e8d967c3ffaf3bf09`
-  ([run 38228710295](https://github.com/JackHars/deskflow/actions/runs/38228710295)).
-  That includes the keyboard-fence handshake and predates the trusted-launch
-  changes described above; their local results are recorded separately.
+- All five GitHub Actions jobs passed for `e97650e728fa1374f4868362a9a020d199538995`
+  ([run 38235086860](https://github.com/JackHars/deskflow/actions/runs/38235086860)).
+  That includes the packaged trusted core/host handshake and predates the new
+  selected-peer ticket/mailbox work; its local results are recorded separately.
 
 ## Local package
 
 The new signed core-main bundle is
-`build/packages/trusted-launch-verified-20261012/DeskflowSeamless-Core-Experimental.app`,
+`build/packages/selected-peer-20261012/DeskflowSeamless-Core-Experimental.app`,
 with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`a392a25d35df71612890ca08fe32c5e35730098f52805b0e4435d84a9667581c`.
+`996f7791efe096e1309b4ceb0b4a346792db167240817f7e75f3c75d59a6e7b4`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
-The installed copy passed recursive dependency/signature verification and the
-private handshake/bootstrap-rejection smoke, with original input disabled.
+The package and installed copy passed recursive dependency/signature verification,
+the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
+smoke, with original input disabled. The preceding trusted-launch installation is
+preserved in `build/packages/selected-peer-installed-backup-20261012/`.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 
