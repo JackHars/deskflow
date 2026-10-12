@@ -470,6 +470,15 @@ int main(int argc, char **argv)
   QApplication application(argc, argv);
   application.setQuitOnLastWindowClosed(false);
   try {
+    const auto arguments = application.arguments();
+    if (arguments.size() > 1) {
+      check(
+          arguments.size() == 2 && arguments[1].startsWith("--tls-backend="),
+          "Usage: windowshare-bridge-tests [--tls-backend=<name>]"
+      );
+      check(QSslSocket::setActiveBackend(arguments[1].mid(14)), "Requested TLS backend is unavailable");
+    }
+    QTextStream(stdout) << "TLS backend: " << QSslSocket::activeBackend() << "; Qt " << qVersion() << '\n';
     boundedPresentation();
     delayedViewerCleanup();
     QTemporaryDir directory;

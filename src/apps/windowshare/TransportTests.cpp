@@ -5,9 +5,12 @@
 #include "Transport.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDir>
 #include <QEventLoop>
+#include <QFile>
 #include <QHostAddress>
+#include <QProcess>
 #include <QSslConfiguration>
 #include <QSslError>
 #include <QTcpServer>
@@ -30,6 +33,10 @@ struct ChannelTestAccess
   {
     channel.m_socket.setSocketOption(QAbstractSocket::SendBufferSizeSocketOption, 4096);
   }
+  static void reportCertificateError(Channel &channel, QSslError::SslError error)
+  {
+    channel.m_socket.sslErrors({QSslError(error, channel.m_socket.peerCertificate())});
+  }
 };
 } // namespace deskflow::windowshare
 namespace {
@@ -49,6 +56,50 @@ void check(bool condition, const char *message)
   if (!condition)
     throw std::runtime_error(message);
 }
+void writeFixture(const QString &path, const QByteArray &bytes)
+{
+  QFile file(path);
+  check(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size(), "Cannot write certificate fixture");
+}
+Identity certificateFixture(
+    const QString &directory, const QString &identityDirectory, const Identity &identity, const QDateTime &start,
+    const QDateTime &end, const QByteArray &usage
+)
+{
+  check(QDir().mkpath(directory), "Cannot create certificate fixture directory");
+  const QDir dir(directory);
+  writeFixture(dir.filePath("index"), {});
+  writeFixture(dir.filePath("serial"), "01\n");
+  writeFixture(
+      dir.filePath("ca.cnf"),
+      "[ca]\ndefault_ca=fixture\n[fixture]\ndatabase=index\nnew_certs_dir=.\nserial=serial\n"
+      "default_md=sha256\npolicy=policy\nx509_extensions=usage\n[policy]\ncommonName=supplied\n"
+      "[usage]\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n"
+      "extendedKeyUsage=" +
+          usage + "\n"
+  );
+  const auto key = QDir(identityDirectory).absoluteFilePath("key.pem");
+  auto openssl = [&](const QStringList &arguments) {
+    QProcess process;
+    process.setWorkingDirectory(directory);
+    process.start("openssl", arguments);
+    check(
+        process.waitForFinished(10000) && process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0,
+        "Cannot generate certificate fixture"
+    );
+  };
+  openssl({"req", "-new", "-key", key, "-subj", "/CN=DeskflowWindowShare", "-out", "request.pem"});
+  openssl(
+      {"ca", "-selfsign", "-batch", "-notext", "-config", "ca.cnf", "-in", "request.pem", "-keyfile", key, "-cert",
+       QDir(identityDirectory).absoluteFilePath("cert.pem"), "-startdate", start.toString("yyyyMMddHHmmss'Z'"),
+       "-enddate", end.toString("yyyyMMddHHmmss'Z'"), "-out", "certificate.pem"}
+  );
+  QFile certificateFile(dir.filePath("certificate.pem"));
+  check(certificateFile.open(QIODevice::ReadOnly), "Cannot read certificate fixture");
+  Identity result{QSslCertificate(certificateFile.readAll()), identity.key};
+  check(!result.certificate.isNull(), "Invalid self-signed test certificate");
+  return result;
+}
 void exercise(const Identity &host, const Identity &client, QByteArray hostPin, QByteArray clientPin, bool allowed)
 {
   Listener listener;
@@ -57,9 +108,11 @@ void exercise(const Identity &host, const Identity &client, QByteArray hostPin, 
   Channel peer(client, hostPin);
   int packets = 0, closed = 0;
   bool accepted = false, timedOut = false;
+  QStringList closeReasons;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, clientPin);
-    server->onClosed = [&](QString) {
+    server->onClosed = [&](QString reason) {
+      closeReasons.append("server: " + reason);
       ++closed;
       loop.quit();
     };
@@ -79,7 +132,8 @@ void exercise(const Identity &host, const Identity &client, QByteArray hostPin, 
     accepted = packet.type == MessageType::Accepted && parseObject(packet)["proof"].toInt() == 73;
     loop.quit();
   };
-  peer.onClosed = [&](QString) {
+  peer.onClosed = [&](QString reason) {
+    closeReasons.append("client: " + reason);
     ++closed;
     loop.quit();
   };
@@ -100,9 +154,10 @@ void exercise(const Identity &host, const Identity &client, QByteArray hostPin, 
     server->onPacket = {};
   }
   check(!timedOut, "TLS test timed out");
-  if (allowed)
-    check(accepted && packets == 1, "approved pair did not communicate");
-  else
+  if (allowed) {
+    if (!accepted || packets != 1)
+      throw std::runtime_error(("approved pair did not communicate; " + closeReasons.join("; ")).toStdString());
+  } else
     check(!accepted && packets == 0 && closed > 0, "unapproved peer reached application protocol");
 }
 void mediaAndControl(const Identity &host, const Identity &client)
@@ -153,6 +208,53 @@ void mediaAndControl(const Identity &host, const Identity &client)
     server->onPacket = {};
   }
   check(!timedOut && video && focus, "large frame then control must arrive without disconnect");
+}
+
+void explicitCertificateErrors(const Identity &host, const Identity &client, QSslError::SslError error)
+{
+  Listener listener;
+  QEventLoop loop;
+  std::unique_ptr<Channel> server;
+  Channel peer(client, parseFingerprint(host.fingerprint()));
+  int packets = 0, closed = 0;
+  bool sent = false, timedOut = false;
+  QString closeReason;
+  listener.incoming = [&](qintptr descriptor) {
+    server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
+    server->onPacket = [&](Packet) { ++packets; };
+    server->accept(descriptor);
+  };
+  check(listener.listen(QHostAddress::LocalHost, 0), "certificate error listener failed");
+  peer.onAuthenticated = [&] {
+    // Some backends collapse these conditions into one generic trust error.
+    // Inject their distinct Qt representations on a real pinned TLS channel
+    // to ensure the generic-error recovery never waives explicit failures.
+    ChannelTestAccess::reportCertificateError(peer, error);
+    sent = peer.send(MessageType::Hello);
+  };
+  peer.onClosed = [&](QString reason) {
+    ++closed;
+    closeReason = reason;
+    loop.quit();
+  };
+  QTimer timeout;
+  timeout.setSingleShot(true);
+  QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+    timedOut = true;
+    loop.quit();
+  });
+  timeout.start(10000);
+  peer.connectTo("127.0.0.1", listener.serverPort());
+  loop.exec();
+  peer.onAuthenticated = {};
+  peer.onClosed = {};
+  if (server)
+    server->onPacket = {};
+  check(
+      !timedOut && !sent && packets == 0 && closed == 1 && !peer.authenticated() &&
+          closeReason.contains(QStringLiteral("error %1").arg(static_cast<int>(error))),
+      "An explicit certificate validation error must close the pinned channel"
+  );
 }
 
 void serializationFailure(const Identity &host, const Identity &client, int invalid)
@@ -215,16 +317,15 @@ void encryptedBackpressure(const Identity &host, const Identity &client)
   configuration.setPrivateKey(client.key);
   configuration.setPeerVerifyMode(QSslSocket::VerifyPeer);
   sink.setSslConfiguration(configuration);
-  sink.setReadBufferSize(1);
   QObject::connect(&sink, &QSslSocket::sslErrors, &sink, [&](const QList<QSslError> &errors) {
     if (sink.peerCertificate().digest(QCryptographicHash::Sha256) == parseFingerprint(host.fingerprint()))
       sink.ignoreSslErrors(errors);
   });
   bool started = false, blockedMedia = false, timedOut = false;
+  qint64 plaintext = 0, encrypted = 0;
   QString closeReason;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
-    server->onAuthenticated = [&] { started = server->sendFrame(7, 2, 1, QByteArray(maxPayload - 8, 'x')); };
     server->onClosed = [&](QString reason) {
       closeReason = reason;
       loop.quit();
@@ -238,11 +339,22 @@ void encryptedBackpressure(const Identity &host, const Identity &client)
   timeout.setSingleShot(true);
   const QJsonObject control{{"message", QString(maxControlPayload - 64, 'x')}};
   QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
-    if (!started || !server || !server->authenticated())
+    if (!server || !server->authenticated())
       return;
+    if (!started) {
+      // SecureTransport can still have its final handshake ciphertext queued
+      // when encrypted() fires. Begin congestion only after TLS output drains.
+      if (!server->readyForFrame())
+        return;
+      sink.setReadBufferSize(1);
+      started = server->sendFrame(7, 2, 1, QByteArray(maxPayload - 8, 'x'));
+      return;
+    }
+    plaintext = ChannelTestAccess::plaintext(*server);
+    encrypted = ChannelTestAccess::encrypted(*server);
     // Wait until encryption moved the write out of the plaintext queue. The
     // old admission check incorrectly treated this state as an empty socket.
-    if (ChannelTestAccess::plaintext(*server) != 0 || ChannelTestAccess::encrypted(*server) == 0)
+    if (plaintext != 0 || encrypted == 0)
       return;
     if (!blockedMedia) {
       blockedMedia = !server->sendFrame(7, 2, 1, QByteArray("next access unit"));
@@ -265,19 +377,35 @@ void encryptedBackpressure(const Identity &host, const Identity &client)
   sink.connectToHostEncrypted("127.0.0.1", listener.serverPort());
   loop.exec();
   if (server) {
-    server->onAuthenticated = {};
     server->onClosed = {};
   }
-  check(
-      !timedOut && started && blockedMedia && closeReason == "Control peer is not draining its queue",
-      "Encrypted socket backlog must block media and bound the control queue"
-  );
+  if (timedOut || !started || !blockedMedia || closeReason != "Control peer is not draining its queue")
+    throw std::runtime_error(QStringLiteral(
+                                 "Encrypted socket backlog must block media and bound the control queue "
+                                 "(started=%1, blocked=%2, timeout=%3, plaintext=%4, encrypted=%5, closed=%6)"
+    )
+                                 .arg(started)
+                                 .arg(blockedMedia)
+                                 .arg(timedOut)
+                                 .arg(plaintext)
+                                 .arg(encrypted)
+                                 .arg(closeReason)
+                                 .toStdString());
 }
 } // namespace
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
   try {
+    const auto arguments = application.arguments();
+    if (arguments.size() > 1) {
+      check(
+          arguments.size() == 2 && arguments[1].startsWith("--tls-backend="),
+          "Usage: windowshare-transport-tests [--tls-backend=<name>]"
+      );
+      check(QSslSocket::setActiveBackend(arguments[1].mid(14)), "Requested TLS backend is unavailable");
+    }
+    QTextStream(stdout) << "TLS backend: " << QSslSocket::activeBackend() << "; Qt " << qVersion() << '\n';
     QTemporaryDir directory;
     check(directory.isValid(), "temporary directory unavailable");
     const auto a = QDir(directory.path()).filePath("host"), b = QDir(directory.path()).filePath("client");
@@ -286,6 +414,37 @@ int main(int argc, char **argv)
     const auto host = Identity::load(a), client = Identity::load(b);
     const auto hostPin = parseFingerprint(host.fingerprint()), clientPin = parseFingerprint(client.fingerprint());
     exercise(host, client, hostPin, clientPin, true);
+    const auto now = QDateTime::currentDateTimeUtc();
+    const auto expired = certificateFixture(
+        QDir(directory.path()).filePath("expired"), a, host, now.addDays(-2), now.addDays(-1), "serverAuth,clientAuth"
+    );
+    const auto future = certificateFixture(
+        QDir(directory.path()).filePath("future"), a, host, now.addDays(1), now.addDays(2), "serverAuth,clientAuth"
+    );
+    const auto wrongPurpose = certificateFixture(
+        QDir(directory.path()).filePath("wrong-purpose"), a, host, now.addDays(-1), now.addDays(1), "codeSigning"
+    );
+    const auto serverOnly = certificateFixture(
+        QDir(directory.path()).filePath("server-only"), a, host, now.addDays(-1), now.addDays(1), "serverAuth"
+    );
+    const auto clientOnly = certificateFixture(
+        QDir(directory.path()).filePath("client-only"), b, client, now.addDays(-1), now.addDays(1), "clientAuth"
+    );
+    const auto serverOnlyPin = parseFingerprint(serverOnly.fingerprint());
+    const auto clientOnlyPin = parseFingerprint(clientOnly.fingerprint());
+    exercise(serverOnly, clientOnly, serverOnlyPin, clientOnlyPin, true);
+    exercise(clientOnly, client, clientOnlyPin, clientPin, false);
+    exercise(host, serverOnly, hostPin, serverOnlyPin, false);
+    for (const auto &invalid : {expired, future, wrongPurpose}) {
+      const auto pin = parseFingerprint(invalid.fingerprint());
+      exercise(invalid, client, pin, clientPin, false);
+      exercise(host, invalid, hostPin, pin, false);
+    }
+    for (auto error :
+         {QSslError::CertificateExpired, QSslError::CertificateNotYetValid, QSslError::InvalidPurpose,
+          QSslError::CertificateRevoked, QSslError::CertificateSignatureFailed,
+          QSslError::UnableToVerifyFirstCertificate})
+      explicitCertificateErrors(host, client, error);
     mediaAndControl(host, client);
     for (int invalid = 0; invalid < 3; ++invalid)
       serializationFailure(host, client, invalid);
@@ -328,7 +487,8 @@ int main(int argc, char **argv)
       rejected = true;
     }
     check(rejected, "empty media payload rejected");
-    QTextStream(stdout) << "PASS: mutual TLS, wrong pins, identity guards, media revisions, serialization rejection, "
+    QTextStream(stdout) << "PASS: mutual TLS, wrong pins, invalid certificate dates/purpose, explicit TLS errors, "
+                           "identity guards, media revisions, serialization rejection, "
                            "encrypted backpressure, bounded media and control reserve\n";
     return 0;
   } catch (const std::exception &error) {

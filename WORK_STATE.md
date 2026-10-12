@@ -25,8 +25,14 @@ Local environment: Intel Mac, macOS 26.1, AppleClang 17, Qt 6.8.3, FFmpeg 8.0.1.
 The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link.
 
 - Core and input-routing tests passed with ASan/UBSan; platform-marker tests passed.
-- All five standalone application CTest suites passed: TLS transport, viewer,
-  connection controller, read-only holding-display probe and native recovery journal.
+- All seven standalone application CTest suites passed: TLS transport, viewer,
+  connection controller, read-only holding-display probe, native recovery journal,
+  and explicit Apple SecureTransport runs of the TLS and connection-controller suites.
+- TLS tests pass with both OpenSSL and SecureTransport, including wrong pins,
+  invalid dates, wrong certificate purpose in both peer roles, and explicit
+  certificate errors. Identity generation also passed with Apple's LibreSSL.
+  The native backend evaluates only the approved leaf as a private trust anchor;
+  it does not change keychains or waive certificate policy failures.
 - Viewer tests independently passed with ASan/UBSan and strict compiler warnings,
   including focus revocation, deliberate reacquisition and stale-reply rejection.
 - Connection-controller tests passed normally and with ASan/UBSan. Real TLS
@@ -49,7 +55,8 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   permissions, failed durable writes and retry. Unavailable display/identity
   information preserves unresolved records.
 - The default full Deskflow build passed, followed by all 30 existing CTest suites.
-- The full opt-in Deskflow build passed, followed by all 38 CTest suites. Four
+- The full opt-in Deskflow build passed at the initial native milestone, followed
+  by all 38 then-existing CTest suites. Four
   Server regressions exercise real primary/client routing and orderly disconnect
   through the existing protocol implementations.
 - The final separate experimental app passed nested signing and dependency
@@ -60,14 +67,16 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
 ## Local package
 
 The signed Intel build is in
-`build/packages/native-milestone-20261012-final/DeskflowWindowShare-Experimental.app`
+`build/packages/tls-portability-20261012/DeskflowWindowShare-Experimental.app`
 with a ZIP beside it. This particular package requires macOS 26.0 because of its
 Homebrew dependencies; it is not notarized. ZIP SHA-256:
-`1d5e664fab3a698e6b704bda079b545169754cb5ef2429ce67e501a15837d674`.
+`e35a2e7696591c2ab6d4dcb519ee51f145852afa43ace2a655abeed840ce8af6`.
 
 The separate installation path is `~/Applications/DeskflowWindowShare-Experimental.app`.
 The installed copy also passed dependency/signature verification and the packaged
 CLI/mutual-TLS smoke test without external library environment paths.
+The previous experimental installation is preserved in
+`build/packages/native-installed-backup-20261012/DeskflowWindowShare-Experimental.app`.
 Launch with the explicit options documented in `docs/seamless-windows.md`; it is
 an experimental command-line-configured app, not yet the final integrated GUI.
 

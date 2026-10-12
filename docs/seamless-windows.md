@@ -100,6 +100,12 @@ those fingerprints through a trusted channel. Keep each private key on its own
 computer. Existing identities are never overwritten. `--fingerprint` prints an
 existing identity's fingerprint.
 
+New identities include explicit TLS server and client key usages for both
+OpenSSL and Apple's native TLS backend. If an older experimental identity is
+rejected for its certificate purpose, create a replacement in a new identity
+directory and explicitly approve its new fingerprint on the other computer.
+The application never rotates an identity or changes an approved pin on its own.
+
 On the Mac, check permissions and use the normal OS prompt if needed:
 
 ```sh

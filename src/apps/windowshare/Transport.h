@@ -58,7 +58,7 @@ public:
 
 private:
   bool sendPacket(Packet packet);
-  bool pinned() const;
+  QString peerCertificateError() const;
   qint64 pendingOutput() const;
   QSslSocket m_socket;
   QByteArray m_pin;

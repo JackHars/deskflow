@@ -12,8 +12,14 @@
 #include <QProcess>
 #include <QSslConfiguration>
 #include <QSslError>
+#include <QTemporaryFile>
 #include <QUuid>
 #include <algorithm>
+#ifdef Q_OS_MACOS
+#include <Security/Security.h>
+#include <memory>
+#include <type_traits>
+#endif
 #ifndef Q_OS_WIN
 #include <sys/stat.h>
 #endif
@@ -36,6 +42,46 @@ bool equalBytes(const QByteArray &a, const QByteArray &b)
     diff |= static_cast<unsigned char>(a[i]) ^ static_cast<unsigned char>(b[i]);
   return diff == 0;
 }
+#ifdef Q_OS_MACOS
+template <typename T> using ScopedCF = std::unique_ptr<std::remove_pointer_t<T>, decltype(&CFRelease)>;
+
+QString validatePinnedAnchor(const QSslCertificate &certificate, bool server)
+{
+  const auto der = certificate.toDer();
+  const ScopedCF<CFDataRef> data(
+      CFDataCreate(kCFAllocatorDefault, reinterpret_cast<const UInt8 *>(der.constData()), der.size()), CFRelease
+  );
+  if (!data)
+    return QStringLiteral("Cannot allocate certificate data");
+  const ScopedCF<SecCertificateRef> leaf(SecCertificateCreateWithData(kCFAllocatorDefault, data.get()), CFRelease);
+  const ScopedCF<SecPolicyRef> policy(SecPolicyCreateSSL(server, nullptr), CFRelease);
+  if (!leaf || !policy)
+    return QStringLiteral("Cannot create pinned certificate policy");
+  const void *anchors[] = {leaf.get()};
+  const ScopedCF<CFArrayRef> anchorArray(
+      CFArrayCreate(kCFAllocatorDefault, anchors, 1, &kCFTypeArrayCallBacks), CFRelease
+  );
+  if (!anchorArray)
+    return QStringLiteral("Cannot allocate pinned certificate anchor");
+  SecTrustRef rawTrust = nullptr;
+  const auto status = SecTrustCreateWithCertificates(leaf.get(), policy.get(), &rawTrust);
+  const ScopedCF<SecTrustRef> trust(rawTrust, CFRelease);
+  if (status != errSecSuccess || !trust ||
+      SecTrustSetAnchorCertificates(trust.get(), anchorArray.get()) != errSecSuccess ||
+      SecTrustSetAnchorCertificatesOnly(trust.get(), true) != errSecSuccess ||
+      SecTrustSetNetworkFetchAllowed(trust.get(), false) != errSecSuccess)
+    return QStringLiteral("Cannot configure pinned certificate trust");
+  // This trust object is private to this evaluation. It changes no keychains
+  // or process-wide anchors, and cannot fetch certificates over the network.
+  CFErrorRef rawError = nullptr;
+  const bool valid = SecTrustEvaluateWithError(trust.get(), &rawError);
+  const ScopedCF<CFErrorRef> error(rawError, CFRelease);
+  if (valid)
+    return {};
+  return QStringLiteral("Pinned certificate TLS policy failed (Security error %1)")
+      .arg(error ? CFErrorGetCode(error.get()) : 0);
+}
+#endif
 } // namespace
 Identity Identity::load(const QString &directory)
 {
@@ -67,11 +113,23 @@ void initializeIdentity(const QString &directory)
   if (!QDir().mkpath(directory) ||
       !QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner))
     throw std::runtime_error("Cannot create private identity directory");
+  // Use a private, temporary config for both OpenSSL and Apple's LibreSSL.
+  // Explicit TLS purposes are required by the macOS server trust policy.
+  QTemporaryFile configuration(dir.filePath("certificate-XXXXXX.cnf"));
+  const QByteArray settings(
+      "[req]\nprompt=no\ndistinguished_name=subject\nx509_extensions=identity\n"
+      "[subject]\nCN=DeskflowWindowShare\n[identity]\nbasicConstraints=critical,CA:FALSE\n"
+      "keyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth,clientAuth\n"
+  );
+  if (!configuration.open() || configuration.write(settings) != settings.size() || !configuration.flush())
+    throw std::runtime_error("Cannot create identity certificate configuration");
+  configuration.close();
   // Create in a private directory. Never pass a passphrase or private key in argv.
   QProcess process;
   process.start(
-      "openssl", {"req", "-x509", "-newkey", "rsa:3072", "-nodes", "-sha256", "-days", "365", "-subj",
-                  "/CN=DeskflowWindowShare", "-keyout", dir.filePath("key.pem"), "-out", dir.filePath("cert.pem")}
+      "openssl",
+      {"req", "-x509", "-newkey", "rsa:3072", "-nodes", "-sha256", "-days", "365", "-subj", "/CN=DeskflowWindowShare",
+       "-config", configuration.fileName(), "-keyout", dir.filePath("key.pem"), "-out", dir.filePath("cert.pem")}
   );
   if (!process.waitForFinished(30000) || process.exitStatus() != QProcess::NormalExit || process.exitCode() != 0) {
     process.kill();
@@ -149,24 +207,45 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   m_socket.setSslConfiguration(configuration);
   m_socket.setReadBufferSize(maxPayload + headerSize);
   connect(&m_socket, &QSslSocket::sslErrors, this, [this](const QList<QSslError> &errors) {
-    if (!pinned()) {
-      close("Peer certificate does not match the approved fingerprint");
+    const auto certificateError = peerCertificateError();
+    if (!certificateError.isEmpty()) {
+      close(certificateError);
       return;
     }
-    // A pinned self-signed certificate is our trust root. Never ignore expiry,
-    // revocation or other errors simply because a certificate was presented.
+    // The exact leaf pin replaces public CA and DNS-name trust. Every other
+    // error remains fatal unless an independent, bounded evaluation succeeds.
     for (const auto &error : errors) {
-      if (error.error() != QSslError::SelfSignedCertificate &&
-          error.error() != QSslError::SelfSignedCertificateInChain && error.error() != QSslError::HostNameMismatch) {
-        close("TLS certificate validation failed");
+      bool allowed = error.error() == QSslError::SelfSignedCertificate ||
+                     error.error() == QSslError::SelfSignedCertificateInChain ||
+                     error.error() == QSslError::HostNameMismatch;
+      QString detail;
+#ifdef Q_OS_MACOS
+      // Qt SecureTransport collapses SecTrust failures (including bad purpose)
+      // into CertificateUntrusted. Only a single self-signed, already pinned
+      // leaf can be retried as its own anchor under the peer's TLS role policy.
+      // Do not waive generic trust failures on other backends or CA chains.
+      const auto certificate = m_socket.peerCertificate();
+      if (error.error() == QSslError::CertificateUntrusted && QSslSocket::activeBackend() == "securetransport" &&
+          m_socket.peerCertificateChain().size() == 1 && certificate.isSelfSigned() &&
+          error.certificate() == certificate) {
+        detail = validatePinnedAnchor(certificate, m_socket.mode() == QSslSocket::SslClientMode);
+        allowed = detail.isEmpty();
+      }
+#endif
+      if (!allowed) {
+        close(QStringLiteral("TLS certificate validation failed (%1, error %2): %3")
+                  .arg(QSslSocket::activeBackend())
+                  .arg(static_cast<int>(error.error()))
+                  .arg(detail.isEmpty() ? error.errorString() : detail));
         return;
       }
     }
     m_socket.ignoreSslErrors(errors);
   });
   connect(&m_socket, &QSslSocket::encrypted, this, [this] {
-    if (m_closed || !pinned()) {
-      close("Unapproved peer");
+    const auto certificateError = peerCertificateError();
+    if (m_closed || !certificateError.isEmpty()) {
+      close(certificateError);
       return;
     }
     m_authenticated = true;
@@ -215,12 +294,21 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   });
   m_watchdog.start();
 }
-bool Channel::pinned() const
+QString Channel::peerCertificateError() const
 {
   const auto certificate = m_socket.peerCertificate();
   const auto now = QDateTime::currentDateTimeUtc();
-  return !certificate.isNull() && certificate.effectiveDate() <= now && certificate.expiryDate() > now &&
-         equalBytes(certificate.digest(QCryptographicHash::Sha256), m_pin);
+  if (certificate.isNull() || !equalBytes(certificate.digest(QCryptographicHash::Sha256), m_pin))
+    return QStringLiteral("Peer certificate does not match the approved fingerprint");
+  if (!certificate.effectiveDate().isValid() || !certificate.expiryDate().isValid())
+    return QStringLiteral("Peer certificate has invalid validity dates");
+  if (certificate.effectiveDate() > now)
+    return QStringLiteral("Peer certificate is not yet valid");
+  if (certificate.expiryDate() <= now)
+    return QStringLiteral("Peer certificate has expired");
+  if (certificate.isBlacklisted())
+    return QStringLiteral("Peer certificate is blacklisted");
+  return {};
 }
 void Channel::connectTo(const QString &host, quint16 port)
 {
