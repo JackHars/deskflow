@@ -92,29 +92,51 @@ LocalInputIncarnation incarnation()
   std::copy_n(reinterpret_cast<const std::uint8_t *>(value.constData()), result.size(), result.begin());
   return result;
 }
-QByteArray encodeLease(const LocalInputLease &lease)
+QByteArray encodeOffer(const LocalInputOffer &offer)
 {
   Writer out;
-  out.fixed(lease.deskflowClientIncarnation);
+  for (auto value :
+       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration})
+    out.number(value, 8);
+  out.fixed(offer.deskflowClientIncarnation);
+  out.fixed(offer.deskflowPeerPin);
+  out.fixed(offer.windowSharePeerPin);
+  return out.data;
+}
+LocalInputOffer decodeOffer(Reader &in)
+{
+  LocalInputOffer offer;
+  offer.routeGeneration = in.number(8);
+  offer.coreServerIncarnation = in.number(8);
+  offer.coreRecipient = in.number(8);
+  offer.coreSelectionGeneration = in.number(8);
+  offer.deskflowClientIncarnation = in.fixed<16>();
+  offer.deskflowPeerPin = in.fixed<32>();
+  offer.windowSharePeerPin = in.fixed<32>();
+  require(validLocalInputOffer(offer), "Invalid local input offer binding");
+  return offer;
+}
+QByteArray encodeLease(const LocalInputLease &lease)
+{
+  Writer out{encodeOffer(lease)};
   out.fixed(lease.windowShareClientIncarnation);
-  out.fixed(lease.deskflowPeerPin);
-  out.fixed(lease.windowSharePeerPin);
-  for (auto value : {lease.session, lease.epoch, lease.focusRevision, lease.geometryRevision, lease.routeGeneration})
+  for (auto value :
+       {lease.session, lease.epoch, lease.focusRequest, lease.focusRevision, lease.geometryRevision,
+        lease.keyboardRouteGeneration})
     out.number(value, 8);
   return out.data;
 }
 LocalInputLease decodeLease(Reader &in)
 {
   LocalInputLease lease;
-  lease.deskflowClientIncarnation = in.fixed<16>();
+  static_cast<LocalInputOffer &>(lease) = decodeOffer(in);
   lease.windowShareClientIncarnation = in.fixed<16>();
-  lease.deskflowPeerPin = in.fixed<32>();
-  lease.windowSharePeerPin = in.fixed<32>();
   lease.session = in.number(8);
   lease.epoch = in.number(8);
+  lease.focusRequest = in.number(8);
   lease.focusRevision = in.number(8);
   lease.geometryRevision = in.number(8);
-  lease.routeGeneration = in.number(8);
+  lease.keyboardRouteGeneration = in.number(8);
   require(validLocalInputLease(lease), "Invalid local input lease binding");
   return lease;
 }
@@ -227,11 +249,27 @@ std::optional<LocalInputProcess> currentLocalInputProcess()
   return std::nullopt;
 #endif
 }
+bool validLocalInputOffer(const LocalInputOffer &offer)
+{
+  return offer.routeGeneration != 0 && offer.coreServerIncarnation != 0 && offer.coreRecipient != 0 &&
+         offer.coreSelectionGeneration != 0 && nonzero(offer.deskflowClientIncarnation) &&
+         nonzero(offer.deskflowPeerPin) && nonzero(offer.windowSharePeerPin);
+}
+LocalInputOffer leaseOffer(const LocalInputLease &lease)
+{
+  return lease;
+}
 bool validLocalInputLease(const LocalInputLease &lease)
 {
-  return nonzero(lease.deskflowClientIncarnation) && nonzero(lease.windowShareClientIncarnation) &&
-         nonzero(lease.deskflowPeerPin) && nonzero(lease.windowSharePeerPin) && lease.session != 0 &&
-         lease.epoch != 0 && lease.focusRevision != 0 && lease.geometryRevision != 0 && lease.routeGeneration != 0;
+  if (!validLocalInputOffer(lease) || !nonzero(lease.windowShareClientIncarnation))
+    return false;
+  constexpr std::uint64_t maximum = (std::uint64_t{1} << 53) - 1;
+  for (const auto value :
+       {lease.session, lease.epoch, lease.focusRequest, lease.focusRevision, lease.geometryRevision,
+        lease.keyboardRouteGeneration})
+    if (value == 0 || value > maximum)
+      return false;
+  return true;
 }
 
 enum class LocalInputChannel::Type : std::uint8_t
@@ -246,7 +284,11 @@ enum class LocalInputChannel::Type : std::uint8_t
   Commit,
   Committed,
   Revoke,
-  Original
+  Original,
+  Offer,
+  Candidate,
+  Quiesced,
+  CancelOffer
 };
 
 LocalInputChannel::LocalInputChannel(
@@ -417,7 +459,7 @@ void LocalInputChannel::read()
       Reader header{m_incoming};
       require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
       const auto typeNumber = header.number(1);
-      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::Original), "Unknown local input message");
+      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::CancelOffer), "Unknown local input message");
       const auto type = static_cast<Type>(typeNumber);
       require(
           header.number(1) ==
@@ -493,6 +535,28 @@ void LocalInputChannel::bootstrap(Type type, const QByteArray &payload)
   m_authenticated = true;
   notify(this, onAuthenticated);
 }
+bool LocalInputChannel::offer(LocalInputOffer offer)
+{
+  return fresh() && authenticated() && m_role == LocalInputRole::Core && validLocalInputOffer(offer) &&
+         send(Type::Offer, encodeOffer(offer));
+}
+bool LocalInputChannel::candidate(LocalInputLease lease)
+{
+  return fresh() && authenticated() && m_role == LocalInputRole::Host && validLocalInputLease(lease) &&
+         send(Type::Candidate, encodeLease(lease));
+}
+bool LocalInputChannel::quiesced(LocalInputLease lease)
+{
+  return fresh() && authenticated() && m_role == LocalInputRole::Host && validLocalInputLease(lease) &&
+         send(Type::Quiesced, encodeLease(lease));
+}
+bool LocalInputChannel::cancelOffer(LocalInputOffer offer, LocalInputRevocation reason)
+{
+  const auto value = static_cast<unsigned>(reason);
+  return fresh() && authenticated() && validLocalInputOffer(offer) && value >= 1 &&
+         value <= static_cast<unsigned>(LocalInputRevocation::TransportLost) &&
+         send(Type::CancelOffer, encodeOffer(offer) + QByteArray(1, static_cast<char>(reason)));
+}
 bool LocalInputChannel::prepare(LocalInputLease lease)
 {
   if (!fresh() || m_role != LocalInputRole::Core || m_phase != LocalInputPhase::Idle ||
@@ -556,7 +620,33 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     return;
   }
   Reader in{payload};
+  if (type == Type::Offer || type == Type::CancelOffer) {
+    require(type == Type::CancelOffer || m_role == LocalInputRole::Host, "Invalid local input offer sender role");
+    const auto offer = decodeOffer(in);
+    if (type == Type::Offer) {
+      in.end();
+      notify(this, onOffer, offer);
+    } else {
+      const auto reason = in.number(1);
+      in.end();
+      require(
+          reason >= 1 && reason <= static_cast<unsigned>(LocalInputRevocation::TransportLost),
+          "Invalid local input offer cancellation"
+      );
+      notify(this, onOfferCancelled, offer, static_cast<LocalInputRevocation>(reason));
+    }
+    return;
+  }
   auto lease = decodeLease(in);
+  if (type == Type::Candidate || type == Type::Quiesced) {
+    require(m_role == LocalInputRole::Core, "Invalid local input candidate sender role");
+    in.end();
+    if (type == Type::Candidate)
+      notify(this, onCandidate, lease);
+    else
+      notify(this, onQuiesced, lease);
+    return;
+  }
   if (type == Type::Revoke) {
     const auto reason = in.number(1);
     in.end();

@@ -9,12 +9,14 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QPointer>
 #include <QProcess>
 #include <QSslConfiguration>
 #include <QSslError>
 #include <QTemporaryFile>
 #include <QUuid>
 #include <algorithm>
+#include <limits>
 #ifdef Q_OS_MACOS
 #include <Security/Security.h>
 #include <memory>
@@ -207,9 +209,11 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   m_socket.setSslConfiguration(configuration);
   m_socket.setReadBufferSize(maxPayload + headerSize);
   connect(&m_socket, &QSslSocket::sslErrors, this, [this](const QList<QSslError> &errors) {
+    if (m_closed)
+      return;
     const auto certificateError = peerCertificateError();
     if (!certificateError.isEmpty()) {
-      close(certificateError, CloseCause::Authentication);
+      finishClose(certificateError, CloseCause::Authentication, true);
       return;
     }
     // The exact leaf pin replaces public CA and DNS-name trust. Every other
@@ -233,58 +237,60 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
       }
 #endif
       if (!allowed) {
-        close(
+        finishClose(
             QStringLiteral("TLS certificate validation failed (%1, error %2): %3")
                 .arg(QSslSocket::activeBackend())
                 .arg(static_cast<int>(error.error()))
                 .arg(detail.isEmpty() ? error.errorString() : detail),
-            CloseCause::Authentication
+            CloseCause::Authentication, true
         );
         return;
       }
     }
     m_socket.ignoreSslErrors(errors);
   });
-  connect(&m_socket, &QSslSocket::encrypted, this, [this] {
-    const auto certificateError = peerCertificateError();
-    if (m_closed || !certificateError.isEmpty()) {
-      close(certificateError, CloseCause::Authentication);
-      return;
-    }
-    m_authenticated = true;
-    m_lastRead.restart();
-    if (onAuthenticated)
-      onAuthenticated();
-  });
-  connect(&m_socket, &QSslSocket::readyRead, this, [this] {
-    if (!m_authenticated || m_closed) {
-      close("Data before authenticated TLS", CloseCause::Protocol);
-      return;
-    }
-    m_lastRead.restart();
-    try {
-      const auto bytes = m_socket.readAll();
-      m_decoder.feed(
-          {reinterpret_cast<const std::uint8_t *>(bytes.constData()), static_cast<std::size_t>(bytes.size())},
-          [this](Packet packet) {
-            if (m_closed || !m_sequences.accept(packet.sequence))
-              throw std::runtime_error("Replayed or out-of-order packet");
-            if (packet.type == MessageType::Ping) {
-              send(MessageType::Pong);
-              return;
-            }
-            if (packet.type == MessageType::Pong)
-              return;
-            if (onPacket)
-              onPacket(std::move(packet));
-          }
-      );
-    } catch (const std::exception &error) {
-      close(QString::fromUtf8(error.what()), CloseCause::Protocol);
-    }
-  });
+  connect(
+      &m_socket, &QSslSocket::encrypted, this,
+      [this] {
+        if (!fresh())
+          return;
+        const auto certificateError = peerCertificateError();
+        if (!certificateError.isEmpty()) {
+          close(certificateError, CloseCause::Authentication);
+          return;
+        }
+        if (m_authenticated || m_socket.state() != QAbstractSocket::ConnectedState || !m_socket.isEncrypted()) {
+          close("Invalid TLS connection state", CloseCause::Authentication);
+          return;
+        }
+        if (!fresh())
+          return;
+        AuthenticatedPeerTicket::Fingerprint fingerprint;
+        std::copy_n(reinterpret_cast<const std::uint8_t *>(m_pin.constData()), fingerprint.size(), fingerprint.begin());
+        // The issuer remains private until TLS and every leaf/policy check passed.
+        // It can never issue again, even after close or a failed connection attempt.
+        const auto ticket = m_issuer.issue(fingerprint);
+        if (!ticket) {
+          close("Authenticated connection identity exhausted", CloseCause::Authentication);
+          return;
+        }
+        m_observation = AuthenticatedPeerObservation(*ticket, m_now());
+        m_authenticated = true;
+        const QPointer<Channel> alive(this);
+        try {
+          const auto callback = onAuthenticated;
+          if (callback)
+            callback();
+        } catch (...) {
+          if (alive)
+            alive->close("Authenticated connection callback failed");
+        }
+      },
+      Qt::QueuedConnection
+  );
+  connect(&m_socket, &QSslSocket::readyRead, this, [this] { read(); }, Qt::QueuedConnection);
   connect(&m_socket, &QSslSocket::disconnected, this, [this] {
-    close("Peer disconnected", m_authenticated ? CloseCause::Network : CloseCause::Authentication);
+    finishClose("Peer disconnected", m_authenticated ? CloseCause::Network : CloseCause::Authentication, true);
   });
   connect(&m_socket, &QSslSocket::errorOccurred, this, [this](QAbstractSocket::SocketError error) {
     auto cause = CloseCause::Local;
@@ -306,28 +312,24 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
     default:
       break;
     }
-    close(m_socket.errorString(), cause);
+    finishClose(m_socket.errorString(), cause, true);
   });
-  m_lastRead.start();
   m_watchdog.setInterval(1000);
-  connect(&m_watchdog, &QTimer::timeout, this, [this] {
-    if (m_lastRead.elapsed() > 6000) {
-      const bool connecting =
-          m_socket.state() == QAbstractSocket::HostLookupState || m_socket.state() == QAbstractSocket::ConnectingState;
-      close(
-          m_authenticated ? "Peer heartbeat timed out" : "Connection or TLS handshake timed out",
-          m_authenticated || connecting ? CloseCause::Network : CloseCause::Authentication
-      );
-    } else if (m_authenticated && pendingOutput() == 0)
-      send(MessageType::Ping);
-  });
-  m_watchdog.start();
+  connect(
+      &m_watchdog, &QTimer::timeout, this,
+      [this] {
+        if (fresh() && authenticated() && pendingOutput() == 0)
+          send(MessageType::Ping);
+      },
+      Qt::QueuedConnection
+  );
 }
 Channel::~Channel()
 {
   // QSslSocket can emit disconnected while destroying its internal TCP socket.
   // Stop callbacks while all members are alive: the watchdog is otherwise
   // destroyed before the socket, and QObject disconnects this receiver later.
+  m_issuer.revoke();
   m_closed = true;
   m_authenticated = false;
   disconnect(&m_socket, nullptr, this, nullptr);
@@ -351,12 +353,133 @@ QString Channel::peerCertificateError() const
     return QStringLiteral("Peer certificate is blacklisted");
   return {};
 }
+bool Channel::beginConnection()
+{
+  if (m_started || m_closed) {
+    close("A Channel cannot be reused for another connection");
+    return false;
+  }
+  m_started = true;
+  m_startedAt = m_now();
+  m_watchdog.start();
+  return true;
+}
+std::optional<AuthenticatedPeerObservation> Channel::authenticatedPeerObservation() const
+{
+  if (!m_authenticated || m_closed || m_socket.state() != QAbstractSocket::ConnectedState || !m_socket.isEncrypted() ||
+      !m_observation || !m_observation->liveAt(m_now()))
+    return std::nullopt;
+  return m_observation;
+}
+bool Channel::authenticated() const
+{
+  return authenticatedPeerObservation().has_value();
+}
+bool Channel::fresh()
+{
+  if (m_closed || !m_started)
+    return false;
+  const auto now = m_now();
+  const bool expired = m_authenticated
+                           ? !m_observation || !m_observation->liveAt(now)
+                           : now < m_startedAt || now - m_startedAt >= AuthenticatedPeerObservation::freshness;
+  if (expired) {
+    const bool connecting =
+        m_socket.state() == QAbstractSocket::HostLookupState || m_socket.state() == QAbstractSocket::ConnectingState;
+    close(
+        m_authenticated ? "Peer heartbeat timed out" : "Connection or TLS handshake timed out",
+        m_authenticated || connecting ? CloseCause::Network : CloseCause::Authentication
+    );
+    return false;
+  }
+  if (m_authenticated && (m_socket.state() != QAbstractSocket::ConnectedState || !m_socket.isEncrypted())) {
+    close("Peer disconnected", CloseCause::Network);
+    return false;
+  }
+  return true;
+}
+void Channel::read()
+{
+  if (m_reading || m_closed)
+    return;
+  const QPointer<Channel> alive(this);
+  m_reading = true;
+  try {
+    [&] {
+      // The watchdog may still be queued after readyRead. Neither late bytes
+      // nor repeated observation reads may revive an expired connection.
+      if (!fresh())
+        return;
+      if (!authenticated()) {
+        close("Data before authenticated TLS", CloseCause::Protocol);
+        return;
+      }
+      const auto bytes = m_socket.read(64 * 1024);
+      if (!alive || !fresh() || bytes.isEmpty())
+        return;
+      std::vector<Packet> packets;
+      m_decoder.feed(
+          {reinterpret_cast<const std::uint8_t *>(bytes.constData()), static_cast<std::size_t>(bytes.size())},
+          [this, &packets](Packet packet) {
+            if (!m_sequences.accept(packet.sequence))
+              throw std::runtime_error("Replayed or out-of-order packet");
+            packets.push_back(std::move(packet));
+          }
+      );
+      const auto acceptedAt = m_now();
+      if (!m_observation->liveAt(acceptedAt)) {
+        close("Peer heartbeat timed out", CloseCause::Network);
+        return;
+      }
+      m_observation = AuthenticatedPeerObservation(m_observation->ticket(), acceptedAt);
+      // Decode before callbacks so deleting the Channel cannot leave its member
+      // Decoder on the stack. Each read is bounded, and its authority is checked
+      // again between callbacks that could block or run a nested event loop.
+      for (auto &packet : packets) {
+        if (!alive || !fresh())
+          return;
+        if (packet.type == MessageType::Ping) {
+          send(MessageType::Pong);
+        } else if (packet.type != MessageType::Pong) {
+          const auto callback = onPacket;
+          if (callback)
+            callback(std::move(packet));
+        }
+      }
+    }();
+  } catch (const std::exception &error) {
+    if (alive)
+      alive->close(QString::fromUtf8(error.what()), CloseCause::Protocol);
+  } catch (...) {
+    if (alive)
+      alive->close("Packet callback failed", CloseCause::Protocol);
+  }
+  if (!alive)
+    return;
+  m_reading = false;
+  if (!m_closed && m_socket.bytesAvailable() != 0)
+    QTimer::singleShot(0, this, [this] { read(); });
+}
 void Channel::connectTo(const QString &host, quint16 port)
 {
-  m_socket.connectToHostEncrypted(host, port);
+  if (beginConnection())
+    m_socket.connectToHostEncrypted(host, port);
 }
 void Channel::accept(qintptr descriptor)
 {
+  if (m_started || m_closed) {
+    // Incoming descriptors transfer ownership even on rejection. Do not wrap
+    // the descriptor already owned by this socket in a second QTcpSocket.
+    if (descriptor >= 0 && descriptor != m_socket.socketDescriptor()) {
+      QTcpSocket rejected;
+      if (rejected.setSocketDescriptor(descriptor))
+        rejected.abort();
+    }
+    close("A Channel cannot be reused for another connection");
+    return;
+  }
+  if (!beginConnection())
+    return;
   if (!m_socket.setSocketDescriptor(descriptor)) {
     close("Cannot accept peer");
     return;
@@ -365,7 +488,7 @@ void Channel::accept(qintptr descriptor)
 }
 bool Channel::sendPacket(Packet packet)
 {
-  if (!m_authenticated || m_closed)
+  if (!fresh() || !authenticated())
     return false;
   // One bounded video access unit may already be in the socket. Reserve a
   // separate control allowance so its focus/release reply cannot accidentally
@@ -379,6 +502,10 @@ bool Channel::sendPacket(Packet packet)
     close("Control peer is not draining its queue");
     return false;
   }
+  if (m_outSequence == std::numeric_limits<std::uint64_t>::max()) {
+    close("Outgoing protocol sequence exhausted", CloseCause::Protocol);
+    return false;
+  }
   packet.sequence = ++m_outSequence;
   const auto bytes = encode(packet);
   if (m_socket.write(reinterpret_cast<const char *>(bytes.data()), static_cast<qint64>(bytes.size())) !=
@@ -386,7 +513,7 @@ bool Channel::sendPacket(Packet packet)
     close("Cannot queue a complete protocol packet");
     return false;
   }
-  return true;
+  return authenticated();
 }
 qint64 Channel::pendingOutput() const
 {
@@ -396,7 +523,7 @@ qint64 Channel::pendingOutput() const
 }
 bool Channel::readyForFrame() const
 {
-  return m_authenticated && !m_closed && pendingOutput() == 0;
+  return authenticated() && pendingOutput() == 0;
 }
 bool Channel::send(MessageType type, const QJsonObject &object, std::uint64_t session, std::uint64_t epoch)
 {
@@ -411,7 +538,7 @@ bool Channel::send(MessageType type, const QJsonObject &object, std::uint64_t se
 }
 bool Channel::sendFrame(std::uint64_t session, std::uint64_t epoch, std::uint64_t geometry, const QByteArray &frame)
 {
-  if (!m_authenticated || m_closed)
+  if (!fresh() || !authenticated())
     return false;
   try {
     if (geometry == 0 || geometry > 9007199254740991ULL || frame.isEmpty() || frame.size() > maxPayload - 8)
@@ -436,13 +563,33 @@ bool Channel::sendFrame(std::uint64_t session, std::uint64_t epoch, std::uint64_
 }
 void Channel::close(const QString &reason, CloseCause cause)
 {
+  finishClose(reason, cause, false);
+}
+void Channel::finishClose(const QString &reason, CloseCause cause, bool deferNotification)
+{
   if (m_closed)
     return;
+  m_issuer.revoke();
   m_closed = true;
   m_authenticated = false;
   m_watchdog.stop();
   m_socket.abort();
-  if (onClosed)
-    onClosed(reason, cause);
+  // A callback may destroy this object. Never invoke it on a QSslSocket signal
+  // stack: Qt can still access the by-value socket after emitting that signal.
+  const auto notify = [this, reason, cause] {
+    try {
+      // Observe cancellation if the owner cleared its callback before this
+      // queued notification ran, then retain the callable across self-deletion.
+      const auto callback = onClosed;
+      if (callback)
+        callback(reason, cause);
+    } catch (...) {
+      // The connection is already terminal; never unwind a callback into Qt.
+    }
+  };
+  if (deferNotification)
+    QTimer::singleShot(0, this, notify);
+  else
+    notify();
 }
 } // namespace deskflow::windowshare

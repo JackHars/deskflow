@@ -28,6 +28,7 @@ QSet<int> nativeHeldKeys;
 QSet<int> nativeHeldButtons;
 std::function<void()> nativeResumeObserver;
 std::function<void()> nativeQuiesceObserver;
+std::function<void()> nativeCandidateObserver;
 bool nativeResumeSucceeds = true;
 } // namespace
 
@@ -106,6 +107,9 @@ void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonOb
 std::optional<KeyboardRouteBinding>
 NativeHost::keyboardRouteCandidate(std::uint64_t session, std::uint64_t epoch, std::uint64_t generation) const
 {
+  const auto observer = nativeCandidateObserver;
+  if (observer)
+    observer();
   auto binding = m_impl->focus;
   if (!binding || binding->owner != Owner{session, epoch})
     return std::nullopt;
@@ -118,8 +122,9 @@ bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
       binding, keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation),
       nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
   );
-  if (nativeQuiesceObserver)
-    nativeQuiesceObserver();
+  const auto observer = nativeQuiesceObserver;
+  if (observer)
+    observer();
   return result;
 }
 bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
@@ -193,8 +198,20 @@ struct BridgeTestAccess
   }
   static bool keyboardQuiesced(const Bridge &bridge)
   {
-    return bridge.m_keyboardRoute && bridge.m_keyboardRoute->phase == Bridge::KeyboardPhase::Quiesced &&
-           bridge.m_native->keyboardRouteQuiesced(bridge.m_keyboardRoute->binding);
+    return bridge.m_keyboardRoute && bridge.originalKeyboardQuiesced(bridge.m_keyboardRoute->binding);
+  }
+  static qint64 keyboardDeadline(const Bridge &bridge)
+  {
+    return bridge.m_keyboardRoute->deadline.deadlineNSecs();
+  }
+  static void observedNativeFocus(Bridge &bridge, KeyboardRouteBinding binding)
+  {
+    const auto callback = std::exchange(bridge.m_native->onFocused, {});
+    bridge.m_native->input(
+        binding.owner.session, binding.owner.epoch,
+        {{"kind", "focus"}, {"request", number(binding.focusRequest)}, {"geometry", number(binding.geometry)}}
+    );
+    bridge.m_native->onFocused = callback;
   }
   static void keyboardReply(Bridge &bridge, const KeyboardRouteControl &control)
   {
@@ -388,6 +405,7 @@ struct AutomaticNative
     nativeHeldButtons.clear();
     nativeResumeObserver = {};
     nativeQuiesceObserver = {};
+    nativeCandidateObserver = {};
     nativeResumeSucceeds = true;
   }
   ~AutomaticNative()
@@ -395,6 +413,7 @@ struct AutomaticNative
     automaticNative = false;
     nativeResumeObserver = {};
     nativeQuiesceObserver = {};
+    nativeCandidateObserver = {};
     nativeResumeSucceeds = true;
   }
 };
@@ -991,6 +1010,193 @@ void keyboardFenceRoundTrip(const Identity &hostIdentity, const Identity &viewer
   check(fixture.original && fixture.revokes == 1, "Retired withdrawal revoked the current route");
 }
 
+void keyboardReservation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  const auto peer = fixture.host.authenticatedPeerObservation();
+  check(peer && peer->live(), "Established bridge did not expose live authenticated evidence");
+  const auto replies = std::make_shared<int>(0);
+  const auto send = fixture.window->onKeyboardRouteSend;
+  fixture.window->onKeyboardRouteSend = [send, replies](const auto &control) {
+    ++*replies;
+    return send(control);
+  };
+  fixture.key(QEvent::KeyPress, Qt::Key_Shift);
+  check(waitUntil([&] { return nativeHeldKeys.contains(Qt::Key_Shift); }), "Reservation held-key fixture failed");
+  const auto binding = fixture.host.reserveOriginalKeyboard();
+  check(binding && binding->owner == Owner{91, 2}, "Current focused candidate was not reserved");
+  const auto deadline = BridgeTestAccess::keyboardDeadline(fixture.host);
+  check(!fixture.host.reserveOriginalKeyboard(91, 2), "Two keyboard reservations were admitted");
+  runEvents(20);
+  check(
+      *replies == 0 && nativeHeldKeys.contains(Qt::Key_Shift) && !fixture.host.originalKeyboardQuiesced(*binding),
+      "Reservation contacted the viewer, released a held key, or claimed quiescence"
+  );
+  auto wrong = *binding;
+  ++wrong.generation;
+  check(!fixture.host.startOriginalKeyboard(wrong), "Mismatched reservation started a viewer request");
+  check(BridgeTestAccess::keyboardBinding(fixture.host) == binding, "Stale start canceled the actual reservation");
+  check(fixture.host.startOriginalKeyboard(*binding), "Exact reservation did not start");
+  check(BridgeTestAccess::keyboardDeadline(fixture.host) == deadline, "Start extended the reservation deadline");
+  check(!fixture.host.startOriginalKeyboard(*binding), "Repeated start resent an outstanding request");
+  check(waitUntil([&] { return fixture.grants == 1; }), "Started reservation never quiesced");
+  check(
+      fixture.host.originalKeyboardQuiesced(*binding) && !fixture.host.originalKeyboardQuiesced(wrong),
+      "Quiescence query did not require the exact attempt"
+  );
+  nativeHeldKeys.insert(Qt::Key_Z);
+  check(!fixture.host.originalKeyboardQuiesced(*binding), "Quiescence ignored globally held Qt keys");
+  nativeHeldKeys.clear();
+  nativeHeldButtons.insert(13);
+  check(!fixture.host.originalKeyboardQuiesced(*binding), "Quiescence ignored globally held Qt buttons");
+  nativeHeldButtons.clear();
+  check(fixture.host.originalKeyboardQuiesced(*binding), "Neutral exact attempt no longer quiesced");
+  fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+  check(!fixture.host.originalKeyboardQuiesced(*binding), "Revocation left a live quiescence query");
+  check(waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }), "Viewer resume failed");
+  fixture.key(QEvent::KeyRelease, Qt::Key_Shift);
+}
+
+void keyboardReservationInvalidation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  // Revalidate directly observed native state even before its next notification.
+  for (const bool geometry : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = fixture.host.reserveOriginalKeyboard(91, 2);
+    check(binding.has_value(), "Native-change reservation failed");
+    auto changed = *binding;
+    if (geometry)
+      ++changed.geometry;
+    else
+      ++changed.focusRequest;
+    BridgeTestAccess::observedNativeFocus(fixture.host, changed);
+    check(!fixture.host.startOriginalKeyboard(*binding), "Stale native focus/geometry started a fence");
+    check(
+        !BridgeTestAccess::keyboardBinding(fixture.host) && fixture.revokes == 1 && fixture.grants == 0,
+        "Invalid reservation did not synchronously revoke and retire without a viewer round-trip"
+    );
+  }
+  for (const bool geometry : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    auto changed = binding;
+    if (geometry)
+      ++changed.geometry;
+    else
+      ++changed.focusRequest;
+    BridgeTestAccess::observedNativeFocus(fixture.host, changed);
+    check(!fixture.host.originalKeyboardQuiesced(binding), "Quiescence reused stale native focus/geometry");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = fixture.host.reserveOriginalKeyboard(91, 2);
+    const auto peer = fixture.host.authenticatedPeerObservation();
+    check(binding && peer, "Disconnect reservation fixture failed");
+    BridgeTestAccess::fastReconnect(fixture.viewer);
+    const auto generation = BridgeTestAccess::generation(fixture.viewer);
+    BridgeTestAccess::channel(fixture.host)->close("Reserved connection lost", CloseCause::Network);
+    check(
+        !peer->live() && !fixture.host.authenticatedPeerObservation() &&
+            !fixture.host.startOriginalKeyboard(*binding) && !BridgeTestAccess::keyboardBinding(fixture.host) &&
+            fixture.revokes == 1,
+        "Connection loss retained reservation or authenticated observation"
+    );
+    check(
+        waitUntil([&] {
+          return BridgeTestAccess::generation(fixture.viewer) > generation &&
+                 BridgeTestAccess::catalogReady(fixture.viewer);
+        }),
+        "Reserved disconnect fixture failed to reconnect"
+    );
+    const auto replacement = fixture.host.authenticatedPeerObservation();
+    check(
+        replacement && !replacement->sameConnection(*peer) && !fixture.host.startOriginalKeyboard(*binding) &&
+            !fixture.host.reserveOriginalKeyboard(),
+        "Reconnect revived an old reservation or replayed its exported window"
+    );
+  }
+}
+
+void keyboardReservationDeadlineAndReentrancy(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (const bool slowValidation : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    const auto binding = fixture.host.reserveOriginalKeyboard(91, 2);
+    check(binding.has_value(), "Deadline reservation failed");
+    if (slowValidation)
+      nativeCandidateObserver = [] { QThread::msleep(70); };
+    else
+      QThread::msleep(70); // Deliberately beat delivery of the queued timeout.
+    check(!fixture.host.startOriginalKeyboard(*binding), "Expired reservation started or extended its deadline");
+    nativeCandidateObserver = {};
+    check(
+        !BridgeTestAccess::keyboardBinding(fixture.host) && fixture.revokes == 1 &&
+            fixture.reasons.contains(KeyboardRouteReason::Timeout),
+        "Expired reservation did not synchronously revoke before returning"
+    );
+    BridgeTestAccess::keyboardReply(
+        fixture.host,
+        {*binding, KeyboardRouteAction::Acknowledge, KeyboardRouteMode::Original, KeyboardRouteResult::Ready}
+    );
+    check(fixture.grants == 0 && !fixture.host.originalKeyboardQuiesced(*binding), "Late Ready revived expiry");
+    const auto next = fixture.host.reserveOriginalKeyboard();
+    check(next && next->generation > binding->generation, "New reservation reused an expired generation");
+    check(!fixture.host.startOriginalKeyboard(*binding), "Old start consumed a newer reservation");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    BridgeTestAccess::fastKeyboardTimeout(fixture.host);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    QThread::msleep(70);
+    check(!fixture.host.originalKeyboardQuiesced(binding), "Quiescence outlived its absolute reservation deadline");
+    check(
+        waitUntil([&] { return !BridgeTestAccess::keyboardBinding(fixture.host); }) && fixture.revokes == 1 &&
+            fixture.reasons.contains(KeyboardRouteReason::Timeout),
+        "Abandoned quiesced preflight did not revoke and resume the viewer"
+    );
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    bool attempted = false, nested = true;
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      attempted = true;
+      nested = fixture.host.reserveOriginalKeyboard(91, 2).has_value();
+    };
+    const auto binding = fixture.host.reserveOriginalKeyboard(91, 2);
+    check(binding && attempted && !nested, "Reentrant native query allocated two reservations");
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      fixture.host.withdrawOriginalKeyboard(KeyboardRouteReason::FocusChanged);
+    };
+    check(!fixture.host.startOriginalKeyboard(*binding), "Start ignored synchronous reservation withdrawal");
+    check(!BridgeTestAccess::keyboardBinding(fixture.host) && fixture.revokes == 1, "Reentrant withdrawal leaked");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      BridgeTestAccess::closed(fixture.host, 91);
+    };
+    check(!fixture.host.reserveOriginalKeyboard(91, 2), "Native query returned a removed host session");
+    check(!BridgeTestAccess::keyboardBinding(fixture.host), "Removed session retained a reserved attempt");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    fixture.quiesce();
+    const auto binding = *BridgeTestAccess::keyboardBinding(fixture.host);
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      BridgeTestAccess::channel(fixture.host)->close("Close inside query", CloseCause::Network);
+    };
+    check(!fixture.host.originalKeyboardQuiesced(binding), "Quiescence query ignored reentrant disconnect");
+    check(fixture.revokes == 1 && !fixture.original, "Query disconnect retained owner authority");
+  }
+}
+
 void keyboardCancellation(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   // Cancellation and Original Ready can cross on the two independent streams.
@@ -1418,6 +1624,9 @@ int main(int argc, char **argv)
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
     reconnectCleanupAndIsolation(hostIdentity, viewerIdentity);
     keyboardFenceRoundTrip(hostIdentity, viewerIdentity);
+    keyboardReservation(hostIdentity, viewerIdentity);
+    keyboardReservationInvalidation(hostIdentity, viewerIdentity);
+    keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);
     keyboardCancellation(hostIdentity, viewerIdentity);
     keyboardInvalidation(hostIdentity, viewerIdentity);
     keyboardReentrancyAndDeadlines(hostIdentity, viewerIdentity);

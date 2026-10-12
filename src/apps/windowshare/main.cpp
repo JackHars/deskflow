@@ -263,22 +263,116 @@ public:
   // transport/native callback stack and revalidated immediately before delivery.
   std::function<bool(const KeyboardRouteBinding &, KeyboardRouteReason)> revokeOriginalKeyboard;
   std::function<void(const KeyboardRouteBinding &)> onKeyboardQuiesced;
-  bool requestOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
+  std::optional<AuthenticatedPeerObservation> authenticatedPeerObservation() const
   {
-    if (!m_native || !m_established || !m_keyboardCapable || m_keyboardRoute || m_cleaning || m_shuttingDown ||
+    if (!m_established || !m_keyboardCapable || !m_channel || m_cleaning || m_shuttingDown)
+      return std::nullopt;
+    auto observation = m_channel->authenticatedPeerObservation();
+    return observation && observation->live() ? observation : std::nullopt;
+  }
+  // Reserve before sending private preflight state. No viewer fence is requested
+  // until start(), and slow native validation consumes this same deadline.
+  std::optional<KeyboardRouteBinding> reserveOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
+  {
+    if (!m_native || !authenticatedPeerObservation() || m_keyboardRoute || m_reservingKeyboard ||
         !revokeOriginalKeyboard || m_keyboardGeneration == 9007199254740991ULL)
-      return false;
+      return std::nullopt;
     const auto found = m_hostSessions.find(session);
     if (found == m_hostSessions.end() || found->second != epoch)
-      return false;
-    const auto binding = m_native->keyboardRouteCandidate(session, epoch, m_keyboardGeneration + 1);
-    if (!binding || !validKeyboardRouteBinding(*binding))
-      return false;
+      return std::nullopt;
+    const QPointer<Bridge> alive(this);
+    const auto connection = m_connectionGeneration;
+    const auto next = m_keyboardGeneration + 1;
+    const QDeadlineTimer deadline(m_keyboardTimeoutMs, Qt::PreciseTimer);
+    m_reservingKeyboard = true;
+    std::optional<KeyboardRouteBinding> binding;
+    try {
+      binding = m_native->keyboardRouteCandidate(session, epoch, next);
+    } catch (...) {
+    }
+    if (!alive)
+      return std::nullopt;
+    m_reservingKeyboard = false;
+    const auto current = m_hostSessions.find(session);
+    if (!binding || !validKeyboardRouteBinding(*binding) || binding->owner != Owner{session, epoch} ||
+        binding->generation != next || connection != m_connectionGeneration || !authenticatedPeerObservation() ||
+        !revokeOriginalKeyboard || current == m_hostSessions.end() || current->second != epoch || m_keyboardRoute ||
+        deadline.hasExpired())
+      return std::nullopt;
     m_keyboardGeneration = binding->generation;
-    m_keyboardRoute = KeyboardAttempt{*binding};
-    m_keyboardRoute->deadline = QDeadlineTimer(m_keyboardTimeoutMs, Qt::PreciseTimer);
-    m_keyboardTimeout.start(m_keyboardTimeoutMs);
-    return sendKeyboardRoute({*binding, KeyboardRouteAction::Request, KeyboardRouteMode::Original});
+    m_keyboardRoute = KeyboardAttempt{*binding, connection};
+    m_keyboardRoute->deadline = deadline;
+    m_keyboardTimeout.start(static_cast<int>(deadline.remainingTime()));
+    return binding;
+  }
+  std::optional<KeyboardRouteBinding> reserveOriginalKeyboard()
+  {
+    // The catalog is bounded; NativeHost admits only the actual focused owner.
+    // A value copy also survives a callback that clears exported sessions.
+    const QPointer<Bridge> alive(this);
+    const auto sessions = m_hostSessions;
+    for (const auto &[session, epoch] : sessions) {
+      const auto binding = reserveOriginalKeyboard(session, epoch);
+      if (!alive || binding)
+        return binding;
+    }
+    return std::nullopt;
+  }
+  bool startOriginalKeyboard(KeyboardRouteBinding binding)
+  {
+    if (!m_keyboardRoute || m_keyboardRoute->binding != binding || m_keyboardRoute->phase != KeyboardPhase::Reserved)
+      return false;
+    if (m_keyboardRoute->deadline.hasExpired()) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+      return false;
+    }
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Reserved)) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+      return false;
+    }
+    const QPointer<Bridge> alive(this);
+    std::optional<KeyboardRouteBinding> current;
+    try {
+      current = m_native->keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation);
+    } catch (...) {
+    }
+    if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
+        m_keyboardRoute->phase != KeyboardPhase::Reserved)
+      return false;
+    if (m_keyboardRoute->deadline.hasExpired()) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
+      return false;
+    }
+    if (current != binding || !keyboardAttemptCurrent(binding, KeyboardPhase::Reserved)) {
+      withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+      return false;
+    }
+    m_keyboardRoute->phase = KeyboardPhase::AwaitQuiescence;
+    m_keyboardRoute->viewerRequested = true;
+    const bool sent = sendKeyboardRoute({binding, KeyboardRouteAction::Request, KeyboardRouteMode::Original});
+    if (!alive)
+      return false;
+    if (!sent && m_keyboardRoute && m_keyboardRoute->binding == binding)
+      withdrawOriginalKeyboard(KeyboardRouteReason::Failed);
+    return sent && m_keyboardRoute && m_keyboardRoute->binding == binding && !m_keyboardRoute->revoked;
+  }
+  bool originalKeyboardQuiesced(KeyboardRouteBinding binding) const
+  {
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced))
+      return false;
+    const QPointer<const Bridge> alive(this);
+    bool neutral = false;
+    try {
+      // NativeHost rechecks current focus/geometry and all Qt key/button owners.
+      neutral = m_native->keyboardRouteQuiesced(binding);
+    } catch (...) {
+    }
+    return alive && neutral && keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced);
+  }
+  bool requestOriginalKeyboard(std::uint64_t session, std::uint64_t epoch)
+  {
+    const auto binding = reserveOriginalKeyboard(session, epoch);
+    return binding && startOriginalKeyboard(*binding);
   }
   void withdrawOriginalKeyboard(KeyboardRouteReason reason, bool resumeViewer = true)
   {
@@ -308,6 +402,10 @@ public:
         retireKeyboardRoute();
         if (m_channel)
           m_channel->close("Original keyboard authority could not be revoked");
+        return;
+      }
+      if (!m_keyboardRoute->viewerRequested) {
+        retireKeyboardRoute();
         return;
       }
       if (!m_native->resumeKeyboard(binding) && m_keyboardRoute->quiesced) {
@@ -392,6 +490,7 @@ protected:
 private:
   enum class KeyboardPhase
   {
+    Reserved,
     AwaitQuiescence,
     Quiesced,
     Revoking,
@@ -400,11 +499,20 @@ private:
   struct KeyboardAttempt
   {
     KeyboardRouteBinding binding;
-    KeyboardPhase phase = KeyboardPhase::AwaitQuiescence;
-    bool revoked = false, quiesced = false;
+    std::uint64_t connectionGeneration = 0;
+    KeyboardPhase phase = KeyboardPhase::Reserved;
+    bool revoked = false, quiesced = false, viewerRequested = false;
     bool resumeViewer = true;
     QDeadlineTimer deadline{QDeadlineTimer::Forever};
   };
+  bool keyboardAttemptCurrent(const KeyboardRouteBinding &binding, KeyboardPhase phase) const
+  {
+    const auto found = m_hostSessions.find(binding.owner.session);
+    return m_native && revokeOriginalKeyboard && m_keyboardRoute && m_keyboardRoute->binding == binding &&
+           m_keyboardRoute->phase == phase && !m_keyboardRoute->revoked && !m_keyboardRoute->deadline.hasExpired() &&
+           m_keyboardRoute->connectionGeneration == m_connectionGeneration && found != m_hostSessions.end() &&
+           found->second == binding.owner.epoch && authenticatedPeerObservation().has_value();
+  }
   bool sendKeyboardRoute(const KeyboardRouteControl &control)
   {
     return m_keyboardCapable && send(
@@ -436,6 +544,7 @@ private:
         return;
       throw std::runtime_error("Unsolicited or mismatched keyboard route reply");
     }
+    require(m_keyboardRoute->viewerRequested, "Keyboard route reply preceded its request");
     if (control.action == KeyboardRouteAction::Withdraw) {
       withdrawOriginalKeyboard(control.reason);
       return;
@@ -456,7 +565,13 @@ private:
         withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost, false);
         return;
       }
-      if (!m_native->quiesceKeyboard(control.binding)) {
+      const QPointer<Bridge> alive(this);
+      const bool quiesced = keyboardAttemptCurrent(control.binding, KeyboardPhase::AwaitQuiescence) &&
+                            m_native->quiesceKeyboard(control.binding);
+      if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != control.binding ||
+          m_keyboardRoute->phase != KeyboardPhase::AwaitQuiescence)
+        return;
+      if (!quiesced) {
         withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
         return;
       }
@@ -465,7 +580,6 @@ private:
         withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
         return;
       }
-      m_keyboardTimeout.stop();
       m_keyboardRoute->phase = KeyboardPhase::Quiesced;
       const auto binding = control.binding;
       const auto generation = m_connectionGeneration;
@@ -474,7 +588,11 @@ private:
             m_keyboardRoute->phase != KeyboardPhase::Quiesced || m_connectionGeneration != generation ||
             !m_established || m_cleaning || m_shuttingDown)
           return;
-        const bool neutral = m_native->keyboardRouteQuiesced(binding);
+        const QPointer<Bridge> alive(this);
+        const bool neutral = originalKeyboardQuiesced(binding);
+        if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
+            m_keyboardRoute->phase != KeyboardPhase::Quiesced || m_connectionGeneration != generation)
+          return;
         if (m_keyboardRoute->deadline.hasExpired()) {
           withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
           return;
@@ -488,7 +606,7 @@ private:
           if (callback)
             callback(binding);
         } catch (...) {
-          if (m_connectionGeneration == generation && m_keyboardRoute && m_keyboardRoute->binding == binding)
+          if (alive && m_connectionGeneration == generation && m_keyboardRoute && m_keyboardRoute->binding == binding)
             withdrawOriginalKeyboard(KeyboardRouteReason::Failed);
         }
       });
@@ -959,6 +1077,7 @@ private:
   QTimer m_keyboardTimeout;
   int m_keyboardTimeoutMs = 3000;
   bool m_keyboardCapable = false;
+  bool m_reservingKeyboard = false;
   std::uint64_t m_keyboardGeneration = 0;
   std::optional<KeyboardAttempt> m_keyboardRoute;
   std::optional<KeyboardRouteBinding> m_retiredKeyboardRoute;

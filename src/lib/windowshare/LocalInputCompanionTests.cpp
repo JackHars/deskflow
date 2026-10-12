@@ -455,7 +455,9 @@ void coreSessionOwnership()
   lease.windowShareClientIncarnation[0] = 2;
   lease.deskflowPeerPin[0] = 3;
   lease.windowSharePeerPin[0] = 4;
-  lease.session = lease.epoch = lease.focusRevision = lease.geometryRevision = lease.routeGeneration = 1;
+  lease.session = lease.epoch = lease.focusRequest = lease.focusRevision = lease.geometryRevision =
+      lease.keyboardRouteGeneration = lease.routeGeneration = lease.coreServerIncarnation = lease.coreRecipient =
+          lease.coreSelectionGeneration = 1;
   check(
       validLocalInputLease(lease) && !session->channel()->prepare(lease),
       "Starting the companion implicitly authorized a native input lease"

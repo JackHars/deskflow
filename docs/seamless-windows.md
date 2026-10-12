@@ -242,8 +242,32 @@ publishes only immutable values to the Qt-owned Session's one-value mailbox;
 no proxy or stream pointer crosses threads. Publication starts with the first
 20 ms core timer dispatch. Observations expire after 250 ms independently of
 timer delivery and remain invalid after mailbox replacement, closure or either
-underlying revocation. This is identity infrastructure; it does not authorize
-original input or perform the pending dual-connection preflight.
+underlying revocation. This is identity infrastructure; it does not by itself
+authorize original input.
+
+WindowShare now exposes equivalent revocable TLS tickets with immutable six-second
+read observations. A retained observation expires independently of later reads.
+Queued traffic checks the old deadline before refreshing it, so an overdue timer
+cannot revive a connection. Closing, socket failure and destruction revoke its
+ticket before notifying the owner; a reconnect requires a new Channel instance.
+
+Private protocol version 2 adds Offer, Candidate, Quiesced and Cancel controls.
+The 112-byte offer binds a private route generation, core server/recipient/selection
+tokens, the Deskflow connection incarnation, and both approved pins. A 176-byte
+lease also binds the WindowShare incarnation, session, epoch, focus request,
+focus revision, geometry revision and independent keyboard-fence generation.
+Original event messages remain within the fixed 256-byte private payload limit;
+none of these original events is carried over network JSON.
+
+`LocalInputPreflight` implements the exchange as an isolated, default-deny
+coordinator. Each endpoint checks its own live connection and an explicit immutable
+map of at most eight approved fingerprint pairs. An attempt has one absolute
+two-second deadline. Refresh is allowed only while the retained observation is
+still live and the exact selection/connection is unchanged, including after a
+blocking read. Cancellation takes effect before a following event can authorize;
+replacement waits for synchronous owner release. Reentrant controls use a bounded
+eight-value queue with one cancellation slot. Missing neutral-boundary, module
+integrity or ordered-input checks never authorize Prepare.
 
 An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
 forwarding with an independent native admission fence. The viewer releases its
@@ -253,6 +277,9 @@ authority has been revoked and the host requests an exact viewer resume. Old
 held keys stay suppressed through their releases. Legacy peers keep the ordinary
 viewer path. The executable does not yet install the local controller required
 to initiate this handoff, and the network protocol carries no original Mac keys.
+Bridge reservation now separates selecting an exact binding from requesting the
+viewer fence. It sends the request only after the private candidate can be sent,
+then independently rechecks quiescence and the same fixed reservation deadline.
 
 Activation still requires both live authenticated network connections, an
 explicit approved dual-pin mapping, a neutral capture boundary, a loaded-module
@@ -260,6 +287,10 @@ integrity policy, and causal ordering of original keys
 with pointer events. A cache of the latest modifier flags is insufficient: a
 delayed click must not be delivered after a later modifier release. These remain
 integration requirements, not behavior claimed by the current automated tests.
+The tested preflight coordinator is not yet constructed by either production
+endpoint. Explicit policy configuration and that wiring will follow the ordered
+capture and module-integrity providers; this milestone does not suspend a real
+viewer or enable original input.
 
 The manual `windowshare-native-smoke` executable opens its own disposable test
 window and verifies real capture, decoding, targeted input and restoration. It

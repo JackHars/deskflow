@@ -17,11 +17,53 @@
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <chrono>
 #include <memory>
 using namespace deskflow::windowshare;
 namespace deskflow::windowshare {
+struct AuthenticatedPeerObservationTestAccess
+{
+  using Clock = std::chrono::steady_clock;
+  static bool liveAt(const AuthenticatedPeerObservation &observation, Clock::time_point now)
+  {
+    return observation.liveAt(now);
+  }
+  static Clock::time_point readTime(const AuthenticatedPeerObservation &observation)
+  {
+    return observation.m_read;
+  }
+};
 struct ChannelTestAccess
 {
+  using Clock = std::chrono::steady_clock;
+  static void clock(Channel &channel, const std::shared_ptr<Clock::time_point> &now)
+  {
+    channel.m_now = [now] { return *now; };
+  }
+  static void stopWatchdog(Channel &channel)
+  {
+    channel.m_watchdog.stop();
+  }
+  static void beforeEncryptedDispatch(Channel &channel, const std::function<void()> &callback)
+  {
+    QObject::connect(&channel.m_socket, &QSslSocket::encrypted, &channel, callback);
+  }
+  static void pauseReads(Channel &channel)
+  {
+    QObject::disconnect(&channel.m_socket, &QSslSocket::readyRead, &channel, nullptr);
+  }
+  static qint64 available(const Channel &channel)
+  {
+    return channel.m_socket.bytesAvailable();
+  }
+  static void queueRead(Channel &channel)
+  {
+    QTimer::singleShot(0, &channel, [&channel] { channel.read(); });
+  }
+  static qintptr descriptor(const Channel &channel)
+  {
+    return channel.m_socket.socketDescriptor();
+  }
   static qint64 plaintext(const Channel &channel)
   {
     return channel.m_socket.bytesToWrite();
@@ -60,6 +102,281 @@ void check(bool condition, const char *message)
 {
   if (!condition)
     throw std::runtime_error(message);
+}
+template <typename Predicate> void waitFor(Predicate ready, const char *message)
+{
+  if (ready())
+    return;
+  QEventLoop loop;
+  QTimer poll, timeout;
+  poll.setInterval(2);
+  timeout.setSingleShot(true);
+  QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+    if (ready())
+      loop.quit();
+  });
+  QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+  poll.start();
+  timeout.start(5000);
+  loop.exec();
+  check(ready(), message);
+}
+struct EvidencePair
+{
+  using Clock = std::chrono::steady_clock;
+  Listener listener;
+  std::shared_ptr<Clock::time_point> serverNow = std::make_shared<Clock::time_point>(Clock::now());
+  std::shared_ptr<Clock::time_point> peerNow = std::make_shared<Clock::time_point>(*serverNow);
+  std::unique_ptr<Channel> server, peer;
+
+  EvidencePair(const Identity &host, const Identity &client)
+  {
+    peer = std::make_unique<Channel>(client, parseFingerprint(host.fingerprint()));
+    ChannelTestAccess::clock(*peer, peerNow);
+    check(!peer->authenticatedPeerObservation(), "An unconnected channel exposed evidence");
+    listener.incoming = [&](qintptr descriptor) {
+      server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
+      ChannelTestAccess::clock(*server, serverNow);
+      check(!server->authenticatedPeerObservation(), "An accepted channel exposed evidence before TLS");
+      server->accept(descriptor);
+    };
+    check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for evidence fixture");
+    peer->connectTo("127.0.0.1", listener.serverPort());
+    waitFor([&] { return server && server->authenticated() && peer->authenticated(); }, "Evidence TLS setup failed");
+    // Deterministic clock tests exercise at-use and queued-read checks without
+    // letting a watchdog callback win the race under test.
+    ChannelTestAccess::stopWatchdog(*server);
+    ChannelTestAccess::stopWatchdog(*peer);
+  }
+  ~EvidencePair()
+  {
+    for (auto *channel : {server.get(), peer.get()}) {
+      if (!channel)
+        continue;
+      channel->onAuthenticated = {};
+      channel->onPacket = {};
+      channel->onClosed = {};
+    }
+  }
+};
+
+void retainedEvidence(const Identity &host, const Identity &client)
+{
+  using Access = AuthenticatedPeerObservationTestAccess;
+  const AuthenticatedPeerObservation invalid;
+  check(!invalid.live() && !invalid.sameConnection(invalid), "Default evidence acquired authority");
+  EvidencePair pair(host, client);
+  const auto first = *pair.server->authenticatedPeerObservation();
+  const auto outgoing = *pair.peer->authenticatedPeerObservation();
+  const auto pin = parseFingerprint(client.fingerprint());
+  check(
+      first.live() && outgoing.live() && first.ticket().incarnation() != 0 &&
+          std::equal(
+              first.ticket().fingerprint().begin(), first.ticket().fingerprint().end(),
+              reinterpret_cast<const std::uint8_t *>(pin.constData())
+          ) &&
+          !first.sameConnection(outgoing),
+      "Authenticated evidence did not preserve the verified leaf and unique connection"
+  );
+  const auto start = Access::readTime(first);
+  *pair.serverNow = start + std::chrono::milliseconds(5000);
+  for (int i = 0; i != 8; ++i) {
+    const auto again = pair.server->authenticatedPeerObservation();
+    check(again && Access::readTime(*again) == start, "Reading evidence renewed its deadline");
+  }
+  check(pair.server->send(MessageType::Accepted), "Fresh evidence refused an outgoing packet");
+  check(
+      Access::readTime(*pair.server->authenticatedPeerObservation()) == start,
+      "Outgoing traffic renewed the authenticated read deadline"
+  );
+  int packets = 0;
+  pair.server->onPacket = [&](Packet) { ++packets; };
+  check(pair.peer->send(MessageType::Hello), "Cannot send freshness fixture packet");
+  waitFor([&] { return packets == 1; }, "Authenticated traffic did not refresh observation");
+  const auto renewed = *pair.server->authenticatedPeerObservation();
+  check(
+      renewed.sameConnection(first) && renewed.ticket().incarnation() == first.ticket().incarnation() &&
+          Access::readTime(renewed) == *pair.serverNow,
+      "A read refresh changed connection identity or used observation access time"
+  );
+  *pair.serverNow = start + AuthenticatedPeerObservation::freshness;
+  check(
+      !Access::liveAt(first, *pair.serverNow) && Access::liveAt(renewed, *pair.serverNow) &&
+          pair.server->authenticated() && !Access::liveAt(first, start - std::chrono::nanoseconds(1)),
+      "A fresh observation revived an expired copy or accepted clock regression"
+  );
+  *pair.serverNow = Access::readTime(renewed) + AuthenticatedPeerObservation::freshness;
+  check(
+      !pair.server->authenticated() && !pair.server->readyForFrame() && !pair.server->authenticatedPeerObservation(),
+      "An overdue watchdog left authority usable at query time"
+  );
+  bool revokedBeforeCallback = false;
+  pair.server->onClosed = [&](QString, CloseCause cause) {
+    revokedBeforeCallback = !first.ticket().live() && !renewed.live() && cause == CloseCause::Network;
+  };
+  check(
+      !pair.server->send(MessageType::Hello) && revokedBeforeCallback &&
+          !pair.server->sendFrame(7, 2, 1, QByteArray("frame")),
+      "Expired send renewed authority or notified before revocation"
+  );
+}
+
+void lateReadEvidence(const Identity &host, const Identity &client, bool expireBetweenPackets)
+{
+  EvidencePair pair(host, client);
+  const auto retained = *pair.server->authenticatedPeerObservation();
+  const auto start = AuthenticatedPeerObservationTestAccess::readTime(retained);
+  ChannelTestAccess::pauseReads(*pair.server);
+  int packets = 0, closed = 0;
+  bool revokedBeforeCallback = false;
+  pair.server->onPacket = [&](Packet) {
+    ++packets;
+    if (expireBetweenPackets)
+      *pair.serverNow = start + AuthenticatedPeerObservation::freshness;
+  };
+  pair.server->onClosed = [&](QString, CloseCause cause) {
+    ++closed;
+    revokedBeforeCallback =
+        !retained.ticket().live() && !pair.server->authenticatedPeerObservation() && cause == CloseCause::Network;
+  };
+  check(pair.peer->send(MessageType::Hello), "Cannot queue late-read fixture packet");
+  if (expireBetweenPackets)
+    check(pair.peer->send(MessageType::Hello), "Cannot queue second fixture packet");
+  const auto required = static_cast<qint64>((headerSize + 2) * (expireBetweenPackets ? 2 : 1));
+  waitFor(
+      [&] { return ChannelTestAccess::available(*pair.server) >= required; }, "TLS bytes did not reach receive buffer"
+  );
+  ChannelTestAccess::queueRead(*pair.server);
+  if (!expireBetweenPackets)
+    *pair.serverNow = start + AuthenticatedPeerObservation::freshness;
+  waitFor([&] { return closed != 0; }, "Queued late data did not terminate the expired channel");
+  check(
+      closed == 1 && packets == (expireBetweenPackets ? 1 : 0) && revokedBeforeCallback &&
+          !pair.server->authenticatedPeerObservation(),
+      "Queued data or a second callback revived expired authenticated authority"
+  );
+}
+
+void terminalEvidence(const Identity &host, const Identity &client)
+{
+  std::optional<AuthenticatedPeerObservation> old;
+  for (int mode = 0; mode != 6; ++mode) {
+    EvidencePair pair(host, client);
+    const auto retained = *pair.server->authenticatedPeerObservation();
+    if (old)
+      check(
+          !old->live() && !retained.sameConnection(*old) &&
+              retained.ticket().incarnation() != old->ticket().incarnation(),
+          "Reconnect reused or revived the previous connection incarnation"
+      );
+    old = retained;
+    int closed = 0;
+    bool revokedBeforeCallback = false;
+    pair.server->onClosed = [&](QString, CloseCause) {
+      ++closed;
+      revokedBeforeCallback = !retained.live() && !retained.ticket().live() && !pair.server->authenticated();
+    };
+    if (mode == 0)
+      pair.server->close("explicit terminal fixture");
+    else if (mode == 1)
+      pair.peer->close("remote terminal fixture");
+    else if (mode == 2)
+      ChannelTestAccess::malformedPacket(*pair.peer);
+    else if (mode == 3)
+      ChannelTestAccess::reportCertificateError(*pair.server, QSslError::CertificateRevoked);
+    else if (mode == 4) {
+      pair.server.reset();
+      check(!retained.live() && closed == 0, "Destructor did not silently revoke retained evidence");
+      continue;
+    } else
+      pair.server->accept(ChannelTestAccess::descriptor(*pair.server));
+    waitFor([&] { return closed != 0; }, "Terminal transport event did not notify");
+    check(closed == 1 && revokedBeforeCallback, "Terminal callback ran before retained evidence was revoked");
+    pair.server->connectTo("127.0.0.1", pair.listener.serverPort());
+    check(
+        !pair.server->authenticatedPeerObservation() && !retained.live() && closed == 1,
+        "A terminated Channel attempted reauthentication"
+    );
+  }
+  EvidencePair pair(host, client);
+  const auto retained = *pair.peer->authenticatedPeerObservation();
+  pair.peer->connectTo("127.0.0.1", pair.listener.serverPort());
+  check(!retained.live() && !pair.peer->authenticated(), "A second connectTo preserved the first authority");
+}
+
+void destructiveEvidenceCallbacks(const Identity &host, const Identity &client)
+{
+  // These are real socket callbacks, not a direct call to the public handler.
+  // Destroying the channel must leave neither a Decoder nor Qt socket signal
+  // frame accessing the destroyed by-value transport objects.
+  for (bool terminal : {false, true}) {
+    EvidencePair pair(host, client);
+    const auto retained = *pair.server->authenticatedPeerObservation();
+    bool called = false;
+    const auto state = std::make_shared<int>(37);
+    auto destroy = [&, state] {
+      pair.server.reset();
+      check(*state == 37 && !retained.live(), "Callback capture or evidence survived owner deletion incorrectly");
+      called = true;
+    };
+    if (terminal) {
+      pair.server->onClosed = [destroy](QString, CloseCause) { destroy(); };
+      pair.peer->close("destroy remote callback fixture");
+    } else {
+      pair.server->onPacket = [destroy](Packet) { destroy(); };
+      check(pair.peer->send(MessageType::Hello), "Cannot send destructive callback packet");
+      check(pair.peer->send(MessageType::Hello), "Cannot send post-destruction packet");
+    }
+    waitFor([&] { return called; }, "Destructive socket callback was not reached");
+    check(!pair.server && !retained.live(), "Destroyed callback owner retained authenticated authority");
+  }
+  EvidencePair pair(host, client);
+  const auto retained = *pair.server->authenticatedPeerObservation();
+  int cancelled = 0;
+  pair.server->onClosed = [&](QString, CloseCause) { ++cancelled; };
+  ChannelTestAccess::reportCertificateError(*pair.server, QSslError::CertificateRevoked);
+  check(!retained.live() && cancelled == 0, "Socket error did not revoke before deferred notification");
+  pair.server->onClosed = {};
+  QCoreApplication::processEvents();
+  check(cancelled == 0, "A queued terminal callback ignored owner cancellation");
+}
+
+void handshakeEvidence(const Identity &host, const Identity &client)
+{
+  // Expire after the backend emits encrypted(), before the queued application
+  // handler runs. A delayed handshake must not mint its first ticket either.
+  Listener listener;
+  std::unique_ptr<Channel> server;
+  Channel peer(client, parseFingerprint(host.fingerprint()));
+  auto now = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+  ChannelTestAccess::clock(peer, now);
+  ChannelTestAccess::beforeEncryptedDispatch(peer, [now] { *now += AuthenticatedPeerObservation::freshness; });
+  listener.incoming = [&](qintptr descriptor) {
+    server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
+    server->accept(descriptor);
+  };
+  check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for handshake evidence fixture");
+  int authenticated = 0, closed = 0;
+  bool noEvidence = false;
+  peer.onAuthenticated = [&] { ++authenticated; };
+  peer.onClosed = [&](QString, CloseCause) {
+    ++closed;
+    noEvidence = !peer.authenticatedPeerObservation();
+  };
+  peer.connectTo("127.0.0.1", listener.serverPort());
+  ChannelTestAccess::stopWatchdog(peer);
+  waitFor([&] { return closed != 0; }, "Queued expired handshake did not close");
+  check(closed == 1 && authenticated == 0 && noEvidence, "Expired handshake issued authenticated evidence");
+
+  Channel pending(client, parseFingerprint(host.fingerprint()));
+  int pendingClosed = 0;
+  pending.onClosed = [&](QString, CloseCause) { ++pendingClosed; };
+  pending.connectTo("127.0.0.1", listener.serverPort());
+  pending.connectTo("127.0.0.1", listener.serverPort());
+  check(
+      pendingClosed == 1 && !pending.authenticated() && !pending.authenticatedPeerObservation(),
+      "Double connection attempt did not terminate pending authentication"
+  );
 }
 void keyboardRouteProtocol()
 {
@@ -248,16 +565,18 @@ void mediaAndControl(const Identity &host, const Identity &client)
   std::unique_ptr<Channel> server;
   Channel peer(client, parseFingerprint(host.fingerprint()));
   const QByteArray accessUnit(1024 * 1024, 'x');
-  bool video = false, focus = false, timedOut = false;
+  bool hello = false, queued = false, video = false, focus = false, timedOut = false;
+  QStringList closeReasons;
   listener.incoming = [&](qintptr descriptor) {
     server = std::make_unique<Channel>(host, parseFingerprint(client.fingerprint()));
     server->onPacket = [&](Packet packet) {
       check(packet.type == MessageType::Hello, "media setup hello");
-      check(server->sendFrame(7, 2, 19, accessUnit), "first bounded frame accepted");
-      check(!server->sendFrame(7, 2, 19, accessUnit), "video backlog not queued");
-      check(server->send(MessageType::Focus, {{"focusRevision", 3}}, 7, 2), "control survives large queued IDR");
+      hello = true;
     };
-    server->onClosed = [&](QString, CloseCause) { loop.quit(); };
+    server->onClosed = [&](QString reason, CloseCause) {
+      closeReasons.append("server: " + reason);
+      loop.quit();
+    };
     server->accept(descriptor);
   };
   check(listener.listen(QHostAddress::LocalHost, 0), "media listener failed");
@@ -271,14 +590,32 @@ void mediaAndControl(const Identity &host, const Identity &client)
       loop.quit();
     }
   };
-  peer.onClosed = [&](QString, CloseCause) { loop.quit(); };
-  QTimer timeout;
+  peer.onClosed = [&](QString reason, CloseCause) {
+    closeReasons.append("peer: " + reason);
+    loop.quit();
+  };
+  QTimer poll, timeout;
+  poll.setInterval(2);
+  QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+    // The backend can still be draining its final handshake ciphertext after
+    // the peer's Hello. Frame admission intentionally counts that queue too.
+    if (!hello || !server || !server->readyForFrame())
+      return;
+    poll.stop();
+    queued = server->sendFrame(7, 2, 19, accessUnit) && !server->sendFrame(7, 2, 19, accessUnit) &&
+             server->send(MessageType::Focus, {{"focusRevision", 3}}, 7, 2);
+    if (!queued) {
+      closeReasons.append("media/backlog/control admission failed");
+      loop.quit();
+    }
+  });
   timeout.setSingleShot(true);
   QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
     timedOut = true;
     loop.quit();
   });
   timeout.start(10000);
+  poll.start();
   peer.connectTo("127.0.0.1", listener.serverPort());
   loop.exec();
   peer.onClosed = {};
@@ -288,7 +625,15 @@ void mediaAndControl(const Identity &host, const Identity &client)
     server->onClosed = {};
     server->onPacket = {};
   }
-  check(!timedOut && video && focus, "large frame then control must arrive without disconnect");
+  if (timedOut || !queued || !video || !focus)
+    throw std::runtime_error(
+        (QString("large frame then control must arrive without disconnect (video=%1, focus=%2, timeout=%3): ")
+             .arg(video)
+             .arg(focus)
+             .arg(timedOut) +
+         closeReasons.join("; "))
+            .toStdString()
+    );
 }
 
 void explicitCertificateErrors(const Identity &host, const Identity &client, QSslError::SslError error)
@@ -638,6 +983,12 @@ int main(int argc, char **argv)
     initializeIdentity(b);
     const auto host = Identity::load(a), client = Identity::load(b);
     const auto hostPin = parseFingerprint(host.fingerprint()), clientPin = parseFingerprint(client.fingerprint());
+    retainedEvidence(host, client);
+    lateReadEvidence(host, client, false);
+    lateReadEvidence(host, client, true);
+    terminalEvidence(host, client);
+    destructiveEvidenceCallbacks(host, client);
+    handshakeEvidence(host, client);
     destructionLifetime(host, client);
     exercise(host, client, hostPin, clientPin, true);
     const auto now = QDateTime::currentDateTimeUtc();

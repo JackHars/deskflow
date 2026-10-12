@@ -45,6 +45,10 @@ struct LocalInputChannelTestAccess
   {
     return channel.send(static_cast<LocalInputChannel::Type>(11), payload);
   }
+  static bool raw(LocalInputChannel &channel, unsigned type, const QByteArray &payload)
+  {
+    return channel.send(static_cast<LocalInputChannel::Type>(type), payload);
+  }
   static void stopTimer(LocalInputChannel &channel)
   {
     channel.m_timer.stop();
@@ -122,6 +126,11 @@ LocalInputLease fixtureLease()
   lease.focusRevision = 13;
   lease.geometryRevision = 14;
   lease.routeGeneration = 15;
+  lease.coreServerIncarnation = 16;
+  lease.coreRecipient = 17;
+  lease.coreSelectionGeneration = 18;
+  lease.focusRequest = 19;
+  lease.keyboardRouteGeneration = 20;
   return lease;
 }
 OriginalKeyEvent fixtureEvent(std::uint64_t sequence, OriginalKeyTransition transition = OriginalKeyTransition::Down)
@@ -140,17 +149,35 @@ void number(QByteArray &bytes, std::uint64_t value, int size)
   for (int i = size - 1; i >= 0; --i)
     bytes.append(static_cast<char>(value >> (i * 8)));
 }
-QByteArray originalPayload(const LocalInputLease &lease, const OriginalKeyEvent &event)
+QByteArray offerPayload(const LocalInputOffer &offer)
 {
   QByteArray bytes;
   auto append = [&](const auto &value) { bytes.append(reinterpret_cast<const char *>(value.data()), value.size()); };
-  append(lease.deskflowClientIncarnation);
-  append(lease.windowShareClientIncarnation);
-  append(lease.deskflowPeerPin);
-  append(lease.windowSharePeerPin);
   for (auto value :
-       {lease.session, lease.epoch, lease.focusRevision, lease.geometryRevision, lease.routeGeneration,
-        event.sample.sequence, event.sample.timestampNs, event.sample.flags})
+       {offer.routeGeneration, offer.coreServerIncarnation, offer.coreRecipient, offer.coreSelectionGeneration})
+    number(bytes, value, 8);
+  append(offer.deskflowClientIncarnation);
+  append(offer.deskflowPeerPin);
+  append(offer.windowSharePeerPin);
+  return bytes;
+}
+QByteArray leasePayload(const LocalInputLease &lease)
+{
+  auto bytes = offerPayload(lease);
+  bytes.append(
+      reinterpret_cast<const char *>(lease.windowShareClientIncarnation.data()),
+      lease.windowShareClientIncarnation.size()
+  );
+  for (auto value :
+       {lease.session, lease.epoch, lease.focusRequest, lease.focusRevision, lease.geometryRevision,
+        lease.keyboardRouteGeneration})
+    number(bytes, value, 8);
+  return bytes;
+}
+QByteArray originalPayload(const LocalInputLease &lease, const OriginalKeyEvent &event)
+{
+  auto bytes = leasePayload(lease);
+  for (auto value : {event.sample.sequence, event.sample.timestampNs, event.sample.flags})
     number(bytes, value, 8);
   number(bytes, event.sample.keyboardType, 4);
   number(bytes, event.sample.keyCode, 2);
@@ -238,33 +265,78 @@ struct Fixture
 };
 
 #ifdef Q_OS_UNIX
-QByteArray readHello(int descriptor)
+QByteArray readBytes(int descriptor, qsizetype size)
 {
   QByteArray result;
   QElapsedTimer timer;
   timer.start();
-  while (result.size() < 76 && timer.elapsed() < 2000) {
+  while (result.size() < size && timer.elapsed() < 2000) {
     pollfd poller{descriptor, POLLIN, 0};
     if (poll(&poller, 1, 50) <= 0)
       continue;
-    char buffer[76];
-    const auto count = ::read(descriptor, buffer, 76 - result.size());
+    char buffer[512];
+    const auto count = ::read(descriptor, buffer, std::min(size - result.size(), qsizetype{sizeof(buffer)}));
     if (count <= 0)
       break;
     result.append(buffer, count);
   }
-  check(result.size() == 76, "Raw fixture did not receive bootstrap");
+  check(result.size() == size, "Raw fixture did not receive complete frame");
   return result;
+}
+QByteArray
+wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t sequence, const QByteArray &payload = {})
+{
+  QByteArray header;
+  number(header, 0x444c4931, 4);
+  number(header, 2, 2);
+  number(header, type, 1);
+  number(header, role, 1);
+  number(header, payload.size(), 4);
+  number(header, sequence, 8);
+  header += hello.mid(20, 32); // Authenticated process incarnations, kept opaque in diagnostics.
+  return header + payload;
+}
+int wireChild(int descriptor)
+{
+  const auto hello = readBytes(descriptor, 76);
+  check(hello == wireFrame(hello, 1, 1, 1, hello.mid(52)), "Unexpected protocol v2 bootstrap layout");
+  const auto write = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
+    const auto frame = wireFrame(hello, type, 2, sequence, payload);
+    check(::write(descriptor, frame.constData(), frame.size()) == frame.size(), "Raw fixture write failed");
+  };
+  const auto expect = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
+    const auto expected = wireFrame(hello, type, 1, sequence, payload);
+    check(readBytes(descriptor, expected.size()) == expected, "Protocol v2 wire bytes changed");
+  };
+  const auto lease = fixtureLease();
+  const auto offer = offerPayload(lease), binding = leasePayload(lease);
+  write(2, 1, hello.mid(52));
+  expect(3, 2);
+  expect(12, 3, offer);
+  write(13, 2, binding);
+  write(14, 3, binding);
+  expect(15, 4, offer + char(LocalInputRevocation::Requested));
+  write(15, 4, offer + char(LocalInputRevocation::AuthorityLost));
+  expect(6, 5, binding);
+  write(7, 5, binding);
+  expect(8, 6, binding);
+  write(9, 6, binding);
+  expect(11, 7, originalPayload(lease, fixtureEvent(1)));
+  write(10, 7, binding + char(LocalInputRevocation::Requested));
+  pollfd poller{descriptor, POLLIN, 0};
+  char byte;
+  check(poll(&poller, 1, 2000) > 0 && ::read(descriptor, &byte, 1) == 0, "Wire fixture did not receive clean EOF");
+  return 0;
 }
 int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
 {
-  auto frame = readHello(descriptor);
+  auto frame = readBytes(descriptor, 76);
   frame[6] = 2;
   frame[7] = 2;
   if (mode == "raw-magic")
     frame[0] = 'X';
   else if (mode == "raw-version")
-    frame[5] = 2;
+    frame[5] = 1;
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -307,6 +379,8 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 #ifdef Q_OS_UNIX
   if (mode.startsWith("raw-"))
     return rawChild(application, descriptor, mode);
+  if (mode == "wire-v2")
+    return wireChild(descriptor);
   const auto expectedCore = localInputProcess(getppid());
   check(expectedCore.has_value(), "Controlled fixture launcher is unavailable");
   auto host =
@@ -413,6 +487,40 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       host->revoke();
   };
   host->onClosed = [&](QString) { application.quit(); };
+  if (mode == "preflight" || mode.startsWith("offer-callback-")) {
+    host->authorize = {};
+    host->onOffer = [&, marker = QString(256, 'f')](const LocalInputOffer &offer) {
+      ++callbackEvents;
+      check(offer == leaseOffer(fixtureLease()), "Preflight offer changed its selection binding");
+      check(host->phase() == LocalInputPhase::Idle && !host->lease(), "Offer acquired lease authority");
+      check(!host->offer(offer), "Host sent a core offer");
+      check(
+          !host->prepare(fixtureLease()) && !host->commit(fixtureLease()) &&
+              !host->sendOriginal(fixtureLease(), fixtureEvent(1)),
+          "Preflight granted host original-input permission"
+      );
+      if (mode == "offer-callback-delete")
+        host.reset();
+      else if (mode == "offer-callback-close")
+        host->close();
+      else if (mode == "offer-callback-throw")
+        throw std::runtime_error("Preflight notification fixture failure");
+      else {
+        if (mode == "offer-callback-revoke")
+          host->revoke();
+        check(host->candidate(fixtureLease()) && host->quiesced(fixtureLease()), "Host preflight reply failed");
+      }
+      check(marker.at(callbackEvents % marker.size()) == 'f', "Preflight callback capture did not survive");
+    };
+    host->onOfferCancelled = [&](const LocalInputOffer &offer, LocalInputRevocation reason) {
+      ++callbackEvents;
+      check(
+          offer == leaseOffer(fixtureLease()) && reason == LocalInputRevocation::Requested,
+          "Preflight cancellation changed binding or reason"
+      );
+      check(host->cancelOffer(offer, LocalInputRevocation::AuthorityLost), "Host preflight cancellation failed");
+    };
+  }
   const auto status = application.exec();
   if (mode == "nested-capture")
     check(
@@ -434,6 +542,10 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(originalEvents == 0, "Invalid retired input was delivered");
   if (mode == "revoke-prepared")
     check(retiredDelivered, "Host cancellation prevented the next route from activating");
+  if (mode == "preflight")
+    check(callbackEvents == 2 && originalEvents == 0, "Preflight did not remain an unauthorizing exchange");
+  if (mode.startsWith("offer-callback-"))
+    check(callbackEvents == 1 && originalEvents == 0, "Offer callback did not run exactly once without input");
   return status;
 #else
   Q_UNUSED(application);
@@ -441,6 +553,327 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   Q_UNUSED(mode);
   return 1;
 #endif
+}
+
+void preflightValues()
+{
+  static_assert(LocalInputChannel::version == 2);
+  static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 256);
+  static_assert(LocalInputChannel::offerPayloadBytes == 112 && LocalInputChannel::leasePayloadBytes == 176);
+  static_assert(LocalInputChannel::originalPayloadBytes == 209);
+  const auto original = fixtureLease();
+  const auto offer = leaseOffer(original);
+  check(validLocalInputOffer(offer) && validLocalInputLease(original), "Invalid version 2 fixture");
+  check(
+      offerPayload(offer).size() == 112 && leasePayload(original).size() == 176 &&
+          originalPayload(original, fixtureEvent(1)).size() == 209,
+      "Version 2 golden payload sizes changed"
+  );
+  for (const auto member :
+       {&LocalInputOffer::routeGeneration, &LocalInputOffer::coreServerIncarnation, &LocalInputOffer::coreRecipient,
+        &LocalInputOffer::coreSelectionGeneration}) {
+    auto lease = original;
+    lease.*member = std::numeric_limits<std::uint64_t>::max();
+    check(validLocalInputOffer(lease) && validLocalInputLease(lease), "A core token was restricted to JSON precision");
+    lease.*member = 0;
+    check(!validLocalInputOffer(lease) && !validLocalInputLease(lease), "A zero core token was accepted");
+  }
+  for (const auto member :
+       {&LocalInputLease::session, &LocalInputLease::epoch, &LocalInputLease::focusRequest,
+        &LocalInputLease::focusRevision, &LocalInputLease::geometryRevision,
+        &LocalInputLease::keyboardRouteGeneration}) {
+    auto lease = original;
+    lease.*member = (std::uint64_t{1} << 53) - 1;
+    check(validLocalInputLease(lease) && leaseOffer(lease) == offer, "Valid host counter changed core offer");
+    ++(lease.*member);
+    check(!validLocalInputLease(lease), "Host counter exceeded JSON precision");
+    lease.*member = 0;
+    check(!validLocalInputLease(lease), "A zero host counter was accepted");
+  }
+  for (int field = 0; field < 4; ++field) {
+    auto lease = original;
+    if (field == 0)
+      lease.deskflowClientIncarnation = {};
+    else if (field == 1)
+      lease.deskflowPeerPin = {};
+    else if (field == 2)
+      lease.windowSharePeerPin = {};
+    else
+      lease.windowShareClientIncarnation = {};
+    check(!validLocalInputLease(lease), "An empty preflight identity was accepted");
+    check(validLocalInputOffer(lease) == (field == 3), "Offer validity depended on host-only fields");
+  }
+}
+void preflightRoundtrip()
+{
+  Fixture fixture("preflight");
+  fixture.core->authorize = {};
+  int candidates = 0, quiesced = 0, cancelled = 0;
+  fixture.core->onCandidate = [&](const LocalInputLease &lease) {
+    check(lease == fixtureLease() && quiesced == 0, "Candidate binding or wire order changed");
+    ++candidates;
+  };
+  fixture.core->onQuiesced = [&](const LocalInputLease &lease) {
+    check(lease == fixtureLease() && candidates == 1, "Quiesced binding or wire order changed");
+    ++quiesced;
+  };
+  fixture.core->onOfferCancelled = [&](const LocalInputOffer &offer, LocalInputRevocation reason) {
+    check(
+        offer == leaseOffer(fixtureLease()) && reason == LocalInputRevocation::AuthorityLost,
+        "Returned preflight cancellation changed"
+    );
+    ++cancelled;
+  };
+  const auto offer = leaseOffer(fixtureLease());
+  check(!fixture.core->offer(offer), "Offer was sent before private authentication");
+  fixture.establish();
+  check(!fixture.core->candidate(fixtureLease()) && !fixture.core->quiesced(fixtureLease()), "Core sent a host reply");
+  check(
+      !fixture.core->offer({}) && !fixture.core->cancelOffer({}) &&
+          !fixture.core->cancelOffer(offer, static_cast<LocalInputRevocation>(0)) &&
+          !fixture.core->cancelOffer(offer, static_cast<LocalInputRevocation>(4)),
+      "Invalid outgoing preflight payload was accepted"
+  );
+  check(fixture.core->offer(offer), "Core offer failed");
+  check(
+      until([&] { return (candidates == 1 && quiesced == 1) || fixture.closed; }) && !fixture.closed,
+      "Host preflight failed"
+  );
+  check(
+      fixture.core->phase() == LocalInputPhase::Idle && !fixture.core->lease() &&
+          !fixture.core->prepare(fixtureLease()) && !fixture.core->commit(fixtureLease()) &&
+          !fixture.core->sendOriginal(fixtureLease(), fixtureEvent(1)),
+      "Preflight granted an unauthored input lease"
+  );
+  check(fixture.core->cancelOffer(offer), "Core cancellation failed");
+  check(until([&] { return cancelled == 1 || fixture.closed; }) && !fixture.closed, "Host cancellation was lost");
+  check(fixture.core->authenticated() && fixture.revoked == 0, "Preflight cancellation revoked unrelated authority");
+  fixture.core->close();
+  fixture.childExitedCleanly();
+}
+void preflightWireLayout()
+{
+  Fixture fixture("wire-v2", {1000, 4000});
+  LocalInputChannelTestAccess::stopTimer(*fixture.core);
+  int replies = 0, cancellations = 0;
+  const auto receive = [&](const LocalInputLease &lease) {
+    check(lease == fixtureLease() && !fixture.core->lease(), "Golden host reply changed or granted a lease");
+    ++replies;
+  };
+  fixture.core->onCandidate = receive;
+  fixture.core->onQuiesced = receive;
+  fixture.core->onOfferCancelled = [&](const LocalInputOffer &offer, LocalInputRevocation reason) {
+    check(
+        offer == leaseOffer(fixtureLease()) && reason == LocalInputRevocation::AuthorityLost,
+        "Golden host cancellation changed"
+    );
+    ++cancellations;
+  };
+  fixture.establish();
+  check(fixture.core->offer(leaseOffer(fixtureLease())), "Cannot send golden offer");
+  check(until([&] { return replies == 2 || fixture.closed; }) && !fixture.closed, "Golden host replies were rejected");
+  check(fixture.core->cancelOffer(leaseOffer(fixtureLease())), "Cannot send golden cancellation");
+  check(
+      until([&] { return cancellations == 1 || fixture.closed; }) && !fixture.closed,
+      "Golden host cancellation was rejected"
+  );
+  fixture.activate();
+  check(fixture.core->sendOriginal(fixtureLease(), fixtureEvent(1)), "Cannot send golden Original");
+  check(
+      until([&] { return fixture.revoked == 1 || fixture.closed; }) && !fixture.closed, "Golden Original was rejected"
+  );
+  fixture.core->close();
+  fixture.childExitedCleanly();
+}
+void preflightDoesNotOwnLeaseState()
+{
+  Fixture fixture;
+  fixture.establish();
+  auto future = fixtureLease();
+  future.routeGeneration = future.coreServerIncarnation = future.coreRecipient = future.coreSelectionGeneration =
+      std::numeric_limits<std::uint64_t>::max();
+  int candidates = 0, quiesced = 0, cancellations = 0;
+  fixture.core->onCandidate = [&](const LocalInputLease &lease) {
+    check(lease == future, "Full-width core fields changed during preflight decode");
+    ++candidates;
+  };
+  fixture.core->onQuiesced = [&](const LocalInputLease &lease) {
+    check(lease == fixtureLease(), "Coordinator did not receive stale-generation quiescence");
+    ++quiesced;
+  };
+  fixture.core->onOfferCancelled = [&](const LocalInputOffer &offer, LocalInputRevocation) {
+    check(offer == leaseOffer(future), "Coordinator did not receive cancellation binding");
+    ++cancellations;
+  };
+  check(fixture.core->offer(future), "Full-width offer could not be queued");
+  LocalInputChannelTestAccess::incoming(*fixture.core, 13, leasePayload(future));
+  LocalInputChannelTestAccess::incoming(*fixture.core, 14, leasePayload(fixtureLease()));
+  LocalInputChannelTestAccess::incoming(
+      *fixture.core, 15, offerPayload(future) + static_cast<char>(LocalInputRevocation::Requested)
+  );
+  check(
+      candidates == 1 && quiesced == 1 && cancellations == 1 && !fixture.core->lease() &&
+          fixture.core->phase() == LocalInputPhase::Idle && fixture.core->prepare(fixtureLease()),
+      "Preflight incorrectly owned lease generation/state instead of leaving classification to coordinator"
+  );
+  // Synthetic received frames have deliberately consumed private sequence slots;
+  // close before receiving real traffic on this codec-only fixture.
+  fixture.core->close();
+  fixture.childExitedCleanly();
+  Fixture active;
+  active.activate();
+  active.core->onOfferCancelled = [](const LocalInputOffer &, LocalInputRevocation) {};
+  LocalInputChannelTestAccess::incoming(
+      *active.core, 15, offerPayload(fixtureLease()) + static_cast<char>(LocalInputRevocation::AuthorityLost)
+  );
+  check(
+      active.core->phase() == LocalInputPhase::Active && active.core->lease() == fixtureLease() && active.revoked == 0,
+      "Preflight cancellation directly released a committed lease"
+  );
+  active.core->close();
+  active.childExitedCleanly();
+}
+void malformedPreflight()
+{
+  for (const unsigned type : {12, 13, 14, 15}) {
+    for (int fault = 0; fault < 3; ++fault) {
+      Fixture fixture;
+      fixture.establish();
+      int delivered = 0;
+      fixture.core->onCandidate = [&](const LocalInputLease &) { ++delivered; };
+      fixture.core->onQuiesced = [&](const LocalInputLease &) { ++delivered; };
+      fixture.core->onOfferCancelled = [&](const LocalInputOffer &, LocalInputRevocation) { ++delivered; };
+      auto payload = type == 12 || type == 15 ? offerPayload(fixtureLease()) : leasePayload(fixtureLease());
+      if (type == 15)
+        payload += static_cast<char>(LocalInputRevocation::Requested);
+      if (fault == 0)
+        payload.chop(1);
+      else if (fault == 1)
+        payload.append('x');
+      else
+        payload.replace(0, 8, QByteArray(8, '\0'));
+      if (type == 12) {
+        check(LocalInputChannelTestAccess::raw(*fixture.core, type, payload), "Cannot send malformed offer fixture");
+        check(until([&] { return fixture.closed; }), "Malformed offer did not close receiver");
+      } else
+        LocalInputChannelTestAccess::incoming(*fixture.core, type, payload);
+      check(fixture.closed && delivered == 0 && !fixture.active, "Malformed preflight reached coordinator");
+      fixture.childExitedCleanly();
+    }
+  }
+  for (const unsigned type : {12, 13, 14}) {
+    Fixture fixture;
+    fixture.establish();
+    if (type == 12)
+      LocalInputChannelTestAccess::incoming(*fixture.core, type, offerPayload(fixtureLease()));
+    else {
+      check(
+          LocalInputChannelTestAccess::raw(*fixture.core, type, leasePayload(fixtureLease())),
+          "Cannot send wrong-role fixture"
+      );
+      check(until([&] { return fixture.closed; }), "Wrong-role preflight did not close receiver");
+    }
+    check(fixture.closed && !fixture.active, "Wrong-role preflight was accepted");
+    fixture.childExitedCleanly();
+  }
+  for (const char reason : {0, 4}) {
+    Fixture fixture;
+    fixture.establish();
+    LocalInputChannelTestAccess::incoming(*fixture.core, 15, offerPayload(fixtureLease()) + reason);
+    check(fixture.closed, "Unknown offer cancellation reason was accepted");
+    fixture.childExitedCleanly();
+  }
+  // An otherwise valid lease with a host counter outside JSON precision is
+  // malformed, even though core-owned counters retain all 64 bits.
+  Fixture bounds;
+  bounds.establish();
+  auto invalid = fixtureLease();
+  invalid.focusRequest = std::uint64_t{1} << 53;
+  LocalInputChannelTestAccess::incoming(*bounds.core, 13, leasePayload(invalid));
+  check(bounds.closed, "Oversized host focus request reached coordinator");
+  bounds.childExitedCleanly();
+}
+void preflightCallbacks()
+{
+  for (const unsigned type : {13, 14, 15}) {
+    for (const QString action : {"revoke", "close", "delete", "throw"}) {
+      Fixture fixture;
+      fixture.activate();
+      int callbacks = 0, nested = 0;
+      const auto callback = [&, marker = QString(256, 'c')] {
+        ++callbacks;
+        if (action == "revoke") {
+          fixture.core->revoke();
+          if (type == 15) {
+            fixture.core->onCandidate = [&](const LocalInputLease &) { ++nested; };
+            LocalInputChannelTestAccess::incoming(*fixture.core, 13, leasePayload(fixtureLease()));
+          } else {
+            fixture.core->onOfferCancelled = [&](const LocalInputOffer &, LocalInputRevocation) { ++nested; };
+            LocalInputChannelTestAccess::incoming(
+                *fixture.core, 15, offerPayload(fixtureLease()) + static_cast<char>(LocalInputRevocation::Requested)
+            );
+          }
+        } else if (action == "close")
+          fixture.core->close();
+        else if (action == "delete")
+          fixture.core.reset();
+        else
+          throw std::runtime_error("Preflight callback failure");
+        check(marker.at(callbacks % marker.size()) == 'c', "Copied preflight callback was destroyed while executing");
+      };
+      const auto reply = [callback](const LocalInputLease &lease) {
+        check(lease == fixtureLease(), "Reentrant preflight binding changed");
+        callback();
+      };
+      fixture.core->onCandidate = reply;
+      fixture.core->onQuiesced = reply;
+      fixture.core->onOfferCancelled = [callback](const LocalInputOffer &offer, LocalInputRevocation) {
+        check(offer == leaseOffer(fixtureLease()), "Reentrant cancellation binding changed");
+        callback();
+      };
+      auto payload = type == 15 ? offerPayload(fixtureLease()) : leasePayload(fixtureLease());
+      if (type == 15)
+        payload += static_cast<char>(LocalInputRevocation::Requested);
+      LocalInputChannelTestAccess::incoming(*fixture.core, type, payload);
+      check(callbacks == 1 && fixture.revoked == 1, "Preflight callback lost or duplicated lease release");
+      if (action == "revoke") {
+        check(nested == 1 && !fixture.closed && !fixture.core->lease(), "Reentrant preflight notification failed");
+        fixture.core->close();
+      } else
+        check(fixture.closed, "Failed/destructive preflight callback retained channel authority");
+      fixture.childExitedCleanly();
+    }
+  }
+  for (const QString action : {"revoke", "close", "delete", "throw"}) {
+    Fixture fixture("offer-callback-" + action);
+    int quiesced = 0;
+    fixture.core->onQuiesced = [&](const LocalInputLease &) { ++quiesced; };
+    fixture.establish();
+    check(fixture.core->offer(leaseOffer(fixtureLease())), "Cannot exercise host offer callback");
+    if (action == "revoke") {
+      check(until([&] { return quiesced == 1 || fixture.closed; }) && !fixture.closed, "Reentrant host offer failed");
+      fixture.core->close();
+    } else
+      check(until([&] { return fixture.closed; }), "Failed/destructive host offer callback retained channel");
+    fixture.childExitedCleanly();
+  }
+}
+void preflightExpiry()
+{
+  for (const bool incoming : {false, true}) {
+    Fixture fixture("patient");
+    fixture.establish();
+    int callbacks = 0;
+    fixture.core->onCandidate = [&](const LocalInputLease &) { ++callbacks; };
+    LocalInputChannelTestAccess::stopTimer(*fixture.core);
+    QThread::msleep(limits.timeoutMs + 50);
+    if (incoming)
+      LocalInputChannelTestAccess::incoming(*fixture.core, 13, leasePayload(fixtureLease()));
+    else
+      check(!fixture.core->offer(leaseOffer(fixtureLease())), "Expired private channel sent preflight");
+    check(fixture.closed && callbacks == 0, "Queued preflight revived an expired private channel");
+    fixture.childExitedCleanly();
+  }
 }
 
 void roundtrip()
@@ -502,7 +935,7 @@ void malformedBootstrap()
 }
 void changedBindings()
 {
-  for (int field = 0; field < 9; ++field) {
+  for (int field = 0; field < 14; ++field) {
     Fixture fixture;
     fixture.activate();
     auto lease = fixtureLease();
@@ -533,6 +966,21 @@ void changedBindings()
       break;
     case 8:
       ++lease.routeGeneration;
+      break;
+    case 9:
+      ++lease.coreServerIncarnation;
+      break;
+    case 10:
+      ++lease.coreRecipient;
+      break;
+    case 11:
+      ++lease.coreSelectionGeneration;
+      break;
+    case 12:
+      ++lease.focusRequest;
+      break;
+    case 13:
+      ++lease.keyboardRouteGeneration;
       break;
     }
     check(!fixture.core->sendOriginal(lease, fixtureEvent(1)), "Local API accepted a different lease");
@@ -1056,6 +1504,13 @@ int main(int argc, char **argv)
     check(arguments.size() == 1, "Unexpected local input test argument");
     descriptorAndIdentityGuards();
     exclusiveInheritance();
+    preflightValues();
+    preflightRoundtrip();
+    preflightWireLayout();
+    preflightDoesNotOwnLeaseState();
+    malformedPreflight();
+    preflightCallbacks();
+    preflightExpiry();
     roundtrip();
     authoritativeCommit();
     malformedBootstrap();
@@ -1068,7 +1523,8 @@ int main(int argc, char **argv)
     lossAndLimits();
     QTextStream(
         stdout
-    ) << "PASS: inherited IPC, process/role/incarnation binding, authoritative leases, "
+    ) << "PASS: inherited IPC, process/role/incarnation binding, version 2 preflight isolation and framing, "
+         "authoritative leases, "
          "original-event framing, stale/replayed/malformed rejection, bounded queues and owner revocation\n";
     return 0;
   } catch (const std::exception &error) {

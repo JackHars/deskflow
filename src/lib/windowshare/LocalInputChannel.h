@@ -40,13 +40,30 @@ std::optional<LocalInputProcess> currentLocalInputProcess();
 // This does not transfer ownership or authenticate the launching process.
 bool protectLocalInputDescriptor(int descriptor);
 
-struct LocalInputLease
+// Private, core-attested selection. All four counters are full nonzero u64s;
+// none is a JSON/window counter. Names and addresses never establish identity.
+// Wire order: four counters (32), Deskflow incarnation (16), both pins (64).
+struct LocalInputOffer
 {
-  LocalInputIncarnation deskflowClientIncarnation{}, windowShareClientIncarnation{};
+  std::uint64_t routeGeneration = 0, coreServerIncarnation = 0, coreRecipient = 0, coreSelectionGeneration = 0;
+  LocalInputIncarnation deskflowClientIncarnation{};
   LocalInputPin deskflowPeerPin{}, windowSharePeerPin{};
-  std::uint64_t session = 0, epoch = 0, focusRevision = 0, geometryRevision = 0, routeGeneration = 0;
+  bool operator==(const LocalInputOffer &) const = default;
+};
+bool validLocalInputOffer(const LocalInputOffer &offer);
+
+// Adds the independently host-attested connection and exact keyboard fence.
+// Wire order: Offer (112), WindowShare incarnation (16), six counters (48).
+// These six host counters must be in [1, 2^53-1], matching the JSON protocol.
+// keyboardRouteGeneration and the private routeGeneration are distinct scopes.
+struct LocalInputLease : LocalInputOffer
+{
+  LocalInputIncarnation windowShareClientIncarnation{};
+  std::uint64_t session = 0, epoch = 0, focusRequest = 0, focusRevision = 0, geometryRevision = 0,
+                keyboardRouteGeneration = 0;
   bool operator==(const LocalInputLease &) const = default;
 };
+LocalInputOffer leaseOffer(const LocalInputLease &lease);
 bool validLocalInputLease(const LocalInputLease &lease);
 
 enum class LocalInputRole : std::uint8_t
@@ -94,8 +111,9 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 1;
+  static constexpr std::uint16_t version = 2;
   static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 256, maxQueueBytes = 16 * 1024;
+  static constexpr qsizetype offerPayloadBytes = 112, leasePayloadBytes = 176, originalPayloadBytes = 209;
 
   // Takes ownership even on failure. expectedCore must come from an independently
   // trusted bootstrap, not argv, an environment variable, or peer packet fields.
@@ -106,6 +124,14 @@ public:
   bool authenticated() const;
   LocalInputPhase phase() const;
   std::optional<LocalInputLease> lease() const;
+  // Preflight transports attestations only. It never changes lease phase,
+  // route/capture high-water marks, or authorization. The coordinator owns
+  // pending attempts, deadlines, approval, and stale-generation classification.
+  bool offer(LocalInputOffer offer);     // Core -> host.
+  bool candidate(LocalInputLease lease); // Host -> core.
+  bool quiesced(LocalInputLease lease);  // Host -> core.
+  // Bidirectional preflight cancellation, distinct from revoke() of a lease.
+  bool cancelOffer(LocalInputOffer offer, LocalInputRevocation reason = LocalInputRevocation::Requested);
   bool prepare(LocalInputLease lease);                              // Core -> host.
   bool acknowledgePrepare(LocalInputLease lease);                   // Host -> core.
   bool commit(LocalInputLease lease);                               // Core -> host; acknowledgement activates core.
@@ -130,6 +156,9 @@ public:
   // snapshots, and an authorization cannot grant through a state change.
   // Throwing callbacks fail closed. Recursive authorization is denied.
   std::function<void()> onAuthenticated;
+  std::function<void(const LocalInputOffer &)> onOffer;
+  std::function<void(const LocalInputLease &)> onCandidate, onQuiesced;
+  std::function<void(const LocalInputOffer &, LocalInputRevocation)> onOfferCancelled;
   std::function<void(const LocalInputLease &)> onPrepare, onPrepared, onActivated;
   std::function<void(const LocalInputLease &, const OriginalKeyEvent &)> onOriginal;
   // Release this exact owner's delivered state; do not fabricate capture events.

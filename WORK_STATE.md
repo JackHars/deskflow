@@ -62,8 +62,9 @@ This verifies packaged code, not complete loaded-module integrity. Child launch
 strips ambient DYLD and Qt/QML plugin search overrides, but activation still
 needs an enforceable module-integrity policy.
 
-The next integration slice needs an Offer → Candidate → Quiesced preflight before
-the private channel's Prepare exchange.
+The next integration slice installs the isolated Offer → Candidate → Quiesced
+preflight before the private channel's Prepare exchange, once the activation
+providers below are available.
 The main Qt thread must own private IPC; the core runs a separate blocking event
 loop. Bind accepted active client connections to revocable immutable snapshots,
 never names or proxy pointers across threads. Original keys and pointer intent
@@ -82,18 +83,47 @@ The Qt-owned companion Session closes the mailbox before channel/child/session
 teardown, while ServerApp clears it before nested shutdown loops. No proxies,
 streams, queued Qt calls or pre-ready EventQueue events cross this boundary.
 This foundation remains inactive input metadata: no original authorizer or
-Offer/Candidate/Quiesced coordinator has been installed.
+Offer/Candidate/Quiesced coordinator has been installed in production.
 
-The next preflight must bind the independent WindowShare connection, the explicit
-approved dual-pin mapping, and `focusRequest`, which the current private lease
-does not contain. Add bounded commands/replies and exact Offer/Candidate/Quiesced
-echoes before Prepare. No original activation before pointer ordering is resolved.
+The private v2 protocol and isolated preflight coordinator now implement exact
+Offer/Candidate/Quiesced/Cancel bindings. Offers contain core server, recipient
+and selection identity; leases add both TLS incarnations, `focusRequest`, and
+separate private-route and keyboard-fence generations. Explicit immutable policy
+admits at most eight unambiguous dual-pin pairs. The coordinator checks independent
+local connection evidence, the same retained selection, and one absolute two-second
+deadline. Required module-integrity, ordered-input and neutral-boundary providers
+default to denial. A bounded control FIFO preserves transport ordering and defers
+reentrant replacements until owner releases complete.
+
+WindowShare TLS now publishes revocable tickets and immutable six-second read
+observations; queued late reads cannot refresh expired authority. Bridge can
+reserve an exact native focus candidate without requesting a viewer fence, then
+start that reservation and independently query quiescence. A stalled reservation
+expires without renewing its deadline. Production policy loading/controller
+wiring remains pending, as do capture ordering and module integrity. Original
+capture and injection remain off.
 
 ## Recorded validation
 
 Local environment: Intel Mac, macOS 26.1, AppleClang 17, Qt 6.8.3, FFmpeg 8.0.1.
 The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link.
 
+- After preflight v2, all 30 default-off Deskflow, all 12 standalone app and all
+  49 integrated opt-in CTest suites pass. Strict and ASan/UBSan preflight suites
+  cover missing integrity/neutral/ordering/release providers, both independent
+  identities, deadline expiry during a blocked mailbox read, exact focus binding,
+  queue overflow, retired/future traffic, policy replacement and destructive
+  callbacks. Consecutive CancelOffer/Original and immediate activation regressions
+  fail when their ordering fixes are removed. Pending owner releases cannot start
+  a replacement attempt. These tests use fixture processes, not OS input.
+- Private v2 framing strict and ASan/UBSan suites pass with golden 112/176/209-byte
+  payload checks, full-width private counters, JSON-safe host counters, role/length
+  rejection and unchanged default-deny input. Transport evidence and Bridge
+  reservation suites pass strict and ASan/UBSan with OpenSSL and SecureTransport.
+  TLS tests cover retained expiry, queued late reads, blocked packet callbacks,
+  immediate terminal revocation and same-pin reconnects. Leak detection is disabled
+  for the unsupported Mac runtime; address and undefined-behavior checks are active.
+  Formatting, whitespace and REUSE validation (918/918 files) also pass.
 - All five isolated core suites passed. Protocol, input-routing and original
   keyboard suites use ASan/UBSan and strict compiler warnings; platform-marker
   tests also pass. The keyboard suite checks 12,000 deterministic interleavings
@@ -203,24 +233,24 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   disposable loopback TLS fixture: initial refusal, recovery, authenticated
   disconnect/reconnect, fresh negotiation and clean exit. This newer smoke test
   never starts NativeHost, registers a tap, exports a window or changes displays.
-- All five GitHub Actions jobs passed for `e97650e728fa1374f4868362a9a020d199538995`
-  ([run 38235086860](https://github.com/JackHars/deskflow/actions/runs/38235086860)).
-  That includes the packaged trusted core/host handshake and predates the new
-  selected-peer ticket/mailbox work; its local results are recorded separately.
+- All five GitHub Actions jobs passed for `6d9da2014794832e64f10df9e9b74031f7fc0b81`
+  ([run 38237378832](https://github.com/JackHars/deskflow/actions/runs/38237378832)).
+  That includes selected-peer snapshots and the packaged trusted core/host
+  handshake. The subsequent preflight work is recorded separately below.
 
 ## Local package
 
 The new signed core-main bundle is
-`build/packages/selected-peer-20261012/DeskflowSeamless-Core-Experimental.app`,
+`build/packages/preflight-20261012/DeskflowSeamless-Core-Experimental.app`,
 with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification.
 It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
 notarized. ZIP SHA-256:
-`996f7791efe096e1309b4ceb0b4a346792db167240817f7e75f3c75d59a6e7b4`.
+`b2ae647726574948eece1c67ac54a58af222fcfa3ac642889cdbfef8c1b84b56`.
 The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
 The package and installed copy passed recursive dependency/signature verification,
 the private handshake/bootstrap-rejection smoke, and the viewer-only TLS/reconnect
-smoke, with original input disabled. The preceding trusted-launch installation is
-preserved in `build/packages/selected-peer-installed-backup-20261012/`.
+smoke, with original input disabled. The preceding selected-peer installation is
+preserved in `build/packages/preflight-installed-backup-20261012/`.
 Its core supports the handshake-only probe and explicit host-config launch
 documented in `docs/seamless-windows.md`; original input authorization remains off.
 
