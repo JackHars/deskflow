@@ -3,6 +3,70 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Full viewer input forwarding fence (2026-10-12)
+
+Commit `d879b781b06f004e9694b8b894c26ad140fa55cc` is pushed to the feature
+branch. The real Viewer and NativeHost can now pause keyboard, button, movement
+and scroll forwarding together through the optional `input-route-v1` capability.
+Scope belongs to the exact session/focus/geometry binding. Old peers retain
+their existing keyboard-only or ordinary viewer behavior. The contract is in
+`deploy/windowshare/forwarding-fence.md`.
+
+The gate is installed before callbacks and releases; resume cannot retarget a
+press that began while forwarding was closed. Exact-owner releases remain
+available, and a raw network input packet cannot bypass the native host gate.
+Review reproduced a pending-focus replay bug: a callback could pause and resume
+before a detached input queue finished flushing. Retained scope-specific
+generation markers now discard that old queue even after immediate resume.
+The regression failed before the fix and passes afterward. The private
+keyboard-only preflight also rejects full scope before constructing a lease,
+rather than silently dropping the requested scope.
+
+All nine targeted Mac suites pass, including both TLS backends, Viewer, Bridge,
+native recovery/admission and private input/preflight/companion checks. The
+viewer-only reconnect smoke and all 22 GNOME fixture unit cases pass. Formatting,
+diff checks and REUSE lint pass. No new Mac native input session or local package
+installation was run. Local evidence is under
+`build/full-input-fence-20261012/mac/`.
+
+Home Ubuntu built 32 actual application/core/fixture/test binaries from the
+frozen source. All 30 selected CTest suites pass with zero failures or skips,
+including five Qt core suites with 150 entries and the two private X11 scale
+tests. GNOME provider logic, readiness and fixture checks pass 12, 11 and 22
+cases respectively. The compiled production objects enable both the actual
+EIS backend and the QtWayland adapter.
+
+Actual private GNOME Shell 50.1 acceptance passes at Qt scales 1 and 1.25. Each
+run records four exact full-scope acknowledgments, no forwarded key/button/
+move/scroll packets in the fenced interval, and seven ordered fresh input
+receipts after resume. Native cursor observations remain available while
+forwarding is closed. This uses a private headless compositor, software
+rendering and a synthetic source frame; physical monitor scaling, the Mac
+source and human input are not part of this run. Neither an acknowledgment nor
+an EIS synchronization reply is treated as compositor consumption evidence.
+
+All 1,029 frozen source entries match the implementation commit's Git blob
+bytes and modes. The parent independently verified 75 copied artifacts,
+parsed the test results and exact TLS intervals, and compared the ordinary
+process/settings/container inventories. The owned container and both
+supervisors are absent, with zero child/container exits. Ordinary Deskflow and
+the two unrelated containers were preserved. Ubuntu evidence is
+`build/full-input-fence-20261012/ubuntu/evidence.json`, SHA-256
+`287d569f69f724af4d1e31b2e4ef25d89018a41b5abca9ca10a1e2e9f99630b7`;
+the independent audit is `independent-verification.json` beside it.
+
+All six CI jobs and every job step pass for the implementation commit in
+[run 38318502915](https://github.com/JackHars/deskflow/actions/runs/38318502915).
+This includes native GNOME, both sanitizer core compilers, private input
+sanitizers, the Linux compatibility build, Mac hotkey checks and packaged
+private-core handshake. Complete metadata, logs and hashes are retained under
+`build/full-input-fence-20261012/ci-38318502915/`. The next integration still
+needs a Server decision before legacy input dispatch, native
+queue draining, exact routed-point validation and the production coordinator.
+Original-input delivery remains disabled. Physical acceptance and the requested
+Mac App Management permission remain open; the overall roadmap estimate is
+still approximately 50%.
+
 ## Negotiated input submission tracing (2026-10-12)
 
 The captured-event stamp now follows the actual Server input write through the

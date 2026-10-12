@@ -71,6 +71,16 @@ Ubuntu. Ubuntu also passes 26 compatibility entries with window sharing disabled
 on code revision `5de96808c` in
 [run 38315383611](https://github.com/JackHars/deskflow/actions/runs/38315383611).
 
+The full-input forwarding milestone `d879b781b` additionally passes nine Mac
+suites and 30 home Ubuntu suites. Actual private GNOME 50.1 tests at Qt scales
+1 and 1.25 verify that key, button, movement and scroll forwarding pause and
+resume together, with exact controls and seven ordered fresh input receipts
+per run. These tests use a synthetic frame and do not exercise physical Mac
+input or compositor monitor scaling. Source and cleanup evidence are recorded
+in `WORK_STATE.md`. All six CI jobs pass for this code revision in
+[run 38318502915](https://github.com/JackHars/deskflow/actions/runs/38318502915);
+original-input delivery remains disabled.
+
 ### Actual two-machine synthetic acceptance
 
 The coordinator exports only its own disposable Mac source window. A private
