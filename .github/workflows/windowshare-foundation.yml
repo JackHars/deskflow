@@ -110,7 +110,7 @@ jobs:
           apt-get install -y --no-install-recommends git ca-certificates cmake build-essential ninja-build pkg-config python3 \
             qt6-base-dev qt6-tools-dev libavcodec-dev libavutil-dev libswscale-dev libx264-dev openssl libssl-dev help2man \
             libx11-dev libx11-xcb-dev libxtst-dev libxkbfile-dev libxinerama-dev libxrandr-dev libxi-dev \
-            libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth \
+            libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth dbus-daemon \
             libxkbregistry-dev libxkbcommon-dev libei-dev libportal-dev
       - uses: actions/checkout@v4
       - name: Configure the opt-in application

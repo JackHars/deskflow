@@ -111,7 +111,11 @@ class Provider {
         if (!supportedVersion(Config.PACKAGE_VERSION))
             throw new Error('This provider supports stable GNOME Shell 50 only');
         this._backend = typeName(global.backend);
-        this._native = Meta.is_wayland_compositor() && this._backend === 'MetaBackendNative';
+        // Mutter 50 always creates its Wayland compositor and removed the old
+        // is_wayland_compositor() API. The actual backend type still excludes
+        // nested backends; neither session environment nor a display name is
+        // used as evidence here.
+        this._native = this._backend === 'MetaBackendNative';
         if (!this._native || typeof Meta.WaylandClient.new_subprocess !== 'function')
             throw new Error('A Mutter 50 native Wayland backend is required');
         this._address = GLib.getenv('DBUS_SESSION_BUS_ADDRESS');
