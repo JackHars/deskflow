@@ -8,6 +8,7 @@
 #include "Viewer.h"
 #if defined(WINDOWSHARE_LOCAL_INPUT) && !defined(WINDOWSHARE_BRIDGE_TEST)
 #include "LocalInputBootstrap.h"
+#include "LocalInputCodeAdmission.h"
 #include "LocalInputSession.h"
 #endif
 #include <QApplication>
@@ -1376,20 +1377,49 @@ int main(int argc, char **argv)
 #ifdef WINDOWSHARE_LOCAL_INPUT
     QCommandLineOption inputDescriptor("core-input-fd", "Inherited private descriptor.", "descriptor");
     QCommandLineOption inputProbe("core-input-probe", "Private handshake diagnostic.");
+    QCommandLineOption inputPeerPairs("core-input-peer-pairs", "Configured private input peer pairs.", "json");
     inputDescriptor.setFlags(QCommandLineOption::HiddenFromHelp);
     inputProbe.setFlags(QCommandLineOption::HiddenFromHelp);
-    parser.addOptions({inputDescriptor, inputProbe});
+    inputPeerPairs.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOptions({inputDescriptor, inputProbe, inputPeerPairs});
     // Validate inherited-mode combinations before help/version or any identity,
     // recovery, permission, network, or NativeHost action can run.
     if (!parser.parse(app.arguments()))
       throw std::runtime_error(parser.errorText().toStdString());
     inputBootstrap.validateOptions(parser.optionNames());
+    // inputBootstrap retains the trusted core's immutable explicit peer map.
+    // An absent/empty map denies every pair; no controller or input authorizer
+    // is installed until all real capture/delivery/admission providers exist.
     std::unique_ptr<LocalInputChannel> coreInput;
+    std::unique_ptr<LocalInputCodeAdmission> inputAdmission;
+    QTimer inputAdmissionTimer;
     if (inputBootstrap.inherited()) {
       coreInput = inputBootstrap.adopt();
       if (inputBootstrap.probe())
         return localInputHostProbe(std::move(coreInput));
       coreInput->onClosed = [&shutdown](const QString &) { shutdown.request(); };
+      if (!inputBootstrap.peerPolicy().empty()) {
+        // Run the optional inspection only after the ordinary private handshake.
+        // Expensive Security work never blocks this event loop or input hooks.
+        coreInput->onAuthenticated = [&] {
+          QString admissionError;
+          inputAdmission = LocalInputCodeAdmission::request(*coreInput, &admissionError);
+          if (inputAdmission)
+            inputAdmissionTimer.start(100);
+          else
+            QTextStream(stderr) << "Window sharing code admission unavailable: " << admissionError << '\n';
+        };
+        QObject::connect(&inputAdmissionTimer, &QTimer::timeout, &inputAdmissionTimer, [&] {
+          const auto state = inputAdmission->state();
+          if (state == LocalInputCodeAdmission::State::Pending)
+            return;
+          inputAdmissionTimer.stop();
+          if (state == LocalInputCodeAdmission::State::Ready)
+            QTextStream(stderr) << "Window sharing exact library admission verified; original input remains disabled\n";
+          else
+            QTextStream(stderr) << "Window sharing code admission unavailable: " << inputAdmission->error() << '\n';
+        });
+      }
     }
 #endif
     parser.process(app);

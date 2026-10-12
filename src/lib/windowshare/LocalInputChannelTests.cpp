@@ -13,6 +13,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <thread>
 #ifdef Q_OS_UNIX
 #include <fcntl.h>
 #include <poll.h>
@@ -1841,6 +1842,46 @@ void lossAndLimits()
     );
   }
 }
+void authenticatedIdentityValues()
+{
+  Fixture fixture;
+  check(!fixture.core->authenticatedIdentity(), "Pre-handshake channel exposed an authenticated identity");
+  check(until([&] { return fixture.ready; }), "Identity fixture did not authenticate");
+  const auto identity = fixture.core->authenticatedIdentity();
+  check(
+      identity && identity->role == LocalInputRole::Core && identity->self == currentLocalInputProcess() &&
+          identity->peer == localInputProcess(fixture.child.processId()),
+      "Authenticated identity did not preserve exact role/process births"
+  );
+  check(
+      std::any_of(identity->coreIncarnation.begin(), identity->coreIncarnation.end(), [](auto byte) { return byte; }) &&
+          std::any_of(
+              identity->hostIncarnation.begin(), identity->hostIncarnation.end(), [](auto byte) { return byte; }
+          ),
+      "Authenticated identity omitted a channel incarnation"
+  );
+  bool foreignDenied = false;
+  std::thread foreign([&] { foreignDenied = !fixture.core->authenticatedIdentity(); });
+  foreign.join();
+  check(
+      foreignDenied && fixture.core->authenticatedIdentity() == identity,
+      "Foreign identity query gained or changed authority"
+  );
+  bool revokedBeforeNotification = false;
+  fixture.core->onClosed = [&](QString) { revokedBeforeNotification = !fixture.core->authenticatedIdentity(); };
+  fixture.core->close();
+  check(
+      revokedBeforeNotification && !fixture.core->authenticatedIdentity(),
+      "Closed channel retained authenticated identity"
+  );
+  Fixture replacement;
+  check(until([&] { return replacement.ready; }), "Replacement identity fixture did not authenticate");
+  const auto next = replacement.core->authenticatedIdentity();
+  check(
+      next && next->coreIncarnation != identity->coreIncarnation && next->hostIncarnation != identity->hostIncarnation,
+      "New connection reused an old authenticated identity"
+  );
+}
 void descriptorAndIdentityGuards()
 {
   check(
@@ -1953,6 +1994,7 @@ int main(int argc, char **argv)
     }
     check(arguments.size() == 1, "Unexpected local input test argument");
     descriptorAndIdentityGuards();
+    authenticatedIdentityValues();
     exclusiveInheritance();
     preflightValues();
     preflightRoundtrip();

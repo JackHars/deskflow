@@ -4,6 +4,29 @@ This branch contains a native Mac capture host and independent Qt viewer windows
 It is an opt-in development milestone, not yet the completed drag-between-desktops
 feature. The ordinary Deskflow build remains the default.
 
+## Roadmap status
+
+The project is in integration, before the first verified interactive Mac window
+on Ubuntu. Passing component tests does not establish that complete user flow.
+The next acceptance test is one window with working capture, focus, keyboard,
+pointer, scrolling and return, using the Mac keyboard and trackpad.
+
+| Milestone | Current evidence | Work required to finish |
+| --- | --- | --- |
+| Capture, viewer and transport | Mac capture/encode/decode has run live; authenticated transport, independent viewers and reconnect pass automated tests. | Repeat the complete flow across the two machines with interactive input. |
+| Original input integration | Ordered capture records, press bookkeeping, private channel and handoff coordinator pass tests. Delivery remains disabled. | Connect real source ownership, coordinate validation, pointer fencing and integrity checks to the production coordinator. |
+| Linux and two monitors | Ubuntu builds, 52 integrated suites and private X11 tests pass. The inspected desktop is GNOME Wayland with one active monitor. | Establish Wayland coordinate handling and verify both physical monitor destinations. |
+| Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
+| Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
+| App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
+| Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
+
+The Ubuntu results above cover `aab8467fb`. The later companion-startup fix
+`bc88d6e83` passed all five CI jobs, including Linux, but its home-Ubuntu rerun
+was interrupted by loss of the tunnel route. Hardware tests still require the
+reachable Ubuntu desktop and an open, unlocked Mac. See `WORK_STATE.md` for test
+logs, package details and the distinction between completed and unverified work.
+
 ## Current behavior
 
 The Mac host lists eligible application windows. Either paired computer can
@@ -210,7 +233,7 @@ to that packaged core. The file must be a regular JSON file of at most 16 KiB:
 }
 ```
 
-Only `holdingDisplay` and `headless` are optional. Use the Mac's actual interface
+`holdingDisplay`, `headless` and `inputPeerPairs` are optional. Use the Mac's actual interface
 address, a previously created identity, and the approved viewer's fingerprint.
 Unknown/duplicate fields, wrong types, relative identity/journal paths and arbitrary
 child arguments are rejected. This option starts the real native host and needs
@@ -221,6 +244,37 @@ Normal shutdown allows five seconds for EOF-driven restoration, then sends
 SIGTERM and allows five more seconds before killing an unresponsive owned host.
 The recovery journal remains the fallback for interrupted restoration. The
 handshake-only probe uses a shorter shutdown interval.
+
+For eventual original-input admission, `inputPeerPairs` explicitly pairs the
+approved Deskflow TLS certificate with the approved WindowShare viewer TLS
+certificate. The two fingerprints identify separate connections and may differ:
+
+```json
+"inputPeerPairs": [
+  {
+    "deskflowPeerPin": "REPLACE_WITH_DESKFLOW_PEER_64_HEXADECIMAL_DIGITS",
+    "windowSharePeerPin": "REPLACE_WITH_WINDOWSHARE_PEER_64_HEXADECIMAL_DIGITS"
+  }
+]
+```
+
+Insert that optional field in the host configuration object. Missing or empty
+`inputPeerPairs` denies every original-input pair while preserving the existing
+host configuration behavior. At most eight pairs are accepted. Each fingerprint
+must contain exactly 64 ASCII hexadecimal digits; either letter case is accepted
+and normalized to lowercase. All-zero values, duplicate pairs, either fingerprint
+mapped to multiple partners, unknown row fields and duplicate JSON keys are
+rejected. The host's existing `peerPin` still controls its separate WindowShare
+TLS connection; it never creates a Deskflow pairing automatically. Only an exact
+configured pair can match the independently authenticated live connections.
+
+The core retains one immutable configuration snapshot and forwards its canonical
+public pin map through a bounded internal option to its inherited companion.
+The host retains that same map; neither process rereads or learns policy from
+network messages, computer names or discovery. Replacing the file requires a new
+launch to take effect. This configuration does not enable original input: the
+production preflight controller and authorizer remain uninstalled until the real
+neutrality, module-admission and ordered-delivery providers are available.
 
 Both processes verify fixed role paths, PID birth identities and exact signed
 code against the running bundle main's resource seal. A same-user process, an
@@ -440,7 +494,7 @@ library validation, no entitlements and valid/non-debugged dynamic status. Its
 result is a historical inspection snapshot, with start/end times, rather than
 retained authority. This synchronous Security-framework check must not run in an
 input tap. It establishes the limited Apple-or-same-Team admission policy, not
-exact loaded-image identity, and cannot satisfy the preflight module-integrity
+exact loaded-image identity, and cannot satisfy the preflight code-admission
 provider by itself.
 
 `inspectExactPermittedLibraries` adds a historical snapshot of the stronger
@@ -453,6 +507,34 @@ inspection. The snapshot records observation times, manifest SHA-256, permitted
 hashes, record count and distinct slice count; it supplies no retained capability
 or production preflight provider. It must never run in an event tap.
 
+`LocalInputCodeAdmission` binds that stronger inspection to the exact authenticated
+private channel and live process/anchor identities. It checks the kernel-enforced
+non-Apple library admission policy for those executable lifetimes. Apple/system
+code remains an OS exception. This does not inventory loaded images, attest
+process memory, detect changes among permitted libraries, or defend against
+privileged compromise or defects in admitted code.
+
+The live bundle-main anchor must be the authenticated Core endpoint. A separate
+ancestor can be inspected historically but cannot supply this retained proof:
+the core/host channel cannot observe that ancestor replacing its executable.
+The adopted descriptors are close-on-exec. Trusted code deliberately copying or
+delegating that private descriptor is outside this admission boundary.
+
+Core and host request this optional inspection after authentication only when
+`inputPeerPairs` is nonempty. One worker per process performs the synchronous
+Security/filesystem work; no unbounded work queue is created. The Qt owner polls
+without waiting for that worker and admits the result within an absolute
+15-second budget. Timeout or destruction discards the result without waiting for
+Security calls to return; a stalled worker keeps the single slot occupied. The
+ordinary private handshake and its heartbeat budgets are unchanged.
+
+Copies of the resulting proof require the original Qt thread and recheck channel
+freshness, connection identity and process births at use. Channel closure/expiry,
+anchor loss or guard revocation/destruction invalidates them. These checks read
+no signature files in the input path. A failed check leaves original input
+unavailable while ordinary Deskflow continues. Configuring pairs or obtaining a
+proof still does not install the input coordinator or authorize delivery.
+
 The signed peer checks are reproducible without a native host: build
 `windowshare-peer-trust-tests`, use its `--make-fixture-bundle` option with a new
 `deskflow-windowshare.app` path inside a private directory, and package those
@@ -463,6 +545,12 @@ checks both roles, altered policy, absent/noncanonical manifests, wrong slice
 records, resource tampering, stale identities and a replaced live anchor. The
 driver requires the fixture's proof resource and never runs a display helper;
 do not substitute a production app for the fixture.
+
+The same exact-signed disposable fixture's main executable supports
+`--admission-core allow`. It authenticates both fixed endpoints, runs their real
+asynchronous inspections and checks that closing the private connection revokes
+both retained proofs. The ordinary test suite exercises the corresponding
+ad-hoc denial case. These headless checks never start a native window host.
 
 An optional `keyboard-route-v1` capability coordinates the viewer's keyboard
 forwarding with an independent native admission fence. The viewer releases its
@@ -479,20 +567,23 @@ The local preflight must now explicitly activate that exact Bridge binding
 before the private Commit acknowledgment. Successful activation retires the
 setup deadline; abandoned reservations still expire. Active checks retain the
 native focus/geometry and legacy-input fence while permitting owned original
-presses to remain held. The channel's existing heartbeat rechecks active module
+presses to remain held. The channel's existing heartbeat rechecks active admission
 and delivery providers and releases the owner on failure even without new input;
 it does not repeat the one-time physical-neutrality check.
 
 Activation still requires both live authenticated network connections, an
-explicit approved dual-pin mapping, a neutral capture boundary, a loaded-module
-integrity policy, and causal ordering of original keys
+explicit approved dual-pin mapping, a verified capture boundary, retained code
+admission, and causal ordering of original keys
 with pointer events. A cache of the latest modifier flags is insufficient: a
 delayed click must not be delivered after a later modifier release. These remain
 integration requirements, not behavior claimed by the current automated tests.
 The tested preflight coordinator is not yet constructed by either production
-endpoint. Explicit policy configuration and that wiring will follow the ordered
-capture and module-integrity providers; this milestone does not suspend a real
-viewer or enable original input.
+endpoint. Explicit policy and optional code-admission checks are wired into the
+launch path; ordered ownership, pointer fencing and coordinate validation still
+need integration. The existing global-neutrality interface has no native
+provider; quiet time or a current HID-state query is not a substitute. The next
+route must preserve each press and scroll gesture's owner through an ordered
+cutover. This milestone does not suspend a real viewer or enable original input.
 
 The manual `windowshare-native-smoke` executable opens its own disposable test
 window and verifies real capture, decoding, targeted input and restoration. It
@@ -509,6 +600,10 @@ GitHub Actions for a commit's CI results. A workflow file alone is not evidence
 that a job passed.
 
 ## Remaining work
+
+The [coordinate integration plan](seamless-windows-coordinate-plan.md) describes
+the proposed native X11 witness, ordered pointer validation and the separate
+GNOME Wayland compositor requirement. It is a plan, not implemented behavior.
 
 Automatic edge-drag export/return and transactional drag ownership are unfinished.
 Precise Wayland placement may need compositor cooperation; Qt screen selection

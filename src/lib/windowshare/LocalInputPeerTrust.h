@@ -16,7 +16,7 @@ namespace deskflow::windowshare {
 // It is tied to both fixed roles and the live bundle-main anchor. Retaining it
 // after a process exits, is debugged, or changes does not retain any authority.
 // In particular, this is NOT exact loaded-image identity, process-memory
-// attestation, or a LocalInputPreflight::Checks::moduleIntegrity provider.
+// attestation, or a LocalInputPreflight::Checks::codeAdmission provider.
 class LocalInputRestrictedLibraryAdmissionSnapshot final
 {
 public:
@@ -91,7 +91,7 @@ private:
 // each live role's authenticated executable signature. The OS's Apple/system
 // exception remains; hashes identify code, not its loading path, a loaded-image
 // inventory, or uncompromised process memory. This is not retained authority or
-// a LocalInputPreflight::Checks::moduleIntegrity provider.
+// a LocalInputPreflight::Checks::codeAdmission provider.
 class LocalInputExactPermittedLibrariesSnapshot final
 {
 public:

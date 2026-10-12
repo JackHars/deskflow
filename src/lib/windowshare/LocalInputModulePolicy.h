@@ -74,6 +74,6 @@ const char *localInputModulePolicyFailureText(LocalInputModulePolicyFailure fail
 // Success establishes only the requested Apple-or-same-Team library admission
 // policy, assuming trustworthy OS observations. It does not identify the exact
 // images already loaded or permitted to load, attest process memory, authorize
-// original input, or satisfy LocalInputPreflight::Checks::moduleIntegrity.
+// original input, or satisfy LocalInputPreflight::Checks::codeAdmission.
 
 } // namespace deskflow::windowshare

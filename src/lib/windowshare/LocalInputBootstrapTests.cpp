@@ -4,6 +4,7 @@
  */
 #include "LocalInputBootstrap.h"
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -145,7 +146,11 @@ void configurations()
       {"headless", true}
   };
   write(QJsonDocument(valid).toJson());
-  const auto arguments = localInputHostArguments(path);
+  const auto configuration = LocalInputHostConfiguration::load(path);
+  const auto &arguments = configuration.hostArguments();
+  LocalInputPin unknown{};
+  unknown.fill(0xaa);
+  check(!configuration.peerPolicy().windowSharePeer(unknown), "Absent input policy approved the host network pin");
   check(
       arguments ==
           QStringList{
@@ -160,7 +165,7 @@ void configurations()
     auto missing = valid;
     missing.remove(it.key());
     write(QJsonDocument(missing).toJson());
-    denied([&] { localInputHostArguments(path); });
+    denied([&] { LocalInputHostConfiguration::load(path); });
   }
   const std::vector<std::pair<QString, QJsonValue>> rejected{
       {"version", 2},
@@ -184,21 +189,199 @@ void configurations()
     auto invalid = valid;
     invalid.insert(key, value);
     write(QJsonDocument(invalid).toJson());
-    denied([&] { localInputHostArguments(path); });
+    denied([&] { LocalInputHostConfiguration::load(path); });
   }
   auto bytes = QJsonDocument(valid).toJson(QJsonDocument::Compact);
   bytes.insert(1, "\"\\u0076ersion\":1,");
   write(bytes);
-  denied([&] { localInputHostArguments(path); });
+  denied([&] { LocalInputHostConfiguration::load(path); });
   for (const auto &data : {QByteArray("[]"), QByteArray("{broken"), QByteArray(16385, ' ')}) {
     write(data);
-    denied([&] { localInputHostArguments(path); });
+    denied([&] { LocalInputHostConfiguration::load(path); });
   }
   const auto fifo = QFile::encodeName(directory.filePath("fifo"));
   check(::mkfifo(fifo.constData(), 0600) == 0, "Cannot create nonblocking-read fixture");
-  denied([&] { localInputHostArguments(QString::fromUtf8(fifo)); });
-  denied([&] { localInputHostArguments(directory.path()); });
-  denied([&] { localInputHostArguments(directory.filePath("absent")); });
+  denied([&] { LocalInputHostConfiguration::load(QString::fromUtf8(fifo)); });
+  denied([&] { LocalInputHostConfiguration::load(directory.path()); });
+  denied([&] { LocalInputHostConfiguration::load(directory.filePath("absent")); });
+}
+LocalInputPin pin(std::uint8_t byte)
+{
+  LocalInputPin value{};
+  value.fill(byte);
+  return value;
+}
+QString pinText(std::uint8_t byte)
+{
+  return QString::fromLatin1(QByteArray(32, static_cast<char>(byte)).toHex());
+}
+QJsonObject peerPair(std::uint8_t core, std::uint8_t host)
+{
+  return {{"deskflowPeerPin", pinText(core)}, {"windowSharePeerPin", pinText(host)}};
+}
+void configuredPeerPolicy()
+{
+  QTemporaryDir directory;
+  check(directory.isValid(), "Cannot create policy fixture");
+  const auto path = directory.filePath("host.json");
+  const QJsonObject base{
+      {"version", 1},
+      {"listen", "127.0.0.1"},
+      {"port", 24810},
+      {"identity", "/tmp/identity"},
+      {"peerPin", pinText(0xaa)},
+      {"journal", "/tmp/restore.json"}
+  };
+  const auto write = [&](const QByteArray &bytes) {
+    QFile file(path);
+    check(
+        file.open(QIODevice::WriteOnly | QIODevice::Truncate) && file.write(bytes) == bytes.size(),
+        "Cannot write policy"
+    );
+  };
+  const auto configured = [&](QJsonValue pairs) {
+    auto json = base;
+    json.insert("inputPeerPairs", std::move(pairs));
+    write(QJsonDocument(json).toJson(QJsonDocument::Compact));
+    return LocalInputHostConfiguration::load(path);
+  };
+  const auto bootstrap = [&](const LocalInputHostConfiguration &configuration) {
+    const auto pair = LocalInputSocketPair::create();
+    const int fd = ::dup(pair.childDescriptor());
+    check(fd >= 3, "Cannot duplicate inherited policy descriptor");
+    Arguments arguments{};
+    arguments.text.push_back("host");
+    for (const auto &argument : configuration.hostArguments())
+      arguments.text.push_back(argument.toUtf8());
+    // The generated policy precedes the private descriptor, as in a real launch.
+    arguments.text.push_back(QByteArray("--core-input-fd=") + QByteArray::number(fd));
+    for (auto &argument : arguments.text)
+      arguments.pointers.push_back(argument.data());
+    return arguments.host();
+  };
+
+  auto row = peerPair(0xab, 0xcd);
+  row["deskflowPeerPin"] = pinText(0xab).toUpper();
+  const auto configuration = configured(QJsonArray{row});
+  check(configuration.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd), "Configured core map lost its exact pins");
+  check(!configuration.peerPolicy().windowSharePeer(pin(0xaa)), "Host network pin was learned as a Deskflow identity");
+  const auto expected = QJsonDocument(QJsonArray{peerPair(0xab, 0xcd)}).toJson(QJsonDocument::Compact);
+  check(
+      configuration.hostArguments().last() == "--core-input-peer-pairs=" + QString::fromUtf8(expected),
+      "Forwarded input policy was not canonical"
+  );
+  auto host = bootstrap(configuration);
+  check(
+      host.inherited() && !host.probe() && host.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd),
+      "Host map diverged"
+  );
+  const QStringList names{"core-input-fd", "enable-seamless", "listen",  "port",
+                          "identity",      "peer-pin",        "journal", "core-input-peer-pairs"};
+  host.validateOptions(names);
+  auto missingOption = names;
+  missingOption.removeAll("core-input-peer-pairs");
+  denied([&] { host.validateOptions(missingOption); });
+  auto duplicateOption = names;
+  duplicateOption.append("core-input-peer-pairs");
+  denied([&] { host.validateOptions(duplicateOption); });
+  auto movedHost = std::move(host);
+  check(movedHost.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd), "Moving bootstrap lost its policy");
+
+  // Neither endpoint rereads a changed file. Explicitly empty replacement is
+  // default-deny, while the retained launch snapshot remains the approved map.
+  const auto empty = configured(QJsonArray{});
+  auto emptyHost = bootstrap(empty);
+  check(
+      !empty.peerPolicy().windowSharePeer(pin(0xab)) && !emptyHost.peerPolicy().windowSharePeer(pin(0xab)),
+      "Empty policy approved input"
+  );
+  check(
+      configuration.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd) &&
+          movedHost.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd),
+      "Configuration file replacement mutated retained policy"
+  );
+  QJsonArray eight;
+  for (std::uint8_t i = 1; i <= 8; ++i)
+    eight.append(peerPair(i, static_cast<std::uint8_t>(i + 16)));
+  const auto full = configured(eight);
+  auto fullHost = bootstrap(full);
+  for (std::uint8_t i = 1; i <= 8; ++i)
+    check(
+        full.peerPolicy().windowSharePeer(pin(i)) == pin(static_cast<std::uint8_t>(i + 16)) &&
+            fullHost.peerPolicy().windowSharePeer(pin(i)) == pin(static_cast<std::uint8_t>(i + 16)),
+        "Bounded full policy lost a pair"
+    );
+  eight.append(peerPair(9, 25));
+  denied([&] { configured(eight); });
+  for (const QJsonValue &value :
+       {QJsonValue{}, QJsonValue(false), QJsonValue(1), QJsonValue("[]"), QJsonValue(QJsonObject{})})
+    denied([&] { configured(value); });
+  for (const QJsonValue &value :
+       {QJsonValue{}, QJsonValue(false), QJsonValue(1), QJsonValue("row"), QJsonValue(QJsonArray{})})
+    denied([&] { configured(QJsonArray{value}); });
+  for (const auto &field : {QString("deskflowPeerPin"), QString("windowSharePeerPin")}) {
+    auto missing = peerPair(1, 2);
+    missing.remove(field);
+    denied([&] { configured(QJsonArray{missing}); });
+    for (const QJsonValue &invalid :
+         {QJsonValue{}, QJsonValue(1), QJsonValue(""), QJsonValue(QString(63, 'a')), QJsonValue(QString(65, 'a')),
+          QJsonValue(QString(64, 'g')), QJsonValue(QString(64, '0')), QJsonValue(" " + pinText(1)),
+          QJsonValue("sha256:" + pinText(1)), QJsonValue(QString(64, QChar(0xff11))),
+          QJsonValue(pinText(1).left(31) + ":" + pinText(1).mid(32))}) {
+      auto bad = peerPair(1, 2);
+      bad.insert(field, invalid);
+      denied([&] { configured(QJsonArray{bad}); });
+    }
+  }
+  auto unknown = peerPair(1, 2);
+  unknown.insert("clientName", "not-authority");
+  denied([&] { configured(QJsonArray{unknown}); });
+  for (const auto &pairs :
+       {QJsonArray{peerPair(1, 2), peerPair(1, 2)}, QJsonArray{peerPair(1, 2), peerPair(1, 3)},
+        QJsonArray{peerPair(1, 2), peerPair(3, 2)}})
+    denied([&] { configured(pairs); });
+
+  // QJsonDocument accepts duplicate keys; the raw scanner must reject them
+  // before either endpoint sees Qt's last-key-wins representation.
+  auto duplicateRow = QJsonDocument(QJsonArray{peerPair(1, 2)}).toJson(QJsonDocument::Compact);
+  duplicateRow.insert(2, "\"deskflowPeerPin\":\"" + pinText(3).toUtf8() + "\",");
+  auto escapedDuplicate = duplicateRow;
+  escapedDuplicate.replace(2, 17, "\"\\u0064eskflowPeerPin\"");
+  for (const auto &duplicates : {duplicateRow, escapedDuplicate}) {
+    auto json = QJsonDocument(base).toJson(QJsonDocument::Compact);
+    json.insert(1, "\"inputPeerPairs\":" + duplicates + ',');
+    write(json);
+    denied([&] { LocalInputHostConfiguration::load(path); });
+  }
+
+  for (const auto &payload : {QByteArray("[]"), expected}) {
+    denied([&] { Arguments{"host", "--core-input-peer-pairs=" + payload}.host(); });
+    denied([&] { Arguments{"host", "--core-input-peer-pairs=" + payload, "--init-identity"}.host(); });
+  }
+  const auto pair = LocalInputSocketPair::create();
+  for (const auto &options :
+       {QStringList{"--core-input-peer-pairs=[]", "--core-input-probe"},
+        {"--core-input-peer-pairs=[]", "--core-input-peer-pairs=[]"},
+        {"--core-input-peer-pairs", "[]"},
+        {"-core-input-peer-pairs=[]"},
+        {"--core-input-peer-pairs="},
+        {"--core-input-peer-pairs={}"},
+        {"--core-input-peer-pairs=null"},
+        {"--core-input-peer-pairs=["},
+        {"--core-input-peer-pairs=" + QString(4097, ' ')},
+        {"--core-input-peer-pairs=" + QString::fromUtf8(duplicateRow)},
+        {"--core-input-peer-pairs=" + QString::fromUtf8(escapedDuplicate)}}) {
+    const int fd = ::dup(pair.childDescriptor());
+    check(fd >= 3, "Cannot duplicate rejected policy descriptor");
+    Arguments arguments{"host", "--core-input-fd=" + QByteArray::number(fd)};
+    arguments.pointers.clear();
+    for (const auto &option : options)
+      arguments.text.push_back(option.toUtf8());
+    for (auto &argument : arguments.text)
+      arguments.pointers.push_back(argument.data());
+    denied([&] { arguments.host(); });
+    check(fcntl(fd, F_GETFD) == -1, "Rejected policy leaked inherited descriptor");
+  }
 }
 } // namespace
 int main()
@@ -207,7 +390,8 @@ int main()
     coreArguments();
     hostArguments();
     configurations();
-    std::puts("Local input early bootstrap and host configuration tests passed");
+    configuredPeerPolicy();
+    std::puts("Local input early bootstrap, strict host configuration and retained dual-pin policy tests passed");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

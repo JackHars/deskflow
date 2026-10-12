@@ -35,18 +35,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (WINDOWSHARE_APP OR BUILD_WINDOWSHARE)
   endif()
 endif()
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  find_package(Threads REQUIRED)
   # A private inherited socketpair and explicit packaged companion bootstrap.
   # Merely linking this library neither launches a companion nor enables input.
   add_library(windowshare-local-input STATIC
     "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp"
     "${WS_ROOT}/OriginalInput.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
-    "${WS_ROOT}/LocalInputLibraryConstraint.cpp"
+    "${WS_ROOT}/LocalInputLibraryConstraint.cpp" "${WS_ROOT}/LocalInputCodeAdmission.cpp"
     "${WS_ROOT}/LocalInputBootstrap.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
     "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp")
   target_compile_features(windowshare-local-input PUBLIC cxx_std_20)
   target_compile_definitions(windowshare-local-input PUBLIC QT_NO_KEYWORDS WINDOWSHARE_LOCAL_INPUT=1)
   target_include_directories(windowshare-local-input PUBLIC "${WS_ROOT}")
-  target_link_libraries(windowshare-local-input PUBLIC Qt6::Core Qt6::Network windowshare-selection)
+  target_link_libraries(windowshare-local-input PUBLIC Qt6::Core Qt6::Network windowshare-selection Threads::Threads)
   if(APPLE)
     enable_language(OBJCXX)
     target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_mac.mm"
@@ -72,6 +73,19 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
     endif()
     add_test(NAME windowshare-local-input COMMAND windowshare-local-input-tests)
     set_tests_properties(windowshare-local-input PROPERTIES TIMEOUT 90)
+    # Link-time fixture verifier only: the production PeerTrust object is never
+    # linked here, and the real library has no verifier injection API.
+    add_executable(windowshare-code-admission-tests
+      "${WS_ROOT}/LocalInputCodeAdmissionTests.cpp" "${WS_ROOT}/LocalInputCodeAdmission.cpp"
+      "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp" "${WS_ROOT}/OriginalInput.cpp")
+    target_compile_features(windowshare-code-admission-tests PRIVATE cxx_std_20)
+    target_compile_definitions(windowshare-code-admission-tests PRIVATE QT_NO_KEYWORDS LOCAL_INPUT_CODE_ADMISSION_TEST_VERIFIER=1)
+    target_link_libraries(windowshare-code-admission-tests PRIVATE Qt6::Core Qt6::Network Threads::Threads)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      target_compile_options(windowshare-code-admission-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME windowshare-code-admission COMMAND windowshare-code-admission-tests)
+    set_tests_properties(windowshare-code-admission PROPERTIES TIMEOUT 30)
     add_executable(windowshare-preflight-tests "${WS_ROOT}/LocalInputPreflightTests.cpp")
     target_link_libraries(windowshare-preflight-tests PRIVATE windowshare-local-input)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

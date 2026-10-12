@@ -73,6 +73,15 @@ enum class LocalInputRole : std::uint8_t
   Core = 1,
   Host = 2
 };
+// Value identity of an already-authenticated private connection. This carries
+// no executable/code authority and is not usable after the channel expires.
+struct LocalInputAuthenticatedIdentity
+{
+  LocalInputRole role;
+  LocalInputProcess self, peer;
+  LocalInputIncarnation coreIncarnation{}, hostIncarnation{};
+  bool operator==(const LocalInputAuthenticatedIdentity &) const = default;
+};
 enum class LocalInputCheck
 {
   Prepare,
@@ -127,6 +136,9 @@ public:
   ~LocalInputChannel() override;
 
   bool authenticated() const;
+  // Owner Qt thread only; wrong-thread, stale and unauthenticated queries deny.
+  // Does not invoke callbacks or refresh the authenticated-read deadline.
+  std::optional<LocalInputAuthenticatedIdentity> authenticatedIdentity() const;
   LocalInputPhase phase() const;
   std::optional<LocalInputLease> lease() const;
   // Preflight transports attestations only. It never changes lease phase,

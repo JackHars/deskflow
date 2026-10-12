@@ -56,7 +56,7 @@ std::optional<LocalInputPeerPolicy> LocalInputPeerPolicy::create(std::span<const
   for (const auto &pair : pairs) {
     if (!nonzero(pair.deskflow) || !nonzero(pair.windowShare) ||
         std::any_of(result.m_pairs.begin(), result.m_pairs.begin() + result.m_size, [&](const auto &old) {
-          return old.deskflow == pair.deskflow;
+          return old.deskflow == pair.deskflow || old.windowShare == pair.windowShare;
         }))
       return std::nullopt;
     result.m_pairs[result.m_size++] = pair;
@@ -633,7 +633,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     };
     bool result = false;
     try {
-      const auto integrity = checks.moduleIntegrity, route = checks.deliveryReady, neutral = checks.neutralBoundary;
+      const auto integrity = checks.codeAdmission, route = checks.deliveryReady, neutral = checks.neutralBoundary;
       result =
           stillCurrent() && integrity && route && integrity(lease) && stillCurrent() && route(lease) && stillCurrent();
       if (result && check != LocalInputCheck::Deliver)

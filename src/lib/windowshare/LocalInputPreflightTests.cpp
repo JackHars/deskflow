@@ -87,7 +87,7 @@ LocalInputPeerPolicy policy(std::uint8_t core = 1, std::uint8_t viewer = 2)
 LocalInputPreflight::Checks allow()
 {
   LocalInputPreflight::Checks result;
-  result.moduleIntegrity = result.deliveryReady = result.neutralBoundary = [](const auto &) { return true; };
+  result.codeAdmission = result.deliveryReady = result.neutralBoundary = [](const auto &) { return true; };
   result.release = [](const auto &, auto) { return true; };
   return result;
 }
@@ -192,7 +192,7 @@ int child(int descriptor, const QString &mode)
   if (mode == "missing-host-active")
     host.isActive = {};
   auto checks = allow();
-  checks.moduleIntegrity = [&](const auto &) {
+  checks.codeAdmission = [&](const auto &) {
     return !providerLost || (mode != "host-watchdog-integrity" && mode != "activation-loses-integrity");
   };
   checks.deliveryReady = [&](const auto &) {
@@ -345,11 +345,14 @@ void policyValidation()
   check(LocalInputPeerPolicy::create({}).has_value(), "Empty deny policy rejected");
   const std::array duplicate{LocalInputPeerPair{pin(1), pin(2)}, LocalInputPeerPair{pin(1), pin(3)}};
   check(!LocalInputPeerPolicy::create(duplicate), "Ambiguous pair mapping accepted");
+  const std::array duplicateViewer{LocalInputPeerPair{pin(1), pin(2)}, LocalInputPeerPair{pin(3), pin(2)}};
+  check(!LocalInputPeerPolicy::create(duplicateViewer), "Ambiguous reverse pair mapping accepted");
   const std::array zero{LocalInputPeerPair{{}, pin(2)}};
   check(!LocalInputPeerPolicy::create(zero), "Empty fingerprint accepted");
   std::array<LocalInputPeerPair, 9> excess;
   for (std::size_t i = 0; i < excess.size(); ++i)
-    excess[i] = {pin(static_cast<std::uint8_t>(i + 1)), pin(2)};
+    excess[i] = {pin(static_cast<std::uint8_t>(i + 1)), pin(static_cast<std::uint8_t>(i + 20))};
+  check(LocalInputPeerPolicy::create(std::span(excess).first<8>()).has_value(), "Eight distinct pairs rejected");
   check(!LocalInputPeerPolicy::create(excess), "Unbounded mapping accepted");
   const auto encoded = localInputConnectionIncarnation(0x1020304050607080ULL);
   check(
@@ -442,7 +445,7 @@ void defaultDeny()
   for (int missing = 0; missing < 4; ++missing) {
     auto checks = allow();
     if (missing == 0)
-      checks.moduleIntegrity = {};
+      checks.codeAdmission = {};
     if (missing == 1)
       checks.neutralBoundary = {};
     if (missing == 2)
@@ -559,7 +562,7 @@ void activeProviderWatchdog()
     if (failure == Failure::Delivery)
       checks.deliveryReady = query;
     else
-      checks.moduleIntegrity = query;
+      checks.codeAdmission = query;
     checks.release = [&](const auto &, auto) {
       ++released;
       held = false;
@@ -657,7 +660,7 @@ void deadlineAndQueue()
   {
     Fixture *fixture = nullptr;
     auto checks = allow();
-    checks.moduleIntegrity = [&](const auto &lease) {
+    checks.codeAdmission = [&](const auto &lease) {
       for (int i = 0; i < 7; ++i)
         fixture->channel->onCandidate(lease);
       fixture->channel->onOfferCancelled(leaseOffer(lease), LocalInputRevocation::Requested);
@@ -703,7 +706,7 @@ void reentrantChecksAndPolicy()
     Fixture *fixture = nullptr;
     bool attempted = false, restarted = false;
     auto checks = allow();
-    checks.moduleIntegrity = [&](const auto &lease) {
+    checks.codeAdmission = [&](const auto &lease) {
       if (!attempted) {
         attempted = true;
         fixture->coordinator->cancel();
@@ -726,7 +729,7 @@ void reentrantChecksAndPolicy()
   {
     Fixture *fixture = nullptr;
     auto checks = allow();
-    checks.moduleIntegrity = [&](const auto &) {
+    checks.codeAdmission = [&](const auto &) {
       fixture->coordinator.reset();
       return true;
     };
@@ -851,7 +854,7 @@ void captureEpochAuthority()
       return true;
     };
     if (callback == 0)
-      checks.moduleIntegrity = invalidate;
+      checks.codeAdmission = invalidate;
     else if (callback == 1)
       checks.deliveryReady = invalidate;
     else

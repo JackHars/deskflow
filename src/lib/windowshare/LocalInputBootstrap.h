@@ -4,10 +4,26 @@
  */
 #pragma once
 
-#include "LocalInputChannel.h"
+#include "LocalInputPreflight.h"
 #include <QStringList>
 
 namespace deskflow::windowshare {
+
+// One immutable local configuration snapshot. The policy is never inferred
+// from the host's network pin, names, addresses, or private protocol messages.
+// Missing/empty inputPeerPairs retains the ordinary host with input denied.
+class LocalInputHostConfiguration final
+{
+public:
+  static LocalInputHostConfiguration load(const QString &configPath);
+  const QStringList &hostArguments() const;
+  const LocalInputPeerPolicy &peerPolicy() const;
+
+private:
+  LocalInputHostConfiguration() = default;
+  QStringList m_arguments;
+  LocalInputPeerPolicy m_peerPolicy;
+};
 
 // Inspect the original argv before Qt consumes any of it. A probe must be the
 // sole option. The ordinary parser independently validates server/config mode.
@@ -31,6 +47,9 @@ public:
   LocalInputHostBootstrap &operator=(const LocalInputHostBootstrap &) = delete;
   bool inherited() const;
   bool probe() const;
+  // Same bounded, explicitly configured map forwarded by the trusted core.
+  // This value alone never authorizes delivery or constructs a controller.
+  const LocalInputPeerPolicy &peerPolicy() const;
   // Reject diagnostic/configuration actions before they have side effects.
   void validateOptions(const QStringList &names) const;
   // Derives and verifies the direct parent independently using packaged code.
@@ -39,11 +58,8 @@ public:
 private:
   LocalInputHostBootstrap() = default;
   int m_descriptor = -1;
-  bool m_probe = false;
+  bool m_probe = false, m_peerPairsSupplied = false;
+  LocalInputPeerPolicy m_peerPolicy;
 };
-
-// Bounded, typed, allowlisted configuration; never forwards arbitrary argv,
-// executable paths, process identities, private FDs or initialization actions.
-QStringList localInputHostArguments(const QString &configPath);
 
 } // namespace deskflow::windowshare

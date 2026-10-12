@@ -19,13 +19,17 @@ struct LocalInputPeerPair
   bool operator==(const LocalInputPeerPair &) const = default;
 };
 
-// Explicit local policy. Never learn a pair from Offer, discovery, names, or
+// Explicit one-to-one local policy. Never learn a pair from Offer, discovery, names, or
 // addresses. Values are immutable once made; replacement revokes the attempt.
 class LocalInputPeerPolicy final
 {
 public:
   static constexpr std::size_t maximumPairs = 8;
   static std::optional<LocalInputPeerPolicy> create(std::span<const LocalInputPeerPair> pairs);
+  bool empty() const noexcept
+  {
+    return m_size == 0;
+  }
   std::optional<LocalInputPin> windowSharePeer(const LocalInputPin &deskflow) const;
   bool permits(const LocalInputOffer &offer) const;
 
@@ -41,7 +45,7 @@ LocalInputIncarnation localInputConnectionIncarnation(std::uint64_t counter);
 // Qt-thread coordinator, independently validating each endpoint's local TLS
 // evidence against the same explicit pair. No native capture or delivery is
 // installed here. Production does not construct this controller yet: ordered
-// pointer capture, module integrity and authoritative neutral permits are still
+// pointer ownership and authoritative cutover permits are still
 // required. In particular an empty tracker or a viewer-supplied flag is not a
 // valid implementation of Checks.
 class LocalInputPreflight final
@@ -62,12 +66,15 @@ public:
   {
     // All three are required. State and evidence are revalidated after each
     // callback; none of these callbacks may supply peer-learned authority.
+    // codeAdmission requires the retained exact executable/loader-policy
+    // proof and private-channel lifetime. It does not promise loaded-inventory
+    // or process-memory attestation; see LocalInputCodeAdmissionProof's scope.
     // deliveryReady establishes the ordered keyboard/pointer owner route;
     // neutralBoundary additionally requires completed legacy/owner releases.
-    // Active delivery and the existing channel heartbeat recheck integrity and
+    // Active delivery and the existing channel heartbeat recheck admission and
     // deliveryReady, never physical neutrality. Keep these checks bounded and
     // lightweight; the heartbeat must release idle held owners on failure.
-    std::function<bool(const LocalInputLease &)> moduleIntegrity, deliveryReady, neutralBoundary;
+    std::function<bool(const LocalInputLease &)> codeAdmission, deliveryReady, neutralBoundary;
     // Disable local delivery and release this exact owner synchronously. False
     // or absence closes the channel; never resume the viewer on failed release.
     std::function<bool(const LocalInputLease &, LocalInputRevocation)> release;

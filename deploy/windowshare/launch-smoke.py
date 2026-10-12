@@ -15,7 +15,7 @@ import sys
 import tempfile
 
 
-def run(executable, arguments, *, success, descriptors=()):
+def run(executable, arguments, *, success, descriptors=(), rejection=None):
     environment = os.environ.copy()
     for key in list(environment):
         if key.startswith("DYLD_") or key in {"QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH",
@@ -26,6 +26,8 @@ def run(executable, arguments, *, success, descriptors=()):
                             pass_fds=descriptors, capture_output=True, text=True, timeout=45)
     if result.returncode < 0 or (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {result.stdout[-1000:]} {result.stderr[-1000:]}")
+    if rejection is not None and rejection not in result.stderr:
+        raise RuntimeError(f"Expected bootstrap rejection was missing: {rejection}")
     return result
 
 
@@ -52,6 +54,18 @@ def main():
     run(host, ["--core-input-fd=2", "--core-input-probe"], success=False)
     with tempfile.TemporaryDirectory(prefix="deskflow-launch-smoke-") as temporary:
         identity = Path(temporary) / "must-not-be-created"
+        policy = "--core-input-peer-pairs=" + json.dumps([
+            {"deskflowPeerPin": "12" * 32, "windowSharePeerPin": "34" * 32}
+        ], separators=(",", ":"))
+        # Public pins may be passed only by the authenticated inherited core
+        # launch. A standalone policy option must fail even beside an action
+        # that would otherwise write an identity or bypass normal startup.
+        for arguments in ([policy, "--init-identity", "--identity", str(identity)],
+                          [policy, "--help"]):
+            run(host, arguments, success=False,
+                rejection="Input peer pairs require a non-probe inherited companion")
+            if identity.exists():
+                raise RuntimeError("Standalone policy injection created an identity")
         first, second = socket.socketpair()
         with first, second:
             descriptor = second.fileno()
@@ -60,8 +74,13 @@ def main():
                          success=False, descriptors=(descriptor,))
             if "packaged-code verification" not in result.stderr:
                 raise RuntimeError("Untrusted parent was not rejected by code verification")
+            run(host, [f"--core-input-fd={descriptor}", "--core-input-probe", policy],
+                success=False, descriptors=(descriptor,),
+                rejection="Private input probe requires only its inherited descriptor")
             run(host, [f"--core-input-fd={descriptor}", "--init-identity", "--identity", str(identity)],
                 success=False, descriptors=(descriptor,))
+            run(host, [f"--core-input-fd={descriptor}", policy, "--init-identity", "--identity", str(identity)],
+                success=False, descriptors=(descriptor,), rejection="Invalid companion host option")
             if identity.exists():
                 raise RuntimeError("An inherited descriptor bypassed bootstrap action validation")
     print("Packaged core/host handshake and bootstrap rejection smoke passed; original input remained disabled")

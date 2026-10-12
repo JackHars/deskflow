@@ -20,9 +20,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace deskflow::windowshare {
 namespace {
+constexpr qsizetype maximumEncodedPeerPairs = 4096;
 void require(bool condition, const char *message)
 {
   if (!condition)
@@ -62,16 +64,15 @@ int integerField(const QJsonObject &object, const QString &key, int minimum, int
 }
 void requireUniqueKeys(const QByteArray &json)
 {
-  // QJsonDocument has already validated syntax; walk its top-level strings to
-  // reject duplicate keys, including keys with equivalent Unicode escapes.
-  QSet<QString> keys;
-  int depth = 0;
+  // QJsonDocument has already validated syntax. Track each object's strings
+  // independently, including policy rows and equivalent Unicode escapes.
+  std::vector<QSet<QString>> objects;
   for (qsizetype i = 0; i < json.size(); ++i) {
     const auto c = json[i];
-    if (c == '{' || c == '[')
-      ++depth;
-    else if (c == '}' || c == ']')
-      --depth;
+    if (c == '{')
+      objects.emplace_back();
+    else if (c == '}')
+      objects.pop_back();
     else if (c == '"') {
       const auto start = i++;
       for (; i < json.size() && json[i] != '"'; ++i)
@@ -81,14 +82,85 @@ void requireUniqueKeys(const QByteArray &json)
       while (next < json.size() && (json[next] == ' ' || json[next] == '\t' || json[next] == '\r' || json[next] == '\n')
       )
         ++next;
-      if (depth == 1 && next < json.size() && json[next] == ':') {
+      if (!objects.empty() && next < json.size() && json[next] == ':') {
         const auto decoded = QJsonDocument::fromJson('[' + json.mid(start, i - start + 1) + ']');
         const auto key = decoded.array().first().toString();
-        require(!keys.contains(key), "Duplicate WindowShare host configuration field");
+        auto &keys = objects.back();
+        require(!keys.contains(key), "Duplicate WindowShare configuration field");
         keys.insert(key);
       }
     }
   }
+}
+LocalInputPin fingerprint(const QString &text)
+{
+  require(
+      text.size() == 64 && std::all_of(
+                               text.begin(), text.end(),
+                               [](QChar c) {
+                                 const auto code = c.unicode();
+                                 return (code >= '0' && code <= '9') || (code >= 'a' && code <= 'f') ||
+                                        (code >= 'A' && code <= 'F');
+                               }
+                           ),
+      "WindowShare fingerprints must contain exactly 64 hexadecimal digits"
+  );
+  const auto bytes = QByteArray::fromHex(text.toLatin1());
+  LocalInputPin pin{};
+  std::copy_n(reinterpret_cast<const std::uint8_t *>(bytes.constData()), pin.size(), pin.begin());
+  return pin;
+}
+QString fingerprintText(const LocalInputPin &pin)
+{
+  return QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(pin.data()), pin.size()).toHex());
+}
+struct ParsedPeerPairs
+{
+  LocalInputPeerPolicy policy;
+  QByteArray encoded;
+};
+ParsedPeerPairs peerPairs(const QJsonArray &array)
+{
+  require(
+      array.size() <= static_cast<qsizetype>(LocalInputPeerPolicy::maximumPairs),
+      "Too many WindowShare input peer pairs"
+  );
+  std::vector<LocalInputPeerPair> pairs;
+  QJsonArray canonical;
+  for (const auto &value : array) {
+    require(value.isObject(), "WindowShare input peer pair must be an object");
+    const auto row = value.toObject();
+    require(
+        row.size() == 2 && row.contains("deskflowPeerPin") && row.contains("windowSharePeerPin"),
+        "WindowShare input peer pair requires exactly its two fingerprints"
+    );
+    const LocalInputPeerPair pair{
+        fingerprint(stringField(row, "deskflowPeerPin", 64)), fingerprint(stringField(row, "windowSharePeerPin", 64))
+    };
+    pairs.push_back(pair);
+    canonical.append(
+        QJsonObject{
+            {"deskflowPeerPin", fingerprintText(pair.deskflow)},
+            {"windowSharePeerPin", fingerprintText(pair.windowShare)}
+        }
+    );
+  }
+  const auto policy = LocalInputPeerPolicy::create(pairs);
+  require(policy.has_value(), "WindowShare input peer pairs must be nonzero and one-to-one");
+  const auto encoded = QJsonDocument(canonical).toJson(QJsonDocument::Compact);
+  require(encoded.size() <= maximumEncodedPeerPairs, "WindowShare input peer pairs exceed the encoded limit");
+  return {*policy, encoded};
+}
+ParsedPeerPairs peerPairs(const QByteArray &json)
+{
+  require(!json.isEmpty() && json.size() <= maximumEncodedPeerPairs, "Invalid encoded WindowShare input peer pairs");
+  QJsonParseError error;
+  const auto document = QJsonDocument::fromJson(json, &error);
+  require(
+      error.error == QJsonParseError::NoError && document.isArray(), "WindowShare input peer pairs must be a JSON array"
+  );
+  requireUniqueKeys(json);
+  return peerPairs(document.array());
 }
 } // namespace
 
@@ -123,7 +195,9 @@ LocalInputCoreBootstrap LocalInputCoreBootstrap::inspect(int argc, char *const a
 LocalInputHostBootstrap LocalInputHostBootstrap::inspect(int argc, char *const argv[])
 {
   LocalInputHostBootstrap result;
-  constexpr std::string_view descriptor = "--core-input-fd=", probe = "--core-input-probe";
+  constexpr std::string_view descriptor = "--core-input-fd=", probe = "--core-input-probe",
+                             policy = "--core-input-peer-pairs=";
+  std::optional<std::string_view> encodedPairs;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (related(argument, descriptor.substr(0, descriptor.size() - 1))) {
@@ -141,11 +215,26 @@ LocalInputHostBootstrap LocalInputHostBootstrap::inspect(int argc, char *const a
     } else if (related(argument, probe)) {
       require(argument == probe && !result.m_probe, "Use one --core-input-probe option");
       result.m_probe = true;
+    } else if (related(argument, policy.substr(0, policy.size() - 1))) {
+      require(!encodedPairs && argument.starts_with(policy), "Use one canonical --core-input-peer-pairs=JSON");
+      encodedPairs = argument.substr(policy.size());
+      require(
+          !encodedPairs->empty() && encodedPairs->size() <= maximumEncodedPeerPairs,
+          "Invalid encoded WindowShare input peer pairs"
+      );
     }
   }
   require(
       !result.m_probe || (result.inherited() && argc == 3), "Private input probe requires only its inherited descriptor"
   );
+  if (encodedPairs) {
+    require(result.inherited() && !result.probe(), "Input peer pairs require a non-probe inherited companion");
+    // Parse only after restoring CLOEXEC on the inherited capability. The
+    // argv bytes contain public configured pins, never executable/process trust.
+    result.m_peerPolicy =
+        peerPairs(QByteArray(encodedPairs->data(), static_cast<qsizetype>(encodedPairs->size()))).policy;
+    result.m_peerPairsSupplied = true;
+  }
   return result;
 }
 LocalInputHostBootstrap::~LocalInputHostBootstrap()
@@ -155,7 +244,9 @@ LocalInputHostBootstrap::~LocalInputHostBootstrap()
 }
 LocalInputHostBootstrap::LocalInputHostBootstrap(LocalInputHostBootstrap &&other) noexcept
     : m_descriptor(std::exchange(other.m_descriptor, -1)),
-      m_probe(other.m_probe)
+      m_probe(other.m_probe),
+      m_peerPairsSupplied(other.m_peerPairsSupplied),
+      m_peerPolicy(other.m_peerPolicy)
 {
 }
 bool LocalInputHostBootstrap::inherited() const
@@ -165,6 +256,10 @@ bool LocalInputHostBootstrap::inherited() const
 bool LocalInputHostBootstrap::probe() const
 {
   return m_probe;
+}
+const LocalInputPeerPolicy &LocalInputHostBootstrap::peerPolicy() const
+{
+  return m_peerPolicy;
 }
 void LocalInputHostBootstrap::validateOptions(const QStringList &names) const
 {
@@ -177,8 +272,10 @@ void LocalInputHostBootstrap::validateOptions(const QStringList &names) const
     );
     return;
   }
-  const QSet<QString> allowed{"core-input-fd", "enable-seamless", "listen",          "port",    "identity",
-                              "peer-pin",      "journal",         "holding-display", "headless"};
+  const QSet<QString> allowed{
+      "core-input-fd", "enable-seamless", "listen",          "port",     "identity",
+      "peer-pin",      "journal",         "holding-display", "headless", "core-input-peer-pairs"
+  };
   QSet<QString> seen;
   for (const auto &name : names) {
     require(allowed.contains(name) && !seen.contains(name), "Invalid companion host option");
@@ -186,6 +283,9 @@ void LocalInputHostBootstrap::validateOptions(const QStringList &names) const
   }
   for (const auto &name : {"core-input-fd", "enable-seamless", "listen", "identity", "peer-pin", "journal"})
     require(seen.contains(name), "Private input companion requires explicit host configuration");
+  require(
+      seen.contains("core-input-peer-pairs") == m_peerPairsSupplied, "Input peer policy option changed after bootstrap"
+  );
 }
 std::unique_ptr<LocalInputChannel> LocalInputHostBootstrap::adopt()
 {
@@ -196,7 +296,7 @@ std::unique_ptr<LocalInputChannel> LocalInputHostBootstrap::adopt()
   return LocalInputChannel::adoptHost(std::exchange(m_descriptor, -1), *parent);
 }
 
-QStringList localInputHostArguments(const QString &configPath)
+LocalInputHostConfiguration LocalInputHostConfiguration::load(const QString &configPath)
 {
   constexpr qsizetype maximum = 16 * 1024;
   require(
@@ -224,8 +324,8 @@ QStringList localInputHostArguments(const QString &configPath)
   );
   requireUniqueKeys(bytes);
   const auto object = document.object();
-  const QSet<QString> allowed{"version", "listen",  "port",           "identity",
-                              "peerPin", "journal", "holdingDisplay", "headless"};
+  const QSet<QString> allowed{"version", "listen",         "port",     "identity",      "peerPin",
+                              "journal", "holdingDisplay", "headless", "inputPeerPairs"};
   for (auto it = object.begin(); it != object.end(); ++it)
     require(allowed.contains(it.key()), "Unknown WindowShare host configuration field");
   require(integerField(object, "version", 1, 1) == 1, "Unsupported WindowShare host configuration version");
@@ -237,18 +337,7 @@ QStringList localInputHostArguments(const QString &configPath)
       QFileInfo(identity).isAbsolute() && QFileInfo(journal).isAbsolute(),
       "WindowShare identity and journal paths must be absolute"
   );
-  const auto pin = stringField(object, "peerPin", 64);
-  require(
-      pin.size() == 64 && std::all_of(
-                              pin.begin(), pin.end(),
-                              [](QChar c) {
-                                const auto code = c.unicode();
-                                return (code >= '0' && code <= '9') || (code >= 'a' && code <= 'f') ||
-                                       (code >= 'A' && code <= 'F');
-                              }
-                          ),
-      "WindowShare peerPin must contain exactly 64 hexadecimal digits"
-  );
+  const auto pin = fingerprint(stringField(object, "peerPin", 64));
   QStringList arguments{
       "--enable-seamless",
       "--listen",
@@ -258,7 +347,7 @@ QStringList localInputHostArguments(const QString &configPath)
       "--identity",
       identity,
       "--peer-pin",
-      pin.toLower(),
+      fingerprintText(pin),
       "--journal",
       journal
   };
@@ -269,6 +358,22 @@ QStringList localInputHostArguments(const QString &configPath)
         arguments.append(option);
     }
   }
-  return arguments;
+  LocalInputHostConfiguration result;
+  if (object.contains("inputPeerPairs")) {
+    require(object["inputPeerPairs"].isArray(), "WindowShare input peer pairs must be a JSON array");
+    const auto parsed = peerPairs(object["inputPeerPairs"].toArray());
+    result.m_peerPolicy = parsed.policy;
+    arguments.append(QStringLiteral("--core-input-peer-pairs=") + QString::fromUtf8(parsed.encoded));
+  }
+  result.m_arguments = std::move(arguments);
+  return result;
+}
+const QStringList &LocalInputHostConfiguration::hostArguments() const
+{
+  return m_arguments;
+}
+const LocalInputPeerPolicy &LocalInputHostConfiguration::peerPolicy() const
+{
+  return m_peerPolicy;
 }
 } // namespace deskflow::windowshare

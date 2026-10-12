@@ -18,6 +18,7 @@
 #include "deskflow/ipc/CoreIpcServer.h"
 #ifdef WINDOWSHARE_CORE_COMPANION
 #include "windowshare/LocalInputBootstrap.h"
+#include "windowshare/LocalInputCodeAdmission.h"
 #include "windowshare/LocalInputSession.h"
 #endif
 
@@ -144,19 +145,28 @@ int main(int argc, char **argv)
   parser.parse();
 
 #ifdef WINDOWSHARE_CORE_COMPANION
+  // Retain the parsed local policy for the lifetime of this launch. Merely
+  // configuring a pair never supplies any of the required input providers.
+  std::optional<LocalInputHostConfiguration> inputHostConfiguration;
   std::unique_ptr<LocalInputCoreSession> inputSession;
+  // The timer and admission guard are destroyed before the channel owner.
+  // The worker holds only independent inspection state, never these objects.
+  std::unique_ptr<LocalInputCodeAdmission> inputAdmission;
+  QTimer inputAdmissionTimer;
   if (inputBootstrap->pair) {
     try {
       if (parser.windowShareHostConfig() != inputBootstrap->hostConfig || !parser.serverMode())
         throw std::runtime_error("Invalid WindowShare companion invocation");
-      const auto hostArguments = localInputHostArguments(parser.windowShareHostConfig());
+      inputHostConfiguration.emplace(LocalInputHostConfiguration::load(parser.windowShareHostConfig()));
       QString failure;
       // Native restoration makes several bounded AX calls per window, followed
       // by holding-helper teardown. The short diagnostic grace is insufficient.
       LocalInputCompanionLimits limits;
       limits.gracefulMs = 5000;
       limits.terminateMs = 5000;
-      inputSession = LocalInputCoreSession::start(std::move(*inputBootstrap->pair), hostArguments, &failure, limits);
+      inputSession = LocalInputCoreSession::start(
+          std::move(*inputBootstrap->pair), inputHostConfiguration->hostArguments(), &failure, limits
+      );
       if (!inputSession) {
         QTextStream(stderr) << "Window sharing: " << failure << '\n';
         return s_exitFailed;
@@ -164,6 +174,25 @@ int main(int argc, char **argv)
       inputSession->onStopped = [](const QString &reason) {
         LOG_WARN("experimental window host stopped: %s", qPrintable(reason));
       };
+      if (!inputHostConfiguration->peerPolicy().empty()) {
+        QString admissionError;
+        inputAdmission = LocalInputCodeAdmission::request(*inputSession->channel(), &admissionError);
+        if (!inputAdmission)
+          LOG_WARN("window sharing code admission unavailable: %s", qPrintable(admissionError));
+        else {
+          QObject::connect(&inputAdmissionTimer, &QTimer::timeout, &inputAdmissionTimer, [&] {
+            const auto state = inputAdmission->state();
+            if (state == LocalInputCodeAdmission::State::Pending)
+              return;
+            inputAdmissionTimer.stop();
+            if (state == LocalInputCodeAdmission::State::Ready)
+              LOG_INFO("window sharing exact library admission verified; original input remains disabled");
+            else
+              LOG_WARN("window sharing code admission unavailable: %s", qPrintable(inputAdmission->error()));
+          });
+          inputAdmissionTimer.start(100);
+        }
+      }
       LOG_INFO("trusted window host connected; original input route remains disabled");
     } catch (const std::exception &error) {
       QTextStream(stderr) << "Window sharing: " << error.what() << '\n';

@@ -5,6 +5,7 @@
 #include "LocalInputChannel.h"
 #include <QFile>
 #include <QPointer>
+#include <QThread>
 #include <QUuid>
 #include <algorithm>
 #include <limits>
@@ -478,6 +479,12 @@ bool LocalInputChannel::authenticated() const
 {
   return m_authenticated && !m_closed && m_socket.state() == QLocalSocket::ConnectedState &&
          m_lastRead.elapsed() < m_limits.timeoutMs && peerAlive();
+}
+std::optional<LocalInputAuthenticatedIdentity> LocalInputChannel::authenticatedIdentity() const
+{
+  if (QThread::currentThread() != thread() || !authenticated() || currentLocalInputProcess() != m_self)
+    return std::nullopt;
+  return LocalInputAuthenticatedIdentity{m_role, m_self, m_peer, m_coreIncarnation, m_hostIncarnation};
 }
 LocalInputPhase LocalInputChannel::phase() const
 {

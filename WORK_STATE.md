@@ -3,7 +3,78 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
-## Latest Linux observation and active input handoff (2026-10-12)
+## Latest pairing and code-admission integration (2026-10-12)
+
+The roadmap is now summarized near the top of `docs/seamless-windows.md`. The
+project remains before its first verified interactive Mac window on Ubuntu.
+The next acceptance test is one window with capture, focus, keyboard, pointer,
+scrolling and safe return. Multiple windows/two monitors, edge drag in both
+directions, compatibility, recovery and performance remain later milestones.
+
+The companion configuration now accepts up to eight explicit one-to-one pairs
+of Deskflow and WindowShare TLS certificate fingerprints. Missing/empty policy
+denies every original-input pair. Configuration and inherited-host parsing
+reject malformed or ambiguous pairs, duplicate JSON keys, wrong modes and
+public argument injection before side effects. Both processes retain immutable
+policy; configuring it does not enable input delivery.
+
+An optional asynchronous code-admission guard now binds the exact sealed
+non-Apple library policy to the authenticated core/host channel. It requires
+the live bundle-main anchor to be the Core endpoint; a separate ancestor cannot
+supply retained authority. One worker per process performs synchronous native
+inspection without borrowing Qt objects. Owner polling never waits for its
+mutex, enforces an absolute deadline and discards late results. Retained proof
+copies recheck the original Qt thread, channel freshness/identity and process
+births, and share terminal revocation. This establishes executable/library
+admission, not current mappings or process-memory attestation; Apple/system code
+remains an OS exception. Privileged compromise and defects or deliberate private
+descriptor delegation by admitted code are outside that boundary.
+
+Core and host request this guard after authentication only for nonempty pairing
+policy. Neither creates the original-input coordinator or installs its authorizer.
+The remaining route needs ordered per-press/per-scroll ownership through actual
+core decisions, an authenticated coordinate provider and a pointer fence.
+Public Mac state reads cannot establish a complete global physical-neutral
+boundary. The existing neutral-boundary interface therefore stays default-deny.
+`docs/seamless-windows-coordinate-plan.md` records the X11 connection-witness and
+source-order design, and the separate compositor provider needed for GNOME
+Wayland. Those coordinate providers are not implemented by this milestone.
+
+Focused strict and ASan/UBSan pairing, channel and code-admission suites passed.
+A disposable exact-signed fixture also passed real asynchronous inspection on
+both authenticated endpoints and verified retained-proof revocation on close.
+The fixture did not start NativeHost, capture, event taps or a display helper.
+The final standalone application build passed all 13 suites in 124.35 seconds,
+and the full opt-in Deskflow build passed all 56 integrated suites in 90.75
+seconds. C++ formatting with clang-format 20.1.0, Python syntax, diff checks and
+REUSE licensing checks passed (950/950 files).
+Read-only reviews found and resolved an ancestor-lifetime gap and a result
+publication failure path; the final wiring review found no actionable defects.
+Logs use `build/dual-pin-agent/`, `build/code-admission-*.log` and
+`build/paired-admission-*.log`.
+
+The exact-library experimental package was rebuilt and its source-bundle
+handshake/bootstrap-rejection and mutually pinned TLS/reconnect smokes passed.
+It is installed at
+`~/Applications/DeskflowSeamless-Core-Experimental.app`, with the prior
+experimental installation retained under
+`build/packages/paired-code-admission-installed-backup-20261012/`.
+Both staged and installed bundle audits passed with 77 library records/slices
+and permitted hashes. The installed copy also passed the handshake/bootstrap
+rejection and viewer TLS/reconnect smokes. The ZIP is
+`build/packages/paired-code-admission-20261012/DeskflowSeamless-Core-Experimental.zip`
+with SHA-256
+`59b33a8bffc7f6ddfa4303ad1b91f29455ccc46414124e1b3124f1976b478979`.
+This Intel package still requires macOS 26 due to bundled dependencies and is
+not notarized. The ordinary Deskflow installation has not been replaced.
+
+SSH to the previously verified Ubuntu address now times out; its route goes
+through the local gateway rather than the home tunnel. The Mac lid is still
+closed. No new home-Ubuntu run, Wayland interaction, physical input or window
+restoration tests ran for this milestone. The Ubuntu results below remain
+valid for their recorded earlier source revision. The full goal is incomplete.
+
+## Previous Linux observation and active input handoff (2026-10-12)
 
 SSH key access through the home-network tunnel was verified, and an isolated
 source/build directory was created at

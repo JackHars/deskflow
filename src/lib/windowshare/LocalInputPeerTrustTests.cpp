@@ -2,9 +2,11 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "LocalInputCodeAdmission.h"
 #include "LocalInputPeerTrust.h"
 #include <QCoreApplication>
 #include <QDir>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -493,6 +495,120 @@ int coreFixture(const QString &mode, const QString &otherPeer)
   QTextStream(stdout) << "VERIFIED\n";
   return 0;
 }
+bool admissionUntil(const std::function<bool()> &condition, int timeoutMs = 20000)
+{
+  if (condition())
+    return true;
+  QEventLoop loop;
+  QTimer poll, timeout;
+  poll.setInterval(10);
+  timeout.setSingleShot(true);
+  QObject::connect(&poll, &QTimer::timeout, &loop, [&] {
+    if (condition())
+      loop.quit();
+  });
+  QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+  poll.start();
+  timeout.start(timeoutMs);
+  loop.exec();
+  return condition();
+}
+int admissionHostFixture(QCoreApplication &application, int descriptor, bool expectedAdmission)
+{
+  QString error;
+  const auto parent = localInputProcess(getppid());
+  const auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Core, &error);
+  check(trust && parent && trust->verify(*parent), qPrintable(error));
+  auto channel = LocalInputChannel::adoptHost(descriptor, *parent);
+  std::unique_ptr<LocalInputCodeAdmission> guard;
+  std::optional<LocalInputCodeAdmissionProof> retained;
+  bool announced = false, closed = false, revokedAtClose = false;
+  channel->onAuthenticated = [&] { guard = LocalInputCodeAdmission::request(*channel, &error); };
+  channel->onClosed = [&](QString) {
+    closed = true;
+    revokedAtClose = !retained || !retained->live();
+    application.quit();
+  };
+  QTimer poll;
+  poll.setInterval(10);
+  QObject::connect(&poll, &QTimer::timeout, &application, [&] {
+    if (announced || !guard || guard->state() == LocalInputCodeAdmission::State::Pending)
+      return;
+    retained = guard->proof();
+    announced = true;
+    if (bool(retained) != expectedAdmission) {
+      QTextStream(stderr) << "Host admission failed: " << guard->error() << '\n';
+      application.exit(1);
+      return;
+    }
+    QTextStream output(stdout);
+    output << (expectedAdmission ? "ADMISSION_READY\n" : "ADMISSION_DENIED\n");
+    output.flush();
+  });
+  poll.start();
+  QTimer::singleShot(25000, &application, [&] { application.exit(1); });
+  const auto result = application.exec();
+  check(result == 0 && announced && closed && revokedAtClose, "Real host admission/close lifecycle failed");
+  return 0;
+}
+int admissionCoreFixture(bool expectedAdmission)
+{
+  QString error;
+  const auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Host, &error);
+  check(bool(trust), qPrintable(error));
+  auto pair = LocalInputSocketPair::create();
+  Child child;
+  pair.configureChild(child.process);
+  child.process.start(
+      trust->executable(),
+      {"--admission-host", QString::number(pair.childDescriptor()), expectedAdmission ? "allow" : "deny"}
+  );
+  check(child.process.waitForStarted(5000), "Cannot launch real admission fixture host");
+  const auto peer = localInputProcess(child.process.processId());
+  check(peer && trust->verify(*peer), "Real admission fixture peer identity failed");
+  auto channel = pair.adoptCore(*peer);
+  check(admissionUntil([&] { return channel->authenticated(); }), "Real admission private handshake failed");
+  auto guard = LocalInputCodeAdmission::request(*channel, &error);
+  check(bool(guard), qPrintable(error));
+  QByteArray hostResult;
+  check(
+      admissionUntil([&] {
+        hostResult += child.process.readAllStandardOutput();
+        return (guard->state() != LocalInputCodeAdmission::State::Pending && hostResult.contains('\n')) ||
+               child.process.state() == QProcess::NotRunning;
+      }),
+      "Real asynchronous code admission timed out"
+  );
+  auto proof = guard->proof();
+  if (bool(proof) != expectedAdmission || child.process.state() == QProcess::NotRunning)
+    QTextStream(stderr) << "Core admission: " << guard->error() << '\n' << child.process.readAllStandardError();
+  check(bool(proof) == expectedAdmission, "Real core code-admission result differs from policy");
+  check(
+      hostResult == (expectedAdmission ? "ADMISSION_READY\n" : "ADMISSION_DENIED\n"),
+      "Real host code-admission result differs from policy"
+  );
+  if (proof) {
+    check(proof->live(), "Real core proof was already revoked");
+    const auto &restricted = proof->inspection().restrictedAdmission();
+    check(
+        restricted.anchorProcess() == proof->connection().self && restricted.peerProcess() == *peer,
+        "Real asynchronous proof lost its core-main anchor or peer"
+    );
+  }
+  channel->close();
+  check(!proof || !proof->live(), "Real channel close left retained authority");
+  check(
+      admissionUntil([&] { return child.process.state() == QProcess::NotRunning; }, 5000),
+      "Real admission child did not observe channel closure"
+  );
+  if (child.process.exitCode() != 0)
+    QTextStream(stderr) << child.process.readAllStandardError();
+  check(
+      child.process.exitStatus() == QProcess::NormalExit && child.process.exitCode() == 0, "Real admission host failed"
+  );
+  QTextStream(stdout) << "VERIFIED\n";
+  return 0;
+}
 QString makeBundle(const QString &directory, const QString &name)
 {
   const auto parent = QFileInfo(directory).canonicalFilePath();
@@ -552,6 +668,17 @@ int main(int argc, char **argv)
   QCoreApplication application(argc, argv);
   try {
     const auto arguments = application.arguments();
+    if (arguments.size() == 3 && arguments[1] == "--admission-core") {
+      check(arguments[2] == "allow" || arguments[2] == "deny", "Invalid code-admission expectation");
+      return admissionCoreFixture(arguments[2] == "allow");
+    }
+    if (arguments.size() == 4 && arguments[1] == "--admission-host") {
+      bool ok = false;
+      const auto descriptor = arguments[2].toInt(&ok);
+      check(ok && descriptor >= 3 && protectLocalInputDescriptor(descriptor), "Invalid fixture private descriptor");
+      check(arguments[3] == "allow" || arguments[3] == "deny", "Invalid host code-admission expectation");
+      return admissionHostFixture(application, descriptor, arguments[3] == "allow");
+    }
 #if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
     if (arguments.size() == 2 && arguments[1] == "--reader-only") {
       exactImageReaderTests();
@@ -614,6 +741,10 @@ int main(int argc, char **argv)
     const auto core = bundle + "/Contents/MacOS/deskflow-core";
     const auto host = bundle + "/Contents/MacOS/deskflow-windowshare";
     check(run(core, {"--fixture-core", "pass"}) == "VERIFIED\n", "Signed peer mutual verification failed");
+    check(
+        run(core, {"--admission-core", "deny"}) == "VERIFIED\n",
+        "Ad-hoc fixture acquired retained code-admission authority"
+    );
     check(
         run(core, {"--fixture-core", "restricted-deny"}) == "VERIFIED\n",
         "Ad-hoc signed peers acquired restricted library admission"
