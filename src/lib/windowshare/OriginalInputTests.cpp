@@ -30,6 +30,10 @@ void operator delete(void *memory) noexcept
 {
   std::free(memory);
 }
+void operator delete(void *memory, std::size_t) noexcept
+{
+  std::free(memory);
+}
 
 namespace deskflow::windowshare {
 struct OriginalInputTestAccess
