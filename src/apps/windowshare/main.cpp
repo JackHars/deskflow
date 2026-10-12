@@ -6,6 +6,10 @@
 #include "NativeHost.h"
 #include "Transport.h"
 #include "Viewer.h"
+#if defined(WINDOWSHARE_LOCAL_INPUT) && !defined(WINDOWSHARE_BRIDGE_TEST)
+#include "LocalInputBootstrap.h"
+#include "LocalInputSession.h"
+#endif
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCommandLineParser>
@@ -980,37 +984,61 @@ void configureApplicationLifetime(QApplication &application, Bridge &bridge, std
 #ifndef WINDOWSHARE_BRIDGE_TEST
 int main(int argc, char **argv)
 {
-  QApplication app(argc, argv);
-  app.setApplicationName("DeskflowWindowShare");
-  app.setOrganizationName("Deskflow");
-  app.setApplicationVersion("0.1-experimental");
-  QCommandLineParser parser;
-  parser.addHelpOption();
-  parser.addVersionOption();
-  parser.setApplicationDescription("Experimental per-window sharing. Separate from the working Deskflow installation.");
-  parser.addOptions(
-      {{"enable-seamless", "Explicitly enable experimental window sharing."},
-       {"holding-display", "Enable the experimental private virtual holding display on the Mac."},
-       {"listen", "Listen on this Mac interface address.", "address"},
-       {"connect", "Connect to the approved Mac host.", "host"},
-       {"port", "Separate TLS control/media port.", "port", "24810"},
-       {"identity", "Private identity directory.", "directory",
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/identity"},
-       {"peer-pin", "Approved SHA-256 certificate fingerprint of the other computer.", "fingerprint"},
-       {"init-identity", "Create a new private TLS identity; refuses overwrite."},
-       {"fingerprint", "Print this identity's public certificate fingerprint."},
-       {"probe", "Report macOS capture and Accessibility permissions without requesting them."},
-       {"request-permissions", "Ask macOS for capture and Accessibility access."},
-       {"recover", "Restore journaled windows without opening a network connection."},
-       {"journal", "Persistent restore journal path.", "file",
-        QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/restore.json"},
-       {"screen", "Viewer screen index (zero based).", "index", "0"},
-       {"export-window", "Explicit window ID to export once connected.", "id", "0"},
-       {"quit-after", "Exit cleanly after this many seconds (diagnostics).", "seconds", "0"},
-       {"headless", "Do not show the connection window (viewer windows still appear)."}}
-  );
-  parser.process(app);
   try {
+#ifdef WINDOWSHARE_LOCAL_INPUT
+    auto inputBootstrap = LocalInputHostBootstrap::inspect(argc, argv);
+#endif
+    QApplication app(argc, argv);
+    app.setApplicationName("DeskflowWindowShare");
+    app.setOrganizationName("Deskflow");
+    app.setApplicationVersion("0.1-experimental");
+    QCommandLineParser parser;
+    parser.addHelpOption();
+    parser.addVersionOption();
+    parser.setApplicationDescription(
+        "Experimental per-window sharing. Separate from the working Deskflow installation."
+    );
+    parser.addOptions(
+        {{"enable-seamless", "Explicitly enable experimental window sharing."},
+         {"holding-display", "Enable the experimental private virtual holding display on the Mac."},
+         {"listen", "Listen on this Mac interface address.", "address"},
+         {"connect", "Connect to the approved Mac host.", "host"},
+         {"port", "Separate TLS control/media port.", "port", "24810"},
+         {"identity", "Private identity directory.", "directory",
+          QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/identity"},
+         {"peer-pin", "Approved SHA-256 certificate fingerprint of the other computer.", "fingerprint"},
+         {"init-identity", "Create a new private TLS identity; refuses overwrite."},
+         {"fingerprint", "Print this identity's public certificate fingerprint."},
+         {"probe", "Report macOS capture and Accessibility permissions without requesting them."},
+         {"request-permissions", "Ask macOS for capture and Accessibility access."},
+         {"recover", "Restore journaled windows without opening a network connection."},
+         {"journal", "Persistent restore journal path.", "file",
+          QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/restore.json"},
+         {"screen", "Viewer screen index (zero based).", "index", "0"},
+         {"export-window", "Explicit window ID to export once connected.", "id", "0"},
+         {"quit-after", "Exit cleanly after this many seconds (diagnostics).", "seconds", "0"},
+         {"headless", "Do not show the connection window (viewer windows still appear)."}}
+    );
+#ifdef WINDOWSHARE_LOCAL_INPUT
+    QCommandLineOption inputDescriptor("core-input-fd", "Inherited private descriptor.", "descriptor");
+    QCommandLineOption inputProbe("core-input-probe", "Private handshake diagnostic.");
+    inputDescriptor.setFlags(QCommandLineOption::HiddenFromHelp);
+    inputProbe.setFlags(QCommandLineOption::HiddenFromHelp);
+    parser.addOptions({inputDescriptor, inputProbe});
+    // Validate inherited-mode combinations before help/version or any identity,
+    // recovery, permission, network, or NativeHost action can run.
+    if (!parser.parse(app.arguments()))
+      throw std::runtime_error(parser.errorText().toStdString());
+    inputBootstrap.validateOptions(parser.optionNames());
+    std::unique_ptr<LocalInputChannel> coreInput;
+    if (inputBootstrap.inherited()) {
+      coreInput = inputBootstrap.adopt();
+      if (inputBootstrap.probe())
+        return localInputHostProbe(std::move(coreInput));
+      coreInput->onClosed = [&app](const QString &) { app.quit(); };
+    }
+#endif
+    parser.process(app);
     if (parser.isSet("init-identity"))
       initializeIdentity(parser.value("identity"));
     if (parser.isSet("init-identity") || parser.isSet("fingerprint")) {
@@ -1041,6 +1069,10 @@ int main(int argc, char **argv)
       native.onError = [](const QString &error) { QTextStream(stderr) << error << '\n'; };
       return native.recover() ? 0 : 1;
     }
+    // Install shutdown handling before native startup so a core-requested stop
+    // always follows the host's ordinary window restoration path.
+    std::signal(SIGINT, interruptHandler);
+    std::signal(SIGTERM, interruptHandler);
     bool valid = false;
     const auto port = parser.value("port").toUInt(&valid);
     require(valid && port > 0 && port <= 65535, "Invalid port");
@@ -1066,8 +1098,6 @@ int main(int argc, char **argv)
       bridge.show();
     if (seconds)
       QTimer::singleShot(seconds * 1000, &app, &QApplication::quit);
-    std::signal(SIGINT, interruptHandler);
-    std::signal(SIGTERM, interruptHandler);
     QTimer signals;
     QObject::connect(&signals, &QTimer::timeout, &app, [&app] {
       if (interrupted)

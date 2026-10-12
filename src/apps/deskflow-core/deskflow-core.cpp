@@ -16,6 +16,10 @@
 #include "deskflow/ClientApp.h"
 #include "deskflow/ServerApp.h"
 #include "deskflow/ipc/CoreIpcServer.h"
+#ifdef WINDOWSHARE_CORE_COMPANION
+#include "windowshare/LocalInputBootstrap.h"
+#include "windowshare/LocalInputSession.h"
+#endif
 
 #if defined(Q_OS_WIN)
 #include "arch/win32/ArchMiscWindows.h"
@@ -69,6 +73,17 @@ App *createApp(const CoreArgParser &parser, EventQueue &events, const QString &p
 
 int main(int argc, char **argv)
 {
+#ifdef WINDOWSHARE_CORE_COMPANION
+  using namespace deskflow::windowshare;
+  std::optional<LocalInputCoreBootstrap> inputBootstrap;
+  try {
+    // macOS socketpair CLOEXEC setup must precede Qt/plugin worker startup.
+    inputBootstrap.emplace(LocalInputCoreBootstrap::inspect(argc, argv));
+  } catch (const std::exception &error) {
+    QTextStream(stderr) << "Window sharing: " << error.what() << '\n';
+    return s_exitArgs;
+  }
+#endif
 #if defined(Q_OS_WIN)
   ArchMiscWindows::setInstanceWin32(GetModuleHandle(nullptr));
 #endif
@@ -76,6 +91,10 @@ int main(int argc, char **argv)
   QApplication::setApplicationName(QStringLiteral("%1 Core").arg(kAppName));
   QApplication app(argc, argv);
 
+#ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputBootstrap->probe)
+    return localInputCoreProbe(std::move(*inputBootstrap->pair));
+#endif
   Arch arch;
   arch.init();
 
@@ -87,6 +106,10 @@ int main(int argc, char **argv)
   // Print any parser errors
   if (!parser.errorText().isEmpty()) {
     QTextStream(stdout) << parser.errorText() << "\n";
+#ifdef WINDOWSHARE_CORE_COMPANION
+    if (inputBootstrap->pair)
+      return s_exitArgs;
+#endif
   }
 
   if (parser.help()) {
@@ -116,6 +139,35 @@ int main(int argc, char **argv)
 
   parser.parse();
 
+#ifdef WINDOWSHARE_CORE_COMPANION
+  std::unique_ptr<LocalInputCoreSession> inputSession;
+  if (inputBootstrap->pair) {
+    try {
+      if (parser.windowShareHostConfig() != inputBootstrap->hostConfig || !parser.serverMode())
+        throw std::runtime_error("Invalid WindowShare companion invocation");
+      const auto hostArguments = localInputHostArguments(parser.windowShareHostConfig());
+      QString failure;
+      // Native restoration makes several bounded AX calls per window, followed
+      // by holding-helper teardown. The short diagnostic grace is insufficient.
+      LocalInputCompanionLimits limits;
+      limits.gracefulMs = 5000;
+      limits.terminateMs = 5000;
+      inputSession = LocalInputCoreSession::start(std::move(*inputBootstrap->pair), hostArguments, &failure, limits);
+      if (!inputSession) {
+        QTextStream(stderr) << "Window sharing: " << failure << '\n';
+        return s_exitFailed;
+      }
+      inputSession->onStopped = [](const QString &reason) {
+        LOG_WARN("experimental window host stopped: %s", qPrintable(reason));
+      };
+      LOG_INFO("trusted window host connected; original input route remains disabled");
+    } catch (const std::exception &error) {
+      QTextStream(stderr) << "Window sharing: " << error.what() << '\n';
+      return s_exitConfig;
+    }
+  }
+#endif
+
   EventQueue events;
   const auto processName = QFileInfo(argv[0]).fileName();
 
@@ -128,7 +180,18 @@ int main(int argc, char **argv)
   ipcServer->listen();
 
   QThread coreThread;
+#ifdef WINDOWSHARE_CORE_COMPANION
+  bool companionDrained = true;
+  QObject::connect(&coreThread, &QThread::finished, &app, [&] {
+    // Drain the owned host while the Qt event loop can still service it. The
+    // companion's aboutToQuit handler is only an emergency last resort.
+    if (inputSession)
+      companionDrained = inputSession->stop();
+    app.quit();
+  });
+#else
   QObject::connect(&coreThread, &QThread::finished, &app, &QApplication::quit);
+#endif
   coreApp->run(coreThread);
 
   int exitCode = QApplication::exec();
@@ -138,6 +201,14 @@ int main(int argc, char **argv)
     exitCode = coreApp->getExitCode();
   }
   delete coreApp;
+
+#ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputSession && (!inputSession->stop() || !companionDrained)) {
+    LOG_WARN("experimental window host did not exit before the shutdown deadline");
+    if (exitCode == s_exitSuccess)
+      exitCode = s_exitFailed;
+  }
+#endif
 
   LOG_DEBUG("core exited, code: %d", exitCode);
   return exitCode;

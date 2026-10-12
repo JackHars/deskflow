@@ -182,6 +182,11 @@ bool privateEndpoint(int fd)
 }
 } // namespace
 
+bool protectLocalInputDescriptor(int descriptor)
+{
+  return privateEndpoint(descriptor);
+}
+
 std::optional<LocalInputProcess> localInputProcess(std::int64_t pid)
 {
   if (pid <= 0 || pid > std::numeric_limits<std::int32_t>::max())

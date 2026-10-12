@@ -95,6 +95,64 @@ without modifying it using:
 python3 deploy/windowshare/macos-bundle.py verify /path/to/DeskflowWindowShare-Experimental.app
 ```
 
+## Packaged core companion
+
+The Mac opt-in core can launch the window host through a private inherited
+socketpair. Package the integrated core as the bundle's main executable, with
+the window host sealed as its fixed sibling:
+
+```sh
+MACDEPLOYQT=/path/to/this/Qt/bin/macdeployqt \
+  deploy/windowshare/package-macos.sh build/windowshare-app build/core-package-new \
+  "YOUR_SIGNING_IDENTITY" build/integrated/bin/deskflow-core
+python3 deploy/windowshare/launch-smoke.py \
+  build/core-package-new/DeskflowSeamless-Core-Experimental.app
+```
+
+Build the integrated core with `BUILD_WINDOWSHARE=ON` and `BUILD_OSX_BUNDLE=OFF`.
+The new `DeskflowSeamless-Core-Experimental.app` is separate from both the ordinary
+Deskflow installation and the standalone WindowShare bundle. Its `deskflow-core
+--windowshare-ipc-probe` option must appear alone. That probe verifies the actual
+packaged child, completes its private handshake, and checks its shutdown before
+returning. It starts no input hooks, capture host, network listener or ordinary
+Deskflow shared state, and can run with `QT_QPA_PLATFORM=offscreen`.
+
+For a real host launch, supply `server --windowshare-host-config /absolute/host.json`
+to that packaged core. The file must be a regular JSON file of at most 16 KiB:
+
+```json
+{
+  "version": 1,
+  "listen": "192.0.2.10",
+  "port": 24810,
+  "identity": "/absolute/path/to/existing/identity",
+  "peerPin": "REPLACE_WITH_64_HEXADECIMAL_DIGITS",
+  "journal": "/absolute/path/to/restore.json",
+  "holdingDisplay": false,
+  "headless": false
+}
+```
+
+Only `holdingDisplay` and `headless` are optional. Use the Mac's actual interface
+address, a previously created identity, and the approved viewer's fingerprint.
+Unknown/duplicate fields, wrong types, relative identity/journal paths and arbitrary
+child arguments are rejected. This option starts the real native host and needs
+an open, unlocked Mac with its normal permission grants. A failed initial private
+handshake prevents ordinary core startup; later host loss is reported while the
+ordinary core continues. No automatic companion restart occurs.
+Normal shutdown allows five seconds for EOF-driven restoration, then sends
+SIGTERM and allows five more seconds before killing an unresponsive owned host.
+The recovery journal remains the fallback for interrupted restoration. The
+handshake-only probe uses a shorter shutdown interval.
+
+Both processes verify fixed role paths, PID birth identities and exact signed
+code against the running bundle main's resource seal. A same-user process, an
+unrelated ad-hoc signature, or an inherited FD alone cannot satisfy that check.
+Directly launching the nested host cannot establish this private route. These are
+packaged-code integrity checks, not publisher approval or complete loaded-module
+integrity. The child drops ambient DYLD and Qt/QML plugin search overrides. Input
+authorization remains unset; original capture and injection are still disabled.
+
 ## Pair and run
 
 The examples use `deskflow-windowshare` as the executable. On a Mac build it is
@@ -168,7 +226,8 @@ The original Mac keyboard route is still under development. Its isolated helpers
 track left/right modifiers, press ownership, revocation, and the emergency chord;
 the Mac adapter only constructs events in memory. A private inherited socketpair
 provides bounded, versioned core/host messages and revocable input leases. These
-helpers do not launch a companion, register an input tap, or enable OS input.
+helpers now support the explicit packaged companion launch above; they do not
+register an original-input tap or enable original OS input.
 The eventual route must bind the current Deskflow client and window-share client
 to an explicit pair of approved fingerprints and connection incarnations. The
 core exposes a fingerprint only after its existing trusted-peer check succeeds;
@@ -183,8 +242,9 @@ held keys stay suppressed through their releases. Legacy peers keep the ordinary
 viewer path. The executable does not yet install the local controller required
 to initiate this handoff, and the network protocol carries no original Mac keys.
 
-Activation still requires a verified parent/core launch, both live authenticated
-connections, a neutral capture boundary, and causal ordering of original keys
+Activation still requires both live authenticated network connections, an
+explicit approved dual-pin mapping, a neutral capture boundary, a loaded-module
+integrity policy, and causal ordering of original keys
 with pointer events. A cache of the latest modifier flags is insufficient: a
 delayed click must not be delivered after a later modifier release. These remain
 integration requirements, not behavior claimed by the current automated tests.

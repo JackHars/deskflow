@@ -34,11 +34,15 @@ public:
   bool serverMode() const;
   bool clientMode() const;
   bool singleInstanceOnly() const;
+#ifdef WINDOWSHARE_CORE_COMPANION
+  QString windowShareHostConfig() const;
+#endif
 
 private:
   [[noreturn]] void showHelpText() const;
   QCommandLineParser m_parser;
   QString m_helpText;
+  QString m_error;
   bool m_clientMode = false;
   bool m_serverMode = false;
   bool m_singleInstance = true;

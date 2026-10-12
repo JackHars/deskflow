@@ -20,5 +20,15 @@ struct CoreArgs
   inline static const auto configOption =
       QCommandLineOption({"s", "settings"}, "override configuration file to use", "configFile");
 
+#ifdef WINDOWSHARE_CORE_COMPANION
+  inline static const auto windowShareProbeOption =
+      QCommandLineOption("windowshare-ipc-probe", "Verify the packaged private host handshake without input hooks");
+  inline static const auto windowShareHostOption = QCommandLineOption(
+      "windowshare-host-config", "Launch the experimental packaged window host in server mode", "file"
+  );
+  inline static const auto options = {helpOption,   versionOption,          multiInstanceOption,
+                                      configOption, windowShareProbeOption, windowShareHostOption};
+#else
   inline static const auto options = {helpOption, versionOption, multiInstanceOption, configOption};
+#endif
 };

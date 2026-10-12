@@ -39,6 +39,14 @@ target_link_libraries(
   Qt6::Widgets
   ${libs})
 
+if(BUILD_WINDOWSHARE AND APPLE)
+  target_compile_definitions(${target} PRIVATE WINDOWSHARE_CORE_COMPANION=1)
+  target_link_libraries(${target} windowshare-local-input)
+  add_executable(windowshare-core-args-tests CoreArgParserTests.cpp CoreArgParser.cpp)
+  target_compile_definitions(windowshare-core-args-tests PRIVATE WINDOWSHARE_CORE_COMPANION=1)
+  target_link_libraries(windowshare-core-args-tests PRIVATE common)
+endif()
+
 install(
   TARGETS ${target}
   RUNTIME_DEPENDENCY_SET coreDeps

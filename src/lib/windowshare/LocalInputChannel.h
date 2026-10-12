@@ -35,6 +35,11 @@ struct LocalInputProcess
 std::optional<LocalInputProcess> localInputProcess(std::int64_t pid);
 std::optional<LocalInputProcess> currentLocalInputProcess();
 
+// Early child bootstrap, before QApplication can load plugins or start workers.
+// Restores CLOEXEC and accepts only a connected unnamed Unix stream endpoint.
+// This does not transfer ownership or authenticate the launching process.
+bool protectLocalInputDescriptor(int descriptor);
+
 struct LocalInputLease
 {
   LocalInputIncarnation deskflowClientIncarnation{}, windowShareClientIncarnation{};

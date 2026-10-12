@@ -29,6 +29,16 @@ CoreArgParser::CoreArgParser(const QStringList &args)
   m_helpText.replace("[options] coremode", "coremode [options]");
 
   m_singleInstance = !m_parser.isSet(CoreArgs::multiInstanceOption);
+#ifdef WINDOWSHARE_CORE_COMPANION
+  if (m_parser.isSet(CoreArgs::windowShareProbeOption) && (args.size() != 2 || args.at(1) != "--windowshare-ipc-probe"))
+    m_error = "Use --windowshare-ipc-probe alone";
+  if (m_parser.isSet(CoreArgs::windowShareHostOption)) {
+    const auto modes = m_parser.positionalArguments();
+    if (modes.size() != 1 || modes.front().compare("server", Qt::CaseInsensitive) != 0 || help() || version() ||
+        m_parser.value(CoreArgs::windowShareHostOption).isEmpty())
+      m_error = "--windowshare-host-config requires server mode and a configuration file";
+  }
+#endif
 }
 
 void CoreArgParser::parse()
@@ -75,7 +85,7 @@ QString CoreArgParser::versionText() const
 
 QString CoreArgParser::errorText() const
 {
-  return m_parser.errorText();
+  return m_error.isEmpty() ? m_parser.errorText() : m_error;
 }
 
 bool CoreArgParser::help() const
@@ -102,3 +112,10 @@ bool CoreArgParser::singleInstanceOnly() const
 {
   return m_singleInstance;
 }
+
+#ifdef WINDOWSHARE_CORE_COMPANION
+QString CoreArgParser::windowShareHostConfig() const
+{
+  return m_parser.value(CoreArgs::windowShareHostOption);
+}
+#endif

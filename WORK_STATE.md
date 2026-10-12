@@ -35,7 +35,7 @@ Original-keyboard tracking, press ownership and Mac event construction are
 implemented as isolated helpers. A private inherited core/host socketpair adds
 bounded messages, process-birth checks, expiring leases and exact-owner
 revocation. These helpers are not yet wired into a running input route: they
-neither launch a companion nor register a tap or post OS input. Integration must
+do not register an original-input tap or post original OS input. Integration must
 bind both authenticated connections to an explicit approved fingerprint pair
 and coordinate a neutral keyboard boundary with viewer quiescence.
 
@@ -48,13 +48,35 @@ viewer-resume exchange. Reentrant cancellation, monotonic deadlines and deferred
 controller notification prevent stale authority. The production executable has
 no local route controller installed, so original capture/injection is still off.
 
-The next integration slice needs trusted parent/core launch and an Offer →
-Candidate → Quiesced preflight before the private channel's Prepare exchange.
+The opt-in Mac core now supports an explicit packaged companion launch and a
+handshake-only diagnostic. The inherited FD is protected before Qt starts;
+process trust comes from fixed role paths, kernel PID/birth identities, and exact
+code hashes bound to the running bundle main's sealed resources. The host must be
+the core's direct child. A separate core-main bundle supports direct CLI launch;
+the standalone WindowShare bundle remains independent. Strict bounded host JSON
+cannot override the executable, trust identities or private FD. Startup, channel
+loss and owned-child teardown fail closed; original authorization stays unset.
+This verifies packaged code, not complete loaded-module integrity. Child launch
+strips ambient DYLD and Qt/QML plugin search overrides, but activation still
+needs an enforceable module-integrity policy.
+
+The next integration slice needs an Offer → Candidate → Quiesced preflight before
+the private channel's Prepare exchange.
 The main Qt thread must own private IPC; the core runs a separate blocking event
 loop. Bind accepted active client connections to revocable immutable snapshots,
 never names or proxy pointers across threads. Original keys and pointer intent
 must share capture order; current OS-to-Qt mouse delivery cannot preserve a source
 token. Resolve that ordering before activation rather than using latest flags.
+
+Start the next slice with a shared immutable TLS ticket containing the approved
+pin, a fresh connection incarnation and an atomic revocation cell. Revoke it
+inside SecureSocket before disconnect/error events, without taking a recursive
+SSL lock. Server snapshots must invalidate before selection, disconnect,
+broadcast/configuration, screensaver and shutdown transitions. A bounded mailbox
+polled by the core's existing event timer and Qt's main timer avoids queued calls
+to the blocked core thread and EventQueue's unsynchronized pre-ready addEvent
+path. Preflight must also bind `focusRequest`, which the current private lease
+does not contain. No original activation before pointer ordering is resolved.
 
 ## Recorded validation
 
@@ -71,9 +93,27 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   certificate errors. Identity generation also passed with Apple's LibreSSL.
   The native backend evaluates only the approved leaf as a private trust anchor;
   it does not change keychains or waive certificate policy failures.
-- All eight standalone application CTest suites passed after the final fixes:
-  private local input, both TLS backends, viewer, both connection-controller
+- All eleven standalone application CTest suites passed after the final fixes:
+  private local input, early bootstrap/configuration, owned companion lifecycle,
+  signed process trust, both TLS backends, viewer, both connection-controller
   backend runs, read-only holding-display probe and native recovery journal.
+- The integrated opt-in core and its argument-parser regression target build;
+  the parser tests pass. The packaged, certificate-signed x86_64 core/host probe
+  passes the real mutual handshake, default-deny input and confirmed normal
+  child exit. Invalid flag combinations and an untrusted socketpair-owning parent
+  are rejected before native actions. A measured full probe took 4.29 seconds on
+  this machine; it is not a hard bound on synchronous Security.framework work.
+- New companion/session tests pass with strict warnings and ASan/UBSan. They
+  cover default-deny authorization, startup expiry at use, child death,
+  nonzero/crashed exits, graceful EOF drain, terminate/kill escalation, reentrant
+  stop/destruction and nested-loop deletion. PeerTrust signed fixtures pass
+  strict and sanitizer runs for wrong role/birth/path, direct nested launch,
+  resource tampering, sibling substitution and whole-bundle resealing. Bootstrap
+  sanitizer tests pass, including malformed FDs, CLOEXEC/ownership, duplicate
+  configuration keys, unknown fields, embedded NUL and nonregular files.
+  A custom-grace regression completes 2.2 seconds of child cleanup and confirms
+  normal exit. Actual native hosts get five seconds after EOF and five more after
+  SIGTERM before forced termination, allowing more time for AX window restoration.
 - Viewer tests independently passed with ASan/UBSan and strict compiler warnings,
   including focus revocation, deliberate reacquisition and stale-reply rejection.
 - Connection-controller tests passed normally and with ASan/UBSan. Real TLS
@@ -135,12 +175,26 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   disposable loopback TLS fixture: initial refusal, recovery, authenticated
   disconnect/reconnect, fresh negotiation and clean exit. This newer smoke test
   never starts NativeHost, registers a tap, exports a window or changes displays.
-- All five GitHub Actions jobs passed for `6de5c5b3da7a91efdcf65ae58f4761efd9fbd1c6`
-  ([run 38226039615](https://github.com/JackHars/deskflow/actions/runs/38226039615)).
-  That includes reconnect and original-input foundations; it predates the new
-  keyboard-fence handshake.
+- All five GitHub Actions jobs passed for `b6cd13f418d537f2360a3b8e8d967c3ffaf3bf09`
+  ([run 38228710295](https://github.com/JackHars/deskflow/actions/runs/38228710295)).
+  That includes the keyboard-fence handshake and predates the trusted-launch
+  changes described above; their local results are recorded separately.
 
 ## Local package
+
+The new signed core-main bundle is
+`build/packages/trusted-launch-verified-20261012/DeskflowSeamless-Core-Experimental.app`,
+with its ZIP beside it. All 63 Mach-O files pass dependency/signature verification.
+It is x86_64, requires macOS 26.0 due to the bundled dependencies, and is not
+notarized. ZIP SHA-256:
+`a392a25d35df71612890ca08fe32c5e35730098f52805b0e4435d84a9667581c`.
+The separate installation is `~/Applications/DeskflowSeamless-Core-Experimental.app`.
+The installed copy passed recursive dependency/signature verification and the
+private handshake/bootstrap-rejection smoke, with original input disabled.
+Its core supports the handshake-only probe and explicit host-config launch
+documented in `docs/seamless-windows.md`; original input authorization remains off.
+
+The existing standalone WindowShare installation is retained unchanged:
 
 The signed Intel build is in
 `build/packages/keyboard-fence-20261012/DeskflowWindowShare-Experimental.app`
