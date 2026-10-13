@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## P4 physical-display restore safety (commit `91dba759`, no hardware claims)
+
+Mac host `recoverFrame` now calls a portable `recoveryRect` selector for both
+normal return and journal recovery. Physical displays are supplied by the existing
+CG display enumerator, which excludes Deskflow's holding output by its exact
+vendor/model/serial. The selector prefers largest overlap with the saved window;
+if all overlaps are empty, chooses nearest physical rectangle (not the first
+enumerated display), with deterministic ties. Invalid or unavailable physical
+outputs fail closed, retaining the unresolved recovery journal.
+
+**Executed in this isolated Linux source snapshot:**
+`cmake --build /mnt/data/deskflow-work/build-gcc -j4` followed by
+`ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir
+/mnt/data/deskflow-work/build-gcc --output-on-failure`: **PASS 11/11 suites**,
+0 failures. Same build and test using `build-clang`: **PASS 11/11 suites**,
+0 failures. New `CoreTests` cases include negative output origins, vertical
+arrangements, removed outputs, enumeration order, offscreen restoration and
+no-valid-output refusal. This checks the portable policy under GCC/Clang
+sanitizers, **not** actual window recovery.
+GitHub CI for [`91dba759`](https://github.com/JackHars/deskflow/actions/runs/38342620778):
+**PASS 6/6 jobs**, including Mac application, GCC/Clang foundation, Linux
+application, GNOME provider and transport; source bundle
+[38342620807](https://github.com/JackHars/deskflow/actions/runs/38342620807)
+**PASS**. Physical H05/H06/H10: **NOT_RUN**. This does not complete P4 or P1–P8.
+
 ## Verified partial code identity (2026-10-12)
 
 Most recent tested implementation:

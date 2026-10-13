@@ -1,5 +1,16 @@
 # Experimental window sharing
 
+### Recent P4 monitor-restore improvement (cloud candidate)
+
+Mac restore and journal recovery use the same physical-output selector:
+maximum saved-window overlap, then nearest surviving output on unplug or
+layout change. It is deterministic for negative/vertical origins, skips invalid
+outputs, excludes the private holding display in the Mac enumerator, and
+refuses unsafe restoration with no physical output. Portable GCC/Clang
+sanitizer regressions pass and all six hosted CI jobs including Mac compilation
+passed for `91dba759`. Physical monitor acceptance is pending.
+This is **not** multi-monitor seamless ownership or P4 completion.
+
 ## Incremental implementation checkpoint (2026-10-12)
 
 Additional partial implementation now includes fair keyframe recovery across
