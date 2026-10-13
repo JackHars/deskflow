@@ -41,6 +41,21 @@ Rect fitInside(Rect original, Rect workArea);
 // Callers must exclude Deskflow's private holding display from this list.
 // A missing/invalid output is a refusal to move a source window.
 std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDisplays);
+// Local macOS WindowServer display identity plus logical and pixel geometry.
+// No remote peer may supply or authorize this state. Distinguish a new output
+// using the same frame, reordered enumeration, rotation, and Retina mode change.
+struct PhysicalOutputSignature
+{
+  std::uint32_t displayId = 0;
+  Rect bounds;
+  std::uint32_t pixelWidth = 0, pixelHeight = 0;
+  int rotationDegrees = 0;
+};
+// Empty, oversized, malformed or duplicate snapshots are never equality
+// evidence. No allocations, throws or implicit acceptance when both fail.
+bool samePhysicalOutputLayout(
+    std::span<const PhysicalOutputSignature> expected, std::span<const PhysicalOutputSignature> current
+) noexcept;
 // Returns true only for one self-contained H.264 Annex B access unit carrying
 // SPS, PPS and an IDR in that order. This is a media decoder reset predicate,
 // NOT proof of stream/peer trust (provided by the authenticated envelope).

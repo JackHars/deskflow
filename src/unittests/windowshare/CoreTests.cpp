@@ -67,6 +67,31 @@ int main()
     check(!recoveryRect({0, 0, 200, 200}, invalid), "invalid only output rejected");
     const std::array<Rect, 2> mixed{{invalid[0], outputs[0]}};
     check(recoveryRect({-400, 30, 100, 80}, mixed).has_value(), "malformed output is ignored");
+    using Output = PhysicalOutputSignature;
+    const std::array<Output, 2> topology{{{11, {-1920, 0, 1920, 1080}, 3840, 2160, 0},
+                                           {22, {0, -1080, 2560, 1440}, 2560, 1440, 90}}};
+    const std::array<Output, 2> permuted{{topology[1], topology[0]}};
+    check(samePhysicalOutputLayout(topology, permuted), "display enumeration reorder preserves physical identity");
+    check(!samePhysicalOutputLayout(topology, {}), "missing outputs revoke retained topology");
+    check(!samePhysicalOutputLayout({}, {}), "two absent topologies cannot establish identity");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], topology[0]}}),
+          "duplicate output cannot replace another display identity");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {23, topology[1].bounds, 2560, 1440, 90}}}),
+          "reused geometry cannot substitute a different physical display");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, topology[1].bounds, 5120, 2880, 90}}}),
+          "pixel scale/mode transition invalidates topology even with unchanged logical bounds");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, topology[1].bounds, 2560, 1440, 0}}}),
+          "display rotation invalidates retained native geometry");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, {1, -1080, 2560, 1440}, 2560, 1440, 90}}}),
+          "negative origin/layout shift invalidates old window routing");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, {0, -1080, 0, 1440}, 2560, 1440, 90}}}),
+          "invalid native monitor dimensions cannot be treated as unchanged");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, topology[1].bounds, 0, 1440, 90}}}),
+          "unavailable native pixel mode refuses topology equality");
+    check(!samePhysicalOutputLayout(topology, std::array<Output, 2>{{topology[0], {22, topology[1].bounds, 2560, 1440, 45}}}),
+          "unsupported rotation cannot be used for a native permit");
+    check(!samePhysicalOutputLayout(std::array<Output, 2>{{topology[0], topology[0]}}, permuted),
+          "invalid baseline with duplicate ids cannot be retained");
     const auto sync = [](std::initializer_list<unsigned> data) {
       std::vector<std::uint8_t> bytes;
       for (auto value : data)

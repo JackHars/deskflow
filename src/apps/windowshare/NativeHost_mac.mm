@@ -410,6 +410,42 @@ std::vector<Rect> physicalDisplays()
   }
   return result;
 }
+// Capture a bounded, *local* monitor-mode/identity fingerprint. The holding
+// display never becomes a physical display witness. A failed enumeration or
+// in-progress/unsupported mode is not proof the display layout stayed stable.
+std::optional<std::vector<PhysicalOutputSignature>> physicalOutputSnapshot()
+{
+  CGDirectDisplayID ids[33];
+  std::uint32_t count = 0;
+  if (CGGetActiveDisplayList(33, ids, &count) != kCGErrorSuccess || !count || count >= 33)
+    return std::nullopt;
+  std::vector<PhysicalOutputSignature> physical;
+  physical.reserve(count);
+  for (std::uint32_t index = 0; index < count; ++index) {
+    const auto id = ids[index];
+    if (CGDisplayVendorNumber(id) == virtualDisplayVendor && CGDisplayModelNumber(id) == virtualDisplayProduct &&
+        CGDisplaySerialNumber(id) == virtualDisplaySerial)
+      continue;
+    const auto frame = rect(CGDisplayBounds(id));
+    CF<CGDisplayModeRef> mode(CGDisplayCopyDisplayMode(id));
+    const auto rotation = CGDisplayRotation(id);
+    if (!frame.valid() || !mode || !std::isfinite(rotation))
+      return std::nullopt;
+    const auto normalized = std::fmod(rotation + 360.0, 360.0);
+    const auto rounded = std::round(normalized / 90.0) * 90.0;
+    if (std::abs(normalized - rounded) > 0.01 || rounded > 270.0)
+      return std::nullopt;
+    const auto width = CGDisplayModeGetPixelWidth(mode.get());
+    const auto height = CGDisplayModeGetPixelHeight(mode.get());
+    if (!width || !height || width > 32768 || height > 32768)
+      return std::nullopt;
+    physical.push_back({id, frame, static_cast<std::uint32_t>(width),
+                        static_cast<std::uint32_t>(height), static_cast<int>(rounded)});
+  }
+  if (physical.empty() || !samePhysicalOutputLayout(physical, physical))
+    return std::nullopt;
+  return physical;
+}
 std::optional<Rect> recoverFrame(Rect original)
 {
   // Use the same deterministic physical-output policy for ordinary return
@@ -992,6 +1028,9 @@ struct NativeHost::Impl
   QString journalPath;
   std::map<std::uint64_t, std::unique_ptr<Entry>> entries;
   std::map<CGWindowID, SCWindow *> catalog;
+  // Snapshot taken before any new export. A disconnection/hotplug/scale change
+  // invalidates all old Viewer geometry and input ownership before restoration.
+  std::optional<std::vector<PhysicalOutputSignature>> physicalAtExport;
   QJsonArray recovery;
   InputLedger ledger;
   FocusLease focus;
@@ -1422,6 +1461,18 @@ struct NativeHost::Impl
       error("Unresolved recovery journal entries prevent a new export");
       return;
     }
+    const auto currentOutputs = physicalOutputSnapshot();
+    if (!currentOutputs) {
+      error("Cannot verify active physical monitor identity/mode; export disabled");
+      return;
+    }
+    if (entries.empty())
+      physicalAtExport = *currentOutputs;
+    else if (!physicalAtExport || !samePhysicalOutputLayout(*physicalAtExport, *currentOutputs)) {
+      error("Physical output identity/mode changed during export; restoring old sessions");
+      restoreAll(KeyboardRouteReason::AuthorityLost);
+      return;
+    }
     if (!CGPreflightScreenCaptureAccess() || !AXIsProcessTrusted()) {
       error("Export requires Screen Recording and Accessibility permission");
       return;
@@ -1549,6 +1600,12 @@ struct NativeHost::Impl
     auto *e = entry(session, epoch);
     if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame)
       return;
+    const auto outputs = physicalOutputSnapshot();
+    if (!physicalAtExport || !outputs || !samePhysicalOutputLayout(*physicalAtExport, *outputs)) {
+      error("Physical monitor topology changed before source relocation; restoring all exported windows");
+      restoreAll(KeyboardRouteReason::AuthorityLost);
+      return;
+    }
     if (holdingEnabled) {
       if (!holding.available()) {
         const bool hasHiddenSources =
@@ -1561,6 +1618,14 @@ struct NativeHost::Impl
       }
       QString failure;
       if (holding.available() || holding.create(&failure, 4096, 4096)) {
+        // Creating the virtual holding display can itself rearrange existing
+        // physical outputs. Never move a window using a stale source layout.
+        const auto afterCreate = physicalOutputSnapshot();
+        if (!afterCreate || !samePhysicalOutputLayout(*physicalAtExport, *afterCreate)) {
+          error("Physical outputs changed during holding-display creation; restoring sources");
+          restoreAll(KeyboardRouteReason::AuthorityLost);
+          return;
+        }
         const auto destination = fitInside(e->session.source, holding.bounds());
         if (e->session.journaled && writeJournal() && setBounds(e->window, destination)) {
           const auto actual = bounds(e->window);
@@ -1949,6 +2014,19 @@ struct NativeHost::Impl
   {
     if (!recovered)
       return;
+    if (entries.empty())
+      physicalAtExport.reset();
+    else {
+      const auto outputs = physicalOutputSnapshot();
+      if (!physicalAtExport || !outputs || !samePhysicalOutputLayout(*physicalAtExport, *outputs)) {
+        // The existing 500ms owner-thread poll is deliberately a conservative
+        // recovery trigger, not a proof that old compositor input was drained.
+        error("Physical display disconnected, rotated or changed resolution; restoring exact source owners");
+        restoreAll(KeyboardRouteReason::AuthorityLost);
+        physicalAtExport.reset();
+        return;
+      }
+    }
     if (AXIsProcessTrusted() && !tap)
       installTap();
     if (focusOwner.session) {

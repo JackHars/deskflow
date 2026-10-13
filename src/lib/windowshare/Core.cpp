@@ -112,6 +112,43 @@ std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDi
   }
   return chosen ? std::optional<Rect>(fitInside(original, *chosen)) : std::nullopt;
 }
+bool samePhysicalOutputLayout(
+    std::span<const PhysicalOutputSignature> expected, std::span<const PhysicalOutputSignature> current
+) noexcept
+{
+  if (expected.empty() || expected.size() > 32 || current.size() != expected.size())
+    return false;
+  const auto valid = [](const PhysicalOutputSignature &output) {
+    return output.displayId && output.bounds.valid() && output.pixelWidth && output.pixelHeight &&
+           output.pixelWidth <= 32768 && output.pixelHeight <= 32768 &&
+           (output.rotationDegrees == 0 || output.rotationDegrees == 90 ||
+            output.rotationDegrees == 180 || output.rotationDegrees == 270);
+  };
+  // A maximum of 32 locally enumerated outputs makes an O(n^2) identity
+  // comparison simpler and safer than sorting borrowed native state.
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    const auto &output = expected[i];
+    if (!valid(output))
+      return false;
+    for (std::size_t j = 0; j < i; ++j)
+      if (expected[j].displayId == output.displayId)
+        return false;
+    bool found = false;
+    for (const auto &observed : current) {
+      if (!valid(observed) || observed.displayId != output.displayId)
+        continue;
+      if (found || observed.bounds.x != output.bounds.x || observed.bounds.y != output.bounds.y ||
+          observed.bounds.width != output.bounds.width || observed.bounds.height != output.bounds.height ||
+          observed.pixelWidth != output.pixelWidth || observed.pixelHeight != output.pixelHeight ||
+          observed.rotationDegrees != output.rotationDegrees)
+        return false;
+      found = true;
+    }
+    if (!found)
+      return false;
+  }
+  return true;
+}
 bool decoderSyncAccessUnit(std::span<const std::uint8_t> bytes) noexcept
 {
   if (bytes.size() < 15 || bytes.size() > maxPayload)
