@@ -276,6 +276,12 @@ struct Service
   GnomeViewportDecoder viewportDecoder;
   std::uint64_t paintSnapshot = 0;
   bool delaySnapshot = false, wrongPeer = false, invalidateOnCheck = false, wrongRoutedEcho = false;
+  // Simulate compositor changes without a delivered Invalidated signal while
+  // Qt's asynchronous Check is pending. These are real D-Bus fixture replies,
+  // not native authorization or a fabricated event-drain receipt.
+  bool changeNativeRevisionAfterCheck = false, changeNativeTransformAfterCheck = false;
+  bool afterQtCheck = false;
+  unsigned nativeHitQueries = 0;
   bool advertiseRoutedPoint = true;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
@@ -499,8 +505,14 @@ struct Service
         } else if (request.operation == GnomeViewportOperation::Map) {
           reply.x = request.x * 0.8;
           reply.y = request.y * 0.8;
-        } else if (request.operation == GnomeViewportOperation::Check && std::exchange(invalidateOnCheck, false)) {
-          invalidatePaint();
+        } else if (request.operation == GnomeViewportOperation::Check) {
+          // A synchronous Qt Check acknowledgement is not evidence that
+          // GNOME remained stable while the Qt default queue was processed.
+          afterQtCheck = true;
+          if (std::exchange(changeNativeRevisionAfterCheck, false))
+            ++revision; // Deliberately emit NO native invalidation signal.
+          if (std::exchange(invalidateOnCheck, false))
+            invalidatePaint();
         }
       }
       sendViewport(reply);
@@ -588,8 +600,10 @@ struct Service
       double x = 400, y = 300;
       const bool routed = !std::strcmp(name, "ValidateRoutedPoint");
       const bool hit = routed || !std::strcmp(name, "ValidateCurrentHit");
-      if (hit)
+      if (hit) {
+        ++nativeHitQueries;
         g_variant_get(parameters, "(&su&s&sddu)", &id, &value, &token, &request, &x, &y, &expectedRevision);
+      }
       else
         g_variant_get(parameters, "(&su&s)", &id, &value, &token);
       check(
@@ -617,7 +631,11 @@ struct Service
       add("pointerY", g_variant_new_double(300));
       if (hit) {
         add("request", g_variant_new_string(request));
-        add("localX", g_variant_new_double(routed ? x - 100 : 300));
+        // Change the local transform *after* the Qt Check returned while
+        // retaining surface tokens/revision. A mere token comparison cannot
+        // detect this otherwise silent geometry drift.
+        const double drift = afterQtCheck && changeNativeTransformAfterCheck ? 1.0 : 0.0;
+        add("localX", g_variant_new_double((routed ? x - 100 : 300) + drift));
         add("localY", g_variant_new_double(routed ? y - 100 : 200));
         if (routed) {
           add("routedX", g_variant_new_double(wrongRoutedEcho ? x + 1 : x));
@@ -1007,6 +1025,62 @@ void viewportInvalidatedBeforePublication(const PrivateBus &bus)
   waitUntil([&] { return service.callerGone; }, "Invalidation fixture did not clean up");
   check(service.failure.empty(), "Invalidation fixture service failed");
 }
+void nativeHitRecheckedAfterQtQueue(const PrivateBus &bus)
+{
+  // Case 1: native focus/geometry revision silently changes after the
+  // asynchronous Qt Check. An earlier hit must not escape as a live snapshot.
+  {
+    Service service(bus);
+    service.changeNativeRevisionAfterCheck = true;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready && descriptor.value >= 0, "Post-Qt native revision fixture unavailable");
+    const auto request = client.requestRoutedPointObservation({13, 24, 425, 325});
+    check(request != 0, "Post-Qt revision check could not be requested");
+    const auto result = viewportResult(client, request);
+    check(
+        !result.observation && result.error.find("native viewport changed") != std::string::npos &&
+            service.afterQtCheck && service.nativeHitQueries >= 3 && client.live(),
+        "A silently replaced native revision escaped the post-Qt queue boundary"
+    );
+    // Rejection is bounded and nonterminal: the new native revision may
+    // establish its own fresh snapshot, not revive the first one.
+    const auto next = observed(client);
+    check(next.live() && next.snapshot().nativeRevision == service.revision,
+          "Rejected post-Qt native change poisoned all future observations");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Post-Qt native revision fixture did not close");
+    check(service.failure.empty(), "Post-Qt native revision fixture failed");
+  }
+  // Case 2: focus/identity tokens and native revision remain equal but the
+  // compositor's exact local transform shifts while Qt processed its queue.
+  // Rechecking only the native token is insufficient.
+  {
+    Service service(bus);
+    service.changeNativeTransformAfterCheck = true;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready && descriptor.value >= 0, "Post-Qt transform fixture unavailable");
+    const auto request = client.requestRoutedPointObservation({13, 25, 425, 325});
+    check(request != 0, "Post-Qt transform check could not be requested");
+    const auto result = viewportResult(client, request);
+    check(
+        !result.observation && result.error.find("native hit changed after Qt") != std::string::npos &&
+            service.afterQtCheck && service.nativeHitQueries >= 3 && client.live(),
+        "Silently changed native surface transform was accepted through the Qt queue observation"
+    );
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Post-Qt transform fixture did not close");
+    check(service.failure.empty(), "Post-Qt transform fixture failed");
+  }
+}
+
 void viewportWrongAuthenticatedPeer(const PrivateBus &bus)
 {
   Service service(bus);
@@ -1062,6 +1136,8 @@ int main(int argc, char **argv)
     std::puts("PASS: request deadline and late-reply retirement cannot renew or revive a viewport");
     viewportInvalidatedBeforePublication(bus);
     std::puts("PASS: final child invalidation prevents viewport publication and permits a fresh request");
+    nativeHitRecheckedAfterQtQueue(bus);
+    std::puts("PASS: final frozen GNOME native hit and local transform are rechecked after Qt queue completion");
     viewportWrongAuthenticatedPeer(bus);
     std::puts("PASS: wrong authenticated viewer peer ends the viewport session");
     return 0;

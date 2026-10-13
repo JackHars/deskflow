@@ -679,6 +679,17 @@ struct GnomeProviderClient::Impl
       if (fresh.localX != hit.localX || fresh.localY != hit.localY)
         throw std::runtime_error("GNOME native surface transform changed");
       viewportCall(GnomeViewportOperation::Check, request->deadline, activeSnapshot);
+      // Qt's real GUI/default Wayland queue may take up to 200ms to finish its
+      // ordered observations. A previously valid compositor hit cannot be
+      // retained through that interval without asking the exact GNOME-owned
+      // session again. Some native focus/occlusion/layout changes lack a
+      // synchronous Invalidated signal on the worker's private D-Bus context.
+      // This check uses the frozen routed point and request identity again,
+      // never the current cursor; it remains evidence only, NOT input drain.
+      const auto afterQt = nativeViewport(request->deadline, &native, request->id, routed);
+      if (afterQt.localX != hit.localX || afterQt.localY != hit.localY ||
+          afterQt.x != hit.x || afterQt.y != hit.y)
+        throw std::runtime_error("GNOME native hit changed after Qt queue observation");
       drainViewport();
       checkpoint(request->deadline);
       if (nativeGeneration != nativeInvalidations || invalidatedThrough >= activeSnapshot)
