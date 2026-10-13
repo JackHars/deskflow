@@ -33,6 +33,17 @@ elseif(UNIX)
       SOURCE EiKeyStateTests.cpp
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/platform"
     )
+    # Compile the producer's view inside the real platform target. The test
+    # consumer must independently receive every layout-affecting definition.
+    target_sources(platform PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/EiComputerTestLayout.cpp")
+    create_test(
+      NAME EiComputerTests
+      DEPENDS platform
+      LIBS base arch app
+      SOURCE EiComputerTests.cpp
+      WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/platform"
+    )
+    set_tests_properties(EiComputerTests PROPERTIES TIMEOUT 15)
   endif()
 
   if (BUILD_X11_SUPPORT)

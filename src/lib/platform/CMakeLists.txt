@@ -192,7 +192,10 @@ if(BUILD_WINDOWSHARE)
     # older systems and the experimental original-input route stays disabled.
     # Ordinary Deskflow retains its historical >=1.3 dependency.
     if(LIBEI_VERSION VERSION_GREATER_EQUAL "1.4")
-      target_compile_definitions(platform PRIVATE DESKFLOW_GNOME_EI_PING=1)
+      # EiComputer.h includes the owned prefix state in its class layout.
+      # ClientApp/ServerApp allocate it outside this target, so every consumer
+      # must see the same layout as its constructor and event handlers.
+      target_compile_definitions(platform PUBLIC DESKFLOW_GNOME_EI_PING=1)
     else()
       message(STATUS "GNOME sender EI PONG observation unavailable: libei ${LIBEI_VERSION} < 1.4")
     endif()
