@@ -310,6 +310,11 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
   m_focusTimeout.setSingleShot(true);
   m_resizeDebounce.setSingleShot(true);
   m_resizeTimeout.setSingleShot(true);
+  m_videoRecoveryTimeout.setSingleShot(true);
+  connect(&m_videoRecoveryTimeout, &QTimer::timeout, this, [this] {
+    if (m_videoRecovering && !m_failed && !m_returned)
+      fail(QStringLiteral("Video decoder recovery timed out; returning the source window"));
+  });
   connect(&m_focusTimeout, &QTimer::timeout, this, [this] {
     releaseInput(KeyboardRouteReason::Timeout);
     if (onError)
@@ -358,6 +363,7 @@ Viewer::~Viewer()
 #endif
   releaseInput(KeyboardRouteReason::Returned);
   m_connected = false;
+  m_videoRecoveryTimeout.stop();
   // Decoding never runs on the GUI/event-tap path. Wait only for the current
   // bounded access unit; queued invocations are discarded when the loop exits.
   m_decodeThread.quit();
@@ -383,8 +389,23 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     return;
   }
   const bool firstMetadata = m_geometry == 0;
-  if (!firstMetadata && geometry != m_geometry)
+  if (!firstMetadata && geometry != m_geometry) {
+    // The next access unit belongs to a different source geometry. Revoke
+    // pending media recovery; a stale decoder completion cannot paint this
+    // replacement or resume input on the new window revision.
+    m_videoRecoveryTimeout.stop();
+    m_videoRecovering = false;
+    m_videoRecoveryRequestSent = false;
+    m_videoRecoveryFrameQueued = false;
+    m_videoRecoveryFramePaintReady = false;
+    m_waitingRecoveryPaint = false;
+    if (m_decodeGeneration->load() == std::numeric_limits<std::uint64_t>::max()) {
+      fail(QStringLiteral("Decoder lifetime sequence exhausted"));
+      return;
+    }
+    m_decodeGeneration->fetch_add(1);
     releaseInput(KeyboardRouteReason::GeometryChanged);
+  }
   m_geometry = geometry;
   m_source = QSizeF(sourceWidth, sourceHeight);
   QString title = metadata.value(QStringLiteral("title")).toString();
@@ -410,56 +431,124 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
   update();
 }
 
+void Viewer::beginVideoRecovery()
+{
+  if (!m_mediaRecoveryEnabled || m_failed || m_returned || !m_connected || m_videoRecovering) {
+    fail(QStringLiteral("Video decoding cannot keep up; returning the window to the Mac"));
+    return;
+  }
+  if (m_decodeGeneration->load() == std::numeric_limits<std::uint64_t>::max() ||
+      m_mediaRecoverySequence == maxJsonInteger) {
+    fail(QStringLiteral("Video decoder recovery sequence exhausted"));
+    return;
+  }
+  m_videoRecovering = true;
+  m_videoRecoveryRequestSent = false;
+  m_videoRecoveryFrameQueued = false;
+  m_videoRecoveryFramePaintReady = false;
+  m_waitingRecoveryPaint = true;
+  m_requireFocusIntent = true;
+  m_decodeGeneration->fetch_add(1, std::memory_order_acq_rel);
+  m_videoRecoveryTimeout.start(5000); // One absolute budget, never extended by frames or responses.
+  // Never let input continue against a stale image while decoder state is
+  // unknown. This also revokes any experimental original keyboard/pointer
+  // forwarding lease before source input can be resumed.
+  const QPointer<Viewer> guard(this);
+  releaseInput(KeyboardRouteReason::Failed);
+  if (guard && m_connected && !m_failed)
+    requestVideoRecoveryWhenDrained();
+}
+
+void Viewer::requestVideoRecoveryWhenDrained()
+{
+  if (!m_videoRecovering || m_videoRecoveryRequestSent || m_pendingFrames != 0 || !m_connected ||
+      m_returned || m_failed || m_videoRecoveryTimeout.isActive() == false)
+    return;
+  m_videoRecoveryRequestSent = true; // Before callback reentry.
+  ++m_mediaRecoverySequence;
+  send(MessageType::Input, { {"kind", "video-recovery"}, {"geometry", jsonNumber(m_geometry)},
+                             {"request", jsonNumber(m_mediaRecoverySequence)} });
+}
+
 void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
 {
-  if (!m_connected || m_returned || m_failed)
-    return;
-  // An encoded frame carries the geometry of the capture that produced it.
-  // Arrival after newer metadata does not make an older frame current.
-  if (geometry != m_geometry)
+  if (!m_connected || m_returned || m_failed || geometry != m_geometry)
     return;
   if (accessUnit.isEmpty() || accessUnit.size() > maxPayload) {
     fail(QStringLiteral("Invalid video packet size"));
     return;
   }
+  bool resetDecoder = false;
+  if (m_videoRecovering && !m_videoRecoveryFrameQueued) {
+    // Once old queued work is drained, accept only one independently decodable
+    // SPS/PPS/IDR. No interframe is ever forwarded into a reset FFmpeg context.
+    if (!m_videoRecoveryRequestSent || m_pendingFrames ||
+        !decoderSyncAccessUnit(std::span(
+            reinterpret_cast<const std::uint8_t *>(accessUnit.constData()), std::size_t(accessUnit.size())
+        )))
+      return;
+    m_videoRecoveryFrameQueued = true;
+    resetDecoder = true;
+  }
   if (m_pendingFrames >= maxPendingFrames || accessUnit.size() > maxPendingVideoBytes - m_pendingBytes) {
-    // Dropping arbitrary interframes would corrupt H.264 reference state. Return
-    // safely instead of building an unbounded stale-input/video queue.
-    fail(QStringLiteral("Video decoding cannot keep up; returning the window to the Mac"));
+    if (m_videoRecovering) {
+      // A second overload before painting the recovery frame is not a safe
+      // reason to silently reset the recovery deadline or repeat the request.
+      fail(QStringLiteral("Video decoder overflow during recovery; returning the source window"));
+    } else {
+      beginVideoRecovery();
+    }
     return;
   }
   ++m_pendingFrames;
   m_pendingBytes += accessUnit.size();
   const QPointer<Viewer> target(this);
   const auto decoder = m_decoder;
+  const auto generation = m_decodeGeneration;
+  const auto capturedGeneration = generation->load(std::memory_order_acquire);
   QMetaObject::invokeMethod(
       m_decodeWorker,
-      [target, decoder, accessUnit, geometry] {
-        auto result = decoder->decode(accessUnit);
+      [target, decoder, generation, capturedGeneration, resetDecoder, accessUnit, geometry] {
+        std::optional<VideoDecoder::Result> result;
+        if (generation->load(std::memory_order_acquire) == capturedGeneration) {
+          if (resetDecoder)
+            decoder->reset();
+          result = decoder->decode(accessUnit);
+        }
         if (!target)
           return;
         QMetaObject::invokeMethod(
             target,
-            [target, result = std::move(result), size = accessUnit.size(), geometry]() mutable {
+            [target, result = std::move(result), generation, capturedGeneration, resetDecoder,
+             size = accessUnit.size(), geometry]() mutable {
               if (!target)
                 return;
               auto *self = target.data();
               --self->m_pendingFrames;
               self->m_pendingBytes -= size;
-              if (!self->m_connected || self->m_returned || self->m_failed || geometry != self->m_geometry)
+              if (self->m_videoRecovering && !self->m_videoRecoveryRequestSent && !self->m_pendingFrames) {
+                const QPointer<Viewer> guard(self);
+                self->requestVideoRecoveryWhenDrained();
+                if (!guard)
+                  return;
+              }
+              if (!result || generation->load(std::memory_order_acquire) != capturedGeneration ||
+                  !self->m_connected || self->m_returned || self->m_failed || geometry != self->m_geometry)
                 return;
-              if (!result.error.isEmpty()) {
+              if (!result->error.isEmpty()) {
                 if (++self->m_decodeErrors >= 3)
-                  self->fail(result.error);
+                  self->fail(result->error);
                 else if (self->onError)
-                  self->onError(result.error);
+                  self->onError(result->error);
                 return;
               }
-              if (result.image.isNull())
+              if (result->image.isNull())
                 return;
               self->m_decodeErrors = 0;
-              self->m_image = std::move(result.image);
+              self->m_image = std::move(result->image);
               self->m_frameGeometry = geometry;
+              if (resetDecoder)
+                self->m_videoRecoveryFramePaintReady = true;
               self->update();
             },
             Qt::QueuedConnection
@@ -672,6 +761,7 @@ void Viewer::disconnected()
   // Controller/host releases native ownership on disconnect. No writes can be
   // attempted after the channel callback or its capture has been destroyed.
   m_connected = false;
+  m_videoRecoveryTimeout.stop();
   releaseInput(KeyboardRouteReason::Disconnected);
   m_resizeDebounce.stop();
   m_resizeTimeout.stop();
@@ -814,6 +904,14 @@ void Viewer::paintEvent(QPaintEvent *)
     m_paintedVideo = videoRect();
     m_paintedDpr = devicePixelRatioF();
     m_paintedGeometry = m_frameGeometry;
+    if (m_waitingRecoveryPaint && m_videoRecoveryFramePaintReady && m_paintedGeometry == m_geometry) {
+      // An actual Qt paint, rather than a backend submission or decode callback,
+      // is the first point at which this viewer can offer interaction again.
+      m_videoRecovering = false;
+      m_waitingRecoveryPaint = false;
+      m_videoRecoveryFramePaintReady = false;
+      m_videoRecoveryTimeout.stop();
+    }
   }
   if (m_image.isNull() || !m_error.isEmpty()) {
     const QString text = m_error.isEmpty() ? QStringLiteral("Preparing Mac window…") : m_error;
@@ -855,8 +953,9 @@ void Viewer::focusOutEvent(QFocusEvent *event)
 
 bool Viewer::acceptsLocalInput() const
 {
-  return m_connected && !m_failed && !m_returned && m_readySent && m_committed && m_localActive && !m_resizing &&
-         !isMinimized() && m_paintedGeometry == m_geometry;
+  return m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint && !m_videoRecovering &&
+         m_readySent && m_committed && m_localActive && !m_resizing && !isMinimized() &&
+         m_paintedGeometry == m_geometry;
 }
 
 void Viewer::requestFocus()
@@ -1216,6 +1315,7 @@ void Viewer::closeEvent(QCloseEvent *event)
     releaseInput(KeyboardRouteReason::Returned);
     m_resizeDebounce.stop();
     m_resizeTimeout.stop();
+    m_videoRecoveryTimeout.stop();
     send(MessageType::Return, {{"geometry", jsonNumber(m_geometry)}});
     m_returned = true;
     if (onReturned)
@@ -1236,6 +1336,7 @@ void Viewer::fail(const QString &message)
   m_error = message;
   m_resizeDebounce.stop();
   m_resizeTimeout.stop();
+  m_videoRecoveryTimeout.stop();
   send(MessageType::Return, {{"reason", message}, {"geometry", jsonNumber(m_geometry)}});
   if (onError)
     onError(message);
