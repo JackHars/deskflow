@@ -127,7 +127,10 @@ class CollectorTests(unittest.TestCase):
                         return collector.snapshot()["receipt"]
                     except RuntimeError:
                         return None
-                module.CROSS.wait_for(fresh, "fresh replacement", timeout=1)
+                # Hosted macOS runners can briefly deschedule the 25ms receipt collector.
+                # Only this test's observation allowance changes; the real
+                # 2-second stale publication threshold remains enforced above.
+                module.CROSS.wait_for(fresh, "fresh replacement", timeout=3)
                 path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "missing"):
                     collector.snapshot()
