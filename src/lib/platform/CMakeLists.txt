@@ -187,6 +187,15 @@ if(BUILD_WINDOWSHARE)
     target_link_libraries(platform PRIVATE windowshare-local-input)
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(platform PRIVATE windowshare-gnome-provider)
+    # ei_new_ping/EI_EVENT_PONG were introduced in libei 1.4. Build the
+    # diagnostic on newer systems only; no sender PONG receipt is available on
+    # older systems and the experimental original-input route stays disabled.
+    # Ordinary Deskflow retains its historical >=1.3 dependency.
+    if(LIBEI_VERSION VERSION_GREATER_EQUAL "1.4")
+      target_compile_definitions(platform PRIVATE DESKFLOW_GNOME_EI_PING=1)
+    else()
+      message(STATUS "GNOME sender EI PONG observation unavailable: libei ${LIBEI_VERSION} < 1.4")
+    endif()
     if(BUILD_X11_SUPPORT)
       pkg_check_modules(WS_XLIB_XCB REQUIRED IMPORTED_TARGET x11-xcb)
       target_link_libraries(platform PRIVATE windowshare-x11 PkgConfig::WS_XLIB_XCB)

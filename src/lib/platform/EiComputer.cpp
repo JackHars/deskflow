@@ -218,7 +218,7 @@ void EiComputer::initEi()
 
 void EiComputer::cleanupEi()
 {
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
   cancelGnomeEiPrefixObservation();
   // A new EI context has a different native lifetime. Retained proof from
   // a prior connection must not become eligible on a new context incarnation.
@@ -1100,7 +1100,9 @@ void EiComputer::handleGnomeProviderChanged()
 
 void EiComputer::stopGnomeProvider(const char *reason)
 {
+#ifdef DESKFLOW_GNOME_EI_PING
   cancelGnomeEiPrefixObservation();
+#endif
   if (m_gnomeProviderStopped)
     return;
   m_gnomeProviderStopped = true;
@@ -1114,7 +1116,7 @@ void EiComputer::stopGnomeProvider(const char *reason)
 }
 #endif
 
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
 void EiComputer::retireGnomeEiPing()
 {
   if (m_gnomePrefixTimer) {
@@ -1184,11 +1186,11 @@ void EiComputer::handleSystemEvent(const Event &)
     switch (type) {
     case EI_EVENT_CONNECT:
       LOG_DEBUG("connected to eis");
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
       beginGnomeEiPrefixObservation();
 #endif
       break;
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
     case EI_EVENT_PONG:
       if (m_gnomePrefixPing) {
         auto *answer = ei_event_pong_get_ping(event);
@@ -1218,14 +1220,14 @@ void EiComputer::handleSystemEvent(const Event &)
       }
       break;
     case EI_EVENT_DEVICE_REMOVED:
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
         m_gnomePrefixProbe.invalidate();
 #endif
       removeDevice(device);
       break;
     case EI_EVENT_SEAT_REMOVED:
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
         m_gnomePrefixProbe.invalidate();
 #endif
@@ -1234,9 +1236,11 @@ void EiComputer::handleSystemEvent(const Event &)
       }
       break;
     case EI_EVENT_DISCONNECT:
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
         m_gnomePrefixProbe.invalidate();
+#endif
+#ifdef BUILD_WINDOWSHARE
       if (m_gnomeProvider) {
         stopGnomeProvider("EIS disconnected");
         break;
@@ -1261,7 +1265,7 @@ void EiComputer::handleSystemEvent(const Event &)
       this->handlePortalSessionClosed();
       break;
     case EI_EVENT_DEVICE_PAUSED:
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
         m_gnomePrefixProbe.invalidate();
 #endif
@@ -1324,7 +1328,7 @@ void EiComputer::handleSystemEvent(const Event &)
     }
     ei_event_unref(event);
   }
-#ifdef BUILD_WINDOWSHARE
+#ifdef DESKFLOW_GNOME_EI_PING
   // libei explicitly permits a synthetic PONG immediately before disconnect.
   // Do not acknowledge the PONG inside the switch or before the full event
   // batch has been consumed, and do not mix observations across EI contexts.

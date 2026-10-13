@@ -154,9 +154,11 @@ private:
 #ifdef BUILD_WINDOWSHARE
   void handleGnomeProviderChanged();
   void stopGnomeProvider(const char *reason);
+#ifdef DESKFLOW_GNOME_EI_PING
   void beginGnomeEiPrefixObservation();
   void retireGnomeEiPing();
   void cancelGnomeEiPrefixObservation();
+#endif
 #endif
   void ensureEmulating() const;
   bool inputSessionLive() const noexcept;
@@ -234,11 +236,13 @@ private:
   bool m_gnomeProviderEnabled = false;
   bool m_gnomeProviderStopped = false;
   bool m_gnomeViewportReported = false;
+#ifdef DESKFLOW_GNOME_EI_PING
   // Only a bounded sender-EIS event-batch diagnostic, NEVER native/Qt drain
   // authority. Owned by the same core event thread that calls ei_dispatch.
   windowshare::EiPrefixProbe m_gnomePrefixProbe;
   struct ei_ping *m_gnomePrefixPing = nullptr;
   EventQueueTimer *m_gnomePrefixTimer = nullptr;
+#endif
 #endif
 
   bool m_activated = false;
