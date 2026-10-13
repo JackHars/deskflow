@@ -18,6 +18,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 add_test(NAME windowshare-core COMMAND windowshare-core-tests)
 
+# Portable sender-side EI PONG batch state used by the real Linux backend.
+# Observations here never certify compositor/Qt consumption or native input.
+add_executable(windowshare-ei-prefix-probe-tests EiPrefixProbeTests.cpp)
+target_include_directories(windowshare-ei-prefix-probe-tests PRIVATE ../../lib/windowshare)
+target_compile_features(windowshare-ei-prefix-probe-tests PRIVATE cxx_std_20)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(windowshare-ei-prefix-probe-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  if(WINDOWSHARE_SANITIZERS)
+    target_compile_options(windowshare-ei-prefix-probe-tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+    target_link_options(windowshare-ei-prefix-probe-tests PRIVATE -fsanitize=address,undefined)
+  endif()
+endif()
+add_test(NAME windowshare-ei-prefix-probe COMMAND windowshare-ei-prefix-probe-tests)
+set_tests_properties(windowshare-ei-prefix-probe PROPERTIES TIMEOUT 10)
+
 add_executable(windowshare-platform-markers-tests PlatformMarkersTests.cpp)
 target_include_directories(windowshare-platform-markers-tests PRIVATE ../../lib/windowshare)
 target_compile_features(windowshare-platform-markers-tests PRIVATE cxx_std_17)

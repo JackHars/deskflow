@@ -218,6 +218,12 @@ void EiComputer::initEi()
 
 void EiComputer::cleanupEi()
 {
+#ifdef BUILD_WINDOWSHARE
+  cancelGnomeEiPrefixObservation();
+  // A new EI context has a different native lifetime. Retained proof from
+  // a prior connection must not become eligible on a new context incarnation.
+  m_gnomePrefixProbe.resetAfterConnectionTeardown();
+#endif
   for (auto device : m_eiDevices) {
     delete static_cast<ScrollRemainder *>(ei_device_get_user_data(device));
     ei_device_set_user_data(device, nullptr);
@@ -1094,6 +1100,7 @@ void EiComputer::handleGnomeProviderChanged()
 
 void EiComputer::stopGnomeProvider(const char *reason)
 {
+  cancelGnomeEiPrefixObservation();
   if (m_gnomeProviderStopped)
     return;
   m_gnomeProviderStopped = true;
@@ -1104,6 +1111,59 @@ void EiComputer::stopGnomeProvider(const char *reason)
   // A replacement portal/session would silently replace the retained native
   // identity. Exit this explicit client and let normal teardown release libei.
   m_events->addEvent(Event(EventTypes::Quit, nullptr, new ExitEventData(s_exitFailed)));
+}
+#endif
+
+#ifdef BUILD_WINDOWSHARE
+void EiComputer::retireGnomeEiPing()
+{
+  if (m_gnomePrefixTimer) {
+    m_events->removeHandler(EventTypes::Timer, m_gnomePrefixTimer);
+    m_events->deleteTimer(std::exchange(m_gnomePrefixTimer, nullptr));
+  }
+  if (m_gnomePrefixPing)
+    m_gnomePrefixPing = ei_ping_unref(m_gnomePrefixPing);
+}
+
+void EiComputer::cancelGnomeEiPrefixObservation()
+{
+  m_gnomePrefixProbe.invalidate();
+  retireGnomeEiPing();
+}
+
+void EiComputer::beginGnomeEiPrefixObservation()
+{
+  // Only the explicitly owned GNOME provider's actual libei sender. No
+  // borrowed device or dispatch pointer escapes the core event queue.
+  if (!m_gnomeProviderEnabled || m_gnomeProviderStopped || !m_gnomeProvider || !m_gnomeProvider->live() ||
+      m_isPrimary || !ei_is_sender(m_ei) || m_gnomePrefixProbe.state() != windowshare::EiPrefixProbe::State::Idle)
+    return;
+  ei_ping *ping = ei_new_ping(m_ei);
+  if (!ping)
+    return;
+  const auto id = ei_ping_get_id(ping);
+  const auto now = windowshare::EiPrefixProbe::Clock::now();
+  if (!m_gnomePrefixProbe.begin(id, now, true)) {
+    ei_ping_unref(ping);
+    return;
+  }
+  m_gnomePrefixPing = ping;
+  try {
+    // The 250ms absolute timer retires the ping even if no further native
+    // event arrives. This never extends Server capture/preparation deadlines.
+    m_gnomePrefixTimer = m_events->newOneShotTimer(0.250, nullptr);
+    m_events->addHandler(EventTypes::Timer, m_gnomePrefixTimer, [this](const auto &) {
+      m_gnomePrefixProbe.finishEventBatch(windowshare::EiPrefixProbe::Clock::now());
+      if (m_gnomePrefixProbe.state() != windowshare::EiPrefixProbe::State::Observed) {
+        LOG_DEBUG("GNOME EI sender-prefix observation expired (not native input authority)");
+        cancelGnomeEiPrefixObservation();
+      } else
+        retireGnomeEiPing();
+    });
+    ei_ping(ping);
+  } catch (...) {
+    cancelGnomeEiPrefixObservation();
+  }
 }
 #endif
 
@@ -1124,7 +1184,21 @@ void EiComputer::handleSystemEvent(const Event &)
     switch (type) {
     case EI_EVENT_CONNECT:
       LOG_DEBUG("connected to eis");
+#ifdef BUILD_WINDOWSHARE
+      beginGnomeEiPrefixObservation();
+#endif
       break;
+#ifdef BUILD_WINDOWSHARE
+    case EI_EVENT_PONG:
+      if (m_gnomePrefixPing) {
+        auto *answer = ei_event_pong_get_ping(event);
+        m_gnomePrefixProbe.pong(
+            answer == m_gnomePrefixPing ? ei_ping_get_id(answer) : 0,
+            windowshare::EiPrefixProbe::Clock::now()
+        );
+      }
+      break;
+#endif
     case EI_EVENT_SEAT_ADDED:
       if (!m_eiSeat) {
         m_eiSeat = ei_seat_ref(seat);
@@ -1144,15 +1218,25 @@ void EiComputer::handleSystemEvent(const Event &)
       }
       break;
     case EI_EVENT_DEVICE_REMOVED:
+#ifdef BUILD_WINDOWSHARE
+      if (m_gnomeProviderEnabled)
+        m_gnomePrefixProbe.invalidate();
+#endif
       removeDevice(device);
       break;
     case EI_EVENT_SEAT_REMOVED:
+#ifdef BUILD_WINDOWSHARE
+      if (m_gnomeProviderEnabled)
+        m_gnomePrefixProbe.invalidate();
+#endif
       if (seat == m_eiSeat) {
         m_eiSeat = ei_seat_unref(m_eiSeat);
       }
       break;
     case EI_EVENT_DISCONNECT:
 #ifdef BUILD_WINDOWSHARE
+      if (m_gnomeProviderEnabled)
+        m_gnomePrefixProbe.invalidate();
       if (m_gnomeProvider) {
         stopGnomeProvider("EIS disconnected");
         break;
@@ -1177,6 +1261,10 @@ void EiComputer::handleSystemEvent(const Event &)
       this->handlePortalSessionClosed();
       break;
     case EI_EVENT_DEVICE_PAUSED:
+#ifdef BUILD_WINDOWSHARE
+      if (m_gnomeProviderEnabled)
+        m_gnomePrefixProbe.invalidate();
+#endif
       LOG_DEBUG("device %s is paused", ei_device_get_name(device));
       m_isEmulating = false;
       // a paused device is reset to neutral by the EIS side and sends no
@@ -1236,6 +1324,17 @@ void EiComputer::handleSystemEvent(const Event &)
     }
     ei_event_unref(event);
   }
+#ifdef BUILD_WINDOWSHARE
+  // libei explicitly permits a synthetic PONG immediately before disconnect.
+  // Do not acknowledge the PONG inside the switch or before the full event
+  // batch has been consumed, and do not mix observations across EI contexts.
+  m_gnomePrefixProbe.finishEventBatch(windowshare::EiPrefixProbe::Clock::now());
+  if (m_gnomePrefixPing && !m_gnomePrefixProbe.awaitingPong()) {
+    if (m_gnomePrefixProbe.observed(windowshare::EiPrefixProbe::Clock::now()))
+      LOG_DEBUG("GNOME EI sender prefix observed after complete event batch; Clutter/Qt drain NOT proven");
+    retireGnomeEiPing();
+  }
+#endif
 }
 
 void EiComputer::updateButtons()

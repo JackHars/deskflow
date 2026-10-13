@@ -124,6 +124,11 @@ message(STATUS "Building ${CMAKE_PROJECT_NAME}-${CMAKE_PROJECT_VERSION}")
 # Set lib versions
 set(REQUIRED_OPENSSL_VERSION 3.0)
 set(REQUIRED_LIBEI_VERSION 1.3)
+# Sender-side EI PONG exists since libei 1.4. Keep ordinary Deskflow's 1.3
+# requirement; the opt-in Wayland diagnostic must not compile against 1.3.
+if(BUILD_WINDOWSHARE AND UNIX AND NOT APPLE)
+  set(REQUIRED_LIBEI_VERSION 1.4)
+endif()
 set(REQUIRED_LIBPORTAL_VERSION 0.9.1)
 set(REQUIRED_QT_VERSION 6.7.0)
 

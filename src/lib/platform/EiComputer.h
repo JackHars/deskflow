@@ -13,6 +13,9 @@
 #include "platform/PortalGlobalShortcuts.h"
 #endif
 #include "platform/XDGPowerManager.h"
+#ifdef BUILD_WINDOWSHARE
+#include "windowshare/EiPrefixProbe.h"
+#endif
 
 #include <bitset>
 #include <climits>
@@ -151,6 +154,9 @@ private:
 #ifdef BUILD_WINDOWSHARE
   void handleGnomeProviderChanged();
   void stopGnomeProvider(const char *reason);
+  void beginGnomeEiPrefixObservation();
+  void retireGnomeEiPing();
+  void cancelGnomeEiPrefixObservation();
 #endif
   void ensureEmulating() const;
   bool inputSessionLive() const noexcept;
@@ -228,6 +234,11 @@ private:
   bool m_gnomeProviderEnabled = false;
   bool m_gnomeProviderStopped = false;
   bool m_gnomeViewportReported = false;
+  // Only a bounded sender-EIS event-batch diagnostic, NEVER native/Qt drain
+  // authority. Owned by the same core event thread that calls ei_dispatch.
+  windowshare::EiPrefixProbe m_gnomePrefixProbe;
+  ei_ping *m_gnomePrefixPing = nullptr;
+  EventQueueTimer *m_gnomePrefixTimer = nullptr;
 #endif
 
   bool m_activated = false;
