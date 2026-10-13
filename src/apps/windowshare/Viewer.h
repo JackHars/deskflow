@@ -66,6 +66,16 @@ public:
   ~Viewer() override;
   void applyMetadata(const QJsonObject &metadata);
   void receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry);
+  // Set only once by the authenticated Bridge's capability negotiation, before
+  // the first frame. Legacy peers retain fail-closed decoder-overflow behavior.
+  void setMediaRecoveryEnabled(bool enabled) noexcept
+  {
+    m_mediaRecoveryEnabled = enabled;
+  }
+  bool videoRecovering() const noexcept
+  {
+    return m_videoRecovering;
+  }
   void committed();
   void focusAcknowledged(std::uint64_t revision, std::uint64_t request);
   void keyboardRoute(const KeyboardRouteControl &control);
@@ -144,6 +154,8 @@ private:
   bool sendInput(QJsonObject input);
   bool send(MessageType type, const QJsonObject &message);
   void fail(const QString &message);
+  void beginVideoRecovery();
+  void requestVideoRecoveryWhenDrained();
   void scheduleResize();
   void sendVisibility(bool visible);
   bool acceptsLocalInput() const;
@@ -174,7 +186,16 @@ private:
   QSet<int> m_suppressedKeys;
   QSet<int> m_suppressedButtons;
   QVector<QJsonObject> m_pendingInputs;
-  QTimer m_focusTimeout, m_resizeDebounce, m_resizeTimeout;
+  QTimer m_focusTimeout, m_resizeDebounce, m_resizeTimeout, m_videoRecoveryTimeout;
+  bool m_mediaRecoveryEnabled = false, m_videoRecovering = false;
+  bool m_videoRecoveryRequestSent = false, m_videoRecoveryFrameQueued = false;
+  bool m_videoRecoveryFramePaintReady = false, m_waitingRecoveryPaint = false;
+  std::uint64_t m_mediaRecoverySequence = 0;
+  // Only the decoder worker uses the FFmpeg state. This atomic lets stale
+  // queued work skip decoding after a recovery invalidation without calling
+  // FFmpeg from the GUI thread. GUI completions still account every byte.
+  std::shared_ptr<std::atomic<std::uint64_t>> m_decodeGeneration =
+      std::make_shared<std::atomic<std::uint64_t>>(1);
   QThread m_decodeThread;
   QObject *m_decodeWorker = nullptr;
   std::shared_ptr<VideoDecoder> m_decoder;
