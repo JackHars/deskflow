@@ -6,6 +6,12 @@ SPDX-License-Identifier: MIT
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
+**Local work resumed on 2026-10-13.** This document retains the cloud assignment
+and roadmap; the newest entries in `WORK_STATE.md` and `TESTING.md` identify the
+current implementation and evidence. The cloud has implemented private protocol
+v4 with explicit full-input scope and asynchronous Server preparation. Neither
+those contracts nor the GNOME/Qt observations enable original-input delivery.
+
 ## Assignment and division of work
 
 Complete the remaining Seamless Windows code in a **cloud coding environment**.
@@ -15,8 +21,9 @@ That is an expected limitation, not a reason to stop implementing the roadmap.
 
 The user will return the resulting branch and `TESTING.md` to the original local
 chat. That chat will build/install the final revision on the real machines and
-perform hardware verification. The local development goal is paused for this
-handoff. Do not create automations or attempt to control the user's machines.
+perform hardware verification. Local work was paused during the original
+handoff and has since resumed. Cloud runs must not create automations or attempt
+to control the user's machines.
 
 Your deliverables are:
 
@@ -120,7 +127,7 @@ Use current code and the newest work-state entry to resolve historical wording.
 | Server ownership | `src/lib/server/Server.{h,cpp}`, `src/lib/windowshare/InputRouteState.h`, `src/unittests/server/ServerTests.cpp` | Bounded pre-dispatch queue, exact owner ledger and trusted dispatcher interface exist. |
 | Production registration | `src/lib/deskflow/ServerApp.cpp` | Registers routes and capture inbox on Mac; does **not** install `OriginalInputDispatcher`. |
 | Capture | `src/lib/platform/OriginalInputCaptureSource_mac.mm`, `src/lib/windowshare/OriginalInput.{h,cpp}`, `OriginalInputCapturedInbox.h`, `OriginalInputRoute.{h,cpp}`, `LocalInputSession.cpp` | One raw consumer; separate completed-capture copies reach Server. `onRoutedInput` is historical observation, not a delivery callback. |
-| Private Mac handoff | `src/lib/windowshare/LocalInputChannel.{h,cpp}`, `LocalInputPreflight.{h,cpp}`, `LocalInputSession.{h,cpp}` | Version 3 private lease is keyboard-scoped; full-scope production coordinator absent. |
+| Private Mac handoff | `src/lib/windowshare/LocalInputChannel.{h,cpp}`, `LocalInputPreflight.{h,cpp}`, `LocalInputSession.{h,cpp}` | Version 4 explicitly retains keyboard or full-input scope; the production coordinator remains absent. |
 | Host/viewer | `src/apps/windowshare/main.cpp` (`Bridge`), `NativeHost_mac.mm`, `Viewer.cpp`, `KeyboardRouteProtocol.cpp`; `src/lib/windowshare/KeyboardRoute.h` | Negotiated `input-route-v1` gates key/button/move/scroll forwarding. It is not a native queue drain or permission to post original input. |
 | GNOME | `src/lib/platform/EiComputer.{h,cpp}`, `src/lib/windowshare/GnomeProviderClient.{h,cpp}`, `GnomeViewportProtocol.{h,cpp}`, `deploy/windowshare/gnome-provider/` | Owns an EIS/viewer lifetime and joins native hit observations to last-painted Qt geometry. No original-delivery permit. |
 | Qt native viewport | `src/apps/windowshare/WaylandViewport.{h,cpp}`, `ViewerViewportEndpoint.{h,cpp}` | Actual QtWayland surface and private inherited observation channel. Preserve exact-version/private-API checks. |
@@ -168,22 +175,24 @@ verify the current interfaces instead of relying on old line numbers.
 
 ### P1 — Full-input private lease and asynchronous preparation
 
-- [ ] Carry full input scope through `LocalInputLease`, private framing,
-  preflight, host reservation/activation and release. The current lease is 184
-  bytes and keyboard-only; `LocalInputPreflight::Host.reserve` explicitly rejects
-  full scope. Introduce explicit version/capability handling and strict decoding.
-  Never erase scope to reuse the old keyboard lease.
-- [ ] Preserve independent code-admission, delivery-ready and neutral-boundary
+- [x] Carry full input scope through `LocalInputLease`, private framing,
+  preflight, host reservation/activation and release. Protocol v4 has a 192-byte
+  lease with explicit scope and strict version/capability decoding; old or
+  mismatched scope cannot silently become a keyboard lease.
+- [x] Preserve independent code-admission, delivery-ready and neutral-boundary
   checks. Activation requires physical neutrality; active use may retain that
   owner's held input. Release must be synchronous at the owner boundary or
   remain an explicit unfinished release with forwarding closed.
-- [ ] Add a bounded asynchronous preparation state bridging Server to Qt/native
-  validation. `OriginalInputDispatcher::reserve()` currently must already hold
-  authority; returning `nullopt` immediately selects legacy. Therefore `nullopt`
-  must not mean "still preparing." Distinguish pending, refused, accepted and
-  revoked states without nested event-loop waits or delivering early.
-- [ ] Preserve source order, exact recipient/selection and output capacity
+- [x] Add bounded asynchronous Server preparation with explicit pending,
+  refused, accepted and revoked results, exact nonreused tickets and a separate
+  nonrenewable 500 ms preparation budget. Actual native validation remains P2;
+  an accepted test fixture is not a production permit.
+- [x] Preserve source order, exact recipient/selection and output capacity
   through preparation. Ensure selection/disconnect/destruction cancels safely.
+- [x] Retain the exact quiesced private lease during asynchronous preparation,
+  using one queued continuation and the unchanged private deadline. The hook
+  does not replace admission, readiness or neutrality checks and cannot extend
+  the Server's earlier deadline. The actual native cutoff remains P2.
 
 Acceptance in cloud: malformed/old-version/scope mismatch, missing providers,
 late/duplicate replies, queue limits, timeout, callback reentry, destruction,
@@ -200,10 +209,11 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
   owners, and establish backend → compositor → Qt consumption ordering while
   the full forwarding gate remains closed. Keep explicitly permitted cursor
   presentation distinct from input authority.
-- [ ] Validate the **Server's frozen point and sequence**, not the latest cursor.
-  GNOME's current `requestViewportObservation()` samples the cursor; extend the
-  production API to accept the routed point and exact binding, and validate
-  native ownership, hit/occlusion, painted geometry, focus and freshness at use.
+- [ ] Complete authoritative validation of the **Server's frozen point and
+  sequence** against the cutoff and exact binding. The implemented
+  `requestRoutedPointObservation()` already accepts a frozen point and sequence
+  and joins native/painted observations; it still supplies no delivery permit.
+  Retain native ownership, hit/occlusion, geometry, focus and freshness at use.
 - [ ] Add owned first-click activation with fresh focus/paint validation if the
   Viewer is not focused. Do not inject a duplicate Linux click to activate it.
 - [ ] Complete the X11 namespace witness and hit validation described in the
@@ -216,17 +226,20 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
 
 1. An EI ping after the old prefix may establish one sender/native-thread
    boundary. Process the entire returned batch: PONG followed by disconnect in
-   the same batch must not succeed. Current production `EiComputer` lacks PONG
-   handling. PONG alone does not prove compositor dispatch.
+   the same batch must not succeed. `EiComputer` now has a connection-time
+   PONG diagnostic; it must become a request for the exact frozen prefix.
+   PONG alone does not prove compositor dispatch. Verify the supported Mutter
+   build's libeis event-reference ordering, not just sender API availability.
 2. A provider operation may combine an empty Clutter input queue with a genuinely
    later completed stage update. A single `before-update`/`after-update` pair is
    insufficient: `before-update` is emitted after stage event draining, and that
    drain detaches its queue before callbacks. Request arrival during reentrant
    dispatch must be tested. A conservative additional same-view frame cycle is
    a candidate, not an established proof. Check required APIs at runtime.
-3. After the provider boundary, investigate two asynchronous `wl_display_sync`
-   callbacks on Qt's **existing default input queue**, the second issued by the
-   first. Qt may schedule a deferred-focus sync while processing old input.
+3. After the provider boundary, bind the implemented two asynchronous
+   `wl_display_sync` callbacks on Qt's **existing default input queue** to the
+   exact full forwarding fence. Qt may schedule a deferred-focus sync while
+   processing old input; nested dispatch may retain an older handler on stack.
    Drain QPA window-system events on the GUI thread with the full gate closed
    and revalidate before reply. `sendWindowSystemEvents`' boolean means whether
    it sent events, not proof of success. No blocking roundtrip/new connection.

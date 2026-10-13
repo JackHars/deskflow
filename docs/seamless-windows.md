@@ -1,5 +1,22 @@
 # Experimental window sharing
 
+### Local implementation return (2026-10-13)
+
+The cloud code is integrated. Private preflight now supports a bounded wait
+after the exact full-input forwarding fence closes, followed by one explicit
+continuation that rechecks all authority conditions. Stale or duplicate
+completion cannot activate a newer lease, and direct channel calls cannot
+bypass the wait. This supplies the asynchronous preparation boundary needed
+by the remaining native cutoff coordinator; original delivery stays disabled.
+
+The Mac watchdog also recovers when its exited host has not yet been reaped.
+Its isolated native regression failed before the fix and passes afterward.
+Both local applications build, the five core suites pass 170 Qt entries, and
+the new preflight/channel/companion suites pass. See `TESTING.md` for current
+hosted CI and the precise distinction between these checks and hardware tests.
+Home Ubuntu retesting awaits WiFiman connectivity; physical input, two-monitor,
+multiple-window and bidirectional edge-drag acceptance remain unfinished.
+
 ### P2 native GNOME StageView observation and strict reply validation (verified partial)
 
 The actual GNOME Shell 50 extension now observes two same-stage-view
@@ -123,11 +140,13 @@ proxies; it is not native drain authority or hardware acceptance. See
 
 ## Roadmap status
 
-The overall completion estimate is about 50%. The project is in integration:
-actual Mac capture and Ubuntu viewer input now pass a complete two-machine
-synthetic test. The next acceptance milestone is the physical Mac keyboard and
-trackpad flow, including input ownership and window return. The percentage is
-an engineering estimate, not the fraction of tests that pass.
+The project remains in integration. The original cloud handoff estimated about
+50% overall; that historical estimate is not a count of passing tests. Private
+full-input scope and asynchronous preparation contracts are now implemented.
+The next implementation milestone is the causal native input cutoff followed
+by the production coordinator. Earlier two-machine synthetic capture/input
+checks passed, but physical keyboard/trackpad ownership and window return still
+need acceptance on the current code.
 
 For cloud implementation, use [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md).
 The cloud implementer records available automated results and the procedures
@@ -137,12 +156,12 @@ pending until the returned code is tested on the actual machines.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Captured stamps follow actual Server packets to backend submission receipts. The Server now selects ownership before legacy dispatch, and a negotiated viewer/host gate fences keys and pointers together. GNOME hit observations join painted source geometry. Production original delivery remains disabled. | Connect compositor/Qt queue draining, exact routed-point validation and the production coordinator. |
+| Original input integration | Private protocol v4 retains full-input scope; Server and private preflight can defer preparation without renewing deadlines. The viewer/host gate fences keys and pointers together, and GNOME/Qt supply exact read-only observations. Production original delivery remains disabled. | Connect an exact input cutoff through EI, Mutter and the fenced Qt viewer, then the production coordinator. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
 | App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
-| Recovery, performance and release | Journaling, disconnect cleanup and a separate signed experimental Mac package exist. | Complete automatic crash recovery, stream scheduling, performance tests and Linux packaging. |
+| Recovery, performance and release | Journaling, disconnect cleanup, the independent Mac watchdog, stream recovery, a separate Mac package and an inert Linux archive exist. Isolated unreaped-host recovery and hosted packaging checks pass. | Verify real-window crash recovery, sustained performance and experimental installation/upgrade/removal on both machines. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
 hostname `jack` at `192.168.1.12`. The GNOME viewport milestone

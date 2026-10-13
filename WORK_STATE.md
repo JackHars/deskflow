@@ -1,5 +1,47 @@
 # Seamless Windows work state
 
+## Local implementation resumed — 2026-10-13
+
+Current code: `c867af9d029897f860bc391aa68d4cafee49e601` on
+`feature/seamless-windows`. The cloud changes were fetched and integrated,
+including its subsequent GNOME fixture, boxed-layout and strict-reply fixes.
+
+- `3d9be06db`: a missing advertised GNOME stage method must refuse the request
+  without an earlier-snapshot fallback; a fresh successful request may recover.
+- `7bc8cf332`: the Mac recovery watchdog now recognizes an exited, unreaped
+  host using kernel birth identity and zombie status. A native owned-child
+  regression failed before the fix and passed afterward; it uses only a private
+  marker, not a native window or input session.
+- `c867af9d0`: private preflight can hold its exact quiesced full-input lease
+  while preparation runs, then queue one explicit continuation. The unchanged
+  two-second private deadline, retained capture/selection and all admission,
+  readiness and neutrality checks still apply. Direct channel preparation
+  cannot bypass the wait. This connects the wait to the real private protocol;
+  the production native-cutoff controller remains to be implemented.
+
+Local Mac builds of both applications pass. Five actual core suites pass
+**170 Qt entries**; seven selected application suites pass. The new deferred
+preflight and its adjacent channel/companion suites pass **3/3** after rebuilding.
+The watchdog has retained failing/passing proof and no leftover fixture
+processes; the receipt-policy helper passes **13 tests**. Independent reviews
+found no further actionable issues in these changes.
+
+Current implementation `c867af9d0` passed **all six** hosted jobs in
+[CI 38410153483](https://github.com/JackHars/deskflow/actions/runs/38410153483),
+including Mac/Linux integration, native headless GNOME, transport and both
+sanitizer builds. Its [source bundle](https://github.com/JackHars/deskflow/actions/runs/38410153441)
+also passed. Local evidence is retained privately in
+`build/cloud-return-20261013/`; exact commands and scope are in `TESTING.md`.
+
+Home Ubuntu retesting is pending: WiFiman no longer routes its address and
+strict-key SSH timed out. Fresh physical readiness and the outstanding Mac
+App Management step remain prerequisites for installation/native acceptance.
+No native user input, real-window recovery, package installation or two-machine
+session was performed on this return. Original input remains disabled; the
+next P2 work is one causal cutoff transaction through Core, EI, Mutter and the
+exact fenced Qt viewer, followed by P3 production coordination. Multi-window,
+edge-drag and physical acceptance remain unfinished.
+
 ## Latest P2 verified GNOME StageView/native binding checkpoint (2026-10-13)
 
 Implementation [`e117b66e`](https://github.com/JackHars/deskflow/commit/e117b66e22e7f2141b4a17b93f81e22c736f5b4c)
