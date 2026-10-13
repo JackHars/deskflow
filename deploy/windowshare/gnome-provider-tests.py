@@ -448,7 +448,8 @@ def run_fixture(arguments):
             capabilities = wait_for(processes, lambda: provider.call("GetCapabilities"), "provider activation", timeout=20)
             version, shell_version, caps = capabilities
             require(version == 1 and shell_version.split(".")[0] == "50", "Unexpected provider protocol/version")
-            for key in ("nativeHitTesting", "exactWaylandClientBinding", "eisSessionOwned"):
+            for key in ("nativeHitTesting", "exactWaylandClientBinding", "eisSessionOwned",
+                        "routedPointObservation"):
                 require(caps.get(key) is True, f"Required real compositor capability absent: {key}: {caps}")
             for key in ("syncFenceVerified", "pointerDeviceAttribution", "qtViewportMapping"):
                 require(caps.get(key) is False, f"Provider made an unsupported capability claim: {key}")
@@ -584,6 +585,56 @@ def run_fixture(arguments):
                 rounds.append({"x": x, "y": y, "revision": current["revision"], "request": index,
                                "surfaceX": hit["localX"], "surfaceY": hit["localY"]})
             report["motionPongCurrentHitRounds"] = rounds
+            # Exercise the real compositor's read-only routed-point query at
+            # the earlier frozen frame centre, *without moving the cursor back*.
+            # An old ValidateCurrentHit implementation must reject this point.
+            # Only native hit/transform and exact session/surface/paint identity
+            # are checked: this is NOT a delivery permit or an EIS/Qt drain.
+            frozen_x = float(round(frame[0] + frame[2] / 2))
+            frozen_y = float(round(frame[1] + frame[3] / 2))
+            point_id = "capture_7_sequence_19"
+            current, = provider.call("GetViewer", "(sus)", (session, generation, token))
+            observation_only(current)
+            require(current.get("available") is True and
+                    (frozen_x, frozen_y) != (current["pointerX"], current["pointerY"]),
+                    "Frozen-point fixture failed to distinguish current cursor")
+            routed, = provider.call(
+                "ValidateRoutedPoint", "(sussddu)",
+                (session, generation, token, point_id, frozen_x, frozen_y, current["revision"])
+            )
+            observation_only(routed)
+            require(
+                routed.get("available") is True and routed.get("request") == point_id and
+                routed.get("routedX") == frozen_x and routed.get("routedY") == frozen_y and
+                all(routed.get(k) == current.get(k) for k in
+                    ("session", "generation", "viewer", "window", "surface", "revision")) and
+                all(isinstance(routed.get(k), (int, float)) and math.isfinite(routed[k])
+                    for k in ("localX", "localY")),
+                f"Compositor substituted the cursor or lost frozen point binding: {routed}"
+            )
+            stale_routed, = provider.call(
+                "ValidateRoutedPoint", "(sussddu)",
+                (session, generation, token, "stale-route", frozen_x, frozen_y, current["revision"] + 1)
+            )
+            observation_only(stale_routed)
+            require(stale_routed.get("available") is False and
+                    stale_routed.get("reason") == "stale-revision",
+                    "Frozen-point validator admitted a stale native revision")
+            outside_routed, = provider.call(
+                "ValidateRoutedPoint", "(sussddu)",
+                (session, generation, token, "outside-route", -1000., -1000., current["revision"])
+            )
+            observation_only(outside_routed)
+            require(outside_routed.get("available") is False and
+                    outside_routed.get("reason") == "not-viewer-surface",
+                    "Frozen-point validator accepted an unrelated native input surface")
+            report["frozenRoutedPointReadOnly"] = {
+                "request": point_id, "stageX": frozen_x, "stageY": frozen_y,
+                "cursorX": current["pointerX"], "cursorY": current["pointerY"],
+                "surfaceX": routed["localX"], "surfaceY": routed["localY"],
+                "staleDenied": True, "unrelatedSurfaceDenied": True,
+                "deliveryAuthorized": False,
+            }
             events = viewer_events()
             report["gtkMotionEvents"] = sum(event.get("event") == "motion" for event in events)
             require(report["gtkMotionEvents"] >= 2, "Dedicated Wayland client did not receive real pointer motion")
