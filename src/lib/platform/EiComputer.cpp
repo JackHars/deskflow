@@ -223,6 +223,10 @@ void EiComputer::cleanupEi()
   // A new EI context has a different native lifetime. Retained proof from
   // a prior connection must not become eligible on a new context incarnation.
   m_gnomePrefixProbe.resetAfterConnectionTeardown();
+  m_gnomePrefixBinding.reset();
+  m_gnomeSubmittedKeys.reset();
+  m_gnomeSubmittedButtons.reset();
+  m_gnomeUntrackedInput = false;
 #endif
   for (auto device : m_eiDevices) {
     delete static_cast<ScrollRemainder *>(ei_device_get_user_data(device));
@@ -389,7 +393,7 @@ void EiComputer::getCursorCenter(int32_t &x, int32_t &y) const
 
 void EiComputer::fakeMouseButton(ButtonID button, bool press)
 {
-  if (!inputSessionLive())
+  if (!allowLegacyInput())
     return;
   uint32_t code;
 
@@ -414,6 +418,9 @@ void EiComputer::fakeMouseButton(ButtonID button, bool press)
   ensureEmulating();
   ei_device_button_button(m_eiPointer, code, press);
   ei_device_frame(m_eiPointer, ei_now(m_ei));
+#ifdef DESKFLOW_GNOME_EI_PING
+  m_gnomeSubmittedButtons.set(button, press);
+#endif
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   windowshare::InputSequenceSubmissionScope::submitted();
 #endif
@@ -421,7 +428,7 @@ void EiComputer::fakeMouseButton(ButtonID button, bool press)
 
 void EiComputer::fakeMouseMove(int32_t x, int32_t y)
 {
-  if (!inputSessionLive())
+  if (!allowLegacyInput())
     return;
   // We get one motion event before enter() with the target position
   if (!m_isOnComputer) {
@@ -450,7 +457,7 @@ void EiComputer::fakeMouseMove(int32_t x, int32_t y)
 
 void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
 {
-  if (!inputSessionLive())
+  if (!allowLegacyInput())
     return;
   if (!m_eiPointer)
     return;
@@ -465,7 +472,7 @@ void EiComputer::fakeMouseRelativeMove(int32_t dx, int32_t dy) const
 
 void EiComputer::fakeMouseWheel(ScrollDelta delta) const
 {
-  if (!inputSessionLive())
+  if (!allowLegacyInput())
     return;
   if (!m_eiPointer)
     return;
@@ -484,7 +491,7 @@ void EiComputer::fakeMouseWheel(ScrollDelta delta) const
 
 void EiComputer::fakeKey(uint32_t keycode, bool isDown) const
 {
-  if (!inputSessionLive())
+  if (!allowLegacyInput())
     return;
   if (!m_eiKeyboard)
     return;
@@ -494,6 +501,12 @@ void EiComputer::fakeKey(uint32_t keycode, bool isDown) const
   ensureEmulating();
   ei_device_keyboard_key(m_eiKeyboard, keycode, isDown);
   ei_device_frame(m_eiKeyboard, ei_now(m_ei));
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (keycode < m_gnomeSubmittedKeys.size())
+    m_gnomeSubmittedKeys.set(keycode, isDown);
+  else
+    m_gnomeUntrackedInput = true;
+#endif
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   windowshare::InputSequenceSubmissionScope::submitted();
 #endif
@@ -528,6 +541,20 @@ bool EiComputer::inputSessionLive() const noexcept
 #endif
 }
 
+bool EiComputer::allowLegacyInput() const noexcept
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (m_gnomePrefixBinding) {
+    // Transport normally rejects this before key translation or compression.
+    // A direct backend caller still cannot submit across the retained cutoff.
+    m_gnomePrefixProbe.invalidate();
+    windowshare::InputSequenceSubmissionScope::fail();
+    return false;
+  }
+#endif
+  return inputSessionLive();
+}
+
 void EiComputer::ensureEmulating() const
 {
   if (!inputSessionLive() || m_isPrimary || !m_isOnComputer)
@@ -554,6 +581,9 @@ void EiComputer::ensureEmulating() const
 
 void EiComputer::stopEmulating() const
 {
+#ifdef DESKFLOW_GNOME_EI_PING
+  m_gnomePrefixProbe.invalidate();
+#endif
   cancelIdleEmulationTimer();
   if (!m_isEmulating)
     return;
@@ -771,10 +801,16 @@ void EiComputer::removeDevice(struct ei_device *device)
 
   bool wasTracked = false;
   if (device == m_eiPointer) {
+#ifdef DESKFLOW_GNOME_EI_PING
+    m_gnomeSubmittedButtons.reset();
+#endif
     m_eiPointer = ei_device_unref(m_eiPointer);
     wasTracked = true;
   }
   if (device == m_eiKeyboard) {
+#ifdef DESKFLOW_GNOME_EI_PING
+    m_gnomeSubmittedKeys.reset();
+#endif
     m_eiKeyboard = ei_device_unref(m_eiKeyboard);
     wasTracked = true;
   }
@@ -1133,27 +1169,33 @@ void EiComputer::cancelGnomeEiPrefixObservation()
   retireGnomeEiPing();
 }
 
-void EiComputer::beginGnomeEiPrefixObservation()
+bool EiComputer::beginGnomeEiPrefixObservation(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
+)
 {
   // Only the explicitly owned GNOME provider's actual libei sender. No
   // borrowed device or dispatch pointer escapes the core event queue.
   if (!m_gnomeProviderEnabled || m_gnomeProviderStopped || !m_gnomeProvider || !m_gnomeProvider->live() ||
-      m_isPrimary || !ei_is_sender(m_ei) || m_gnomePrefixProbe.state() != windowshare::EiPrefixProbe::State::Idle)
-    return;
+      m_isPrimary || !m_activated || !m_isOnComputer || !m_isEmulating || !m_ei || !m_eiPointer || !m_eiKeyboard ||
+      !m_eiAbs || m_gnomeSubmittedKeys.any() || m_gnomeSubmittedButtons.any() || m_gnomeUntrackedInput ||
+      std::this_thread::get_id() != m_gnomePrefixThread || !windowshare::validInputCutoffBinding(binding) ||
+      !ei_is_sender(m_ei) || m_gnomePrefixBinding)
+    return false;
   struct ei_ping *ping = ei_new_ping(m_ei);
   if (!ping)
-    return;
+    return false;
   const auto id = ei_ping_get_id(ping);
   const auto now = windowshare::EiPrefixProbe::Clock::now();
-  if (!m_gnomePrefixProbe.begin(id, now, true)) {
+  if (!m_gnomePrefixProbe.begin(binding.request, id, now, deadline, true)) {
     ei_ping_unref(ping);
-    return;
+    return false;
   }
+  m_gnomePrefixBinding = binding;
   m_gnomePrefixPing = ping;
   try {
     // The 250ms absolute timer retires the ping even if no further native
     // event arrives. This never extends Server capture/preparation deadlines.
-    m_gnomePrefixTimer = m_events->newOneShotTimer(0.250, nullptr);
+    m_gnomePrefixTimer = m_events->newOneShotTimer(std::chrono::duration<double>(deadline - now).count(), nullptr);
     m_events->addHandler(EventTypes::Timer, m_gnomePrefixTimer, [this](const auto &) {
       m_gnomePrefixProbe.finishEventBatch(windowshare::EiPrefixProbe::Clock::now());
       if (m_gnomePrefixProbe.state() != windowshare::EiPrefixProbe::State::Observed) {
@@ -1165,7 +1207,53 @@ void EiComputer::beginGnomeEiPrefixObservation()
     ei_ping(ping);
   } catch (...) {
     cancelGnomeEiPrefixObservation();
+    m_gnomePrefixProbe.retire(binding.request);
+    m_gnomePrefixBinding.reset();
+    return false;
   }
+  return true;
+}
+#endif
+
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool EiComputer::beginInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  return beginGnomeEiPrefixObservation(binding, deadline);
+#else
+  return false;
+#endif
+}
+windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::InputCutoffBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (std::this_thread::get_id() != m_gnomePrefixThread || m_gnomePrefixBinding != binding)
+    return windowshare::InputCutoffState::Denied;
+  if (!inputSessionLive() || !m_activated || !m_isOnComputer || !m_isEmulating || !m_eiPointer || !m_eiKeyboard ||
+      !m_eiAbs)
+    m_gnomePrefixProbe.invalidate();
+  if (m_gnomePrefixProbe.observed(windowshare::InputCutoffClock::now()))
+    return windowshare::InputCutoffState::BackendObserved;
+  return m_gnomePrefixProbe.state() == windowshare::EiPrefixProbe::State::Denied
+             ? windowshare::InputCutoffState::Denied
+             : windowshare::InputCutoffState::Pending;
+#else
+  return windowshare::InputCutoffState::Denied;
+#endif
+}
+bool EiComputer::resumeInputCutoff(const windowshare::InputCutoffBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (std::this_thread::get_id() != m_gnomePrefixThread || m_gnomePrefixBinding != binding)
+    return false;
+  cancelGnomeEiPrefixObservation();
+  m_gnomePrefixBinding.reset();
+  return m_gnomePrefixProbe.retire(binding.request);
+#else
+  return false;
+#endif
 }
 #endif
 
@@ -1186,17 +1274,13 @@ void EiComputer::handleSystemEvent(const Event &)
     switch (type) {
     case EI_EVENT_CONNECT:
       LOG_DEBUG("connected to eis");
-#ifdef DESKFLOW_GNOME_EI_PING
-      beginGnomeEiPrefixObservation();
-#endif
       break;
 #ifdef DESKFLOW_GNOME_EI_PING
     case EI_EVENT_PONG:
       if (m_gnomePrefixPing) {
         auto *answer = ei_event_pong_get_ping(event);
         m_gnomePrefixProbe.pong(
-            answer == m_gnomePrefixPing ? ei_ping_get_id(answer) : 0,
-            windowshare::EiPrefixProbe::Clock::now()
+            answer == m_gnomePrefixPing ? ei_ping_get_id(answer) : 0, windowshare::EiPrefixProbe::Clock::now()
         );
       }
       break;
@@ -1266,8 +1350,13 @@ void EiComputer::handleSystemEvent(const Event &)
       break;
     case EI_EVENT_DEVICE_PAUSED:
 #ifdef DESKFLOW_GNOME_EI_PING
-      if (m_gnomeProviderEnabled)
+      if (m_gnomeProviderEnabled) {
         m_gnomePrefixProbe.invalidate();
+        if (device == m_eiKeyboard)
+          m_gnomeSubmittedKeys.reset();
+        if (device == m_eiPointer)
+          m_gnomeSubmittedButtons.reset();
+      }
 #endif
       LOG_DEBUG("device %s is paused", ei_device_get_name(device));
       m_isEmulating = false;

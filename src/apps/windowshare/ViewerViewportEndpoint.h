@@ -47,9 +47,16 @@ public:
   // Fixture callbacks may test delayed/stale responses, but cannot mint
   // production original-input authority.
   std::function<bool(const GnomeViewportState &, std::function<void(bool)>)> onQtQueue;
+  // Distinct from observational Check. Both callbacks must retain the exact
+  // live All forwarding fence; missing native support always denies.
+  std::function<bool(const GnomeViewportState &, const InputCutoffBinding &)> onInputDrainCheck;
+  std::function<bool(const GnomeViewportState &, const InputCutoffBinding &, QDeadlineTimer, std::function<void(bool)>)>
+      onInputDrain;
   std::function<void()> onClosed;
-  bool startWaylandQueue(
-      QWindow *window, const WaylandViewportGeometry &expected, std::function<void(bool)> finished
+  bool startWaylandQueue(QWindow *window, const WaylandViewportGeometry &expected, std::function<void(bool)> finished);
+  bool startWaylandInputDrain(
+      QWindow *window, const WaylandViewportGeometry &expected, QDeadlineTimer deadline,
+      std::function<bool()> exactFence, std::function<void(bool)> finished
   );
   void invalidate(const QString &reason = QStringLiteral("viewport-changed"));
   void close();
@@ -64,7 +71,15 @@ private:
   void handle(const GnomeViewportRequest &request);
   bool send(const GnomeViewportReply &reply);
   bool current(std::uint64_t snapshot);
-  void finishQtQueue(bool observed);
+  bool currentInputDrain(const GnomeViewportRequest &request, QDeadlineTimer deadline);
+  void finishQtQueue(const GnomeViewportRequest &request, bool observed);
+  struct PendingQueue
+  {
+    GnomeViewportRequest request;
+    QDeadlineTimer deadline;
+    bool starting = true;
+    std::optional<bool> completion;
+  };
   int m_descriptor = -1;
   std::unique_ptr<QSocketNotifier> m_read, m_write;
   GnomeViewportDecoder m_decoder;
@@ -73,8 +88,9 @@ private:
   std::uint64_t m_lastRequest = 0, m_snapshot = 0;
   QDeadlineTimer m_deadline;
   QTimer m_expiry;
+  QTimer m_queueExpiry;
   QtWaylandQueueWitness m_queueWitness;
-  std::optional<GnomeViewportRequest> m_pendingCheck;
+  std::optional<PendingQueue> m_pendingCheck;
   bool m_reading = false;
 };
 } // namespace deskflow::windowshare

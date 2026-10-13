@@ -93,14 +93,10 @@ bool bounded(const char *text)
 // GVariant's lookup returns the first matching entry, which alone cannot
 // reject a duplicate key or an unrecognized substituted field. This is
 // read-only evidence, but it must never admit malformed native bindings.
-bool exactStageFields(GVariant *dictionary)
+template <std::size_t N>
+bool exactFields(GVariant *dictionary, const std::array<std::pair<const char *, const char *>, N> &schema)
 {
-  static constexpr std::array<std::pair<const char *, const char *>, 13> schema{{
-      {"available", "b"}, {"reason", "s"}, {"observationOnly", "b"}, {"deliveryReady", "b"},
-      {"session", "s"}, {"viewer", "s"}, {"request", "s"}, {"generation", "u"},
-      {"revision", "u"}, {"stageUpdates", "u"}, {"sameStageView", "b"},
-      {"stageX", "d"}, {"stageY", "d"}
-  }};
+  static_assert(N < 32);
   if (!dictionary || !g_variant_is_of_type(dictionary, G_VARIANT_TYPE("a{sv}")) ||
       g_variant_n_children(dictionary) != schema.size())
     return false;
@@ -126,27 +122,102 @@ bool exactStageFields(GVariant *dictionary)
   }
   return seen == ((1u << schema.size()) - 1);
 }
+bool exactStageFields(GVariant *dictionary)
+{
+  static constexpr std::array<std::pair<const char *, const char *>, 13> schema{
+      {{"available", "b"},
+       {"reason", "s"},
+       {"observationOnly", "b"},
+       {"deliveryReady", "b"},
+       {"session", "s"},
+       {"viewer", "s"},
+       {"request", "s"},
+       {"generation", "u"},
+       {"revision", "u"},
+       {"stageUpdates", "u"},
+       {"sameStageView", "b"},
+       {"stageX", "d"},
+       {"stageY", "d"}}
+  };
+  return exactFields(dictionary, schema);
+}
+constexpr std::array<std::pair<const char *, const char *>, 13> inputDrainBindingSchema{
+    {{"cutoffRequest", "s"},
+     {"coreConnectionGeneration", "u"},
+     {"captureEpoch", "s"},
+     {"captureSequence", "s"},
+     {"capturePart", "u"},
+     {"viewerConnection", "s"},
+     {"ownerSession", "s"},
+     {"ownerEpoch", "s"},
+     {"forwardingGeneration", "s"},
+     {"focusRequest", "s"},
+     {"focusRevision", "s"},
+     {"geometry", "s"},
+     {"scope", "s"}}
+};
+GVariant *inputDrainBinding(const InputCutoffBinding &binding)
+{
+  GVariantBuilder values;
+  g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+  const auto number = [&](const char *key, std::uint64_t value) {
+    g_variant_builder_add(&values, "{sv}", key, g_variant_new_string(std::to_string(value).c_str()));
+  };
+  number("cutoffRequest", binding.request);
+  g_variant_builder_add(
+      &values, "{sv}", "coreConnectionGeneration", g_variant_new_uint32(binding.coreConnectionGeneration)
+  );
+  number("captureEpoch", binding.capture.epoch);
+  number("captureSequence", binding.capture.sequence);
+  g_variant_builder_add(&values, "{sv}", "capturePart", g_variant_new_uint32(binding.capture.part));
+  number("viewerConnection", binding.viewerConnection);
+  number("ownerSession", binding.forwarding.owner.session);
+  number("ownerEpoch", binding.forwarding.owner.epoch);
+  number("forwardingGeneration", binding.forwarding.generation);
+  number("focusRequest", binding.forwarding.focusRequest);
+  number("focusRevision", binding.forwarding.focusRevision);
+  number("geometry", binding.forwarding.geometry);
+  g_variant_builder_add(&values, "{sv}", "scope", g_variant_new_string("all"));
+  return g_variant_builder_end(&values);
+}
+bool matchingInputDrainBinding(GVariant *values, const InputCutoffBinding &binding)
+{
+  if (!exactFields(values, inputDrainBindingSchema))
+    return false;
+  Variant expected(g_variant_ref_sink(inputDrainBinding(binding)));
+  for (const auto &[key, type] : inputDrainBindingSchema) {
+    Variant wanted(g_variant_lookup_value(expected.value, key, G_VARIANT_TYPE(type)));
+    Variant actual(g_variant_lookup_value(values, key, G_VARIANT_TYPE(type)));
+    if (!actual.value || !g_variant_equal(actual.value, wanted.value))
+      return false;
+  }
+  return true;
+}
 } // namespace
 
 struct GnomeProviderClient::Impl
 {
   GnomeProviderConfig configuration;
   std::function<void()> changed;
-  std::atomic<bool> stopping = false, alive = false, routedPointSupported = false;
+  std::atomic<bool> stopping = false, alive = false, routedPointSupported = false, inputDrainSupported = false;
   bool stageUpdatesSupported = false; // Worker-owned; read-only Clutter observation only.
   std::mutex mutex;
   Update update;
   std::optional<ViewportUpdate> viewportUpdate;
+  std::optional<InputDrainUpdate> inputDrainUpdate;
   struct Request
   {
     std::uint64_t id;
     Clock::time_point deadline;
     std::optional<RoutedPoint> routedPoint;
+    std::optional<InputCutoffBinding> cutoff;
   };
   std::optional<Request> viewportRequest;
   std::shared_ptr<std::atomic_bool> viewportRevoked;
   bool notified = false, viewportNotified = false, viewportBusy = false;
   std::uint64_t nextViewportRequest = 0, lastViewportRequest = 0;
+  std::uint64_t lastInputCutoffRequest = 0;
+  bool lastWasInputDrain = false;
   GCancellable *cancel = g_cancellable_new();
   std::thread worker;
   // Worker-owned native objects below; never dereferenced by the consumer.
@@ -352,6 +423,13 @@ struct GnomeProviderClient::Impl
       throw std::runtime_error("Unsupported GNOME provider capabilities or Shell version");
     routedPointSupported.store(boolean(values, "routedPointObservation"), std::memory_order_release);
     stageUpdatesSupported = boolean(values, "stageUpdateSequence");
+    if (boolean(values, "inputDrainSegment")) {
+      const char *limit = nullptr;
+      if (!g_variant_lookup(values, "inputDrainOrderingLimit", "&s", &limit) ||
+          std::strcmp(limit, InputDrainSegment::orderingLimitation()))
+        throw std::runtime_error("Unsupported GNOME input-drain ordering contract");
+      inputDrainSupported.store(true, std::memory_order_release);
+    }
     DescriptorList descriptors;
     Variant created(g_dbus_connection_call_with_unix_fd_list_sync(
         bus, owner.c_str(), object, interface, "CreateSession", nullptr, G_VARIANT_TYPE("(suh)"),
@@ -450,7 +528,10 @@ struct GnomeProviderClient::Impl
     {
       const std::lock_guard lock(mutex);
       if (viewportRevoked && !viewportRevoked->exchange(true, std::memory_order_acq_rel)) {
-        viewportUpdate = ViewportUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt};
+        if (lastWasInputDrain)
+          inputDrainUpdate = InputDrainUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt};
+        else
+          viewportUpdate = ViewportUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt};
         changed = true;
       }
     }
@@ -533,14 +614,19 @@ struct GnomeProviderClient::Impl
   }
   GnomeViewportReply viewportCall(
       GnomeViewportOperation operation, Clock::time_point deadline, std::uint64_t snapshot = 0, double x = 0,
-      double y = 0
+      double y = 0, const InputCutoffBinding *cutoff = nullptr
   )
   {
     checkpoint(deadline);
     if (wireIssued == std::numeric_limits<std::uint64_t>::max())
       throw ChannelError("GNOME viewport request counter exhausted");
     const auto id = ++wireIssued;
-    const auto frame = gnomeViewportFrame(gnomeViewportJson(GnomeViewportRequest{operation, id, snapshot, x, y}));
+    GnomeViewportRequest request{operation, id, snapshot, x, y, {}, 0};
+    if (cutoff) {
+      request.cutoff = *cutoff;
+      request.budgetMs = static_cast<std::uint32_t>(std::min(250, remainingMs(deadline)));
+    }
+    const auto frame = gnomeViewportFrame(gnomeViewportJson(request));
     qsizetype sent = 0;
     try {
       while (sent < frame.size()) {
@@ -578,7 +664,8 @@ struct GnomeProviderClient::Impl
       if (retiredReply(*reply))
         continue;
       if (reply->request != id || reply->operation != operation ||
-          (reply->ok && operation != GnomeViewportOperation::Snapshot && reply->snapshot != snapshot))
+          (reply->ok && operation != GnomeViewportOperation::Snapshot && reply->snapshot != snapshot) ||
+          (cutoff && (reply->cutoff != *cutoff || reply->snapshot != snapshot)))
         throw ChannelError("GNOME viewport reply does not match its request");
       wireRetired = id;
       if (!reply->ok)
@@ -594,8 +681,7 @@ struct GnomeProviderClient::Impl
     std::uint32_t revision = 0;
     double x = 0, y = 0, localX = 0, localY = 0;
   };
-  NativeViewport
-  nativeViewport(
+  NativeViewport nativeViewport(
       Clock::time_point deadline, const NativeViewport *expected = nullptr, std::uint64_t request = 0,
       const RoutedPoint *routedPoint = nullptr
   )
@@ -686,8 +772,8 @@ struct GnomeProviderClient::Impl
     Variant reply(g_dbus_connection_call_sync(
         bus, owner.c_str(), object, interface, "ObserveStageFrames",
         g_variant_new(
-            "(sussddu)", session.c_str(), generation, viewer.c_str(), requestText.c_str(),
-            native.x, native.y, native.revision
+            "(sussddu)", session.c_str(), generation, viewer.c_str(), requestText.c_str(), native.x, native.y,
+            native.revision
         ),
         G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, remainingMs(deadline), cancel, &error.value
     ));
@@ -707,8 +793,7 @@ struct GnomeProviderClient::Impl
     gboolean available = false, observationOnly = false, deliveryReady = true, sameView = false;
     double stageX = 0, stageY = 0;
     if (text("session") != session || text("viewer") != viewer || text("request") != requestText ||
-        !g_variant_lookup(values.value, "generation", "u", &returnedGeneration) ||
-        returnedGeneration != generation ||
+        !g_variant_lookup(values.value, "generation", "u", &returnedGeneration) || returnedGeneration != generation ||
         !g_variant_lookup(values.value, "revision", "u", &revision) || revision != native.revision ||
         !g_variant_lookup(values.value, "available", "b", &available) ||
         !g_variant_lookup(values.value, "observationOnly", "b", &observationOnly) || !observationOnly ||
@@ -716,8 +801,7 @@ struct GnomeProviderClient::Impl
         !g_variant_lookup(values.value, "sameStageView", "b", &sameView) ||
         !g_variant_lookup(values.value, "stageUpdates", "u", &cycles) ||
         !g_variant_lookup(values.value, "stageX", "d", &stageX) ||
-        !g_variant_lookup(values.value, "stageY", "d", &stageY) ||
-        !std::isfinite(stageX) || !std::isfinite(stageY) ||
+        !g_variant_lookup(values.value, "stageY", "d", &stageY) || !std::isfinite(stageX) || !std::isfinite(stageY) ||
         stageX != native.x || stageY != native.y)
       throw ChannelError("GNOME stage observation substituted its exact native binding");
     if (!available)
@@ -726,18 +810,86 @@ struct GnomeProviderClient::Impl
       throw ChannelError("GNOME stage observation lacked two same-view update pairs");
   }
 
-  std::uint64_t scheduleViewport(std::optional<RoutedPoint> routedPoint)
+  void observeInputDrain(
+      Clock::time_point deadline, const NativeViewport &native, std::uint64_t request, const InputCutoffBinding &cutoff
+  )
+  {
+    static constexpr std::array<std::pair<const char *, const char *>, 12> schema{
+        {{"available", "b"},
+         {"reason", "s"},
+         {"session", "s"},
+         {"generation", "u"},
+         {"viewer", "s"},
+         {"request", "s"},
+         {"revision", "u"},
+         {"stageX", "d"},
+         {"stageY", "d"},
+         {"binding", "a{sv}"},
+         {"segment", "s"},
+         {"orderingLimit", "s"}}
+    };
+    const auto requestText = std::to_string(request);
+    const auto budget = static_cast<guint>(std::min(120, remainingMs(deadline)));
+    Error error;
+    Variant reply(g_dbus_connection_call_sync(
+        bus, owner.c_str(), object, interface, "DrainInputPrefix",
+        g_variant_new(
+            "(sussddu@a{sv}u)", session.c_str(), generation, viewer.c_str(), requestText.c_str(), native.x, native.y,
+            native.revision, inputDrainBinding(cutoff), budget
+        ),
+        G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, remainingMs(deadline), cancel, &error.value
+    ));
+    checkpoint(deadline);
+    if (!reply.value)
+      throw std::runtime_error(error.message("GNOME input drain incomplete"));
+    Variant values(g_variant_get_child_value(reply.value, 0));
+    if (!exactFields(values.value, schema))
+      throw ChannelError("Malformed GNOME input-drain field schema");
+    const auto text = [&](const char *key) {
+      const char *value = nullptr;
+      if (!g_variant_lookup(values.value, key, "&s", &value) || !value || std::strlen(value) > 128)
+        throw ChannelError("Malformed GNOME input-drain text");
+      return std::string(value);
+    };
+    guint returnedGeneration = 0, revision = 0;
+    double x = 0, y = 0;
+    Variant binding(g_variant_lookup_value(values.value, "binding", G_VARIANT_TYPE("a{sv}")));
+    if (text("session") != session || text("viewer") != viewer || text("request") != requestText ||
+        text("segment") != "clutter-queue-and-stage" ||
+        text("orderingLimit") != InputDrainSegment::orderingLimitation() ||
+        !g_variant_lookup(values.value, "generation", "u", &returnedGeneration) || returnedGeneration != generation ||
+        !g_variant_lookup(values.value, "revision", "u", &revision) || revision != native.revision ||
+        !g_variant_lookup(values.value, "stageX", "d", &x) || !std::isfinite(x) || x != native.x ||
+        !g_variant_lookup(values.value, "stageY", "d", &y) || !std::isfinite(y) || y != native.y ||
+        !matchingInputDrainBinding(binding.value, cutoff))
+      throw ChannelError("GNOME input drain substituted its exact cutoff binding");
+    const auto reason = text("reason");
+    if (!boolean(values.value, "available"))
+      throw std::runtime_error(reason.empty() ? "GNOME compositor input drain unavailable" : reason);
+    if (!reason.empty())
+      throw ChannelError("GNOME input drain returned contradictory completion");
+  }
+  std::uint64_t scheduleViewport(
+      std::optional<RoutedPoint> routedPoint, std::optional<InputCutoffBinding> cutoff = std::nullopt,
+      Clock::time_point inheritedDeadline = Clock::time_point::max()
+  )
   {
     const auto requestedAt = Clock::now();
+    const auto deadline = std::min(inheritedDeadline, requestedAt + inputCutoffMaximumLifetime);
     const std::unique_lock lock(mutex, std::try_to_lock);
     if (!lock.owns_lock() || !alive.load(std::memory_order_acquire) || stopping.load() ||
         (routedPoint && !routedPointSupported.load(std::memory_order_acquire)) || viewportBusy || viewportUpdate ||
+        inputDrainUpdate || deadline <= requestedAt ||
+        (cutoff && (!inputDrainSupported.load(std::memory_order_acquire) || cutoff->request <= lastInputCutoffRequest)
+        ) ||
         nextViewportRequest == std::numeric_limits<std::uint64_t>::max())
       return 0;
     if (viewportRevoked)
       viewportRevoked->store(true, std::memory_order_release);
     const auto id = ++nextViewportRequest;
-    viewportRequest = Request{id, requestedAt + std::chrono::milliseconds(gnomeViewportLifetimeMs), routedPoint};
+    viewportRequest = Request{id, deadline, routedPoint, cutoff};
+    if (cutoff)
+      lastInputCutoffRequest = cutoff->request;
     viewportBusy = true;
     return id;
   }
@@ -760,6 +912,14 @@ struct GnomeProviderClient::Impl
       activeSnapshot = painted.request;
       if (painted.state.peerFingerprint != configuration.peerFingerprint())
         throw ChannelError("GNOME viewer reported a different authenticated peer");
+      if (request->cutoff) {
+        const auto &binding = request->cutoff->forwarding;
+        if (painted.state.connection != request->cutoff->viewerConnection ||
+            painted.state.session != binding.owner.session || painted.state.epoch != binding.owner.epoch ||
+            painted.state.geometry != binding.geometry || painted.state.focusRequest != binding.focusRequest ||
+            painted.state.focusRevision != binding.focusRevision)
+          throw std::runtime_error("GNOME input-drain Viewer binding changed");
+      }
       const auto *routed = request->routedPoint ? &*request->routedPoint : nullptr;
       const auto hit = nativeViewport(request->deadline, &native, request->id, routed);
       const auto mapped =
@@ -770,11 +930,18 @@ struct GnomeProviderClient::Impl
       const auto fresh = nativeViewport(request->deadline, &native, request->id, routed);
       if (fresh.localX != hit.localX || fresh.localY != hit.localY)
         throw std::runtime_error("GNOME native surface transform changed");
-      // Observe two actual same-view Mutter frame updates before the Qt
-      // default-input-queue witness, when explicitly available. This is
-      // intentionally read-only: still no EIS/Clutter consumption proof.
-      observeStageFrames(request->deadline, hit, request->id);
-      viewportCall(GnomeViewportOperation::Check, request->deadline, activeSnapshot);
+      // The explicit cutoff path requires a compositor queue/stage segment
+      // followed by the same exact All-fenced Qt operation. Generic viewport
+      // observations retain their separate, nonauthorizing frame checks.
+      if (request->cutoff) {
+        observeInputDrain(request->deadline, hit, request->id, *request->cutoff);
+        if (nativeGeneration != nativeInvalidations || invalidatedThrough >= activeSnapshot)
+          throw std::runtime_error("GNOME input drain invalidated before Qt consumption");
+        viewportCall(GnomeViewportOperation::InputDrain, request->deadline, activeSnapshot, 0, 0, &*request->cutoff);
+      } else {
+        observeStageFrames(request->deadline, hit, request->id);
+        viewportCall(GnomeViewportOperation::Check, request->deadline, activeSnapshot);
+      }
       // Qt's real GUI/default Wayland queue may take up to 200ms to finish its
       // ordered observations. A previously valid compositor hit cannot be
       // retained through that interval without asking the exact GNOME-owned
@@ -783,8 +950,7 @@ struct GnomeProviderClient::Impl
       // This check uses the frozen routed point and request identity again,
       // never the current cursor; it remains evidence only, NOT input drain.
       const auto afterQt = nativeViewport(request->deadline, &native, request->id, routed);
-      if (afterQt.localX != hit.localX || afterQt.localY != hit.localY ||
-          afterQt.x != hit.x || afterQt.y != hit.y)
+      if (afterQt.localX != hit.localX || afterQt.localY != hit.localY || afterQt.x != hit.x || afterQt.y != hit.y)
         throw std::runtime_error("GNOME native hit changed after Qt queue observation");
       drainViewport();
       checkpoint(request->deadline);
@@ -807,7 +973,7 @@ struct GnomeProviderClient::Impl
       snapshot->sourceX = mapped.x;
       snapshot->sourceY = mapped.y;
       snapshot->paint = painted.state;
-      snapshot->stageFramesObserved = stageUpdatesSupported; // Read-only observation, not native input drain.
+      snapshot->stageFramesObserved = !request->cutoff && stageUpdatesSupported;
       ViewportObservation observation;
       observation.m_snapshot = std::move(snapshot);
       observation.m_revoked = std::make_shared<std::atomic_bool>(false);
@@ -827,8 +993,19 @@ struct GnomeProviderClient::Impl
         result.error = "GNOME viewport ended before publication";
       }
       lastViewportRequest = request->id;
+      lastWasInputDrain = request->cutoff.has_value();
       viewportRevoked = result.observation ? result.observation->m_revoked : nullptr;
-      viewportUpdate = std::move(result);
+      if (request->cutoff) {
+        InputDrainUpdate drain{result.request, std::move(result.error), std::nullopt};
+        if (result.observation) {
+          InputDrainSegment segment;
+          segment.m_viewport = std::move(*result.observation);
+          segment.m_cutoff = *request->cutoff;
+          drain.segment = std::move(segment);
+        }
+        inputDrainUpdate = std::move(drain);
+      } else
+        viewportUpdate = std::move(result);
       viewportBusy = false;
     }
     notify(true);
@@ -952,6 +1129,36 @@ std::uint64_t GnomeProviderClient::requestRoutedPointObservation(RoutedPoint poi
       !exactStageCoordinate(point.desktopY))
     return 0;
   return m_impl->scheduleViewport(point);
+}
+std::uint64_t GnomeProviderClient::requestInputDrain(InputDrainRequest request)
+{
+  const auto exactCoordinate = [](double value) {
+    return std::isfinite(value) && std::abs(value) <= 10000000.0 &&
+           static_cast<double>(static_cast<float>(value)) == value;
+  };
+  if (!validInputCutoffBinding(request.cutoff) || request.point.captureEpoch != request.cutoff.capture.epoch ||
+      request.point.sequence != request.cutoff.capture.sequence || !exactCoordinate(request.point.desktopX) ||
+      !exactCoordinate(request.point.desktopY) || request.deadline <= Clock::now())
+    return 0;
+  return m_impl->scheduleViewport(request.point, request.cutoff, request.deadline);
+}
+std::optional<GnomeProviderClient::InputDrainUpdate> GnomeProviderClient::takeInputDrainUpdate()
+{
+  const std::lock_guard lock(m_impl->mutex);
+  m_impl->viewportNotified = false;
+  return std::exchange(m_impl->inputDrainUpdate, std::nullopt);
+}
+bool GnomeProviderClient::InputDrainSegment::live() const noexcept
+{
+  return m_viewport.live();
+}
+const GnomeProviderClient::ViewportSnapshot &GnomeProviderClient::InputDrainSegment::snapshot() const noexcept
+{
+  return m_viewport.snapshot();
+}
+const InputCutoffBinding &GnomeProviderClient::InputDrainSegment::binding() const noexcept
+{
+  return m_cutoff;
 }
 std::optional<GnomeProviderClient::ViewportUpdate> GnomeProviderClient::takeViewportUpdate()
 {

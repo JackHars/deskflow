@@ -181,7 +181,32 @@ bool ClientProxy1_0::parseHandshakeMessage(const uint8_t *code)
 
 bool ClientProxy1_0::parseMessage(const uint8_t *code)
 {
-  if (memcmp(code, kMsgCInputSequenceAck, 4) == 0) {
+  if (memcmp(code, kMsgCInputCutoffAck, 4) == 0) {
+    if (m_messagePacketSize != 8)
+      throw BadClientException("Incorrect input cutoff acknowledgement size");
+    std::array<char, 4> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete input cutoff acknowledgement");
+    std::size_t offset = 0;
+    receiveInputCutoffAck(
+        static_cast<std::uint32_t>(
+            deskflow::windowshare::inputSequenceDetail::read(std::string_view(body.data(), body.size()), offset, 4)
+        )
+    );
+    return true;
+  } else if (memcmp(code, kMsgCInputCutoffReceipt, 4) == 0) {
+    using namespace deskflow::windowshare;
+    if (m_messagePacketSize != 4 + inputCutoffReceiptBytes)
+      throw BadClientException("Incorrect input cutoff receipt size");
+    std::array<char, inputCutoffReceiptBytes> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete input cutoff receipt");
+    const auto receipt = decodeInputCutoffReceipt(std::string_view(body.data(), body.size()));
+    if (!receipt)
+      throw BadClientException("Malformed input cutoff receipt");
+    receiveInputCutoffReceipt(*receipt);
+    return true;
+  } else if (memcmp(code, kMsgCInputSequenceAck, 4) == 0) {
     // Save packet size before reading its code: after its last byte the packet
     // filter may already expose the NEXT packet's size. Never borrow its body.
     if (m_messagePacketSize != 8)
@@ -381,9 +406,15 @@ void ClientProxy1_0::screensaver(bool on)
 
 void ClientProxy1_0::resetOptions()
 {
+  const auto alive = proxyLifetime();
+  retireInputCutoffCapability();
+  if (!*alive)
+    return;
   retireInputSequenceTrace();
   LOG_VERBOSE("send reset options to \"%s\"", getName().c_str());
   ProtocolUtil::writef(getStream(), kMsgCResetOptions);
+  if (!*alive)
+    return;
 
   // reset heart rate and death
   resetHeartbeatRate();
@@ -393,6 +424,7 @@ void ClientProxy1_0::resetOptions()
 
 void ClientProxy1_0::setOptions(const OptionsList &options)
 {
+  const auto alive = proxyLifetime();
   LOG_VERBOSE("send set options to \"%s\" size=%d", getName().c_str(), options.size());
   if (options.size() % 2 != 0) {
     LOG_ERR("options are the incorrect size, not sending");
@@ -400,7 +432,11 @@ void ClientProxy1_0::setOptions(const OptionsList &options)
   }
 
   const auto outgoing = prepareInputSequenceOptions(options);
+  if (!*alive)
+    return;
   ProtocolUtil::writef(getStream(), kMsgDSetOptions, &outgoing);
+  if (!*alive)
+    return;
 
   // check options
   for (uint32_t i = 0, n = (uint32_t)options.size(); i < n; i += 2) {

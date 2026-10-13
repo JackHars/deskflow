@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
     unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validViewportHandle,
-    StageUpdateSequence,
+    StageUpdateSequence, InputDrainSequence, validInputDrainBinding,
 } from '../logic.js';
 
 test('only stable Shell 50 is supported', () => {
@@ -133,6 +133,93 @@ test('stage updates refuse deadline, reentry, view changes, layout drift and unp
     }
     assert.throws(() => new StageUpdateSequence('p', 1, 2, 1, 0, 500));
     assert.throws(() => new StageUpdateSequence('p', 1, 2, 0, 0));
+});
+
+test('input drain waits for a nonrecursive empty-queue idle and a genuinely later same-view frame', () => {
+    const view = {}, other = {};
+    const rect = {x: -1920, y: 0, width: 1920, height: 1080};
+    const elsewhere = {x: 0, y: 0, width: 1920, height: 1080};
+    const seq = new InputDrainSequence('cutoff_1', -100, 200, 8, 100, 80);
+    assert.equal(seq.before(view, rect, 1, 101), false);
+    assert.equal(seq.after(view, rect, 1, 102), false);
+    assert.equal(seq.queueEmpty(true, 1, 103), false);
+    assert.equal(seq.before(view, rect, 1, 104), false);
+    assert.equal(seq.queueEmpty(false, 1, 105), true);
+    assert.equal(seq.after(view, rect, 1, 106), false);
+    assert.equal(seq.before(other, elsewhere, 1, 107), false);
+    assert.equal(seq.before(view, rect, 1, 108), true);
+    assert.equal(seq.after(other, elsewhere, 1, 109), false);
+    assert.equal(seq.after(view, {...rect}, 1, 110), true);
+    assert.equal(seq.complete, true);
+    assert.equal(seq.after(view, rect, 1, 111), false);
+});
+
+test('input drain correlation is closed, exact All, and retains full canonical cutoff integers', () => {
+    const binding = {cutoffRequest: '18446744073709551615', coreConnectionGeneration: UINT32_MAX,
+        captureEpoch: '18446744073709551615', captureSequence: '18446744073709551615', capturePart: 16,
+        viewerConnection: '18446744073709551615', ownerSession: '1', ownerEpoch: '2',
+        forwardingGeneration: '3', focusRequest: '4', focusRevision: '5', geometry: '9007199254740991', scope: 'all'};
+    assert.equal(validInputDrainBinding(binding), true);
+    for (const [key, value] of [['cutoffRequest', '18446744073709551616'], ['captureEpoch', '01'],
+        ['captureSequence', '0'], ['ownerSession', 1], ['geometry', '9007199254740992'],
+        ['scope', 'keyboard'], ['capturePart', 17], ['coreConnectionGeneration', 0]])
+        assert.equal(validInputDrainBinding({...binding, [key]: value}), false, key);
+    assert.equal(validInputDrainBinding({...binding, unexpected: '1'}), false);
+    const missing = {...binding};
+    delete missing.viewerConnection;
+    assert.equal(validInputDrainBinding(missing), false);
+});
+
+test('input drain refuses nested dispatch even when a popped or stolen queue appears empty', () => {
+    const rect = {x: 0, y: 0, width: 1000, height: 700}, view = {};
+    for (const callback of ['idle', 'before', 'after']) {
+        const seq = new InputDrainSequence('cutoff_2', 100, 200, 8, 100, 80);
+        if (callback === 'idle')
+            seq.queueEmpty(false, 2, 101);
+        else {
+            seq.queueEmpty(false, 1, 101);
+            if (callback === 'before')
+                seq.before(view, rect, 2, 102);
+            else {
+                seq.before(view, rect, 1, 102);
+                seq.after(view, rect, 2, 103);
+            }
+        }
+        assert.equal(seq.complete, false);
+        assert.equal(seq.reason, 'nested-main-dispatch');
+        assert.equal(seq.queueEmpty(false, 1, 104), false);
+    }
+});
+
+test('input drain keeps its inherited budget and cannot revive after invalidation, layout drift or late frames', () => {
+    const rect = {x: 0, y: 0, width: 1000, height: 700}, view = {};
+    const fresh = () => new InputDrainSequence('cutoff_3', 100, 200, 8, 100, 20);
+    const lateIdle = fresh();
+    lateIdle.queueEmpty(false, 1, 120);
+    assert.equal(lateIdle.reason, 'input-drain-timeout');
+    const lateFrame = fresh();
+    lateFrame.queueEmpty(false, 1, 101);
+    lateFrame.before(view, rect, 1, 102);
+    assert.equal(lateFrame.after(view, rect, 1, 120), false);
+    assert.equal(lateFrame.reason, 'input-drain-timeout');
+    const invalid = fresh();
+    invalid.queueEmpty(false, 1, 101);
+    invalid.before(view, rect, 1, 102);
+    invalid.deny('native-state-invalidated');
+    assert.equal(invalid.after(view, rect, 1, 103), false);
+    assert.equal(invalid.complete, false);
+    const moved = fresh();
+    moved.queueEmpty(false, 1, 101);
+    moved.before(view, rect, 1, 102);
+    assert.equal(moved.after(view, {...rect, width: 900}, 1, 103), false);
+    assert.equal(moved.reason, 'stage-layout-changed');
+    const repeated = fresh();
+    repeated.queueEmpty(false, 1, 101);
+    repeated.before(view, rect, 1, 102);
+    repeated.before(view, rect, 1, 103);
+    assert.equal(repeated.reason, 'stage-update-reentered');
+    for (const budget of [0, -1, 121, 1.5, Infinity])
+        assert.throws(() => new InputDrainSequence('c', 100, 200, 8, 100, budget));
 });
 
 test('native hit prerequisites deny each unsupported state explicitly', () => {

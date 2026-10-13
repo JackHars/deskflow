@@ -12,6 +12,9 @@
 #include "deskflow/KeyTypes.h"
 #include "deskflow/MouseTypes.h"
 #include "deskflow/OptionTypes.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/InputCutoff.h"
+#endif
 
 #include <string>
 
@@ -176,6 +179,11 @@ public:
   modify options that aren't given in \c options.
   */
   void setOptions(const OptionsList &options);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputCutoff(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point);
+  windowshare::InputCutoffState inputCutoffState(const windowshare::InputCutoffBinding &);
+  bool resumeInputCutoff(const windowshare::InputCutoffBinding &);
+#endif
 
   //! Set clipboard sequence number
   /*!

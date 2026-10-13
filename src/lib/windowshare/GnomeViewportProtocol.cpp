@@ -61,6 +61,8 @@ QString operationName(GnomeViewportOperation operation)
     return QStringLiteral("check");
   case GnomeViewportOperation::Invalidated:
     return QStringLiteral("invalidated");
+  case GnomeViewportOperation::InputDrain:
+    return QStringLiteral("input-drain");
   }
   throw std::runtime_error("Unknown viewport operation");
 }
@@ -71,7 +73,7 @@ GnomeViewportOperation operation(const QJsonObject &object)
   require(name.isString(), "Viewport operation must be a string");
   for (auto candidate :
        {GnomeViewportOperation::Snapshot, GnomeViewportOperation::Map, GnomeViewportOperation::Check,
-        GnomeViewportOperation::Invalidated})
+        GnomeViewportOperation::Invalidated, GnomeViewportOperation::InputDrain})
     if (name.toString() == operationName(candidate))
       return candidate;
   throw std::runtime_error("Unknown viewport operation");
@@ -86,6 +88,55 @@ QString reason(const QJsonObject &object)
       "Invalid viewport denial reason"
   );
   return text;
+}
+QJsonObject cutoffJson(const InputCutoffBinding &binding)
+{
+  const auto &route = binding.forwarding;
+  return {
+      {"request", QString::number(binding.request)},
+      {"coreConnectionGeneration", QString::number(binding.coreConnectionGeneration)},
+      {"captureEpoch", QString::number(binding.capture.epoch)},
+      {"captureSequence", QString::number(binding.capture.sequence)},
+      {"capturePart", QString::number(binding.capture.part)},
+      {"viewerConnection", QString::number(binding.viewerConnection)},
+      {"session", QString::number(route.owner.session)},
+      {"epoch", QString::number(route.owner.epoch)},
+      {"generation", QString::number(route.generation)},
+      {"focusRequest", QString::number(route.focusRequest)},
+      {"focusRevision", QString::number(route.focusRevision)},
+      {"geometry", QString::number(route.geometry)},
+      {"scope", route.scope == ForwardingScope::All ? QStringLiteral("all") : QStringLiteral("keyboard")}
+  };
+}
+InputCutoffBinding cutoff(const QJsonObject &message)
+{
+  require(message.value("cutoff").isObject(), "Viewport cutoff missing");
+  const auto object = message.value("cutoff").toObject();
+  fields(
+      object,
+      {"request", "coreConnectionGeneration", "captureEpoch", "captureSequence", "capturePart", "viewerConnection",
+       "session", "epoch", "generation", "focusRequest", "focusRevision", "geometry", "scope"}
+  );
+  InputCutoffBinding result;
+  result.request = sequence(object, "request");
+  const auto connection = sequence(object, "coreConnectionGeneration");
+  require(connection <= UINT32_MAX, "Invalid cutoff Core connection");
+  result.coreConnectionGeneration = static_cast<std::uint32_t>(connection);
+  result.capture.epoch = sequence(object, "captureEpoch");
+  result.capture.sequence = sequence(object, "captureSequence");
+  const auto part = sequence(object, "capturePart");
+  require(part <= maximumOriginalInputParts, "Invalid cutoff translation part");
+  result.capture.part = static_cast<decltype(result.capture.part)>(part);
+  result.viewerConnection = sequence(object, "viewerConnection");
+  result.forwarding.owner = {sequence(object, "session"), sequence(object, "epoch")};
+  result.forwarding.generation = sequence(object, "generation");
+  result.forwarding.focusRequest = sequence(object, "focusRequest");
+  result.forwarding.focusRevision = sequence(object, "focusRevision");
+  result.forwarding.geometry = sequence(object, "geometry");
+  require(object.value("scope") == QJsonValue(QStringLiteral("all")), "Cutoff requires exact All scope");
+  result.forwarding.scope = ForwardingScope::All;
+  require(validInputCutoffBinding(result), "Invalid viewport cutoff binding");
+  return result;
 }
 QJsonObject stateJson(const GnomeViewportState &s)
 {
@@ -191,10 +242,17 @@ GnomeViewportRequest parseGnomeViewportRequest(const QJsonObject &object)
   result.operation = operation(object);
   result.request = sequence(object, "request");
   QSet<QString> expected{"version", "operation", "request"};
-  if (result.operation == GnomeViewportOperation::Map || result.operation == GnomeViewportOperation::Check) {
+  if (result.operation == GnomeViewportOperation::Map || result.operation == GnomeViewportOperation::Check ||
+      result.operation == GnomeViewportOperation::InputDrain) {
     expected.insert("snapshot");
     result.snapshot = sequence(object, "snapshot");
     require(result.snapshot < result.request, "Map/check must follow its snapshot request");
+  }
+  if (result.operation == GnomeViewportOperation::InputDrain) {
+    expected.insert("cutoff");
+    expected.insert("budgetMs");
+    result.cutoff = cutoff(object);
+    result.budgetMs = integer(object, "budgetMs", gnomeViewportLifetimeMs);
   }
   if (result.operation == GnomeViewportOperation::Map) {
     expected.insert("x");
@@ -222,6 +280,13 @@ GnomeViewportReply parseGnomeViewportReply(const QJsonObject &object)
     result.request = sequence(object, "request");
     require(object.value("ok").isBool(), "Viewport reply needs boolean result");
     result.ok = object.value("ok").toBool();
+    if (result.operation == GnomeViewportOperation::InputDrain) {
+      expected.insert("cutoff");
+      expected.insert("snapshot");
+      result.cutoff = cutoff(object);
+      result.snapshot = sequence(object, "snapshot");
+      require(result.snapshot < result.request, "Invalid input drain snapshot association");
+    }
     if (!result.ok) {
       expected.insert("reason");
       result.reason = reason(object);
@@ -250,8 +315,14 @@ QJsonObject gnomeViewportJson(const GnomeViewportRequest &request)
   QJsonObject result{
       {"version", 1}, {"operation", operationName(request.operation)}, {"request", QString::number(request.request)}
   };
-  if (request.operation == GnomeViewportOperation::Map || request.operation == GnomeViewportOperation::Check)
+  if (request.operation == GnomeViewportOperation::Map || request.operation == GnomeViewportOperation::Check ||
+      request.operation == GnomeViewportOperation::InputDrain)
     result.insert("snapshot", QString::number(request.snapshot));
+  if (request.operation == GnomeViewportOperation::InputDrain) {
+    require(validInputCutoffBinding(request.cutoff), "Invalid viewport cutoff binding");
+    result.insert("cutoff", cutoffJson(request.cutoff));
+    result.insert("budgetMs", qint64(request.budgetMs));
+  }
   if (request.operation == GnomeViewportOperation::Map) {
     result.insert("x", request.x);
     result.insert("y", request.y);
@@ -268,6 +339,11 @@ QJsonObject gnomeViewportJson(const GnomeViewportReply &reply)
   } else {
     result.insert("request", QString::number(reply.request));
     result.insert("ok", reply.ok);
+    if (reply.operation == GnomeViewportOperation::InputDrain) {
+      require(validInputCutoffBinding(reply.cutoff), "Invalid viewport cutoff binding");
+      result.insert("cutoff", cutoffJson(reply.cutoff));
+      result.insert("snapshot", QString::number(reply.snapshot));
+    }
     if (!reply.ok)
       result.insert("reason", reply.reason);
     else if (reply.operation == GnomeViewportOperation::Snapshot)

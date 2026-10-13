@@ -14,6 +14,7 @@
 #include "io/IStream.h"
 
 #include <algorithm>
+#include <atomic>
 #include <limits>
 
 using namespace deskflow::windowshare;
@@ -24,6 +25,17 @@ void increment(std::uint64_t &counter) noexcept
   if (counter != std::numeric_limits<std::uint64_t>::max())
     ++counter;
 }
+template <class T> T nextCutoffIdentity()
+{
+  static std::atomic<T> next{1};
+  auto value = next.load(std::memory_order_relaxed);
+  while (value) {
+    const auto successor = value == std::numeric_limits<T>::max() ? 0 : value + 1;
+    if (next.compare_exchange_weak(value, successor, std::memory_order_relaxed))
+      return value;
+  }
+  return 0;
+}
 } // namespace
 
 // ProtocolUtil performs exactly one write for each complete legacy message.
@@ -32,48 +44,60 @@ void increment(std::uint64_t &counter) noexcept
 class ClientProxy::InputStream final : public deskflow::IStream
 {
 public:
-  explicit InputStream(ClientProxy &owner) : m_owner(owner)
+  explicit InputStream(ClientProxy &owner, bool input = true) : m_owner(owner), m_input(input)
   {
   }
   void write(const void *buffer, std::uint32_t size) override
   {
-    m_owner.writeInputPacket(buffer, size);
+    if (m_input)
+      m_owner.writeInputPacket(buffer, size);
+    else
+      m_owner.writeControlPacket(buffer, size);
   }
   void close() override
   {
-    m_owner.getStream()->close();
+    m_owner.m_stream->close();
   }
   std::uint32_t read(void *buffer, std::uint32_t size) override
   {
-    return m_owner.getStream()->read(buffer, size);
+    return m_owner.m_stream->read(buffer, size);
   }
   void flush() override
   {
-    m_owner.getStream()->flush();
+    m_owner.m_stream->flush();
   }
   void shutdownInput() override
   {
-    m_owner.getStream()->shutdownInput();
+    m_owner.m_stream->shutdownInput();
   }
   void shutdownOutput() override
   {
-    m_owner.getStream()->shutdownOutput();
+    m_owner.m_stream->shutdownOutput();
   }
   void *getEventTarget() const override
   {
-    return m_owner.getStream()->getEventTarget();
+    return m_owner.m_stream->getEventTarget();
   }
   bool isReady() const override
   {
-    return m_owner.getStream()->isReady();
+    return m_owner.m_stream->isReady();
   }
   std::uint32_t getSize() const override
   {
-    return m_owner.getStream()->getSize();
+    return m_owner.m_stream->getSize();
+  }
+  std::optional<PeerFingerprint> authenticatedPeerFingerprint() const override
+  {
+    return m_owner.m_stream->authenticatedPeerFingerprint();
+  }
+  std::optional<deskflow::AuthenticatedPeerTicket> authenticatedPeerTicket() const override
+  {
+    return m_owner.m_stream->authenticatedPeerTicket();
   }
 
 private:
   ClientProxy &m_owner;
+  bool m_input;
 };
 
 //
@@ -83,7 +107,8 @@ private:
 ClientProxy::ClientProxy(const std::string &name, deskflow::IStream *stream)
     : BaseClientProxy(name),
       m_stream(stream),
-      m_inputStream(std::make_unique<InputStream>(*this))
+      m_inputStream(std::make_unique<InputStream>(*this)),
+      m_controlStream(std::make_unique<InputStream>(*this, false))
 {
   // do nothing
 }
@@ -107,7 +132,7 @@ void ClientProxy::close(const char *msg)
 
 deskflow::IStream *ClientProxy::getStream() const
 {
-  return m_stream;
+  return m_controlStream.get();
 }
 
 void *ClientProxy::getEventTarget() const
@@ -152,11 +177,29 @@ std::optional<std::uint32_t> ClientProxy::requestInputSequenceTrace()
 
 OptionsList ClientProxy::prepareInputSequenceOptions(const OptionsList &options)
 {
+  const auto alive = proxyLifetime();
   OptionsList result;
   result.reserve(options.size());
-  bool found = false;
+  bool found = false, foundCutoff = false;
   for (std::size_t index = 0; index < options.size(); index += 2) {
     const auto id = options[index], value = options[index + 1];
+    if (id == kOptionInputCutoff) {
+      if (foundCutoff || !supportsInputSequenceTrace() ||
+          (value && value != m_cutoffRequested && value != m_cutoffGeneration))
+        continue;
+      foundCutoff = true;
+      if (!value) {
+        retireInputCutoffCapability();
+        if (!*alive)
+          return {};
+      } else if (value != m_cutoffGeneration) {
+        if (!inputCutoffTlsLive())
+          continue;
+        m_cutoffIssued = m_cutoffGeneration = value;
+        m_cutoffRequested = 0;
+        m_cutoffAcknowledged = false;
+      }
+    }
     if (id == kOptionInputSequenceTrace) {
       // This option is reserved for the programmatic request above. Repeated
       // DSOP with the current generation is idempotent, never a sequence reset.
@@ -198,6 +241,10 @@ void ClientProxy::stopInputSequenceTrace() noexcept
   for (auto &pending : m_inputSequencePending)
     pending.reset();
   m_inputSequenceStatistics.outstanding = 0;
+  m_cutoff.reset();
+  m_cutoffTicket.reset();
+  m_cutoffGeneration = m_cutoffRequested = 0;
+  m_cutoffAcknowledged = false;
 }
 
 ClientProxy::InputSequenceStatistics ClientProxy::inputSequenceStatistics() const noexcept
@@ -264,4 +311,150 @@ void ClientProxy::receiveInputSequenceReceipt(const InputSequenceReceipt &receip
   if (callback)
     callback(token, receipt);
   // Do not access this after the callback; it may have destroyed the proxy.
+}
+
+bool ClientProxy::inputCutoffTlsLive() const
+{
+  const auto peer = m_stream->authenticatedPeerTicket();
+  return !m_inputSequenceStopped && m_cutoffTicket && m_cutoffTicket->live() && peer && peer->live() &&
+         peer->incarnation() == m_cutoffTicket->incarnation();
+}
+
+std::optional<std::uint32_t> ClientProxy::requestInputCutoffCapability()
+{
+  if (!supportsInputSequenceTrace() || m_inputSequenceStopped)
+    return std::nullopt;
+  if (!m_cutoffTicket)
+    m_cutoffTicket = m_stream->authenticatedPeerTicket();
+  if (!inputCutoffTlsLive())
+    return std::nullopt;
+  if (m_cutoffGeneration)
+    return m_cutoffGeneration;
+  if (!m_cutoffRequested)
+    m_cutoffRequested = nextCutoffIdentity<std::uint32_t>();
+  return m_cutoffRequested ? std::optional(m_cutoffRequested) : std::nullopt;
+}
+
+void ClientProxy::receiveInputCutoffAck(std::uint32_t generation)
+{
+  if (!generation || generation > m_cutoffIssued || !inputCutoffTlsLive())
+    throw BadClientException("Unsolicited input cutoff capability acknowledgement");
+  if (generation == m_cutoffGeneration)
+    m_cutoffAcknowledged = true;
+  // An older issued capability can arrive after reset or a replacement
+  // negotiation; recognizing it must not acknowledge the current generation.
+}
+
+std::optional<InputCutoffBinding> ClientProxy::startInputCutoff(
+    OriginalInputStamp capture, const KeyboardRouteBinding &forwarding, std::uint64_t viewerConnection,
+    InputCutoffClock::time_point deadline
+)
+{
+  const auto now = InputCutoffClock::now();
+  if (!m_cutoffAcknowledged || !inputCutoffTlsLive() || (m_cutoff && m_cutoff->state != InputCutoffState::Resumed) ||
+      deadline <= now || deadline > now + inputCutoffMaximumLifetime)
+    return std::nullopt;
+  const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
+  InputCutoffBinding binding{
+      nextCutoffIdentity<std::uint64_t>(), m_cutoffGeneration, capture, forwarding, viewerConnection
+  };
+  if (!validInputCutoffBinding(binding) || !remaining)
+    return std::nullopt;
+  if (m_cutoff)
+    m_retiredCutoff = m_cutoff->binding;
+  m_cutoff = Cutoff{binding, deadline};
+  const auto bytes = encodeInputCutoffRequest({binding, static_cast<std::uint16_t>(remaining)});
+  const auto alive = proxyLifetime();
+  m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
+  if (!*alive || !inputCutoffTlsLive() || !m_cutoff || m_cutoff->binding != binding || m_cutoff->resuming)
+    return std::nullopt;
+  return binding;
+}
+
+bool ClientProxy::resumeInputCutoff(const InputCutoffBinding &binding)
+{
+  if (!m_cutoff || m_cutoff->binding != binding || !inputCutoffTlsLive())
+    return false;
+  if (m_cutoff->resuming || m_cutoff->state == InputCutoffState::Resumed)
+    return true;
+  // Revoke the observation before the ordered write can reenter this proxy.
+  m_cutoff->resuming = true;
+  m_cutoff->state = InputCutoffState::Denied;
+  const auto bytes = encodeInputCutoffResume(binding);
+  const auto alive = proxyLifetime();
+  m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
+  return *alive && inputCutoffTlsLive() && m_cutoff && m_cutoff->binding == binding;
+}
+
+InputCutoffState ClientProxy::inputCutoffState(const InputCutoffBinding &binding)
+{
+  if (!m_cutoff || m_cutoff->binding != binding || !inputCutoffTlsLive())
+    return InputCutoffState::Denied;
+  if (m_cutoff->state == InputCutoffState::Resumed)
+    return InputCutoffState::Resumed;
+  if (InputCutoffClock::now() >= m_cutoff->deadline) {
+    resumeInputCutoff(binding);
+    return InputCutoffState::Denied;
+  }
+  return m_cutoff->resuming ? InputCutoffState::Denied : m_cutoff->state;
+}
+
+void ClientProxy::receiveInputCutoffReceipt(const InputCutoffReceipt &receipt)
+{
+  if (!inputCutoffTlsLive() || !validInputCutoffBinding(receipt.binding))
+    throw BadClientException("Unauthenticated input cutoff receipt");
+  if (m_retiredCutoff == receipt.binding)
+    return;
+  if (!m_cutoff || m_cutoff->binding != receipt.binding)
+    throw BadClientException("Unknown input cutoff receipt binding");
+  if (receipt.state == InputCutoffState::Resumed) {
+    if (!m_cutoff->resuming && m_cutoff->state != InputCutoffState::Resumed)
+      throw BadClientException("Unrequested input cutoff resume");
+    m_cutoff->state = InputCutoffState::Resumed;
+    m_cutoff->resuming = false;
+    return;
+  }
+  if (m_cutoff->resuming || m_cutoff->state == InputCutoffState::Resumed)
+    return;
+  if (receipt.state != InputCutoffState::BackendObserved && receipt.state != InputCutoffState::Denied)
+    throw BadClientException("Invalid input cutoff outcome");
+  if (InputCutoffClock::now() >= m_cutoff->deadline) {
+    resumeInputCutoff(receipt.binding);
+    return;
+  }
+  if (m_cutoff->state == InputCutoffState::Denied && receipt.state != InputCutoffState::Denied)
+    throw BadClientException("Revoked input cutoff observation revived");
+  m_cutoff->state = receipt.state;
+  if (receipt.state == InputCutoffState::Denied)
+    resumeInputCutoff(receipt.binding);
+}
+
+void ClientProxy::retireInputCutoffCapability()
+{
+  if (m_cutoff) {
+    const auto alive = proxyLifetime();
+    const auto binding = m_cutoff->binding;
+    if (!resumeInputCutoff(binding) || !*alive)
+      return;
+    m_retiredCutoff = binding;
+    m_cutoff.reset();
+  }
+  m_cutoffGeneration = m_cutoffRequested = 0;
+  m_cutoffAcknowledged = false;
+}
+
+void ClientProxy::writeControlPacket(const void *buffer, std::uint32_t size)
+{
+  const std::string_view packet(static_cast<const char *>(buffer), size);
+  if (m_cutoff && !m_cutoff->resuming && m_cutoff->state != InputCutoffState::Resumed && !packet.starts_with("CNOP") &&
+      !packet.starts_with("CALV")) {
+    const auto alive = proxyLifetime();
+    const auto binding = m_cutoff->binding;
+    if (!resumeInputCutoff(binding)) {
+      if (*alive)
+        m_stream->close();
+      return;
+    }
+  }
+  m_stream->write(buffer, size);
 }

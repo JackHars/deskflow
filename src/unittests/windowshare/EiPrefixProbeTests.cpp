@@ -34,12 +34,13 @@ int main()
   check(p.begin(42, start, true), "live sender initiates");
   check(!p.begin(43, start + 1ms, true), "only one outstanding ping");
   p.pong(42, start + 1ms);
-  check(p.state() == State::PongWithinBatch && !p.observed(start + 2ms),
-        "PONG is not a receipt before complete event batch");
+  check(
+      p.state() == State::PongWithinBatch && !p.observed(start + 2ms),
+      "PONG is not a receipt before complete event batch"
+  );
   p.invalidate();
   p.finishEventBatch(start + 3ms);
-  check(!p.observed(start + 3ms) && p.state() == State::Denied,
-        "PONG followed by synthetic DISCONNECT never succeeds");
+  check(!p.observed(start + 3ms) && p.state() == State::Denied, "PONG followed by synthetic DISCONNECT never succeeds");
   check(!p.begin(44, start + 4ms, true), "failed attempt terminal until actual connection teardown");
 
   p.resetAfterConnectionTeardown();
@@ -53,8 +54,9 @@ int main()
   p.pong(45, start + 50ms);
   p.finishEventBatch(start + 100ms);
   check(p.observed(start + 101ms), "sender callback can be observed after entire batch");
-  check(!p.observed(start + 250ms) && p.state() == State::Denied,
-        "observation cannot be reused across absolute deadline");
+  check(
+      !p.observed(start + 250ms) && p.state() == State::Denied, "observation cannot be reused across absolute deadline"
+  );
   p.pong(45, start + 251ms);
   check(!p.observed(start + 252ms), "late PONG cannot revive expired receiver");
 
@@ -80,6 +82,23 @@ int main()
   check(p.observed(start + 3ms), "retained 64-bit identity is compared exactly");
   p.invalidate();
   check(!p.observed(start + 4ms), "later native disconnect revokes observation");
+
+  p.resetAfterConnectionTeardown();
+  check(!p.begin(1, 4, start, start, true), "expired caller deadline refuses");
+  check(!p.begin(1, 4, start, start + 251ms, true), "caller cannot extend maximum lifetime");
+  check(p.begin(1, 4, start, start + 20ms, true), "requested cutoff inherits earlier deadline");
+  p.pong(4, start + 1ms);
+  check(!p.observed(start + 2ms), "requested pong still needs whole event batch");
+  p.finishEventBatch(start + 3ms);
+  check(p.observed(start + 4ms), "requested prefix completes after batch");
+  check(!p.retire(2) && p.observed(start + 5ms), "mismatched resume cannot retire current prefix");
+  check(p.retire(1), "exact resume retires requested prefix");
+  check(!p.begin(1, 5, start + 6ms, start + 20ms, true), "retired request cannot be reused");
+  check(p.begin(2, 5, start + 6ms, start + 20ms, true), "new requested ping on same owned connection");
+  p.pong(5, start + 19ms);
+  p.finishEventBatch(start + 20ms);
+  check(!p.observed(start + 20ms), "whole batch must finish within inherited absolute deadline");
+  check(p.retire(2), "denied request still accepts exact cleanup");
 
   std::puts("PASS: EI probe rejects stale/wrong/late PONG and same-batch disconnect");
   return 0;

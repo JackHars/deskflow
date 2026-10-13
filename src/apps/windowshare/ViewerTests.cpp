@@ -654,33 +654,46 @@ void testBoundedMediaRecovery()
     viewer.receiveFrame(frame(), viewer.geometryRevision());
   check(viewer.videoRecovering(), "Decoder overflow did not enter the bounded recovery state");
   check(recording.count(MessageType::Return) == 0, "Decoder overload returned the window prematurely");
-  check(recording.count(MessageType::Input, "key") > delivered,
-        "Decoder overload did not release the exact held keyboard owner");
+  check(
+      recording.count(MessageType::Input, "key") > delivered,
+      "Decoder overload did not release the exact held keyboard owner"
+  );
   key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
   mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
-  check(recording.count(MessageType::Input, "key") == delivered + 1,
-        "A new press escaped through a suspended video/input route");
-  check(waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
-        "Draining the decoder queue did not send exactly one recovery request");
+  check(
+      recording.count(MessageType::Input, "key") == delivered + 1,
+      "A new press escaped through a suspended video/input route"
+  );
+  check(
+      waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
+      "Draining the decoder queue did not send exactly one recovery request"
+  );
   const auto &requested = recording.last(MessageType::Input, "video-recovery");
-  check(requested.session == 811 && requested.epoch == 37 &&
-            requested.object.value("geometry").toInteger() == 1 &&
-            requested.object.value("request").toInteger() == 1,
-        "Recovery request lost its session, geometry or monotonic identity");
+  check(
+      requested.session == 811 && requested.epoch == 37 && requested.object.value("geometry").toInteger() == 1 &&
+          requested.object.value("request").toInteger() == 1,
+      "Recovery request lost its session, geometry or monotonic identity"
+  );
   viewer.receiveFrame(QByteArray::fromHex("000000014188"), viewer.geometryRevision());
-  check(viewer.videoRecovering() && recording.count(MessageType::Input, "video-recovery") == 1,
-        "Dependent frame bypassed recovery or triggered a repeat request");
+  check(
+      viewer.videoRecovering() && recording.count(MessageType::Input, "video-recovery") == 1,
+      "Dependent frame bypassed recovery or triggered a repeat request"
+  );
   viewer.receiveFrame(frame(), viewer.geometryRevision());
-  check(waitUntil([&] { return !viewer.videoRecovering(); }),
-        "A self-contained keyframe did not reset, decode and paint after the drain");
-  check(recording.count(MessageType::Return) == 0 &&
-            recording.count(MessageType::Input, "video-recovery") == 1,
-        "Completed recovery returned the window or repeated its one-shot request");
+  check(
+      waitUntil([&] { return !viewer.videoRecovering(); }),
+      "A self-contained keyframe did not reset, decode and paint after the drain"
+  );
+  check(
+      recording.count(MessageType::Return) == 0 && recording.count(MessageType::Input, "video-recovery") == 1,
+      "Completed recovery returned the window or repeated its one-shot request"
+  );
   // Input must remain blocked until fresh user intent reestablishes focus.
   const auto beforeFocus = recording.count(MessageType::Input, "focus");
   QCoreApplication::processEvents();
-  check(recording.count(MessageType::Input, "focus") == beforeFocus,
-        "Recovered paint silently reused stale input focus");
+  check(
+      recording.count(MessageType::Input, "focus") == beforeFocus, "Recovered paint silently reused stale input focus"
+  );
   viewer.close();
 }
 
@@ -696,36 +709,48 @@ void testMediaPauseOnHiddenViewer()
   const int sentKeys = recording.count(MessageType::Input, "key");
   viewer.hide();
   check(viewer.videoPaused(), "Hidden negotiated Viewer did not suspend decoding");
-  check(recording.count(MessageType::Input, "key") == sentKeys + 1,
-        "Hiding a Viewer did not release exactly its held key");
-  check(recording.count(MessageType::Input, "video-recovery") == 0,
-        "Hidden Viewer began a timed IDR recovery before visibility returned");
+  check(
+      recording.count(MessageType::Input, "key") == sentKeys + 1, "Hiding a Viewer did not release exactly its held key"
+  );
+  check(
+      recording.count(MessageType::Input, "video-recovery") == 0,
+      "Hidden Viewer began a timed IDR recovery before visibility returned"
+  );
   for (int i = 0; i < 64; ++i)
     viewer.receiveFrame(frame(), viewer.geometryRevision());
   QCoreApplication::processEvents();
-  check(recording.count(MessageType::Return) == 0 && viewer.videoPaused(),
-        "Hidden frame burst consumed decoding capacity or returned source");
+  check(
+      recording.count(MessageType::Return) == 0 && viewer.videoPaused(),
+      "Hidden frame burst consumed decoding capacity or returned source"
+  );
   viewer.applyMetadata(metadata(2, 800, 600));
-  check(viewer.videoPaused() && viewer.geometryRevision() == 2,
-        "A hidden geometry update reopened unpainted input authority");
+  check(
+      viewer.videoPaused() && viewer.geometryRevision() == 2,
+      "A hidden geometry update reopened unpainted input authority"
+  );
   viewer.show();
-  check(waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
-        "Resuming hidden Viewer did not request exactly one post-drain IDR");
-  check(!viewer.videoPaused() && viewer.videoRecovering(),
-        "Restored visibility bypassed decoder/input recovery fence");
-  check(recording.last(MessageType::Input, "video-recovery").object.value("geometry").toInteger() == 2,
-        "Visibility recovery reused a stale source geometry revision");
+  check(
+      waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
+      "Resuming hidden Viewer did not request exactly one post-drain IDR"
+  );
+  check(!viewer.videoPaused() && viewer.videoRecovering(), "Restored visibility bypassed decoder/input recovery fence");
+  check(
+      recording.last(MessageType::Input, "video-recovery").object.value("geometry").toInteger() == 2,
+      "Visibility recovery reused a stale source geometry revision"
+  );
   viewer.receiveFrame(frame(), 1);
   check(viewer.videoRecovering(), "Stale pre-minimize source video reopened input authority");
   key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
-  check(recording.count(MessageType::Input, "key") == sentKeys + 1,
-        "Input leaked before the resumed IDR was painted");
+  check(recording.count(MessageType::Input, "key") == sentKeys + 1, "Input leaked before the resumed IDR was painted");
   viewer.receiveFrame(frame(), viewer.geometryRevision());
-  check(waitUntil([&] { return !viewer.videoRecovering(); }),
-        "Resumed hidden Viewer did not decode and paint independent keyframe");
-  check(recording.count(MessageType::Return) == 0 &&
-            recording.count(MessageType::Input, "video-recovery") == 1,
-        "Resumed window returned source or requested repeated IDRs");
+  check(
+      waitUntil([&] { return !viewer.videoRecovering(); }),
+      "Resumed hidden Viewer did not decode and paint independent keyframe"
+  );
+  check(
+      recording.count(MessageType::Return) == 0 && recording.count(MessageType::Input, "video-recovery") == 1,
+      "Resumed window returned source or requested repeated IDRs"
+  );
   viewer.close();
 }
 
@@ -962,6 +987,89 @@ void testFullInputFenceInvalidation()
   viewer.disconnected();
 }
 
+void testFullInputFenceReceiptLifetime()
+{
+  Recording recording;
+  Viewer viewer(249, 32, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  auto request = originalRoute(viewer, recording);
+  request.binding.scope = ForwardingScope::All;
+  unsigned revocations = 0;
+  viewer.onForwardingFenceChanged = [&] {
+    ++revocations;
+    check(
+        !viewer.allForwardingFenced(request.binding),
+        "A changing forwarding fence was advertised as completed during its revocation callback"
+    );
+  };
+  const auto send = viewer.onKeyboardRouteSend;
+  viewer.onKeyboardRouteSend = [&](const KeyboardRouteControl &control) {
+    if (control.result == KeyboardRouteResult::Ready) {
+      check(
+          revocations != 0 && !viewer.allForwardingFenced(control.binding),
+          "A nested queue check accepted a fence while its acknowledgement was still on stack"
+      );
+      if (control.mode == KeyboardRouteMode::Viewer)
+        check(revocations == 2, "Resume acknowledgement preceded retained-receipt revocation");
+    }
+    return send(control);
+  };
+  check(!viewer.allForwardingFenced(request.binding), "An absent All gate passed queue admission");
+  viewer.keyboardRoute(request);
+  check(
+      revocations == 1 && viewer.allForwardingFenced(request.binding),
+      "Exact acknowledged All gate did not become eligible after dispatch unwound"
+  );
+  auto substituted = request.binding;
+  ++substituted.generation;
+  check(!viewer.allForwardingFenced(substituted), "Different All generation borrowed the current fence");
+  substituted = request.binding;
+  substituted.scope = ForwardingScope::Keyboard;
+  check(!viewer.allForwardingFenced(substituted), "Keyboard scope was treated as a complete input fence");
+  viewer.keyboardRoute(request);
+  check(revocations == 1, "Duplicate exact request needlessly revoked the retained fence");
+  viewer.keyboardRoute(resumeRoute(request));
+  check(
+      revocations == 2 && !viewer.allForwardingFenced(request.binding),
+      "Resumed All route retained a live queue receipt without any geometry change"
+  );
+  viewer.keyboardRoute(request);
+  check(!viewer.allForwardingFenced(request.binding), "Retired generation revived exact queue admission");
+  viewer.onKeyboardRouteSend = send;
+  ++request.binding.generation;
+  viewer.keyboardRoute(request);
+  check(revocations == 3 && viewer.allForwardingFenced(request.binding), "Fresh gate could not acquire a new receipt");
+  viewer.focusAcknowledged(0, recording.focusRequest());
+  check(
+      revocations == 4 && !viewer.allForwardingFenced(request.binding),
+      "Focus invalidation left the exact forwarding receipt live"
+  );
+  viewer.onForwardingFenceChanged = {};
+  viewer.disconnected();
+
+  for (unsigned phase = 0; phase < 3; ++phase) {
+    Recording ownedRecording;
+    auto owned = std::make_unique<Viewer>(250 + phase, 33, metadata());
+    ownedRecording.attach(*owned);
+    makeReady(*owned, ownedRecording);
+    makeFocused(*owned, ownedRecording);
+    auto route = originalRoute(*owned, ownedRecording);
+    route.binding.scope = ForwardingScope::All;
+    if (phase != 0)
+      owned->keyboardRoute(route);
+    owned->onForwardingFenceChanged = [&] { owned.reset(); };
+    if (phase == 0)
+      owned->keyboardRoute(route);
+    else if (phase == 1)
+      owned->keyboardRoute(resumeRoute(route));
+    else
+      owned->disconnected();
+    check(!owned, "Destructive forwarding-fence callback did not complete safely");
+  }
+}
+
 void testKeyboardRouteBindingValidation()
 {
   Recording recording;
@@ -1178,6 +1286,7 @@ int main(int argc, char **argv)
     testKeyboardRoutePendingFocus(ForwardingScope::All, true);
     testFullInputFenceAndResume();
     testFullInputFenceInvalidation();
+    testFullInputFenceReceiptLifetime();
     testKeyboardRouteBindingValidation();
     testKeyboardRouteInvalidation();
     testKeyboardRouteSendFailure();
@@ -1191,7 +1300,8 @@ int main(int argc, char **argv)
          "queued geometry race, negotiated bounded decoder recovery, hidden-viewer pause/IDR and input revocation, "
          "keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
          "route generations, pending focus fence, full-input scope, pointer tombstones, "
-         "route invalidation/resume and send failure\n";
+         "exact queue-receipt gate/revocation, destructive fence callbacks, route invalidation/resume and send "
+         "failure\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #pragma once
+#include "InputCutoff.h"
 
 #include <QByteArray>
 #include <QJsonObject>
@@ -24,7 +25,8 @@ enum class GnomeViewportOperation
   Snapshot,
   Map,
   Check,
-  Invalidated
+  Invalidated,
+  InputDrain
 };
 
 struct GnomeViewportState
@@ -47,6 +49,9 @@ struct GnomeViewportRequest
   GnomeViewportOperation operation = GnomeViewportOperation::Snapshot;
   std::uint64_t request = 0, snapshot = 0;
   double x = 0, y = 0;
+  InputCutoffBinding cutoff{};
+  std::uint32_t budgetMs = 0;
+  bool operator==(const GnomeViewportRequest &) const = default;
 };
 
 struct GnomeViewportReply
@@ -57,11 +62,13 @@ struct GnomeViewportReply
   QString reason;
   GnomeViewportState state;
   double x = 0, y = 0;
+  InputCutoffBinding cutoff{};
 };
 
 // Snapshot success: {version,operation,request,ok:true,state}. Its request ID
 // is the retained snapshot ID. Map/check success adds snapshot (map also x/y).
-// Denial: {version,operation,request,ok:false,reason}. Unsolicited revocation:
+// InputDrain requires cutoff/budgetMs and echoes cutoff/snapshot on success or
+// denial. Other denial: {version,operation,request,ok:false,reason}. Revocation:
 // {version:1,operation:"invalidated",snapshot,reason}; no request/ok fields.
 // One retained snapshot and one revocation are enough; no timer may renew it.
 QJsonObject gnomeViewportJson(const GnomeViewportRequest &request);

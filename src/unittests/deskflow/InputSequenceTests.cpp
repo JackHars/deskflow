@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "InputSequenceTests.h"
+#include "deskflow/InputCutoffProtocol.h"
 #include "deskflow/InputSequence.h"
 #include <thread>
 
@@ -144,6 +145,48 @@ void InputSequenceTests::originScopeDoesNotLeak()
     QVERIFY(InputSequenceOriginScope::current() == token().capture);
   }
   QVERIFY(!InputSequenceOriginScope::current());
+}
+
+void InputSequenceTests::inputCutoffCodecIsBoundedAndExact()
+{
+  InputCutoffBinding binding{
+      0xf102030405060708ULL,
+      0x8899aabb,
+      {0xfedcba9876543210ULL, 0xabcdef0198765432ULL, 2},
+      {{11, 12}, 13, 14, 15, 16, ForwardingScope::All},
+      0xaabbccddeeff1122ULL
+  };
+  const auto request = encodeInputCutoffRequest({binding, 250});
+  QCOMPARE(request.size(), 4 + inputCutoffRequestBytes);
+  const auto decoded = decodeInputCutoffRequest(std::string_view(request).substr(4));
+  QVERIFY(decoded && decoded->binding == binding && decoded->remainingMs == 250);
+  for (std::size_t size = 0; size < inputCutoffRequestBytes; ++size)
+    QVERIFY(!decodeInputCutoffRequest(std::string_view(request).substr(4, size)));
+  QVERIFY(!decodeInputCutoffRequest(std::string_view(request).substr(4).substr(0, inputCutoffRequestBytes - 1)));
+  QVERIFY(!decodeInputCutoffRequest(request.substr(4) + '\0'));
+  QVERIFY_EXCEPTION_THROWN(encodeInputCutoffRequest({binding, 0}), std::invalid_argument);
+  QVERIFY_EXCEPTION_THROWN(encodeInputCutoffRequest({binding, 251}), std::invalid_argument);
+  const auto resume = encodeInputCutoffResume(binding);
+  QVERIFY(decodeInputCutoffResume(std::string_view(resume).substr(4)) == binding);
+  for (auto state : {InputCutoffState::BackendObserved, InputCutoffState::Denied, InputCutoffState::Resumed}) {
+    const InputCutoffReceipt receipt{binding, state};
+    const auto bytes = encodeInputCutoffReceipt(receipt);
+    QCOMPARE(bytes.size(), 4 + inputCutoffReceiptBytes);
+    QVERIFY(decodeInputCutoffReceipt(std::string_view(bytes).substr(4)) == receipt);
+    for (std::size_t size = 0; size < inputCutoffReceiptBytes; ++size)
+      QVERIFY(!decodeInputCutoffReceipt(std::string_view(bytes).substr(4, size)));
+  }
+  auto wrong = binding;
+  wrong.forwarding.scope = ForwardingScope::Keyboard;
+  QVERIFY(!validInputCutoffBinding(wrong));
+  QVERIFY_EXCEPTION_THROWN(encodeInputCutoffRequest({wrong, 50}), std::invalid_argument);
+  wrong = binding;
+  wrong.viewerConnection = 0;
+  QVERIFY(!validInputCutoffBinding(wrong));
+  wrong = binding;
+  wrong.capture.part = 0;
+  QVERIFY(!validInputCutoffBinding(wrong));
+  QVERIFY_EXCEPTION_THROWN(encodeInputCutoffReceipt({binding, InputCutoffState::Pending}), std::invalid_argument);
 }
 
 QTEST_GUILESS_MAIN(InputSequenceTests)

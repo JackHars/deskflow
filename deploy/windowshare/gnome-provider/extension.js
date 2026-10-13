@@ -13,7 +13,8 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
-    validRequest, validRoutedPointRequest, StageUpdateSequence,
+    validRequest, validRoutedPointRequest, StageUpdateSequence, InputDrainSequence,
+    INPUT_DRAIN_BINDING_TYPES, validInputDrainBinding,
 } from './logic.js';
 import {closeDescriptorList, withViewerLauncher} from './launcher.js';
 
@@ -29,6 +30,28 @@ const rectArray = rect => [rect.x, rect.y, rect.width, rect.height];
 function removeSource(id) {
     if (id)
         GLib.source_remove(id);
+}
+
+function inputDrainBinding(invocation) {
+    // Read the original dictionary, not deep_unpack's object: duplicate D-Bus
+    // keys must not disappear before the closed schema is checked.
+    const raw = invocation.get_parameters().get_child_value(7);
+    const keys = Object.keys(INPUT_DRAIN_BINDING_TYPES);
+    if (raw.get_type_string() !== 'a{sv}' || raw.n_children() !== keys.length)
+        throw new Error('Malformed input-drain correlation');
+    const binding = {};
+    for (let i = 0; i < raw.n_children(); i++) {
+        const entry = raw.get_child_value(i);
+        const key = entry.get_child_value(0).deep_unpack();
+        const value = entry.get_child_value(1).get_variant();
+        if (!Object.hasOwn(INPUT_DRAIN_BINDING_TYPES, key) || Object.hasOwn(binding, key) ||
+            value.get_type_string() !== INPUT_DRAIN_BINDING_TYPES[key])
+            throw new Error('Malformed input-drain correlation');
+        binding[key] = value.deep_unpack();
+    }
+    if (!validInputDrainBinding(binding))
+        throw new Error('Invalid input-drain correlation');
+    return Object.freeze(binding);
 }
 
 function disconnect(signals) {
@@ -107,6 +130,7 @@ class Provider {
         this._object = null;
         this._native = false;
         this._stageCapable = false;
+        this._drainCapable = false;
     }
 
     async start() {
@@ -125,6 +149,8 @@ class Provider {
         // This does not enable the compositor input-consumption drain.
         this._stageCapable = typeof global.stage.schedule_update === 'function' &&
             typeof Clutter.StageView?.prototype?.get_layout === 'function';
+        this._drainCapable = this._stageCapable && typeof Clutter.events_pending === 'function' &&
+            typeof GLib.main_depth === 'function';
         this._address = GLib.getenv('DBUS_SESSION_BUS_ADDRESS');
         if (!this._address)
             throw new Error('An explicit session bus address is required');
@@ -184,6 +210,7 @@ class Provider {
             return;
         }
         this._finishStageCheck(session, session.stageCheck, 'native-state-invalidated');
+        this._finishInputDrain(session, session.inputDrain, 'native-state-invalidated');
         this._object?.emit_signal('Invalidated',
             new GLib.Variant('(suus)', [session.id, session.generation, session.revision, reason]));
     }
@@ -195,6 +222,8 @@ class Provider {
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
             viewportChannel: ['b', true], routedPointObservation: ['b', true],
             stageUpdateSequence: ['b', this._stageCapable],
+            inputDrainSegment: ['b', this._drainCapable],
+            inputDrainOrderingLimit: ['s', 'mutter-eis-sync-build-unverified'],
             viewportSocketValidated: ['b', false],
             syncFenceVerified: ['b', false], pointerDeviceAttribution: ['b', false],
             qtViewportMapping: ['b', false], deliveryReady: ['b', false],
@@ -207,7 +236,7 @@ class Provider {
             session = this._state.begin(invocation.get_sender(), uuid(), nowMs());
             Object.assign(session, {
                 cancel: new Gio.Cancellable(), invocation, signals: [], connection: null,
-                viewer: null, window: null, surface: null, signature: '', stageCheck: null,
+                viewer: null, window: null, surface: null, signature: '', stageCheck: null, inputDrain: null,
             });
             session.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, STARTUP_MS, () => {
                 session.timeout = 0;
@@ -475,7 +504,7 @@ class Provider {
         try {
             session = this._lookup(invocation, id, generation);
             if (!this._stageCapable || !validRequest(request, x, y, revision) ||
-                session.stageCheck)
+                session.stageCheck || session.inputDrain)
                 throw new Error('Stage update observation unsupported or busy');
             const initial = this._observe(session, token);
             if (initial.values.reason[1] || initial.values.revision[1] !== revision ||
@@ -548,6 +577,135 @@ class Provider {
         } catch (error) {
             if (check && session?.stageCheck === check)
                 this._finishStageCheck(session, check, 'stage-start-failed');
+            else
+                errorReply(invocation, error);
+        }
+    }
+
+    _finishInputDrain(session, check, reason = '') {
+        if (!check || session.inputDrain !== check)
+            return;
+        session.inputDrain = null;
+        removeSource(check.timeout);
+        removeSource(check.idle);
+        disconnect(check.signals);
+        const valid = !reason && check.sequence.complete && this._state.matches(session) &&
+            session.revision === check.revision && nowMs() < check.sequence.deadline;
+        const binding = Object.fromEntries(Object.entries(check.binding).map(([key, value]) =>
+            [key, [INPUT_DRAIN_BINDING_TYPES[key], value]]));
+        try {
+            check.invocation.return_value(new GLib.Variant('(a{sv})', [variants({
+                available: ['b', valid], reason: ['s', valid ? '' : (reason || 'input-drain-incomplete')],
+                session: ['s', session.id], generation: ['u', session.generation],
+                viewer: ['s', check.viewer], request: ['s', check.request], revision: ['u', check.revision],
+                stageX: ['d', check.x], stageY: ['d', check.y], binding: ['a{sv}', variants(binding)],
+                segment: ['s', 'clutter-queue-and-stage'],
+                orderingLimit: ['s', 'mutter-eis-sync-build-unverified'],
+            })]));
+        } catch (_) {
+            // Retired before replying. A vanished caller cannot retain a result.
+        }
+    }
+
+    // The caller orders this operation after its exact owned sender PONG. GI
+    // provides no runtime HAVE_EIS_EVENT_REF feature proof, so this operation
+    // certifies only the compositor segment and reports that boundary. It does
+    // not validate the caller's All fence; the subsequent private Qt operation
+    // must verify the same binding before the caller may use this segment.
+    DrainInputPrefixAsync([id, generation, token, request, x, y, revision, _binding, budgetMs], invocation) {
+        let session, check;
+        try {
+            session = this._lookup(invocation, id, generation);
+            const binding = inputDrainBinding(invocation);
+            if (!this._drainCapable || session.stageCheck || session.inputDrain ||
+                !validRoutedPointRequest(request, x, y, revision) || !Number.isInteger(budgetMs) ||
+                budgetMs <= 0 || budgetMs > 120)
+                throw new Error('Input drain unsupported, malformed or busy');
+            const previous = session.lastDrainCutoff;
+            if (previous && (binding.cutoffRequest.length < previous.length ||
+                (binding.cutoffRequest.length === previous.length && binding.cutoffRequest <= previous)))
+                throw new Error('Input cutoff request was already retired');
+            const initial = this._observe(session, token);
+            if (initial.values.reason[1] || initial.values.revision[1] !== revision || !initial.surface ||
+                global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== initial.surface)
+                throw new Error('Frozen point is not on the current owned Viewer');
+            const sequence = new InputDrainSequence(request, x, y, revision, nowMs(), budgetMs);
+            check = {request, revision, viewer: token, invocation, binding, sequence, x, y,
+                surface: initial.surface, signals: [], timeout: 0, idle: 0};
+            session.lastDrainCutoff = binding.cutoffRequest;
+            session.inputDrain = check;
+            const terminate = reason => this._finishInputDrain(session, check, reason);
+            const current = () => {
+                const observed = this._observe(session, token);
+                return session.inputDrain === check && !observed.values.reason[1] &&
+                    observed.values.revision[1] === revision && observed.surface === check.surface &&
+                    global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) === check.surface;
+            };
+            check.signals.push([global.stage, global.stage.connect('before-update', (_stage, view) => {
+                if (session.inputDrain !== check)
+                    return;
+                try {
+                    sequence.before(view, view?.layout, GLib.main_depth(), nowMs());
+                    if (sequence.reason)
+                        terminate(sequence.reason);
+                    else if (sequence.view === view && !current())
+                        terminate('input-drain-hit-or-focus-changed');
+                } catch (_) {
+                    terminate('unsupported-input-drain-stage');
+                }
+            })]);
+            check.signals.push([global.stage, global.stage.connect('after-update', (_stage, view) => {
+                if (session.inputDrain !== check)
+                    return;
+                try {
+                    const completed = sequence.after(view, view?.layout, GLib.main_depth(), nowMs());
+                    if (sequence.reason)
+                        terminate(sequence.reason);
+                    else if (completed) {
+                        if (!current())
+                            terminate('input-drain-hit-or-focus-changed');
+                        else
+                            this._finishInputDrain(session, check);
+                    }
+                } catch (_) {
+                    terminate('unsupported-input-drain-stage');
+                }
+            })]);
+            check.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, budgetMs, () => {
+                check.timeout = 0;
+                terminate('input-drain-timeout');
+                return GLib.SOURCE_REMOVE;
+            });
+            // Mutter's global Clutter event source has default priority. This
+            // lower-priority idle cannot jump ahead of queued events, and the
+            // depth check excludes events already popped by recursive dispatch.
+            check.idle = GLib.idle_add(GLib.PRIORITY_DEFAULT_IDLE, () => {
+                if (session.inputDrain !== check)
+                    return GLib.SOURCE_REMOVE;
+                try {
+                    const ready = sequence.queueEmpty(Clutter.events_pending(), GLib.main_depth(), nowMs());
+                    if (sequence.reason) {
+                        check.idle = 0;
+                        terminate(sequence.reason);
+                        return GLib.SOURCE_REMOVE;
+                    }
+                    if (!ready)
+                        return GLib.SOURCE_CONTINUE;
+                    check.idle = 0;
+                    if (!current())
+                        terminate('input-drain-hit-or-focus-changed');
+                    else
+                        global.stage.schedule_update();
+                    return GLib.SOURCE_REMOVE;
+                } catch (_) {
+                    check.idle = 0;
+                    terminate('unsupported-input-drain-queue');
+                    return GLib.SOURCE_REMOVE;
+                }
+            });
+        } catch (error) {
+            if (check && session?.inputDrain === check)
+                this._finishInputDrain(session, check, 'input-drain-start-failed');
             else
                 errorReply(invocation, error);
         }
@@ -632,6 +790,7 @@ class Provider {
             return;
         session.cleaned = true;
         this._finishStageCheck(session, session.stageCheck, 'viewer-or-provider-closed');
+        this._finishInputDrain(session, session.inputDrain, 'viewer-or-provider-closed');
         this._state.detach(session);
         session.cancel?.cancel();
         removeSource(session.timeout);

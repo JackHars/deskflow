@@ -300,9 +300,7 @@ public:
       const auto mapped = found->second.window->mapWaylandSurface(expected, point);
       return alive && alive->viewportState() == std::optional(expected) ? mapped : std::nullopt;
     };
-    endpoint.onQtQueue = [alive, &endpoint](
-                             const GnomeViewportState &expected, std::function<void(bool)> finished
-                         ) {
+    endpoint.onQtQueue = [alive, &endpoint](const GnomeViewportState &expected, std::function<void(bool)> finished) {
       if (!alive || alive->viewportState() != std::optional(expected))
         return false;
       const auto found = alive->m_viewers.find(expected.session);
@@ -314,6 +312,34 @@ public:
       if (!geometry || !alive || alive->viewportState() != std::optional(expected))
         return false;
       return endpoint.startWaylandQueue(window, *geometry, std::move(finished));
+    };
+    const auto exactFence = [alive](const GnomeViewportState &expected, const InputCutoffBinding &cutoff) {
+      const auto *app = dynamic_cast<ViewerApplication *>(qApp);
+      if (!alive || !alive->m_inputCapable || !validInputCutoffBinding(cutoff) || !app ||
+          !app->ownsInputDrainDispatch() || !app->inputDispatchIdle() ||
+          cutoff.viewerConnection != expected.connection || alive->viewportState() != std::optional(expected))
+        return false;
+      const auto found = alive->m_viewers.find(expected.session);
+      return found != alive->m_viewers.end() && found->second.window &&
+             found->second.window->allForwardingFenced(cutoff.forwarding);
+    };
+    endpoint.onInputDrainCheck = exactFence;
+    const QPointer<ViewerViewportEndpoint> ownedEndpoint(&endpoint);
+    endpoint.onInputDrain = [alive, ownedEndpoint, exactFence](
+                                const GnomeViewportState &expected, const InputCutoffBinding &cutoff,
+                                QDeadlineTimer deadline, std::function<void(bool)> finished
+                            ) {
+      if (!ownedEndpoint || !exactFence(expected, cutoff))
+        return false;
+      const auto found = alive->m_viewers.find(expected.session);
+      auto *window = found->second.window->windowHandle();
+      const auto geometry = readWaylandViewport(window);
+      if (!geometry || !exactFence(expected, cutoff))
+        return false;
+      return ownedEndpoint->startWaylandInputDrain(
+          window, *geometry, deadline, [exactFence, expected, cutoff] { return exactFence(expected, cutoff); },
+          std::move(finished)
+      );
     };
   }
 #endif
@@ -1099,8 +1125,8 @@ private:
                 {{"version", static_cast<int>(protocolVersion)},
                  {"role", "host"},
                  {"codec", "h264"},
-                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable)
-                                                      : QJsonArray{}}}
+                 {"capabilities",
+                  m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable) : QJsonArray{}}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -1252,6 +1278,10 @@ private:
         if (currentViewer(id, epoch, viewer, generation) && m_viewportEndpoint)
           m_viewportEndpoint->invalidate();
       };
+      viewer->onForwardingFenceChanged = [this, id, epoch = packet.epoch, viewer, generation] {
+        if (currentViewer(id, epoch, viewer, generation) && m_viewportEndpoint)
+          m_viewportEndpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+      };
 #endif
       connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer, generation] {
         forgetViewer(id, epoch, viewer, generation);
@@ -1355,6 +1385,10 @@ private:
   {
     auto viewers = std::move(m_viewers);
     m_viewers.clear();
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    if (m_viewportEndpoint)
+      m_viewportEndpoint->invalidate(QStringLiteral("viewer-set-changed"));
+#endif
     for (auto &[id, view] : viewers)
       if (view.window) {
         view.window->onReturned = {};
@@ -1362,6 +1396,7 @@ private:
         view.window->onKeyboardRouteSend = {};
         view.window->onError = {};
         view.window->onViewportInvalidated = {};
+        view.window->onForwardingFenceChanged = {};
         view.window->disconnected();
         view.window->close();
       }
@@ -1517,7 +1552,7 @@ int main(int argc, char **argv)
 #ifdef WINDOWSHARE_LOCAL_INPUT
     auto inputBootstrap = LocalInputHostBootstrap::inspect(argc, argv);
 #endif
-    QApplication app(argc, argv);
+    ViewerApplication app(argc, argv);
     // Declared before coreInput and Bridge: its callbacks remain valid through
     // both destructors, and the attached controller is held only by QPointer.
     HostShutdownGuard shutdown([&app] { app.quit(); });
@@ -1674,6 +1709,13 @@ int main(int argc, char **argv)
       shutdown.request();
     if (shutdown.requested())
       return 0;
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    // The private owned GNOME startup alone opts into QPA depth observation.
+    // Unsupported Qt/plugin builds or a foreign handler leave InputDrain
+    // unavailable while ordinary viewport observations keep their behavior.
+    if (viewportBootstrap.inherited())
+      (void)app.enableInputDrainDispatch();
+#endif
     Bridge bridge(
         hosting, Identity::load(parser.value("identity")), parseFingerprint(parser.value("peer-pin")),
         parser.value("journal"), screen, window, parser.isSet("holding-display")

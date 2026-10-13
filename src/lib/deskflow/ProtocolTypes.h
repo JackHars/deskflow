@@ -14,6 +14,10 @@
 extern const char *const kMsgCInputSequenceAck;     // CISA + generation:u32
 extern const char *const kMsgDInputSequence;        // DSEQ + body length:u16 + bounded body
 extern const char *const kMsgCInputSequenceReceipt; // CISR + fixed 15-byte body
+extern const char *const kMsgCInputCutoffAck;       // CICA + negotiated generation:u32
+extern const char *const kMsgDInputCutoff;          // DICQ + fixed bounded request
+extern const char *const kMsgDInputCutoffResume;    // DICX + exact binding
+extern const char *const kMsgCInputCutoffReceipt;   // CICR + exact binding and outcome
 /**
  * @file ProtocolTypes.h
  * @brief Deskflow Network Protocol Specification and Implementation

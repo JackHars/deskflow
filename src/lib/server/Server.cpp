@@ -1215,7 +1215,7 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(2 * options->size());
     for (auto [optionId, optionValue] : *options) {
-      if (optionId == kOptionInputSequenceTrace)
+      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff)
         continue; // Reserved for the live capture route, never configuration.
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
@@ -1228,7 +1228,7 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(optionsList.size() + 2 * options->size());
     for (auto [optionId, optionValue] : *options) {
-      if (optionId == kOptionInputSequenceTrace)
+      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff)
         continue;
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
@@ -1241,6 +1241,10 @@ void Server::sendOptions(BaseClientProxy *client) const
   if (m_originalInputRoutes && m_originalInputRoutes->live()) {
     if (const auto generation = client->requestInputSequenceTrace()) {
       optionsList.push_back(kOptionInputSequenceTrace);
+      optionsList.push_back(*generation);
+    }
+    if (const auto generation = client->requestInputCutoffCapability()) {
+      optionsList.push_back(kOptionInputCutoff);
       optionsList.push_back(*generation);
     }
   }
@@ -1285,8 +1289,10 @@ void Server::processOptions()
     } else if (id == kOptionClipboardSharingSize) {
       if (value <= 0) {
         m_maximumClipboardSize = 0;
-        LOG_INFO("clipboard sharing is disabled because the "
-                 "maximum shared clipboard size is set to 0");
+        LOG_INFO(
+            "clipboard sharing is disabled because the "
+            "maximum shared clipboard size is set to 0"
+        );
       } else {
         m_maximumClipboardSize = static_cast<size_t>(value);
       }

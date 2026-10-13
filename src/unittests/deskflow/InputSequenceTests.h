@@ -15,4 +15,5 @@ private Q_SLOTS:
   void scopeSeparatesSubmissionFromDelivery();
   void nestedAndExhaustedScopesFail();
   void originScopeDoesNotLeak();
+  void inputCutoffCodecIsBoundedAndExact();
 };

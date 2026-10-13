@@ -60,6 +60,20 @@
       <arg name="expectedRevision" type="u" direction="in"/>
       <arg name="observation" type="a{sv}" direction="out"/>
     </method>
+    <!-- Caller-ordered compositor segment only. The exact inherited cutoff is
+         echoed; compiled Mutter EIS ordering and the Qt fence are independent. -->
+    <method name="DrainInputPrefix">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="expectedRevision" type="u" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="budgetMs" type="u" direction="in"/>
+      <arg name="segment" type="a{sv}" direction="out"/>
+    </method>
     <method name="ValidateCurrentHit">
       <arg name="session" type="s" direction="in"/>
       <arg name="generation" type="u" direction="in"/>

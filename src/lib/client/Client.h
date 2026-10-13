@@ -15,6 +15,9 @@
 #include "common/Enums.h"
 #include "deskflow/IClipboard.h"
 #include "net/NetworkAddress.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/InputCutoff.h"
+#endif
 
 #include <climits>
 #include <string>
@@ -188,6 +191,13 @@ public:
   void screensaver(bool activate) override;
   void resetOptions() override;
   void setOptions(const OptionsList &options) override;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  virtual bool beginInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual deskflow::windowshare::InputCutoffState inputCutoffState(const deskflow::windowshare::InputCutoffBinding &);
+  virtual bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &);
+#endif
   std::string getName() const override;
 
 private:

@@ -77,6 +77,12 @@ constexpr auto introspection = R"xml(
       <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
       <arg type="a{sv}" direction="out"/>
     </method>
+    <method name="DrainInputPrefix">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
+      <arg type="a{sv}" direction="in"/><arg type="u" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
     <method name="CloseSession">
       <arg type="s" direction="in"/><arg type="u" direction="in"/>
     </method>
@@ -291,6 +297,13 @@ struct Service
   bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false, unknownStageMethod = false;
   bool duplicateStageField = false, substituteStageField = false, wrongStageFieldType = false;
   unsigned stageRequests = 0;
+  bool advertiseDrain = false, wrongDrainBinding = false, duplicateDrainField = false, unknownDrainMethod = false;
+  bool delayDrain = false, invalidateDuringDrain = false, wrongQtDrainBinding = false;
+  unsigned drainRequests = 0, qtDrainRequests = 0;
+  std::uint64_t qtGateGeneration = 6;
+  guint lastDrainBudget = 0;
+  GDBusMethodInvocation *pendingDrain = nullptr;
+  GVariant *pendingDrainReply = nullptr;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
   Mode mode;
@@ -521,6 +534,17 @@ struct Service
             ++revision; // Deliberately emit NO native invalidation signal.
           if (std::exchange(invalidateOnCheck, false))
             invalidatePaint();
+        } else if (request.operation == GnomeViewportOperation::InputDrain) {
+          ++qtDrainRequests;
+          reply.cutoff = request.cutoff;
+          if (wrongQtDrainBinding)
+            ++reply.cutoff.request;
+          if (request.cutoff.forwarding.generation != qtGateGeneration) {
+            reply.ok = false;
+            reply.reason = "fixture-exact-All-fence-not-held";
+          }
+          if (std::exchange(invalidateOnCheck, false))
+            invalidatePaint();
         }
       }
       sendViewport(reply);
@@ -539,6 +563,12 @@ struct Service
         g_variant_builder_add(&values, "{sv}", "routedPointObservation", g_variant_new_boolean(true));
       if (advertiseStage)
         g_variant_builder_add(&values, "{sv}", "stageUpdateSequence", g_variant_new_boolean(true));
+      if (advertiseDrain) {
+        g_variant_builder_add(&values, "{sv}", "inputDrainSegment", g_variant_new_boolean(true));
+        g_variant_builder_add(
+            &values, "{sv}", "inputDrainOrderingLimit", g_variant_new_string("mutter-eis-sync-build-unverified")
+        );
+      }
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
@@ -602,16 +632,76 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
+    } else if (!std::strcmp(name, "DrainInputPrefix")) {
+      check(caller == g_dbus_method_invocation_get_sender(invocation), "Drain request changed private caller");
+      const char *sessionKey = nullptr, *token = nullptr, *request = nullptr;
+      guint g = 0, requestedRevision = 0, budget = 0;
+      double x = 0, y = 0;
+      GVariant *binding = nullptr;
+      g_variant_get(
+          parameters, "(&su&s&sddu@a{sv}u)", &sessionKey, &g, &token, &request, &x, &y, &requestedRevision, &binding,
+          &budget
+      );
+      check(
+          !std::strcmp(sessionKey, sessionId) && g == generation && !std::strcmp(token, viewerId) && request &&
+              *request && advertiseDrain && budget > 0 && budget <= 120,
+          "Drain request changed native binding or inherited budget"
+      );
+      ++drainRequests;
+      lastDrainBudget = budget;
+      if (unknownDrainMethod) {
+        g_variant_unref(binding);
+        g_dbus_method_invocation_return_dbus_error(
+            invocation, "org.freedesktop.DBus.Error.UnknownMethod", "Input drain is unavailable"
+        );
+        return;
+      }
+      if (wrongDrainBinding) {
+        GVariantDict changed;
+        g_variant_dict_init(&changed, binding);
+        g_variant_dict_insert(&changed, "cutoffRequest", "s", "18446744073709551615");
+        g_variant_unref(binding);
+        binding = g_variant_ref_sink(g_variant_dict_end(&changed));
+      }
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
+      add("available", g_variant_new_boolean(true));
+      add(duplicateDrainField ? "available" : "reason",
+          duplicateDrainField ? g_variant_new_boolean(true) : g_variant_new_string(""));
+      add("session", g_variant_new_string(sessionId));
+      add("generation", g_variant_new_uint32(generation));
+      add("viewer", g_variant_new_string(viewerId));
+      add("request", g_variant_new_string(request));
+      add("revision", g_variant_new_uint32(requestedRevision));
+      add("stageX", g_variant_new_double(x));
+      add("stageY", g_variant_new_double(y));
+      add("binding", binding);
+      g_variant_unref(binding);
+      add("segment", g_variant_new_string("clutter-queue-and-stage"));
+      add("orderingLimit", g_variant_new_string("mutter-eis-sync-build-unverified"));
+      auto *reply = g_variant_new("(a{sv})", &values);
+      if (invalidateDuringDrain)
+        invalidateNative();
+      if (std::exchange(delayDrain, false)) {
+        check(!pendingDrain, "Fixture retained two delayed drains");
+        pendingDrain = G_DBUS_METHOD_INVOCATION(g_object_ref(invocation));
+        pendingDrainReply = g_variant_ref_sink(reply);
+      } else
+        g_dbus_method_invocation_return_value(invocation, reply);
     } else if (!std::strcmp(name, "ObserveStageFrames")) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Stage request changed authenticated caller");
       const char *sessionKey = nullptr, *token = nullptr, *request = nullptr;
       guint g = 0, requestedRevision = 0;
       double stageX = 0, stageY = 0;
-      g_variant_get(parameters, "(&su&s&sddu)", &sessionKey, &g, &token, &request, &stageX, &stageY,
-                    &requestedRevision);
-      check(sessionKey && !std::strcmp(sessionKey, sessionId) && g == generation &&
-            token && !std::strcmp(token, viewerId) && request && *request && advertiseStage,
-            "Stage observation changed exact session or lacked capability");
+      g_variant_get(
+          parameters, "(&su&s&sddu)", &sessionKey, &g, &token, &request, &stageX, &stageY, &requestedRevision
+      );
+      check(
+          sessionKey && !std::strcmp(sessionKey, sessionId) && g == generation && token &&
+              !std::strcmp(token, viewerId) && request && *request && advertiseStage,
+          "Stage observation changed exact session or lacked capability"
+      );
       ++stageRequests;
       if (unknownStageMethod) {
         g_dbus_method_invocation_return_dbus_error(
@@ -654,8 +744,7 @@ struct Service
       if (hit) {
         ++nativeHitQueries;
         g_variant_get(parameters, "(&su&s&sddu)", &id, &value, &token, &request, &x, &y, &expectedRevision);
-      }
-      else
+      } else
         g_variant_get(parameters, "(&su&s)", &id, &value, &token);
       check(
           id && token && std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(token, viewerId) == 0,
@@ -735,6 +824,11 @@ struct Service
     if (pendingCreate) {
       g_dbus_method_invocation_return_dbus_error(pendingCreate, "org.deskflow.Test.Ended", "Fixture ended");
       g_object_unref(std::exchange(pendingCreate, nullptr));
+    }
+    if (pendingDrain) {
+      g_dbus_method_invocation_return_dbus_error(pendingDrain, "org.deskflow.Test.Ended", "Fixture ended");
+      g_object_unref(std::exchange(pendingDrain, nullptr));
+      g_variant_unref(std::exchange(pendingDrainReply, nullptr));
     }
     peer.reset();
     if (connection) {
@@ -909,6 +1003,169 @@ GnomeProviderClient::ViewportObservation observed(GnomeProviderClient &client)
     throw std::runtime_error("No live viewport observation: " + result.error);
   return *result.observation;
 }
+GnomeProviderClient::InputDrainRequest inputDrainRequest(std::uint64_t request = 1)
+{
+  InputCutoffBinding cutoff;
+  cutoff.request = request;
+  cutoff.coreConnectionGeneration = 7;
+  cutoff.capture = {9, 37, 1};
+  cutoff.forwarding = {{11, 12}, 6, 4, 5, 3, ForwardingScope::All};
+  cutoff.viewerConnection = 1;
+  return {cutoff, {9, 37, 425, 325}, InputCutoffClock::now() + 250ms};
+}
+GnomeProviderClient::InputDrainUpdate inputDrainResult(GnomeProviderClient &client, std::uint64_t request)
+{
+  std::optional<GnomeProviderClient::InputDrainUpdate> result;
+  waitUntil(
+      [&] {
+        auto value = client.takeInputDrainUpdate();
+        if (value) {
+          check(value->request == request, "Input drain changed request identity");
+          result = std::move(value);
+        }
+        return result.has_value();
+      },
+      "Input drain result timed out"
+  );
+  return std::move(*result);
+}
+void inputDrainBindingAndRevocation(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.advertiseDrain = true;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  auto wanted = inputDrainRequest();
+  const auto request = client.requestInputDrain(wanted);
+  check(request && !client.requestViewportObservation(), "Input drain did not reserve the bounded shared slot");
+  const auto result = inputDrainResult(client, request);
+  if (!result.segment || !result.segment->live())
+    throw std::runtime_error("No live compositor/Qt segment: " + result.error);
+  check(
+      result.segment->binding() == wanted.cutoff && result.segment->snapshot().routedPoint == wanted.point &&
+          result.segment->snapshot().desktopX == 425 && service.drainRequests == 1 && service.qtDrainRequests == 1 &&
+          service.stageRequests == 0 && !service.afterQtCheck && !client.takeViewportUpdate() &&
+          std::string(result.segment->orderingLimitation()) == "mutter-eis-sync-build-unverified",
+      "Input drain lost correlation or used generic observation as a drain"
+  );
+  check(!client.requestInputDrain(wanted), "A retired cutoff request was reused");
+  service.invalidatePaint();
+  waitUntil([&] { return !result.segment->live(); }, "Gate/paint invalidation did not revoke input-drain segment");
+  const auto invalidated = client.takeInputDrainUpdate();
+  check(
+      invalidated && invalidated->request == request && !invalidated->segment,
+      "Input-drain invalidation was not published on its typed update"
+  );
+  wanted = inputDrainRequest(2);
+  wanted.cutoff.forwarding.generation = 7; // Snapshot matches, exact gate does not.
+  const auto deniedId = client.requestInputDrain(wanted);
+  const auto denied = inputDrainResult(client, deniedId);
+  check(
+      !denied.segment && denied.error == "fixture-exact-All-fence-not-held" && client.live(),
+      "An unrelated All generation granted a segment"
+  );
+  auto bad = inputDrainRequest(3);
+  bad.point.sequence++;
+  check(!client.requestInputDrain(bad), "Input drain admitted a substituted capture point");
+  bad = inputDrainRequest(3);
+  bad.cutoff.forwarding.scope = ForwardingScope::Keyboard;
+  check(!client.requestInputDrain(bad), "Keyboard-only gate admitted a full input drain");
+  bad = inputDrainRequest(3);
+  bad.cutoff.viewerConnection++;
+  const auto oldDrainCount = service.drainRequests;
+  const auto badId = client.requestInputDrain(bad);
+  const auto changed = inputDrainResult(client, badId);
+  check(
+      !changed.segment && service.drainRequests == oldDrainCount, "Changed Viewer connection reached the native drain"
+  );
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Input drain fixture did not close");
+  check(service.failure.empty(), "Input drain binding fixture failed");
+}
+void inputDrainMalformedAndInvalidated(const PrivateBus &bus)
+{
+  for (int mode = 0; mode < 4; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = true;
+    service.duplicateDrainField = mode == 0;
+    service.wrongDrainBinding = mode == 1;
+    service.wrongQtDrainBinding = mode == 2;
+    service.invalidateDuringDrain = mode == 3;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    const auto id = client.requestInputDrain(inputDrainRequest());
+    check(id, "Input drain fixture was not admitted");
+    const auto result = inputDrainResult(client, id);
+    check(!result.segment && !result.error.empty(), "Malformed or invalidated drain granted a segment");
+    if (mode != 2)
+      check(service.qtDrainRequests == 0, "Invalid provider segment reached Qt drain");
+    if (mode < 3)
+      waitUntil([&] { return !client.live(); }, "Substituted drain reply did not retire the private channel");
+    else
+      check(client.live(), "Ordinary native invalidation became a protocol failure");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Malformed drain fixture did not close");
+    check(service.failure.empty(), "Malformed drain fixture failed");
+  }
+}
+void inputDrainDeadlineAndCapabilities(const PrivateBus &bus)
+{
+  for (int mode = 0; mode < 3; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = mode != 0;
+    service.delayDrain = mode == 1;
+    service.unknownDrainMethod = mode == 2;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    auto wanted = inputDrainRequest();
+    if (mode == 0) {
+      check(
+          !client.requestInputDrain(wanted) && service.drainRequests == 0,
+          "Provider without native drain capability admitted a request"
+      );
+    } else {
+      if (mode == 1)
+        wanted.deadline = InputCutoffClock::now() + 80ms;
+      const auto id = client.requestInputDrain(wanted);
+      check(id, "Delayed/unknown drain fixture was not admitted");
+      const auto result = inputDrainResult(client, id);
+      check(
+          !result.segment && client.live() && service.qtDrainRequests == 0,
+          "Expired or unavailable native drain reached Qt or granted a segment"
+      );
+      if (mode == 1) {
+        check(
+            service.lastDrainBudget <= 80 && service.pendingDrain,
+            "Input drain renewed the inherited deadline or did not exercise a late native reply"
+        );
+        g_dbus_method_invocation_return_value(service.pendingDrain, service.pendingDrainReply);
+        g_object_unref(std::exchange(service.pendingDrain, nullptr));
+        g_variant_unref(std::exchange(service.pendingDrainReply, nullptr));
+      } else
+        service.unknownDrainMethod = false;
+      const auto freshId = client.requestInputDrain(inputDrainRequest(2));
+      check(freshId && freshId != id, "A fresh drain after a late/unsupported reply was not admitted");
+      const auto fresh = inputDrainResult(client, freshId);
+      check(
+          fresh.segment && fresh.segment->live() && fresh.segment->binding().request == 2 &&
+              service.drainRequests == 2 && service.qtDrainRequests == 1,
+          "A late or unsupported reply contaminated the next exact drain"
+      );
+    }
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Deadline drain fixture did not close");
+    check(service.failure.empty(), "Deadline drain fixture failed");
+  }
+}
 void viewportJoinAndRevocation(const PrivateBus &bus)
 {
   Service service(bus);
@@ -976,8 +1233,8 @@ void routedPointUsesFrozenCoordinate(const PrivateBus &bus)
   const auto &snapshot = result.observation->snapshot();
   check(
       snapshot.routedPoint == route && snapshot.desktopX == route.desktopX && snapshot.desktopY == route.desktopY &&
-          snapshot.surfaceX == 325 && snapshot.surfaceY == 225 && snapshot.sourceX == 260 &&
-          snapshot.sourceY == 180 && snapshot.nativeRevision == service.revision,
+          snapshot.surfaceX == 325 && snapshot.surfaceY == 225 && snapshot.sourceX == 260 && snapshot.sourceY == 180 &&
+          snapshot.nativeRevision == service.revision,
       "Provider substituted its current cursor for the frozen Server point"
   );
   check(
@@ -987,8 +1244,10 @@ void routedPointUsesFrozenCoordinate(const PrivateBus &bus)
   const auto deniedId = client.requestRoutedPointObservation({3, 5, 900, 900});
   check(deniedId != 0 && !result.observation->live(), "New request did not revoke old routed observation");
   const auto denied = viewportResult(client, deniedId);
-  check(!denied.observation && denied.error == "fixture-native-denied" && client.live(),
-        "Point outside the native viewer hit was accepted or unexpectedly ended its session");
+  check(
+      !denied.observation && denied.error == "fixture-native-denied" && client.live(),
+      "Point outside the native viewer hit was accepted or unexpectedly ended its session"
+  );
   client.stop();
   waitUntil([&] { return service.callerGone; }, "Routed-point fixture did not retire provider caller");
   check(service.failure.empty(), "Routed-point fixture service failed");
@@ -1025,8 +1284,10 @@ void routedPointWrongEchoIsTerminal(const PrivateBus &bus)
   const auto request = client.requestRoutedPointObservation({7, 8, 425, 325});
   check(request != 0, "Wrong-echo fixture did not send a request");
   const auto denied = viewportResult(client, request);
-  check(!denied.observation && denied.error.find("substituted") != std::string::npos,
-        "Mismatched native point echo became a viewport observation");
+  check(
+      !denied.observation && denied.error.find("substituted") != std::string::npos,
+      "Mismatched native point echo became a viewport observation"
+  );
   waitUntil([&] { return !client.live(); }, "Malformed native reply did not close the provider session");
   client.stop();
   waitUntil([&] { return service.callerGone; }, "Wrong-echo fixture did not retire caller");
@@ -1089,8 +1350,10 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     Descriptor descriptor(ready.descriptor);
     check(ready.ready && service.stageRequests == 0, "Legacy stage fixture did not start");
     const auto legacy = observed(client);
-    check(legacy.live() && !legacy.snapshot().stageFramesObserved && service.stageRequests == 0,
-          "Legacy provider implicitly claimed Clutter stage observation");
+    check(
+        legacy.live() && !legacy.snapshot().stageFramesObserved && service.stageRequests == 0,
+        "Legacy provider implicitly claimed Clutter stage observation"
+    );
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Legacy stage fixture did not close");
   }
@@ -1107,22 +1370,22 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     check(routeId != 0, "Stage-capable routed point request was refused");
     const auto result = viewportResult(client, routeId);
     if (!result.observation || !result.observation->live() || service.stageRequests != 1 ||
-        !result.observation->snapshot().stageFramesObserved ||
-        result.observation->snapshot().desktopX != 425) {
+        !result.observation->snapshot().stageFramesObserved || result.observation->snapshot().desktopX != 425) {
       throw std::runtime_error(
           "Authenticated stage observation failed: requests=" + std::to_string(service.stageRequests) +
-          " observation=" + (result.observation ? "present" : "absent") +
-          " error=" + result.error + " service=" + service.failure +
-          " client=" + (client.live() ? "live" : "closed")
+          " observation=" + (result.observation ? "present" : "absent") + " error=" + result.error +
+          " service=" + service.failure + " client=" + (client.live() ? "live" : "closed")
       );
     }
     service.unavailableStage = true;
     const auto refusedId = client.requestViewportObservation();
     check(refusedId != 0, "Stage-denial request did not start");
     const auto refused = viewportResult(client, refusedId);
-    check(!refused.observation && refused.error == "fixture-stage-unavailable" && client.live() &&
-          service.stageRequests == 2,
-          "A stage refusal silently permitted viewport observation or killed the session");
+    check(
+        !refused.observation && refused.error == "fixture-stage-unavailable" && client.live() &&
+            service.stageRequests == 2,
+        "A stage refusal silently permitted viewport observation or killed the session"
+    );
     service.unavailableStage = false;
     check(observed(client).live(), "Fresh native stage after refusal could not recover");
     client.stop();
@@ -1175,8 +1438,7 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     const auto ready = wake.next(client);
     Descriptor descriptor(ready.descriptor);
     check(ready.ready, "Malformed stage dictionary fixture not Ready");
-    const auto request =
-        client.requestRoutedPointObservation({9, 38u + static_cast<unsigned>(corruption), 425, 325});
+    const auto request = client.requestRoutedPointObservation({9, 38u + static_cast<unsigned>(corruption), 425, 325});
     check(request != 0, "Malformed stage dictionary request not queued");
     const auto result = viewportResult(client, request);
     check(
@@ -1203,10 +1465,11 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     const auto request = client.requestRoutedPointObservation({9, substitute ? 33u : 34u, 425, 325});
     check(request != 0, "Malformed stage request did not begin");
     const auto reply = viewportResult(client, request);
-    check(!reply.observation && !reply.error.empty() && service.stageRequests == 1,
-          "Substituted routed stage point or incomplete cycle created a viewport observation");
-    waitUntil([&] { return !client.live(); },
-              "Malformed authenticated stage reply did not retire provider session");
+    check(
+        !reply.observation && !reply.error.empty() && service.stageRequests == 1,
+        "Substituted routed stage point or incomplete cycle created a viewport observation"
+    );
+    waitUntil([&] { return !client.live(); }, "Malformed authenticated stage reply did not retire provider session");
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Malformed stage fixture not cleaned");
   }
@@ -1229,15 +1492,17 @@ void nativeHitRecheckedAfterQtQueue(const PrivateBus &bus)
     check(request != 0, "Post-Qt revision check could not be requested");
     const auto result = viewportResult(client, request);
     check(
-        !result.observation && result.error == "fixture-native-denied" &&
-            service.afterQtCheck && service.nativeHitQueries >= 3 && client.live(),
+        !result.observation && result.error == "fixture-native-denied" && service.afterQtCheck &&
+            service.nativeHitQueries >= 3 && client.live(),
         "A silently replaced native revision escaped the post-Qt queue boundary"
     );
     // Rejection is bounded and nonterminal: the new native revision may
     // establish its own fresh snapshot, not revive the first one.
     const auto next = observed(client);
-    check(next.live() && next.snapshot().nativeRevision == service.revision,
-          "Rejected post-Qt native change poisoned all future observations");
+    check(
+        next.live() && next.snapshot().nativeRevision == service.revision,
+        "Rejected post-Qt native change poisoned all future observations"
+    );
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Post-Qt native revision fixture did not close");
     check(service.failure.empty(), "Post-Qt native revision fixture failed");
@@ -1327,6 +1592,12 @@ int main(int argc, char **argv)
     std::puts("PASS: final frozen GNOME native hit and local transform are rechecked after Qt queue completion");
     stageUpdateObservationCapabilities(bus);
     std::puts("PASS: optional native stage update counts/binding are tested without an input-drain permit");
+    inputDrainBindingAndRevocation(bus);
+    std::puts("PASS: compositor/Qt drain retains exact All cutoff and revokes with the private viewport");
+    inputDrainMalformedAndInvalidated(bus);
+    std::puts("PASS: malformed, substituted and invalidated drain replies cannot publish a segment");
+    inputDrainDeadlineAndCapabilities(bus);
+    std::puts("PASS: missing drain capability, inherited deadline and late replies preserve the finite request");
     viewportWrongAuthenticatedPeer(bus);
     std::puts("PASS: wrong authenticated viewer peer ends the viewport session");
     return 0;

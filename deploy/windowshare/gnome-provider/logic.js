@@ -43,6 +43,31 @@ export function validRoutedPointRequest(request, x, y, revision) {
         Math.abs(y) <= 10000000 && Math.fround(x) === x && Math.fround(y) === y;
 }
 
+export const INPUT_DRAIN_BINDING_TYPES = Object.freeze({
+    cutoffRequest: 's', coreConnectionGeneration: 'u', captureEpoch: 's', captureSequence: 's',
+    capturePart: 'u', viewerConnection: 's', ownerSession: 's', ownerEpoch: 's',
+    forwardingGeneration: 's', focusRequest: 's', focusRevision: 's', geometry: 's', scope: 's',
+});
+
+export function validInputDrainBinding(binding) {
+    const keys = Object.keys(INPUT_DRAIN_BINDING_TYPES);
+    if (!binding || typeof binding !== 'object' || Object.keys(binding).length !== keys.length ||
+        !keys.every(k => Object.hasOwn(binding, k)) || binding.scope !== 'all' ||
+        !Number.isInteger(binding.coreConnectionGeneration) || binding.coreConnectionGeneration <= 0 ||
+        binding.coreConnectionGeneration > UINT32_MAX || !Number.isInteger(binding.capturePart) ||
+        binding.capturePart <= 0 || binding.capturePart > 16)
+        return false;
+    const host = new Set(['ownerSession', 'ownerEpoch', 'forwardingGeneration',
+        'focusRequest', 'focusRevision', 'geometry']);
+    return keys.filter(k => INPUT_DRAIN_BINDING_TYPES[k] === 's' && k !== 'scope').every(k => {
+        const value = binding[k];
+        if (typeof value !== 'string' || !/^[1-9][0-9]{0,19}$/.test(value))
+            return false;
+        const maximum = host.has(k) ? '9007199254740991' : '18446744073709551615';
+        return value.length < maximum.length || (value.length === maximum.length && value <= maximum);
+    });
+}
+
 export function validRect(rect) {
     return rect && ['x', 'y', 'width', 'height'].every(k =>
         Number.isFinite(rect[k]) && Math.abs(rect[k]) <= MAX_COORDINATE) &&
@@ -130,6 +155,92 @@ export class StageUpdateSequence {
         if (this.count === 2)
             this.complete = true;
         return this.complete;
+    }
+}
+
+// The compositor segment of a caller-ordered cutoff. The adapter must call
+// queueEmpty from a deferred, nonrecursive main-context dispatch, then request
+// a new stage update. In Mutter 50.1 the fresh frame processes the stage event
+// queue before before-update. This does not verify Mutter's compiled EIS SYNC
+// implementation, the caller's PONG, a Viewer forwarding fence, or Qt delivery.
+export class InputDrainSequence {
+    constructor(request, x, y, revision, startedMs, budgetMs) {
+        if (!validRoutedPointRequest(request, x, y, revision) || !Number.isFinite(startedMs) ||
+            !Number.isInteger(budgetMs) || budgetMs <= 0 || budgetMs > 120)
+            throw new Error('Invalid bounded input drain');
+        this.point = {x, y};
+        this.deadline = startedMs + budgetMs;
+        this.phase = 'queue';
+        this.view = null;
+        this.layout = null;
+        this.complete = false;
+        this.reason = '';
+    }
+
+    deny(reason) {
+        if (!this.complete && !this.reason) {
+            this.reason = reason;
+            this.phase = 'denied';
+        }
+    }
+
+    _live(depth, at) {
+        if (this.complete || this.reason)
+            return false;
+        if (!Number.isFinite(at) || at >= this.deadline)
+            this.deny('input-drain-timeout');
+        else if (depth !== 1)
+            this.deny('nested-main-dispatch');
+        return !this.reason;
+    }
+
+    queueEmpty(pending, depth, at) {
+        if (!this._live(depth, at) || this.phase !== 'queue')
+            return false;
+        if (typeof pending !== 'boolean') {
+            this.deny('unsupported-event-queue-state');
+            return false;
+        }
+        if (pending)
+            return false;
+        this.phase = 'armed';
+        return true;
+    }
+
+    before(view, layout, depth, at) {
+        if (!this._live(depth, at) || this.phase === 'queue')
+            return false; // A frame already running before the empty-queue idle is not evidence.
+        if (!view || !validRect(layout)) {
+            this.deny('invalid-stage-view');
+            return false;
+        }
+        const {x, y} = this.point;
+        if (x < layout.x || x >= layout.x + layout.width ||
+            y < layout.y || y >= layout.y + layout.height)
+            return false;
+        if (this.phase !== 'armed') {
+            this.deny('stage-update-reentered');
+            return false;
+        }
+        this.view = view;
+        this.layout = {x: layout.x, y: layout.y, width: layout.width, height: layout.height};
+        this.phase = 'frame';
+        return true;
+    }
+
+    after(view, layout, depth, at) {
+        if (!this._live(depth, at) || this.phase === 'queue' || this.phase === 'armed')
+            return false;
+        if (view !== this.view)
+            return false;
+        if (this.phase !== 'frame' || !validRect(layout) ||
+            ['x', 'y', 'width', 'height'].some(k => this.layout[k] !== layout[k])) {
+            this.deny('stage-layout-changed');
+            return false;
+        }
+        this.complete = true;
+        this.phase = 'complete';
+        return true;
     }
 }
 

@@ -110,6 +110,43 @@ deadline and cancel its native work through exact-owner release. The private
 two-second budget never extends a pending Server reservation. No production
 controller or native drain permission is created by this scheduling hook.
 
+## Native cutoff components
+
+`InputCutoffBinding` correlates one nonreused request with its authenticated
+Core connection generation, capture epoch/sequence/part, exact full-input
+forwarding binding and Viewer connection. Correlation fields never replace
+the retained connection or native ownership checks.
+
+The separately negotiated `IPC1` Core extension sends a bounded cutoff after
+previously compressed legacy motion. Its receiver delegates on the existing
+core event thread to the owned EI sender. A requested ping is observed only
+after the entire returned EI event batch, under the inherited deadline;
+device/session loss overrides PONG. Exact resume has a separate receipt.
+New legacy writes revoke the observation and order resume before the write.
+Old peers and disabled builds do not acquire this optional capability.
+
+`GnomeProviderClient::requestInputDrain` implements the later native segments:
+the owned provider waits for an empty Clutter queue outside recursive dispatch,
+then a newly completed same-view stage update. It proceeds to a distinct private
+Qt `input-drain` operation carrying the same cutoff and the remaining budget.
+The Viewer must retain the exact All gate through both Wayland sync callbacks,
+QPA processing and final native/paint checks. Gate changes synchronously revoke
+pending and retained results. Generic viewport observations cannot stand in
+for this operation.
+
+Qt input notifications (including input-method queries) and native handler
+dispatch must both be idle. The exact supported Qt build must own its handler
+slot and retain either no input context or the built-in QtWayland context with
+input methods disabled. Other plugins, replacement/destruction and nested
+input dispatch deny. These checks observe normal Qt delivery without filtering
+events or replacing a foreign handler.
+
+These segments still expose `mutter-eis-sync-build-unverified`: the public
+Mutter/GI interface does not attest whether its native-thread EIS SYNC barrier
+was compiled. The real GNOME fixture uses an owned sender PONG and synthetic
+Core correlation; it is not the production Core coordinator or a delivery
+permit. Unsupported native/Qt capabilities deny the operation.
+
 ## Remaining integration
 
 The production coordinator must install a dispatcher only after native queue
@@ -118,14 +155,12 @@ forwarding handoff have been established. It must retain those conditions
 through delivery and release. Neither the viewer handoff acknowledgment nor a
 legacy backend submission receipt provides compositor-consumption evidence.
 
-The next connected transaction needs an independently negotiated cutoff marker
-on the existing Core stream, after compressed motion and old-owner releases;
-a requested EI PONG for that prefix; a supported Mutter consumption boundary;
-and an exact full-scope-fenced Qt completion. Current startup PONG, stage-frame
-observations and generic Qt viewport checks are separate diagnostics. They do
-not establish that causal chain. Recursive Mutter/Qt event dispatch and exact
-resume completion also require explicit handling before refusal can safely
-return to legacy input.
+The controller must connect the Core prefix receipt to the provider's native
+segments using the same frozen Server point and actual retained lease, verify
+the Mutter sender-ordering prerequisite, and explicitly finish old-owner
+releases before cutoff. It must keep the earliest Server/preflight deadline and
+wait for exact completed release/resume before returning `Refused`. A revoked
+or unfinished handoff must not fall back to a duplicate legacy acquisition.
 
 The Server tests use local dispatcher fixtures and actual protocol proxies;
 they do not post native input. Physical two-machine acceptance remains separate.

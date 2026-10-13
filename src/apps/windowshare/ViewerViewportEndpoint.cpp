@@ -102,6 +102,11 @@ ViewerViewportEndpoint::ViewerViewportEndpoint(int fd, QObject *parent) : QObjec
     connect(m_write.get(), &QSocketNotifier::activated, this, [this] { write(); });
     m_expiry.setSingleShot(true);
     connect(&m_expiry, &QTimer::timeout, this, [this] { invalidate(QStringLiteral("snapshot-expired")); });
+    m_queueExpiry.setSingleShot(true);
+    connect(&m_queueExpiry, &QTimer::timeout, this, [this] {
+      if (m_pendingCheck)
+        finishQtQueue(m_pendingCheck->request, false);
+    });
   } catch (...) {
     ::close(std::exchange(m_descriptor, -1));
     throw;
@@ -120,6 +125,7 @@ void ViewerViewportEndpoint::close()
   m_write->setEnabled(false);
   ::close(std::exchange(m_descriptor, -1));
   m_expiry.stop();
+  m_queueExpiry.stop();
   m_queueWitness.cancel();
   m_pendingCheck.reset();
   m_snapshot = 0;
@@ -177,11 +183,13 @@ void ViewerViewportEndpoint::write()
 void ViewerViewportEndpoint::invalidate(const QString &reason)
 {
   m_queueWitness.cancel();
+  m_queueExpiry.stop();
   if (const auto pending = std::exchange(m_pendingCheck, std::nullopt); pending && live()) {
     GnomeViewportReply denied;
-    denied.operation = pending->operation;
-    denied.request = pending->request;
-    denied.snapshot = pending->snapshot;
+    denied.operation = pending->request.operation;
+    denied.request = pending->request.request;
+    denied.snapshot = pending->request.snapshot;
+    denied.cutoff = pending->request.cutoff;
     denied.reason = QStringLiteral("qt-queue-invalidated");
     const QPointer<ViewerViewportEndpoint> alive(this);
     send(denied);
@@ -215,18 +223,51 @@ bool ViewerViewportEndpoint::startWaylandQueue(
 {
   return m_queueWitness.begin(window, expected, std::move(finished));
 }
-
-void ViewerViewportEndpoint::finishQtQueue(bool observed)
+bool ViewerViewportEndpoint::startWaylandInputDrain(
+    QWindow *window, const WaylandViewportGeometry &expected, QDeadlineTimer deadline, std::function<bool()> exactFence,
+    std::function<void(bool)> finished
+)
 {
-  const auto pending = std::exchange(m_pendingCheck, std::nullopt);
-  if (!pending || !live())
-    return; // Canceled/revoked/late callbacks cannot publish a new reply.
-  GnomeViewportReply reply;
-  reply.operation = GnomeViewportOperation::Check;
-  reply.request = pending->request;
-  reply.snapshot = pending->snapshot;
+  return m_queueWitness.beginInputDrain(window, expected, deadline, std::move(exactFence), std::move(finished));
+}
+bool ViewerViewportEndpoint::currentInputDrain(const GnomeViewportRequest &request, QDeadlineTimer deadline)
+{
   const QPointer<ViewerViewportEndpoint> alive(this);
-  reply.ok = observed && current(pending->snapshot);
+  if (deadline.hasExpired() || !validInputCutoffBinding(request.cutoff) || !current(request.snapshot) || !alive)
+    return false;
+  const auto state = *m_state;
+  const auto &binding = request.cutoff.forwarding;
+  if (request.cutoff.viewerConnection != state.connection || binding.owner != Owner{state.session, state.epoch} ||
+      binding.focusRequest != state.focusRequest || binding.focusRevision != state.focusRevision ||
+      binding.geometry != state.geometry)
+    return false;
+  const auto check = onInputDrainCheck;
+  const bool valid = check && check(state, request.cutoff);
+  return alive && live() && valid && m_state && *m_state == state && request.snapshot == m_snapshot &&
+         !m_deadline.hasExpired() && !deadline.hasExpired();
+}
+void ViewerViewportEndpoint::finishQtQueue(const GnomeViewportRequest &request, bool observed)
+{
+  if (!m_pendingCheck || m_pendingCheck->request != request || !live())
+    return; // An old callback cannot complete a later operation.
+  if (m_pendingCheck->starting) {
+    if (!m_pendingCheck->completion)
+      m_pendingCheck->completion = observed;
+    return; // The starter must return success before a synchronous receipt.
+  }
+  const auto pending = std::exchange(m_pendingCheck, std::nullopt);
+  m_queueExpiry.stop();
+  m_queueWitness.cancel();
+  GnomeViewportReply reply;
+  reply.operation = pending->request.operation;
+  reply.request = pending->request.request;
+  reply.snapshot = pending->request.snapshot;
+  reply.cutoff = pending->request.cutoff;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  reply.ok =
+      observed && !pending->deadline.hasExpired() &&
+      (reply.operation == GnomeViewportOperation::InputDrain ? currentInputDrain(pending->request, pending->deadline)
+                                                             : current(pending->request.snapshot));
   if (!alive)
     return;
   if (!reply.ok)
@@ -249,6 +290,7 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
   reply.operation = request.operation;
   reply.request = request.request;
   reply.snapshot = request.snapshot;
+  reply.cutoff = request.cutoff;
   reply.reason = QStringLiteral("viewport-unavailable");
   if (request.operation == GnomeViewportOperation::Snapshot) {
     invalidate(QStringLiteral("snapshot-replaced"));
@@ -277,26 +319,46 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
       }
     }
   } else {
+    // Take the inherited budget before any external validation callback. The
+    // retained snapshot is an independent earlier absolute deadline.
+    const bool inputDrain = request.operation == GnomeViewportOperation::InputDrain;
+    const auto deadline =
+        inputDrain ? std::min(m_deadline, QDeadlineTimer(request.budgetMs, Qt::PreciseTimer)) : m_deadline;
     const bool valid = current(request.snapshot);
     if (!alive || !live())
       return;
-    if (valid && request.operation == GnomeViewportOperation::Check) {
-      if (onQtQueue) {
+    if (valid && (request.operation == GnomeViewportOperation::Check || inputDrain)) {
+      const bool exact = !inputDrain || currentInputDrain(request, deadline);
+      if (!alive || !live())
+        return;
+      if (exact && (inputDrain ? bool(onInputDrain) : bool(onQtQueue))) {
         const auto start = onQtQueue;
+        const auto startDrain = onInputDrain;
         const auto state = *m_state;
-        m_pendingCheck = request; // Before any callback can reenter the endpoint.
-        const bool started = start(state, [alive](bool observed) {
+        m_pendingCheck = PendingQueue{request, deadline, true, std::nullopt};
+        m_queueExpiry.start(static_cast<int>(std::max<qint64>(1, deadline.remainingTime())));
+        const auto finished = [alive, request](bool observed) {
           if (alive)
-            alive->finishQtQueue(observed);
-        });
+            alive->finishQtQueue(request, observed);
+        };
+        const bool started =
+            inputDrain ? startDrain(state, request.cutoff, deadline, finished) : start(state, finished);
         if (!alive || !live())
           return;
-        if (!m_pendingCheck)
-          return; // Synchronous test callback already published exactly once.
-        if (started)
+        if (!m_pendingCheck || m_pendingCheck->request != request)
+          return; // A callback invalidated or replaced the retained operation.
+        m_pendingCheck->starting = false;
+        if (started) {
+          if (const auto completed = m_pendingCheck->completion)
+            finishQtQueue(request, *completed);
           return; // The native Wayland callbacks arrive asynchronously.
+        }
+        m_queueExpiry.stop();
+        m_queueWitness.cancel();
         m_pendingCheck.reset();
         reply.reason = QStringLiteral("qt-wayland-queue-unavailable");
+      } else if (inputDrain) {
+        reply.reason = exact ? QStringLiteral("qt-input-drain-unavailable") : QStringLiteral("all-fence-not-current");
       } else {
         // Legacy/fixture-only Check remains a read-only geometry observation.
         // The real GNOME Bridge always supplies onQtQueue and refuses it

@@ -130,6 +130,10 @@ ServerProxy::ServerProxy(Client *client, deskflow::IStream *stream, IEventQueue 
 
 ServerProxy::~ServerProxy()
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  *m_alive = false;
+  revokeInputCutoff();
+#endif
   setKeepAliveRate(-1.0);
   m_events->removeHandler(EventTypes::StreamInputReady, m_stream->getEventTarget());
   m_events->removeHandler(EventTypes::ClipboardSending, this);
@@ -157,14 +161,16 @@ void ServerProxy::setKeepAliveRate(double rate)
 void ServerProxy::handleData()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
-  if (m_sequenceProtocolFailed)
+  const auto alive = m_alive;
+  if (!*alive || m_sequenceProtocolFailed)
     return;
-  if (m_sequenceDispatching) {
+  if (m_sequenceDispatching || m_cutoffDispatching) {
     // Do not let a nested event dispatch read transport bytes through the
     // temporary payload stream, or attribute its submissions to this input.
     deskflow::windowshare::InputSequenceSubmissionScope::fail();
     m_sequenceProtocolFailed = true;
     revokeInputSequence();
+    revokeInputCutoff();
     return;
   }
   m_messageBytes = m_stream->getSize();
@@ -183,7 +189,12 @@ void ServerProxy::handleData()
     // parse message
     LOG_VERBOSE("msg from server: %c%c%c%c", code[0], code[1], code[2], code[3]);
     try {
-      switch ((this->*m_parser)(code)) {
+      const auto result = (this->*m_parser)(code);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      if (!*alive)
+        return;
+#endif
+      switch (result) {
         using enum ConnectionResult;
       case Okay:
         break;
@@ -200,10 +211,17 @@ void ServerProxy::handleData()
         return;
       }
     } catch (const BadClientException &e) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      if (!*alive)
+        return;
+#endif
       LOG_ERR("protocol error from server: %s", e.what());
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
       m_sequenceProtocolFailed = true;
       revokeInputSequence();
+      revokeInputCutoff();
+      if (!*alive)
+        return;
 #endif
       ProtocolUtil::writef(m_stream, kMsgEBad);
       requestDisconnect("invalid message from server");
@@ -226,7 +244,8 @@ ServerProxy::ConnectionResult ServerProxy::parseHandshakeMessage(const uint8_t *
   using enum deskflow::core::ConnectionRefusal;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
-  if (memcmp(code, kMsgDInputSequence, 4) == 0)
+  if (memcmp(code, kMsgDInputSequence, 4) == 0 || memcmp(code, kMsgDInputCutoff, 4) == 0 ||
+      memcmp(code, kMsgDInputCutoffResume, 4) == 0)
     throw BadClientException("Input sequence before handshake completion");
 #endif
 
@@ -302,7 +321,19 @@ ServerProxy::ConnectionResult ServerProxy::parseHandshakeMessage(const uint8_t *
 
 ServerProxy::ConnectionResult ServerProxy::handleMessage(const uint8_t *code)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  const auto alive = m_alive;
+  // Gate before virtual version-specific parsers, key layout changes, and
+  // compressed motion. Only an exact Resume may restore legacy dispatch.
+  if (m_cutoff && memcmp(code, kMsgDInputCutoffResume, 4) && memcmp(code, kMsgCKeepAlive, 4) &&
+      memcmp(code, kMsgCNoop, 4) && memcmp(code, kMsgCClose, 4))
+    throw BadClientException("Legacy/control input crossed a frozen cutoff");
+#endif
   const auto result = parseMessage(code);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (!*alive)
+    return ConnectionResult::Disconnect;
+#endif
   if (result == ConnectionResult::Okay) {
     // send a reply.  this is intended to work around a delay when
     // running a linux server and an OS X (any BSD?) client.  the
@@ -321,6 +352,10 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
   using enum ConnectionResult;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (memcmp(code, kMsgDInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffResume, 4) == 0) {
+    inputCutoff(memcmp(code, kMsgDInputCutoffResume, 4) == 0);
+    return Okay;
+  }
   if (memcmp(code, kMsgDInputSequence, 4) == 0) {
     inputSequence();
     return Okay;
@@ -442,6 +477,13 @@ void ServerProxy::handleKeepAliveAlarm()
 
 void ServerProxy::requestDisconnect(const char *message)
 {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  const auto alive = m_alive;
+  m_sequenceProtocolFailed = true;
+  revokeInputCutoff();
+  if (!*alive)
+    return;
+#endif
   m_events->addEvent(Event(
       EventTypes::ClientDisconnectRequested, m_stream->getEventTarget(),
       new Client::DisconnectRequest(Client::DisconnectRequest::Kind::Disconnect, message)
@@ -858,6 +900,7 @@ void ServerProxy::screensaver()
 void ServerProxy::resetOptions()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  revokeInputCutoff();
   revokeInputSequence();
 #endif
   // parse
@@ -906,6 +949,7 @@ void ServerProxy::setOptions()
   }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  setInputCutoffOptions(options);
   setInputSequenceOptions(options);
 #endif
 
@@ -940,6 +984,198 @@ void ServerProxy::setOptions()
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool ServerProxy::inputCutoffConnectionLive() const
+{
+  const auto current = m_stream->authenticatedPeerTicket();
+  return m_cutoffPeer && m_cutoffPeer->live() && current && current->live() &&
+         current->incarnation() == m_cutoffPeer->incarnation();
+}
+
+void ServerProxy::stopInputCutoffTimer()
+{
+  m_events->removeHandler(EventTypes::Timer, &m_cutoffTimerTarget);
+  if (m_cutoffTimer)
+    m_events->deleteTimer(std::exchange(m_cutoffTimer, nullptr));
+}
+
+void ServerProxy::revokeInputCutoff()
+{
+  const auto old = std::exchange(m_cutoff, std::nullopt);
+  if (old)
+    m_retiredCutoff = old->binding;
+  stopInputCutoffTimer();
+  m_cutoffGeneration = 0;
+  m_cutoffPeer.reset();
+  if (old && old->backendStarted) {
+    try {
+      m_client->resumeInputCutoff(old->binding);
+    } catch (...) {
+      // Connection teardown owns all remaining platform cleanup. No receipt
+      // or continued dispatch may be authorized by this abandoned result.
+    }
+  }
+}
+
+void ServerProxy::setInputCutoffOptions(const OptionsList &options)
+{
+  if (!supportsInputSequence())
+    return;
+  std::optional<std::uint32_t> generation;
+  for (std::size_t i = 0; i < options.size(); i += 2) {
+    if (options[i] != kOptionInputCutoff)
+      continue;
+    if (generation)
+      throw BadClientException("Duplicate input cutoff option");
+    generation = options[i + 1];
+  }
+  if (!generation)
+    return;
+  if (!*generation) {
+    revokeInputCutoff();
+    return;
+  }
+  if (*generation == m_cutoffGeneration && inputCutoffConnectionLive()) {
+    ProtocolUtil::writef(m_stream, kMsgCInputCutoffAck, *generation);
+    return;
+  }
+  if (*generation <= m_cutoffGenerationHighWater)
+    throw BadClientException("Reused input cutoff connection generation");
+  revokeInputCutoff();
+  m_cutoffGenerationHighWater = *generation;
+  const auto peer = m_stream->authenticatedPeerTicket();
+  if (!peer || !peer->live())
+    return;
+  m_cutoffGeneration = *generation;
+  m_cutoffPeer = peer;
+  ProtocolUtil::writef(m_stream, kMsgCInputCutoffAck, *generation);
+}
+
+void ServerProxy::inputCutoff(bool resume)
+{
+  using namespace deskflow::windowshare;
+  const auto alive = m_alive;
+  m_cutoffDispatching = true;
+  const auto done = qScopeGuard([this, alive] {
+    if (*alive)
+      m_cutoffDispatching = false;
+  });
+  if (!supportsInputSequence() || !m_cutoffGeneration || !inputCutoffConnectionLive())
+    throw BadClientException("Unnegotiated input cutoff");
+  const auto size = resume ? inputCutoffBindingBytes : inputCutoffRequestBytes;
+  if (m_messageBytes != 4 + size)
+    throw BadClientException("Incorrect input cutoff packet size");
+  std::array<char, inputCutoffRequestBytes> bytes{};
+  if (m_stream->read(bytes.data(), static_cast<std::uint32_t>(size)) != size)
+    throw BadClientException("Incomplete input cutoff packet");
+  const std::string_view body(bytes.data(), size);
+  if (resume) {
+    const auto binding = decodeInputCutoffResume(body);
+    if (!binding || binding->coreConnectionGeneration != m_cutoffGeneration)
+      throw BadClientException("Malformed input cutoff resume");
+    if (!m_cutoff) {
+      if (m_retiredCutoff != binding)
+        throw BadClientException("Unknown input cutoff resume");
+    } else {
+      if (m_cutoff->binding != binding)
+        throw BadClientException("Mismatched input cutoff resume");
+      const auto old = std::exchange(m_cutoff, std::nullopt);
+      stopInputCutoffTimer();
+      m_retiredCutoff = *binding;
+      bool released = !old->backendStarted;
+      try {
+        if (old->backendStarted)
+          released = m_client->resumeInputCutoff(*binding);
+      } catch (...) {
+      }
+      if (!*alive)
+        return;
+      if (!released || m_sequenceProtocolFailed || !inputCutoffConnectionLive())
+        throw BadClientException("Input cutoff backend failed exact resume");
+    }
+    const auto receipt = encodeInputCutoffReceipt({*binding, InputCutoffState::Resumed});
+    m_stream->write(receipt.data(), static_cast<std::uint32_t>(receipt.size()));
+    return;
+  }
+  const auto request = decodeInputCutoffRequest(body);
+  if (!request || request->binding.coreConnectionGeneration != m_cutoffGeneration || m_cutoff ||
+      request->binding.request <= m_cutoffRequestHighWater)
+    throw BadClientException("Invalid or reused input cutoff request");
+  m_cutoffRequestHighWater = request->binding.request;
+  const auto deadline = InputCutoffClock::now() + std::chrono::milliseconds(request->remainingMs);
+  // Submit ALL prior compressed motion before creating the requested ping;
+  // this includes unstamped legacy traffic outside DSEQ envelopes.
+  flushCompressedMouse();
+  if (!*alive)
+    return;
+  if (m_sequenceProtocolFailed || !inputCutoffConnectionLive() || InputCutoffClock::now() >= deadline)
+    throw BadClientException("Input cutoff invalidated while flushing prior input");
+  m_cutoff = Cutoff{request->binding, deadline, true};
+  auto *client = m_client;
+  bool started = false;
+  try {
+    started = client->beginInputCutoff(request->binding, deadline);
+  } catch (...) {
+    if (*alive)
+      throw BadClientException("Input cutoff backend failed");
+  }
+  if (!*alive) {
+    if (started)
+      client->resumeInputCutoff(request->binding);
+    return;
+  }
+  if (!m_cutoff || m_cutoff->binding != request->binding || !inputCutoffConnectionLive() || m_sequenceProtocolFailed) {
+    if (started)
+      client->resumeInputCutoff(request->binding);
+    if (!*alive)
+      return;
+    throw BadClientException("Input cutoff invalidated during backend request");
+  }
+  m_cutoff->backendStarted = started;
+  m_cutoffTimer = m_events->newTimer(0.010, &m_cutoffTimerTarget);
+  m_events->addHandler(EventTypes::Timer, &m_cutoffTimerTarget, [this](const auto &) { pollInputCutoff(); });
+  pollInputCutoff();
+}
+
+void ServerProxy::pollInputCutoff()
+{
+  using namespace deskflow::windowshare;
+  if (!m_cutoff)
+    return;
+  const auto alive = m_alive;
+  const bool wasDispatching = std::exchange(m_cutoffDispatching, true);
+  const auto done = qScopeGuard([this, alive, wasDispatching] {
+    if (*alive)
+      m_cutoffDispatching = wasDispatching;
+  });
+  if (!inputCutoffConnectionLive()) {
+    requestDisconnect("Input cutoff connection expired");
+    return;
+  }
+  const auto binding = m_cutoff->binding;
+  auto state = InputCutoffState::Denied;
+  if (m_cutoff->backendStarted && InputCutoffClock::now() < m_cutoff->deadline) {
+    try {
+      state = m_client->inputCutoffState(binding);
+    } catch (...) {
+    }
+  }
+  if (!*alive)
+    return;
+  if (!m_cutoff || m_cutoff->binding != binding || m_sequenceProtocolFailed || !inputCutoffConnectionLive()) {
+    requestDisconnect("Input cutoff invalidated during backend observation");
+    return;
+  }
+  if (InputCutoffClock::now() >= m_cutoff->deadline || state == InputCutoffState::Resumed)
+    state = InputCutoffState::Denied;
+  if (m_cutoff->reported == InputCutoffState::Denied)
+    state = InputCutoffState::Denied;
+  if (state == InputCutoffState::Pending || m_cutoff->reported == state)
+    return;
+  m_cutoff->reported = state;
+  const auto bytes = encodeInputCutoffReceipt({binding, state});
+  m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
+}
+
 void ServerProxy::revokeInputSequence()
 {
   m_sequenceGeneration = 0;

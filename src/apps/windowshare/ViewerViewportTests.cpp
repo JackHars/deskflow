@@ -6,6 +6,9 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QInputMethodEvent>
+#include <QJsonDocument>
+#include <QKeyEvent>
 #include <QPointer>
 #include <QProcess>
 #include <QTextStream>
@@ -17,6 +20,7 @@
 #include <stdexcept>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using namespace deskflow::windowshare;
@@ -76,6 +80,27 @@ GnomeViewportState fixtureState()
   s.contentY = 28;
   s.logicalScale = 1.25;
   return s;
+}
+InputCutoffBinding fixtureCutoff()
+{
+  const auto state = fixtureState();
+  return {
+      91,
+      6,
+      {71, 83, 2},
+      {{state.session, state.epoch}, 11, state.focusRequest, state.focusRevision, state.geometry, ForwardingScope::All},
+      state.connection
+  };
+}
+GnomeViewportRequest drainRequest(std::uint64_t request, std::uint64_t snapshot, std::uint32_t budget = 200)
+{
+  GnomeViewportRequest result;
+  result.operation = GnomeViewportOperation::InputDrain;
+  result.request = request;
+  result.snapshot = snapshot;
+  result.cutoff = fixtureCutoff();
+  result.budgetMs = budget;
+  return result;
 }
 QByteArray rawFrame(const QByteArray &body)
 {
@@ -145,6 +170,92 @@ void protocol()
   rejects([&] { oversized.append(frame); });
   GnomeViewportDecoder bounded;
   rejects([&] { bounded.append(QByteArray(2 * (gnomeViewportMaximumPayload + 4) + 1, 'x')); });
+}
+void inputDrainProtocol()
+{
+  const auto request = drainRequest(2, 1);
+  const auto json = gnomeViewportJson(request);
+  check(parseGnomeViewportRequest(json) == request, "Input drain lost exact request/cutoff correlation");
+  for (const bool ok : {false, true}) {
+    GnomeViewportReply reply;
+    reply.operation = GnomeViewportOperation::InputDrain;
+    reply.request = request.request;
+    reply.snapshot = request.snapshot;
+    reply.cutoff = request.cutoff;
+    reply.ok = ok;
+    reply.reason = QStringLiteral("fixture-denied");
+    const auto encoded = gnomeViewportJson(reply);
+    const auto decoded = parseGnomeViewportReply(encoded);
+    check(
+        decoded.cutoff == request.cutoff && decoded.snapshot == 1 && decoded.request == 2 && decoded.ok == ok,
+        "Input drain denial/success did not retain the whole cutoff"
+    );
+    for (const auto *key : {"cutoff", "snapshot"})
+      rejects([&] {
+        auto malformed = encoded;
+        malformed.remove(QLatin1String(key));
+        (void)parseGnomeViewportReply(malformed);
+      });
+  }
+  for (const auto *key :
+       {"request", "coreConnectionGeneration", "captureEpoch", "captureSequence", "capturePart", "viewerConnection",
+        "session", "epoch", "generation", "focusRequest", "focusRevision", "geometry", "scope"}) {
+    rejects([&] {
+      auto malformed = json;
+      auto cutoff = malformed.value("cutoff").toObject();
+      cutoff.remove(QLatin1String(key));
+      malformed.insert("cutoff", cutoff);
+      (void)parseGnomeViewportRequest(malformed);
+    });
+    rejects([&] {
+      auto malformed = json;
+      auto cutoff = malformed.value("cutoff").toObject();
+      cutoff.insert(QLatin1String(key), QStringLiteral("0"));
+      malformed.insert("cutoff", cutoff);
+      (void)parseGnomeViewportRequest(malformed);
+    });
+  }
+  for (const auto &[field, value] : std::vector<std::pair<QString, QJsonValue>>{
+           {"scope", "keyboard"},
+           {"scope", "unknown"},
+           {"request", "091"},
+           {"request", 91},
+           {"coreConnectionGeneration", "4294967296"},
+           {"capturePart", "17"},
+           {"generation", "9007199254740992"},
+           {"extra", "1"}
+       })
+    rejects([&] {
+      auto malformed = json;
+      auto cutoff = malformed.value("cutoff").toObject();
+      cutoff.insert(field, value);
+      malformed.insert("cutoff", cutoff);
+      (void)parseGnomeViewportRequest(malformed);
+    });
+  for (const QJsonValue &budget : {QJsonValue(0), QJsonValue(251), QJsonValue(1.5), QJsonValue("20")})
+    rejects([&] {
+      auto malformed = json;
+      malformed.insert("budgetMs", budget);
+      (void)parseGnomeViewportRequest(malformed);
+    });
+  auto substitute = request;
+  ++substitute.cutoff.capture.sequence;
+  check(
+      parseGnomeViewportRequest(gnomeViewportJson(substitute)) != request,
+      "A different completed Core capture was treated as the same request"
+  );
+  rejects([&] {
+    auto malformed = json;
+    malformed.insert("operation", "check");
+    (void)parseGnomeViewportRequest(malformed);
+  });
+  rejects([&] {
+    GnomeViewportDecoder decoder;
+    auto bytes = QJsonDocument(json).toJson(QJsonDocument::Compact);
+    bytes.replace("\"capturePart\":\"2\"", "\"capturePart\":\"2\",\"capturePart\":\"2\"");
+    decoder.append(rawFrame(bytes));
+    (void)decoder.take();
+  });
 }
 struct Pair
 {
@@ -271,16 +382,19 @@ void deferredQtQueueCheckpoint()
     pair.send({GnomeViewportOperation::Check, 2, 1});
     check(waitUntil([&] { return starts == 1; }), "Qt queue callback was not requested");
     pair.drain();
-    check(std::none_of(pair.replies.begin(), pair.replies.end(),
-                       [](const auto &reply) { return reply.request == 2; }),
-          "A Qt check replied before two native queue sync callbacks could finish");
+    check(
+        std::none_of(pair.replies.begin(), pair.replies.end(), [](const auto &reply) { return reply.request == 2; }),
+        "A Qt check replied before two native queue sync callbacks could finish"
+    );
     complete(true);
     check(pair.reply(2).ok, "Completed owned Qt observation did not publish one check");
     complete(true);
     pair.drain();
-    check(std::count_if(pair.replies.begin(), pair.replies.end(),
-                        [](const auto &reply) { return reply.request == 2; }) == 1,
-          "Duplicate Qt completion published another reply");
+    check(
+        std::count_if(pair.replies.begin(), pair.replies.end(), [](const auto &reply) { return reply.request == 2; }) ==
+            1,
+        "Duplicate Qt completion published another reply"
+    );
 
     pair.send({GnomeViewportOperation::Snapshot, 3});
     check(pair.reply(3).ok, "Replacement Qt queue snapshot was refused");
@@ -308,12 +422,20 @@ void deferredQtQueueCheckpoint()
     check(!pair.reply(2).ok, "Invalidated Qt observation remained eligible");
     late(true);
     pair.drain();
-    check(std::count_if(pair.replies.begin(), pair.replies.end(),
-                        [](const auto &reply) { return reply.request == 2; }) == 1,
-          "Late Qt event reused the canceled reply identity");
-    check(std::any_of(pair.replies.begin(), pair.replies.end(), [](const auto &reply) {
-            return reply.operation == GnomeViewportOperation::Invalidated && reply.snapshot == 1;
-          }), "Qt invalidation did not also revoke its retained native snapshot");
+    check(
+        std::count_if(pair.replies.begin(), pair.replies.end(), [](const auto &reply) { return reply.request == 2; }) ==
+            1,
+        "Late Qt event reused the canceled reply identity"
+    );
+    check(
+        std::any_of(
+            pair.replies.begin(), pair.replies.end(),
+            [](const auto &reply) {
+              return reply.operation == GnomeViewportOperation::Invalidated && reply.snapshot == 1;
+            }
+        ),
+        "Qt invalidation did not also revoke its retained native snapshot"
+    );
   }
   {
     Pair pair;
@@ -347,8 +469,10 @@ void deferredQtQueueCheckpoint()
     check(pair.reply(1).ok, "Unavailable-native fixture could not establish snapshot");
     pair.send({GnomeViewportOperation::Check, 2, 1});
     const auto result = pair.reply(2);
-    check(!result.ok && result.reason == QStringLiteral("qt-wayland-queue-unavailable"),
-          "Missing native QtWayland queue was accidentally a success-returning drain");
+    check(
+        !result.ok && result.reason == QStringLiteral("qt-wayland-queue-unavailable"),
+        "Missing native QtWayland queue was accidentally a success-returning drain"
+    );
   }
   {
     Pair pair;
@@ -363,10 +487,279 @@ void deferredQtQueueCheckpoint()
     pair.send({GnomeViewportOperation::Check, 2, 1});
     check(pair.reply(2).ok, "Synchronous fixture reentry lost its exact request");
     pair.drain();
-    check(std::count_if(pair.replies.begin(), pair.replies.end(),
-                        [](const auto &reply) { return reply.request == 2; }) == 1,
-          "Synchronous callback and return path sent duplicate Qt receipts");
+    check(
+        std::count_if(pair.replies.begin(), pair.replies.end(), [](const auto &reply) { return reply.request == 2; }) ==
+            1,
+        "Synchronous callback and return path sent duplicate Qt receipts"
+    );
   }
+}
+void fencedInputQueue()
+{
+  {
+    Pair pair;
+    const auto state = fixtureState();
+    const auto cutoff = fixtureCutoff();
+    bool fenced = true;
+    std::vector<std::function<void(bool)>> completions;
+    pair.endpoint->onSnapshot = [state] { return state; };
+    pair.endpoint->onCheck = [state](const auto &expected) { return expected == state; };
+    pair.endpoint->onInputDrainCheck = [&](const auto &expected, const auto &binding) {
+      return expected == state && fenced && binding == cutoff;
+    };
+    pair.endpoint->onInputDrain = [&](const auto &expected, const auto &binding, QDeadlineTimer deadline, auto done) {
+      check(
+          expected == state && binding == cutoff && !deadline.hasExpired() && deadline.remainingTime() <= 200,
+          "Native input drain did not receive exact binding and inherited budget"
+      );
+      completions.push_back(std::move(done));
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Fenced drain snapshot unavailable");
+    pair.send(drainRequest(2, 1));
+    check(waitUntil([&] { return completions.size() == 1; }), "Fenced drain was not started");
+    pair.drain();
+    check(
+        std::none_of(pair.replies.begin(), pair.replies.end(), [](const auto &r) { return r.request == 2; }),
+        "Fenced drain completed before its native queue callbacks"
+    );
+    completions[0](true);
+    check(pair.reply(2).ok && pair.reply(2).cutoff == cutoff, "Fenced drain did not echo its exact cutoff");
+    // Resume invalidates even a completed receipt, without a geometry change.
+    fenced = false;
+    pair.endpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+    pair.drain();
+    check(
+        std::any_of(
+            pair.replies.begin(), pair.replies.end(),
+            [](const auto &r) {
+              return r.operation == GnomeViewportOperation::Invalidated && r.snapshot == 1 &&
+                     r.reason == QStringLiteral("forwarding-fence-changed");
+            }
+        ),
+        "A resumed gate left the completed snapshot receipt live"
+    );
+    pair.send(drainRequest(3, 1));
+    check(!pair.reply(3).ok && pair.reply(3).cutoff == cutoff, "A completed drain revived its revoked snapshot");
+
+    fenced = true;
+    pair.send({GnomeViewportOperation::Snapshot, 4});
+    check(pair.reply(4).ok, "Fresh fenced snapshot unavailable");
+    pair.send(drainRequest(5, 4));
+    check(waitUntil([&] { return completions.size() == 2; }), "Fresh fenced drain did not start");
+    completions[0](true); // Old callback while a new operation is pending.
+    pair.drain();
+    check(
+        std::none_of(pair.replies.begin(), pair.replies.end(), [](const auto &r) { return r.request == 5; }),
+        "An old native completion acknowledged a different cutoff operation"
+    );
+    fenced = false;
+    completions[1](true);
+    check(!pair.reply(5).ok, "Final Qt receipt skipped exact fence revalidation");
+    completions[1](true);
+    pair.drain();
+    check(
+        std::count_if(pair.replies.begin(), pair.replies.end(), [](const auto &r) { return r.request == 5; }) == 1,
+        "Duplicate completion emitted a second fenced receipt"
+    );
+  }
+  for (unsigned variant = 0; variant < 7; ++variant) {
+    Pair pair;
+    const auto state = fixtureState();
+    pair.endpoint->onSnapshot = [state] { return state; };
+    pair.endpoint->onCheck = [state](const auto &expected) { return expected == state; };
+    bool started = false;
+    pair.endpoint->onInputDrainCheck = [](const auto &, const auto &binding) {
+      return binding.forwarding == fixtureCutoff().forwarding;
+    };
+    pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer, auto) {
+      started = true;
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Mismatch fixture snapshot unavailable");
+    auto request = drainRequest(2, 1);
+    switch (variant) {
+    case 0:
+      ++request.cutoff.viewerConnection;
+      break;
+    case 1:
+      ++request.cutoff.forwarding.owner.session;
+      break;
+    case 2:
+      ++request.cutoff.forwarding.owner.epoch;
+      break;
+    case 3:
+      ++request.cutoff.forwarding.focusRequest;
+      break;
+    case 4:
+      ++request.cutoff.forwarding.focusRevision;
+      break;
+    case 5:
+      ++request.cutoff.forwarding.geometry;
+      break;
+    case 6:
+      ++request.cutoff.forwarding.generation;
+      break;
+    }
+    pair.send(request);
+    check(
+        !pair.reply(2).ok && pair.reply(2).cutoff == request.cutoff && !started,
+        "A mismatched All fence or viewer connection reached the native queue"
+    );
+  }
+  {
+    Pair pair;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onInputDrainCheck = [](const auto &, const auto &) { return true; };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Missing support fixture snapshot unavailable");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    check(pair.reply(2).ok, "Legacy observational Check changed behavior");
+    pair.send(drainRequest(3, 1));
+    check(
+        !pair.reply(3).ok && pair.reply(3).reason == QStringLiteral("qt-input-drain-unavailable"),
+        "Missing native support fell back to generic observational Check"
+    );
+    pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer deadline, auto done) {
+      return pair.endpoint->startWaylandInputDrain(nullptr, {}, deadline, [] { return true; }, std::move(done));
+    };
+    pair.send(drainRequest(4, 1));
+    check(!pair.reply(4).ok, "Unavailable real QtWayland input queue fabricated a drain receipt");
+  }
+  for (const bool started : {false, true}) {
+    Pair pair;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onInputDrainCheck = [](const auto &, const auto &) { return true; };
+    pair.endpoint->onInputDrain = [started](const auto &, const auto &, QDeadlineTimer, auto done) {
+      done(true);
+      done(false); // Only the first result belongs to this operation.
+      return started;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Synchronous drain snapshot unavailable");
+    pair.send(drainRequest(2, 1));
+    check(pair.reply(2).ok == started, "A completion bypassed its starter's eventual failure");
+  }
+  {
+    Pair pair;
+    std::function<void(bool)> late;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onInputDrainCheck = [](const auto &, const auto &) { return true; };
+    pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer deadline, auto done) {
+      check(deadline.remainingTime() <= 20, "Endpoint renewed its inherited drain budget");
+      late = std::move(done);
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Budget fixture snapshot unavailable");
+    pair.send(drainRequest(2, 1, 20));
+    check(!pair.reply(2).ok && bool(late), "A missing native completion exceeded its bounded deadline");
+    late(true);
+    pair.drain();
+    check(
+        std::count_if(pair.replies.begin(), pair.replies.end(), [](const auto &r) { return r.request == 2; }) == 1,
+        "Late completion revived an expired input drain"
+    );
+  }
+  for (unsigned phase = 0; phase < 3; ++phase) {
+    Pair pair;
+    std::function<void(bool)> late;
+    unsigned checks = 0;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onInputDrainCheck = [&](const auto &, const auto &) {
+      if (phase == 0 || (phase == 2 && ++checks == 2))
+        pair.endpoint.reset();
+      return true;
+    };
+    pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer, auto done) {
+      late = std::move(done);
+      if (phase == 1)
+        pair.endpoint.reset();
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Destructive drain snapshot unavailable");
+    pair.send(drainRequest(2, 1));
+    check(waitUntil([&] { return !pair.endpoint || bool(late); }), "Destructive drain did not start");
+    if (late)
+      late(true);
+    check(!pair.endpoint, "Destructive validation/completion did not run");
+    if (late)
+      late(true);
+  }
+}
+
+void nestedInputDispatch(ViewerApplication &app)
+{
+  class Filter final : public QObject
+  {
+  public:
+    QObject *target = nullptr;
+    std::function<void()> nested;
+    bool eventFilter(QObject *object, QEvent *event) override
+    {
+      if (object != target || (event->type() != QEvent::KeyPress && event->type() != QEvent::InputMethodQuery))
+        return false;
+      nested();
+      return true;
+    }
+  } filter;
+  QObject receiver;
+  filter.target = &receiver;
+  app.installEventFilter(&filter);
+  check(app.inputDispatchIdle(), "Input dispatch guard started busy");
+  Pair pair;
+  pair.endpoint->onSnapshot = fixtureState;
+  pair.endpoint->onCheck = [](const auto &) { return true; };
+  pair.endpoint->onInputDrainCheck = [&](const auto &, const auto &) { return app.inputDispatchIdle(); };
+  unsigned starts = 0;
+  std::function<void(bool)> finish;
+  pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer, auto done) {
+    ++starts;
+    finish = std::move(done);
+    return true;
+  };
+  pair.send({GnomeViewportOperation::Snapshot, 1});
+  check(pair.reply(1).ok, "Nested dispatch fixture snapshot unavailable");
+  filter.nested = [&] {
+    check(!app.inputDispatchIdle(), "Input filter ran before the application's dispatch-depth guard");
+    pair.send(drainRequest(2, 1));
+    check(
+        !pair.reply(2).ok && starts == 0,
+        "Nested processEvents admitted a drain while an older input filter remained on stack"
+    );
+  };
+  QKeyEvent event(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier);
+  QCoreApplication::sendEvent(&receiver, &event);
+  check(app.inputDispatchIdle(), "Input depth did not unwind after a nested event loop");
+  filter.nested = [&] {
+    check(!app.inputDispatchIdle(), "Pre-QPA input-method query escaped the dispatch-depth guard");
+    pair.send(drainRequest(3, 1));
+    check(
+        !pair.reply(3).ok && starts == 0, "Input-method reset/query admitted a drain before the older key reached QPA"
+    );
+  };
+  QInputMethodQueryEvent query(Qt::ImEnabled);
+  QCoreApplication::sendEvent(&receiver, &query);
+  check(app.inputDispatchIdle(), "Input-method query depth did not unwind");
+  pair.send(drainRequest(4, 1));
+  check(waitUntil([&] { return starts == 1; }), "Fresh drain did not start after input handler unwound");
+  filter.nested = [&] {
+    finish(true);
+    check(!pair.reply(4).ok, "Nested native completion ignored the older input handler still on stack");
+  };
+  QCoreApplication::sendEvent(&receiver, &event);
+  check(app.inputDispatchIdle(), "Completion callback corrupted input dispatch depth");
+  pair.send(drainRequest(5, 1));
+  check(waitUntil([&] { return starts == 2; }), "Idle drain retry did not begin");
+  finish(true);
+  check(pair.reply(5).ok, "A fully unwound input dispatch could not finish its exact fixture operation");
 }
 void destruction()
 {
@@ -486,15 +879,23 @@ int main(int argc, char **argv)
 {
   if (argc > 1 && QByteArray(argv[1]).startsWith("--bootstrap-fixture="))
     return bootstrapChild(argc, argv);
-  QCoreApplication app(argc, argv);
+  qputenv("QT_QPA_PLATFORM", "offscreen");
+  ViewerApplication app(argc, argv);
+  app.setQuitOnLastWindowClosed(false);
+  (void)app.enableInputDrainDispatch();
   try {
     protocol();
+    inputDrainProtocol();
     endpointLifetime();
     deferredQtQueueCheckpoint();
+    fencedInputQueue();
+    nestedInputDispatch(app);
     destruction();
     bootstrap();
     QTextStream(stdout) << "PASS: bounded viewport framing/schema, mapping association, invalidation/expiry, monotonic "
-                           "requests, async Qt queue checkpoints, stale/duplicate/unsupported denial, EOF and destructive callbacks\n";
+                           "requests, async Qt queue checkpoints, exact All cutoff/receipt correlation, "
+                           "revoked/completed/late/expired drains, nested input-filter denial, "
+                           "unsupported native denial, EOF and destructive callbacks\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

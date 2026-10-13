@@ -250,6 +250,12 @@ class TlsHost:
                         require(isinstance(payload, dict), "Viewer payload was not an object")
                         self.record("viewer", kind, session, epoch, payload)
                         self.packet(kind, session, epoch, payload)
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+            # Stopping the owned provider closes its Viewer. TLS may report
+            # EOF as a transport exception instead of an empty read; only the
+            # explicitly requested shutdown may accept that outcome.
+            if not self.expected_disconnect and not self.stopping.is_set():
+                self.failure = traceback.format_exc()
         except Exception:
             if not self.stopping.is_set():
                 self.failure = traceback.format_exc()
@@ -303,7 +309,8 @@ class Driver:
         command = {"id": self.request, "op": operation, **values}
         self.child.stdin.write((json.dumps(command) + "\n").encode())
         self.child.stdin.flush()
-        expected = {"observe": "observed", "retained": "retained", "stop": "stopped"}.get(operation, "synced")
+        expected = {"observe": "observed", "drain": "drained", "drain-retained": "drain-retained", "retained": "retained",
+                    "stop": "stopped"}.get(operation, "synced")
         reply = self.event(expected)
         require(reply.get("id") == self.request, "Wrong fixture request reply")
         return reply
@@ -504,6 +511,94 @@ def forwarding_fence_acceptance(processes, host, driver, initial, desktop):
             "closedInterval": closing, "reopened": reopened, "sourceTolerance": tolerance}
 
 
+def input_drain_receipt(reply, request, initial):
+    """Verify a native segment receipt without treating it as a route permit."""
+    require(reply.get("live") is True and not reply.get("error") and type(reply.get("id")) is int
+            and reply["id"] > 0 and reply.get("originalDeliveryAuthority") is False,
+            f"Exact fenced input drain did not complete: {reply}")
+    require(reply.get("orderingLimitation") == "mutter-eis-sync-build-unverified",
+            "Native segment receipt hid its sender-ordering limitation")
+    expected = {"request": str(reply["id"]), "coreConnectionGeneration": 1,
+                "captureEpoch": "1", "captureSequence": str(reply["id"]), "capturePart": 1,
+                "viewerConnection": initial["paint"]["connection"],
+                "session": str(request["session"]), "epoch": str(request["epoch"]),
+                "scope": "all"}
+    expected.update({field: str(request["payload"][field])
+                     for field in ("generation", "focusRequest", "focusRevision", "geometry")})
+    binding = reply.get("cutoff")
+    require(isinstance(binding, dict) and binding.keys() == expected.keys()
+            and all(type(binding[field]) is type(value) and binding[field] == value
+                    for field, value in expected.items()),
+            "Native segment receipt changed the exact cutoff binding")
+    observed = reply.get("snapshot", {})
+    require(observed.get("window") == initial["window"] and observed.get("surface") == initial["surface"]
+            and observed.get("paint") == initial["paint"], "Native segment receipt changed native/paint identity")
+    require(all(type(observed.get(field)) in (int, float) and math.isfinite(observed[field])
+                and abs(observed[field] - initial[field]) <= 1 / 256
+                for field in ("desktopX", "desktopY")), "Native segment receipt changed the frozen routed point")
+    return reply
+
+
+def input_drain_denial(reply, description):
+    require(reply.get("live") is False and "snapshot" not in reply and "cutoff" not in reply
+            and reply.get("originalDeliveryAuthority") is False and isinstance(reply.get("error"), str)
+            and reply["error"], f"{description} did not deny the native drain: {reply}")
+    require(not any(term in reply["error"].lower() for term in ("timeout", "protocol", "disconnected", "closed")),
+            f"{description} failed infrastructure instead of denying its binding: {reply}")
+    return reply["error"]
+
+
+def native_input_drain_acceptance(processes, host, driver, initial):
+    """Real PONG -> Clutter segment -> exact-All Qt completion on owned GNOME.
+
+    The fixture supplies synthetic Core correlation. Production Core cutoff and
+    Mutter's compiled EIS SYNC barrier are separate prerequisites for authority.
+    """
+    paint = initial["paint"]
+    request = forwarding_request(initial, 3, "original")
+    entered = request_forwarding(processes, host, request)
+    prefix = [driver.command("key", code=67), driver.command("scroll", dx=0, dy=120)]
+
+    def drain(generation, connection=None):
+        return driver.command("drain", generation=generation,
+                              connection=int(paint["connection"]) if connection is None else connection)
+
+    denials = {}
+    for reason, generation, connection in (("wrongGate", 4, int(paint["connection"])),
+                                           ("wrongConnection", 3, int(paint["connection"]) + 1)):
+        reply = drain(generation, connection)
+        denials[reason] = input_drain_denial(reply, reason)
+    completed = input_drain_receipt(drain(3), request, initial)
+    resumed_request = {**request, "payload": {**request["payload"], "mode": "viewer"}}
+    resumed = request_forwarding(processes, host, resumed_request)
+    forwarding_receipts(host.events()[:resumed["index"] + 1], request, [], entered["index"] + 1, [0, 0])
+
+    def revoked_before_expiry():
+        retained = driver.command("drain-retained")
+        require(type(retained.get("remainingMs")) is int and retained["remainingMs"] > 0,
+                "Retained drain expired before its gate revocation could be verified")
+        return retained if retained.get("live") is False else None
+
+    revoked = common.wait_for(processes, revoked_before_expiry, "retained native drain revocation before expiry",
+                              timeout=.25, retry_errors=False)
+    reply = drain(3)
+    denials["resumedGate"] = input_drain_denial(reply, "resumed gate")
+
+    fresh_request = forwarding_request(initial, 4, "original")
+    fresh_entered = request_forwarding(processes, host, fresh_request)
+    fresh = input_drain_receipt(drain(4), fresh_request, initial)
+    require(fresh["id"] > completed["id"], "Native drain reused a completed cutoff request")
+    fresh_resume = {**fresh_request, "payload": {**fresh_request["payload"], "mode": "viewer"}}
+    fresh_resumed = request_forwarding(processes, host, fresh_resume)
+    forwarding_receipts(host.events()[:fresh_resumed["index"] + 1], fresh_request, [],
+                        fresh_entered["index"] + 1, [0, 0])
+    return {"scope": "owned-pong-compositor-segment-exact-fenced-qt-completion",
+            "originalDeliveryAuthority": False, "productionCoreCutoff": False,
+            "senderOrderingBuildVerified": False, "entered": entered, "prefixPongs": prefix,
+            "completed": completed, "resumed": resumed, "revokedBeforeExpiry": revoked, "denials": denials,
+            "freshCompleted": fresh, "freshResumed": fresh_resumed}
+
+
 class FocusState:
     """Publish current GTK state; a previous activation is not current focus."""
 
@@ -590,6 +685,7 @@ def run(arguments):
             root = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="df-qt-gnome-", dir="/tmp")))
             environment = common.private_environment(root)
             environment["QT_SCALE_FACTOR"] = str(arguments.scale)
+            environment["QT_LOGGING_RULES"] = "qt.qpa.wayland.debug=true"
             processes = common.Processes(arguments.output, environment)
             cleanup.callback(processes.close)
             shell = start_shell(processes, root, report)
@@ -680,6 +776,9 @@ def run(arguments):
             require(fence_initial.get("live") is True, "Full-input acceptance requires current painted focus")
             report["forwardingFence"] = forwarding_fence_acceptance(
                 processes, host, driver, fence_initial["snapshot"], desktop)
+            drain_initial = driver.command("observe")
+            require(drain_initial.get("live") is True, "Native drain requires current painted focus")
+            report["inputDrain"] = native_input_drain_acceptance(processes, host, driver, drain_initial["snapshot"])
             report["denials"] = {}
             for label, point in (
                 ("letterbox", desktop(paint["videoX"] / 2, paint["clientHeight"] / 2)),
@@ -733,6 +832,12 @@ def run(arguments):
     finally:
         if processes:
             processes.close()
+        report["qtInputContextMessages"] = [
+            {"log": path.name, "message": line}
+            for path in sorted(arguments.output.glob("*.log"))
+            for line in path.read_text(errors="replace").splitlines()
+            if "using input method:" in line
+        ]
         (arguments.output / "result.json").write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0 if report["status"] == "passed" else 1

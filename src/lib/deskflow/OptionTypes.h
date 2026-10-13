@@ -60,6 +60,8 @@ static const OptionID kOptionClipboardSharingSize = OPTION_CODE("CLSZ");
 // Protocol 1.8 opt-in input trace version 1. Value is a nonzero negotiation
 // generation; zero withdraws it. Older peers ignore this ordinary option.
 static const OptionID kOptionInputSequenceTrace = OPTION_CODE("ISQ1");
+// Separately negotiated backend-prefix cutoff, never native delivery authority.
+static const OptionID kOptionInputCutoff = OPTION_CODE("IPC1");
 //@}
 
 //! @name Computer switch corner masks

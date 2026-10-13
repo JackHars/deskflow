@@ -14,6 +14,7 @@
 #include "common/Settings.h"
 #include "deskflow/AppUtil.h"
 #include "deskflow/Computer.h"
+#include "deskflow/DeskflowException.h"
 #include "deskflow/PacketStreamFilter.h"
 #include "deskflow/PlatformComputer.h"
 #include "deskflow/ProtocolTypes.h"
@@ -22,7 +23,9 @@
 #include "net/ISocketFactory.h"
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputCutoffProtocol.h"
 #include "deskflow/InputSequence.h"
+#include "windowshare/EiPrefixProbe.h"
 #endif
 
 #include <QTemporaryDir>
@@ -201,10 +204,12 @@ public:
     m_addedEvents.emplace_back(std::move(event));
   }
 
-  EventQueueTimer *newTimer(double, void *) override
+  EventQueueTimer *newTimer(double, void *target) override
   {
+    repeatingTarget = target;
     return timer();
   }
+  void *repeatingTarget = nullptr;
 
   EventQueueTimer *newOneShotTimer(double, void *) override
   {
@@ -281,6 +286,54 @@ public:
   explicit InputPlatform(IEventQueue *events) : PlatformComputer(events)
   {
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &binding,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    ++cutoffBegins;
+    if (!cutoffSupported || cutoffBinding)
+      return false;
+    const bool started = cutoffProbe.begin(
+        binding.request, binding.request, deskflow::windowshare::InputCutoffClock::now(), deadline, true
+    );
+    if (!started)
+      return false;
+    cutoffBinding = binding;
+    if (onCutoffBegin)
+      onCutoffBegin();
+    return started;
+  }
+  deskflow::windowshare::InputCutoffState
+  inputCutoffState(const deskflow::windowshare::InputCutoffBinding &binding) override
+  {
+    using namespace deskflow::windowshare;
+    if (cutoffBinding != binding)
+      return InputCutoffState::Denied;
+    if (cutoffProbe.observed(InputCutoffClock::now()))
+      return InputCutoffState::BackendObserved;
+    return cutoffProbe.state() == EiPrefixProbe::State::Denied ? InputCutoffState::Denied : InputCutoffState::Pending;
+  }
+  bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &binding) override
+  {
+    if (cutoffBinding != binding)
+      return false;
+    ++cutoffResumes;
+    cutoffBinding.reset();
+    const bool retired = cutoffProbe.retire(binding.request);
+    const auto callback = onCutoffResume;
+    if (callback)
+      callback();
+    return retired;
+  }
+  bool cutoffSupported = false;
+  unsigned cutoffBegins = 0, cutoffResumes = 0;
+  std::optional<deskflow::windowshare::InputCutoffBinding> cutoffBinding;
+  deskflow::windowshare::EiPrefixProbe cutoffProbe;
+  std::function<void()> onCutoffBegin;
+  std::function<void()> onCutoffResume;
+#endif
 
   void *getEventTarget() const override
   {
@@ -522,7 +575,8 @@ template <typename... Args> std::string wire(const char *format, Args... args)
 struct InputFixture
 {
   RecordingEventQueue events;
-  deskflow::Computer computer{new InputPlatform(&events), &events};
+  InputPlatform *platform = new InputPlatform(&events);
+  deskflow::Computer computer{platform, &events};
   RecordingClient client{&events, &computer};
   FakeStream stream;
   std::unique_ptr<ServerProxy> proxy;
@@ -590,6 +644,35 @@ void negotiate(InputFixture &fixture, uint32_t generation = 7)
   fixture.stream.authenticate();
   fixture.handshake({kOptionInputSequenceTrace, generation});
   fixture.stream.writes.clear();
+}
+InputCutoffBinding cutoffBinding(std::uint64_t request = 1)
+{
+  return {request, 9, {31, 400, 1}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17};
+}
+void negotiateCutoff(InputFixture &fixture)
+{
+  fixture.stream.authenticate();
+  fixture.handshake({kOptionInputCutoff, 9});
+  fixture.stream.writes.clear();
+  fixture.platform->cutoffSupported = true;
+}
+std::vector<InputCutoffReceipt> cutoffReceipts(const FakeStream &stream)
+{
+  std::vector<InputCutoffReceipt> result;
+  for (const auto &bytes : stream.writes) {
+    if (!bytes.starts_with("CICR"))
+      continue;
+    const auto receipt = decodeInputCutoffReceipt(std::string_view(bytes).substr(4));
+    if (!receipt)
+      throw std::runtime_error("Invalid cutoff reply");
+    result.push_back(*receipt);
+  }
+  return result;
+}
+void pollCutoff(InputFixture &fixture)
+{
+  if (!fixture.events.dispatchEvent(Event(EventTypes::Timer, fixture.events.repeatingTarget)))
+    throw std::runtime_error("Cutoff poll handler missing");
 }
 #endif
 
@@ -1165,6 +1248,176 @@ void ServerProxyTests::inputSequence_optionsCannotCrossPacketBoundary()
   std::string untouched(next.size(), '\0');
   QCOMPARE(packets.read(untouched.data(), static_cast<uint32_t>(untouched.size())), uint32_t(next.size()));
   QCOMPARE(untouched, next);
+}
+void ServerProxyTests::inputCutoff_flushesMotionDelegatesAndResumes()
+{
+  InputFixture f;
+  negotiateCutoff(f);
+  const auto binding = cutoffBinding();
+  bool flushedBeforeBackend = false;
+  f.platform->onCutoffBegin = [&] {
+    flushedBeforeBackend = f.client.calls.size() == 1 && f.client.calls[0].kind == "mouseMove" &&
+                           f.client.calls[0].x == 30 && f.client.calls[0].y == 40;
+  };
+  f.stream.push(wire(kMsgDMouseMove, 10, 20));
+  f.stream.push(wire(kMsgDMouseMove, 30, 40));
+  f.stream.push(encodeInputCutoffRequest({binding, 250}));
+  f.dispatch();
+  QVERIFY(flushedBeforeBackend);
+  QCOMPARE(f.platform->cutoffBegins, 1u);
+  QVERIFY(f.platform->cutoffBinding == binding);
+  QVERIFY(cutoffReceipts(f.stream).empty());
+  f.platform->cutoffProbe.pong(binding.request, InputCutoffClock::now());
+  pollCutoff(f);
+  QVERIFY(cutoffReceipts(f.stream).empty()); // Entire EI event batch still pending.
+  f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+  pollCutoff(f);
+  QCOMPARE(cutoffReceipts(f.stream), (std::vector<InputCutoffReceipt>{{binding, InputCutoffState::BackendObserved}}));
+  pollCutoff(f);
+  QCOMPARE(cutoffReceipts(f.stream).size(), 1u);
+  f.send(encodeInputCutoffResume(binding));
+  QCOMPARE(f.platform->cutoffResumes, 1u);
+  QVERIFY(!f.platform->cutoffBinding);
+  QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{binding, InputCutoffState::Resumed}));
+  f.send(encodeInputCutoffResume(binding)); // Exact cleanup is idempotent.
+  QCOMPARE(f.platform->cutoffResumes, 1u);
+  f.send(wire(kMsgDKeyUp, 'a', 0, 7));
+  QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+  QVERIFY(!disconnectRequest(f.events));
+  f.send(encodeInputCutoffRequest({binding, 250}));
+  QVERIFY(disconnectRequest(f.events)); // Even a resumed request ID cannot be reused.
+  QCOMPARE(f.platform->cutoffBegins, 1u);
+}
+
+void ServerProxyTests::inputCutoff_requiresNegotiationAndExactBoundedPackets()
+{
+  for (bool latest : {false, true}) {
+    InputFixture f(latest);
+    f.handshake({kOptionInputCutoff, 9}); // No authenticated connection.
+    QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &bytes) {
+      return bytes.starts_with("CICA");
+    }));
+    f.send(encodeInputCutoffRequest({cutoffBinding(), 250}));
+    QCOMPARE(f.platform->cutoffBegins, 0u);
+    QVERIFY(disconnectRequest(f.events));
+  }
+  const auto request = encodeInputCutoffRequest({cutoffBinding(), 250});
+  for (const auto &bad : {request.substr(0, 4), request.substr(0, request.size() - 1), request + '\0'}) {
+    InputFixture f;
+    negotiateCutoff(f);
+    f.stream.push(bad);
+    f.stream.push(wire(kMsgDMouseDown, 1));
+    f.dispatch();
+    QCOMPARE(f.platform->cutoffBegins, 0u);
+    QVERIFY(f.client.calls.empty());
+    QVERIFY(disconnectRequest(f.events));
+  }
+  InputFixture unsupported;
+  negotiateCutoff(unsupported);
+  unsupported.platform->cutoffSupported = false;
+  unsupported.send(request);
+  QCOMPARE(
+      cutoffReceipts(unsupported.stream), (std::vector<InputCutoffReceipt>{{cutoffBinding(), InputCutoffState::Denied}})
+  );
+  unsupported.send(encodeInputCutoffResume(cutoffBinding()));
+  QCOMPARE(unsupported.platform->cutoffResumes, 0u);
+  QVERIFY(!disconnectRequest(unsupported.events));
+}
+
+void ServerProxyTests::inputCutoff_freezeRejectsLaterInputAndWrongResume()
+{
+  const std::string language = "en";
+  const OptionsList options{kOptionHeartbeat, 2000};
+  auto wrong = cutoffBinding();
+  ++wrong.forwarding.focusRevision;
+  const std::vector packets{wire(kMsgDMouseMove, 10, 20),  wire(kMsgDMouseRelMove, 1, 2),
+                            wire(kMsgDMouseWheel, 3, 4),   wire(kMsgDMouseDown, 1),
+                            wire(kMsgDMouseUp, 1),         wire(kMsgDKeyDown, 'a', 0, 7, &language),
+                            wire(kMsgDKeyUp, 'a', 0, 7),   wire(kMsgDKeyRepeat, 'a', 0, 2, 7, &language),
+                            wire(kMsgCEnter, 1, 2, 3, 0),  wire(kMsgCLeave),
+                            wire(kMsgCResetOptions),       wire(kMsgDSetOptions, &options),
+                            encodeInputCutoffResume(wrong)};
+  for (const auto &packet : packets) {
+    InputFixture f;
+    negotiateCutoff(f);
+    f.send(encodeInputCutoffRequest({cutoffBinding(), 250}));
+    f.send(packet);
+    QVERIFY(f.client.calls.empty());
+    QVERIFY(cutoffReceipts(f.stream).empty());
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+    QVERIFY(disconnectRequest(f.events));
+  }
+}
+
+void ServerProxyTests::inputCutoff_deadlineInvalidationAndDestruction()
+{
+  {
+    InputFixture f;
+    negotiateCutoff(f);
+    const auto binding = cutoffBinding();
+    f.send(encodeInputCutoffRequest({binding, 10}));
+    QTest::qSleep(12);
+    pollCutoff(f);
+    QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{binding, InputCutoffState::Denied}));
+    f.platform->cutoffProbe.pong(binding.request, InputCutoffClock::now());
+    f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+    pollCutoff(f);
+    QCOMPARE(cutoffReceipts(f.stream).size(), 1u);
+    f.send(encodeInputCutoffResume(binding));
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+  }
+  for (bool disconnect : {false, true}) {
+    InputFixture f;
+    negotiateCutoff(f);
+    const auto binding = cutoffBinding();
+    f.send(encodeInputCutoffRequest({binding, 250}));
+    f.platform->cutoffProbe.pong(binding.request, InputCutoffClock::now());
+    f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+    pollCutoff(f);
+    if (disconnect)
+      f.stream.revoke();
+    else
+      f.platform->cutoffProbe.invalidate();
+    pollCutoff(f);
+    if (disconnect) {
+      QVERIFY(disconnectRequest(f.events));
+      QCOMPARE(f.platform->cutoffResumes, 1u);
+    } else {
+      QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{binding, InputCutoffState::Denied}));
+      f.send(encodeInputCutoffResume(binding));
+    }
+  }
+  {
+    InputFixture f;
+    negotiateCutoff(f);
+    f.platform->onCutoffResume = [&] {
+      f.stream.push(wire(kMsgDMouseDown, 1));
+      f.dispatch();
+    };
+    f.platform->onCutoffBegin = [&] { f.proxy.reset(); };
+    f.send(encodeInputCutoffRequest({cutoffBinding(), 250}));
+    QVERIFY(!f.proxy);
+    QVERIFY(f.client.calls.empty());
+    QVERIFY(cutoffReceipts(f.stream).empty());
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+    QVERIFY(!f.platform->cutoffBinding);
+  }
+  for (bool throwsAfterDestroy : {false, true}) {
+    InputFixture f;
+    negotiateCutoff(f);
+    f.platform->onCutoffBegin = [&] { f.stream.revoke(); };
+    f.platform->onCutoffResume = [&] {
+      f.proxy.reset();
+      if (throwsAfterDestroy)
+        throw BadClientException("Backend destroyed proxy during cleanup");
+    };
+    f.send(encodeInputCutoffRequest({cutoffBinding(), 250}));
+    QVERIFY(!f.proxy);
+    QVERIFY(f.client.calls.empty());
+    QVERIFY(f.stream.writes.empty());
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+    QVERIFY(!f.platform->cutoffBinding);
+  }
 }
 #endif
 

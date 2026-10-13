@@ -14,6 +14,9 @@
 #include "deskflow/IPrimaryComputer.h"
 #include "deskflow/ISecondaryComputer.h"
 #include "deskflow/OptionTypes.h"
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/InputCutoff.h"
+#endif
 
 class IClipboard;
 
@@ -149,6 +152,22 @@ public:
   // Whether this backend reports actual API submissions inside the current
   // legacy-input sequence scope. This is not proof of native input delivery.
   virtual bool supportsInputSequenceTrace() const noexcept
+  {
+    return false;
+  }
+  // Owner-thread asynchronous sender-prefix observation. Default unsupported;
+  // no compositor/application drain or original-input authority is returned.
+  virtual bool beginInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  virtual deskflow::windowshare::InputCutoffState inputCutoffState(const deskflow::windowshare::InputCutoffBinding &)
+  {
+    return deskflow::windowshare::InputCutoffState::Denied;
+  }
+  virtual bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &)
   {
     return false;
   }

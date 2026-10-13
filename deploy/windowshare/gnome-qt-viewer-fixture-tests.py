@@ -14,6 +14,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from copy import deepcopy
 
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("qt_viewer_fixture", Path(__file__).with_name("gnome-qt-viewer-tests.py"))
@@ -121,6 +122,40 @@ class ForwardingProtocol(unittest.TestCase):
         self.assertIsNone(host.pending_route)
         with self.assertRaisesRegex(RuntimeError, "Unsolicited or unnegotiated"):
             host.packet(18, 1, 2, self.ack["payload"])
+
+
+class FixtureTransportShutdown(unittest.TestCase):
+    def run_failure(self, error, expected):
+        host = module.TlsHost.__new__(module.TlsHost)
+        host.stopping = module.threading.Event()
+        host.expected_disconnect = expected
+        host.failure = None
+        host.input_sequence = 1
+        host.commands = module.queue.Queue()
+        host.listener = Mock()
+        host.listener.accept.return_value = (Mock(), None)
+        connection = Mock()
+        connection.getpeercert.return_value = b"fixture-certificate"
+        connection.pending.return_value = True
+        connection.recv.side_effect = error
+        host.viewer_pin = module.hashlib.sha256(b"fixture-certificate").hexdigest()
+        host.context = Mock()
+        host.context.wrap_socket.return_value = contextlib.nullcontext(connection)
+        host.run()
+        self.assertIsNone(host.connection)
+        return host.failure
+
+    def test_only_requested_shutdown_accepts_transport_close_errors(self):
+        for error in (BrokenPipeError("closed"), ConnectionResetError("reset"), module.ssl.SSLEOFError("EOF")):
+            with self.subTest(error=type(error).__name__):
+                self.assertIsNone(self.run_failure(error, True))
+                self.assertIn(type(error).__name__, self.run_failure(error, False))
+
+    def test_expected_disconnect_does_not_hide_protocol_or_timeout_failures(self):
+        for error in (RuntimeError("malformed fixture packet"), TimeoutError("stalled peer"),
+                      module.ssl.SSLError("invalid TLS data")):
+            with self.subTest(error=type(error).__name__):
+                self.assertIn(type(error).__name__, self.run_failure(error, True))
 
 
 class ForwardingReceipts(unittest.TestCase):
@@ -241,6 +276,59 @@ class ForwardingAcceptance(unittest.TestCase):
     def test_native_pongs_and_elapsed_time_cannot_replace_fresh_input_receipts(self):
         with self.assertRaisesRegex(RuntimeError, "Timed out waiting for ordered fresh input"):
             self.exercise(drop_fresh_key=True)
+
+
+class NativeDrainReceipts(unittest.TestCase):
+    def setUp(self):
+        self.snapshot = painted_snapshot()
+        self.snapshot["paint"]["connection"] = "11"
+        self.request = module.forwarding_request(self.snapshot, 9, "original")
+        self.reply = {"live": True, "error": "", "id": 12, "originalDeliveryAuthority": False,
+                      "orderingLimitation": "mutter-eis-sync-build-unverified", "snapshot": deepcopy(self.snapshot),
+                      "cutoff": {"request": "12", "coreConnectionGeneration": 1, "captureEpoch": "1",
+                                 "captureSequence": "12", "capturePart": 1, "viewerConnection": "11",
+                                 "session": "1", "epoch": "2", "generation": "9", "focusRequest": "3",
+                                 "focusRevision": "4", "geometry": "5", "scope": "all"}}
+
+    def verify(self, reply):
+        return module.input_drain_receipt(reply, self.request, self.snapshot)
+
+    def test_complete_exact_receipt_retains_explicit_authority_limitation(self):
+        self.assertEqual(self.verify(self.reply), self.reply)
+
+    def test_each_cutoff_field_and_unknown_fields_are_checked(self):
+        for field in self.reply["cutoff"]:
+            for invalid in (None, True, "99", 99):
+                value = deepcopy(self.reply)
+                value["cutoff"][field] = invalid
+                with self.subTest(field=field, invalid=invalid), self.assertRaisesRegex(RuntimeError, "exact cutoff"):
+                    self.verify(value)
+        value = deepcopy(self.reply)
+        value["cutoff"]["authority"] = True
+        with self.assertRaisesRegex(RuntimeError, "exact cutoff"):
+            self.verify(value)
+
+    def test_native_identity_point_and_authority_cannot_be_substituted(self):
+        for field, invalid in (("window", "other"), ("surface", "other"), ("paint", {}),
+                               ("desktopX", float("nan")), ("desktopY", 0)):
+            value = deepcopy(self.reply)
+            value["snapshot"][field] = invalid
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.verify(value)
+        for field, invalid in (("live", False), ("id", True), ("error", "failed"),
+                               ("originalDeliveryAuthority", True), ("originalDeliveryAuthority", 0),
+                               ("orderingLimitation", "")):
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.verify({**self.reply, field: invalid})
+
+    def test_binding_denial_is_distinct_from_failed_infrastructure(self):
+        reply = {"live": False, "originalDeliveryAuthority": False, "error": "viewer-connection-mismatch"}
+        self.assertEqual(module.input_drain_denial(reply, "fixture"), reply["error"])
+        for change in ({"live": True}, {"snapshot": {}}, {"cutoff": {}}, {"originalDeliveryAuthority": True},
+                       {"error": ""}, {"error": "timeout"}, {"error": "protocol-error"},
+                       {"error": "disconnected"}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                module.input_drain_denial({**reply, **change}, "fixture")
 
 
 class CurrentFocus(unittest.TestCase):

@@ -361,6 +361,24 @@ void Computer::setOptions(const OptionsList &options)
   m_computer->setOptions(options);
 }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool Computer::beginInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return !m_isPrimary && windowshare::validInputCutoffBinding(binding) &&
+         windowshare::InputCutoffClock::now() < deadline && m_computer->beginInputCutoff(binding, deadline);
+}
+windowshare::InputCutoffState Computer::inputCutoffState(const windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->inputCutoffState(binding);
+}
+bool Computer::resumeInputCutoff(const windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->resumeInputCutoff(binding);
+}
+#endif
+
 void Computer::setSequenceNumber(uint32_t seqNum)
 {
   m_computer->setSequenceNumber(seqNum);

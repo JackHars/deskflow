@@ -93,6 +93,24 @@ QJsonObject snapshot(const GnomeProviderClient::ViewportSnapshot &value)
       {"paint", gnomeViewportJson(paint).value("state")}
   };
 }
+QJsonObject cutoff(const InputCutoffBinding &value)
+{
+  return {
+      {"request", QString::number(value.request)},
+      {"coreConnectionGeneration", static_cast<qint64>(value.coreConnectionGeneration)},
+      {"captureEpoch", QString::number(value.capture.epoch)},
+      {"captureSequence", QString::number(value.capture.sequence)},
+      {"capturePart", value.capture.part},
+      {"viewerConnection", QString::number(value.viewerConnection)},
+      {"session", QString::number(value.forwarding.owner.session)},
+      {"epoch", QString::number(value.forwarding.owner.epoch)},
+      {"generation", QString::number(value.forwarding.generation)},
+      {"focusRequest", QString::number(value.forwarding.focusRequest)},
+      {"focusRevision", QString::number(value.forwarding.focusRevision)},
+      {"geometry", QString::number(value.forwarding.geometry)},
+      {"scope", "all"}
+  };
+}
 struct Ei
 {
   ei *context = ei_new_sender(nullptr);
@@ -135,10 +153,16 @@ int main(int argc, char **argv)
     bool adopted = false, announced = false;
     std::uint64_t lastId = 0, pingId = 0, observationId = 0, observationRequest = 0, completedRequest = 0;
     std::optional<GnomeProviderClient::ViewportObservation> retained;
+    std::optional<GnomeProviderClient::InputDrainRequest> pendingDrain;
+    std::optional<GnomeProviderClient::InputDrainSegment> retainedDrain;
+    std::optional<Clock::time_point> drainDeadline;
+    std::optional<Clock::time_point> retainedDrainDeadline;
+    std::uint64_t drainCommandId = 0, drainRequest = 0, completedDrainRequest = 0;
     GnomeProviderClient::Update identity;
     pid_t eisPeerPid = 0;
     const auto deadline = Clock::now() + std::chrono::seconds(150);
     while (Clock::now() < deadline) {
+      require(!drainDeadline || Clock::now() < *drainDeadline, "Input drain exceeded its inherited deadline");
       QCoreApplication::processEvents();
       if (changed.exchange(false, std::memory_order_acq_rel)) {
         auto update = client.takeUpdate();
@@ -197,8 +221,40 @@ int main(int argc, char **argv)
           observationId = observationRequest = 0;
         }
       }
+      if (auto update = client.takeInputDrainUpdate()) {
+        if (!drainCommandId) {
+          require(
+              completedDrainRequest && update->request == completedDrainRequest && !update->segment &&
+                  !update->error.empty() && (!retainedDrain || !retainedDrain->live()),
+              "Unexpected unsolicited input drain update"
+          );
+        } else {
+          require(update->request == drainRequest, "Wrong input drain reply");
+          QJsonObject reply{
+              {"event", "drained"},
+              {"id", number(drainCommandId)},
+              {"clientRequest", QString::number(update->request)},
+              {"error", QString::fromStdString(update->error)},
+              {"originalDeliveryAuthority", false}
+          };
+          if (update->segment) {
+            retainedDrain = std::move(update->segment);
+            retainedDrainDeadline = drainDeadline;
+            reply.insert("live", retainedDrain->live());
+            reply.insert("snapshot", snapshot(retainedDrain->snapshot()));
+            reply.insert("cutoff", cutoff(retainedDrain->binding()));
+            reply.insert("orderingLimitation", QString::fromUtf8(retainedDrain->orderingLimitation()));
+          } else {
+            reply.insert("live", false);
+          }
+          output(std::move(reply));
+          completedDrainRequest = drainRequest;
+          drainCommandId = drainRequest = 0;
+          drainDeadline.reset();
+        }
+      }
       if (adopted) {
-        bool pong = false, disconnected = false;
+        bool pong = false, disconnected = false, deviceInvalidated = false;
         ei_dispatch(input.context);
         while (auto *event = ei_get_event(input.context)) {
           auto *device = ei_event_get_device(event);
@@ -228,6 +284,8 @@ int main(int argc, char **argv)
             break;
           case EI_EVENT_DEVICE_PAUSED:
           case EI_EVENT_DEVICE_REMOVED:
+            if (device == input.pointer || device == input.keyboard)
+              deviceInvalidated = true;
             if (device == input.pointer)
               input.pointerReady = false;
             if (device == input.keyboard)
@@ -248,9 +306,19 @@ int main(int argc, char **argv)
         // A final synthetic PONG accompanying DISCONNECT must never pass.
         require(!disconnected && client.live(), "Owned production EIS session disconnected");
         if (pong) {
-          require(input.pointerReady && input.keyboardReady, "EIS device revoked before PONG");
+          require(!deviceInvalidated && input.pointerReady && input.keyboardReady, "EIS device revoked before PONG");
           input.pending = ei_ping_unref(input.pending);
-          output({{"event", "synced"}, {"id", number(pingId)}});
+          if (pendingDrain) {
+            // No new EI submission is accepted until this command completes.
+            // The synthetic fixture correlation proves only the lower native
+            // segments; it is not a production Core cutoff or delivery permit.
+            require(Clock::now() < pendingDrain->deadline, "Drain deadline expired before the complete PONG batch");
+            drainRequest = client.requestInputDrain(*pendingDrain);
+            require(drainRequest, "Production input drain request rejected as busy/unavailable");
+            pendingDrain.reset();
+          } else {
+            output({{"event", "synced"}, {"id", number(pingId)}});
+          }
           pingId = 0;
         }
         if (!announced && input.connected && input.pointerReady && input.keyboardReady) {
@@ -298,12 +366,15 @@ int main(int argc, char **argv)
         require(error.error == QJsonParseError::NoError && document.isObject(), "Malformed fixture command");
         const auto command = document.object();
         const auto id = integer(command, "id");
-        require(id > lastId && !observationId && !input.pending, "Unordered/concurrent fixture command");
+        require(
+            id > lastId && !observationId && !input.pending && !drainCommandId, "Unordered/concurrent fixture command"
+        );
         lastId = id;
         const auto operation = command.value("op").toString();
         const QSet<QString> allowed = operation == "move"     ? QSet<QString>{"id", "op", "x", "y"}
                                       : operation == "scroll" ? QSet<QString>{"id", "op", "dx", "dy"}
                                       : operation == "key"    ? QSet<QString>{"id", "op", "code"}
+                                      : operation == "drain"  ? QSet<QString>{"id", "op", "generation", "connection"}
                                                               : QSet<QString>{"id", "op"};
         for (auto it = command.begin(); it != command.end(); ++it)
           require(allowed.contains(it.key()), "Unknown fixture command field");
@@ -323,8 +394,45 @@ int main(int argc, char **argv)
           output({{"event", "retained"}, {"id", number(id)}, {"live", retained && retained->live()}});
           continue;
         }
+        if (operation == "drain-retained") {
+          require(retainedDrain && retainedDrainDeadline, "No native drain segment was retained");
+          output(
+              {{"event", "drain-retained"},
+               {"id", number(id)},
+               {"live", retainedDrain->live()},
+               {"remainingMs",
+                static_cast<qint64>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(*retainedDrainDeadline - Clock::now()).count()
+                )}}
+          );
+          continue;
+        }
         require(input.pointerReady && input.keyboardReady, "EIS devices are not ready");
-        if (operation == "move") {
+        if (operation == "drain") {
+          require(retained.has_value(), "Input drain requires a retained painted snapshot");
+          const auto &observed = retained->snapshot();
+          const auto &paint = observed.paint;
+          InputCutoffBinding binding{
+              id,
+              1,
+              {1, id, 1},
+              {{paint.session, paint.epoch},
+               integer(command, "generation"),
+               paint.focusRequest,
+               paint.focusRevision,
+               paint.geometry,
+               ForwardingScope::All},
+              integer(command, "connection")
+          };
+          require(validInputCutoffBinding(binding), "Invalid fixture cutoff binding");
+          pendingDrain = GnomeProviderClient::InputDrainRequest{
+              binding,
+              {binding.capture.epoch, binding.capture.sequence, observed.desktopX, observed.desktopY},
+              Clock::now() + inputCutoffMaximumLifetime
+          };
+          drainDeadline = pendingDrain->deadline;
+          drainCommandId = id;
+        } else if (operation == "move") {
           const auto x = command.value("x"), y = command.value("y");
           require(
               x.isDouble() && y.isDouble() && std::isfinite(x.toDouble()) && std::isfinite(y.toDouble()) &&

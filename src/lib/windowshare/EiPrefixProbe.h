@@ -32,11 +32,32 @@ public:
 
   bool begin(std::uint64_t pingId, Instant at, bool ownedSender) noexcept
   {
-    if (m_state != State::Idle || !ownedSender || !pingId || at > Instant::max() - lifetime)
+    if (at > Instant::max() - lifetime)
       return false;
+    return begin(pingId, pingId, at, at + lifetime, ownedSender);
+  }
+
+  bool begin(std::uint64_t request, std::uint64_t pingId, Instant at, Instant deadline, bool ownedSender) noexcept
+  {
+    if (m_state != State::Idle || !ownedSender || !pingId || !request || request <= m_requestHighWater ||
+        at > Instant::max() - lifetime || deadline <= at || deadline > at + lifetime)
+      return false;
+    m_request = m_requestHighWater = request;
     m_id = pingId;
-    m_deadline = at + lifetime;
+    m_deadline = deadline;
     m_state = State::AwaitingPong;
+    return true;
+  }
+
+  // Exact cancellation/resume retires this bounded transaction. New requests
+  // on the same native connection cannot reuse a prior request identity.
+  bool retire(std::uint64_t request) noexcept
+  {
+    if (!request || request != m_request)
+      return false;
+    m_state = State::Idle;
+    m_request = m_id = 0;
+    m_deadline = {};
     return true;
   }
 
@@ -103,12 +124,14 @@ public:
   {
     m_state = State::Idle;
     m_id = 0;
+    m_request = m_requestHighWater = 0;
     m_deadline = {};
   }
 
 private:
   State m_state = State::Idle;
   std::uint64_t m_id = 0;
+  std::uint64_t m_request = 0, m_requestHighWater = 0;
   Instant m_deadline{};
 };
 

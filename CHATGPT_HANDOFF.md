@@ -11,6 +11,10 @@ and roadmap; the newest entries in `WORK_STATE.md` and `TESTING.md` identify the
 current implementation and evidence. The cloud has implemented private protocol
 v4 with explicit full-input scope and asynchronous Server preparation. Neither
 those contracts nor the GNOME/Qt observations enable original-input delivery.
+The local continuation now adds negotiated Core cutoff/PONG/resume components
+and a separate exact-fenced GNOME/Qt input-drain segment. See P2 below and the
+newest `TESTING.md` entry for its final validation. The Core-to-provider
+coordinator and verified Mutter sender-ordering prerequisite remain missing.
 
 ## Assignment and division of work
 
@@ -201,10 +205,20 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
 
 ### P2 — Native old-input drain and exact routed-point validation
 
-- [ ] Introduce negotiated, bounded request/receipt types for an exact old-input
-  cutoff and for `ValidateRoutedPoint`. Bind them to the actual authenticated
-  Core connection, capture stamp, native session/device/layout lifetime, Viewer,
-  full forwarding binding and one monotonic request deadline.
+- [x] Introduce negotiated, bounded Core cutoff and exact resume messages,
+  retaining the authenticated peer, capture stamp, full forwarding binding,
+  Viewer connection and one monotonic deadline. `IPC1` is separate from input
+  sequence tracing; `DICQ`/`DICX` and `CICR` cannot enable an unacknowledged peer.
+- [x] Connect the requested Core prefix to the real EI sender on its owner
+  thread, flush prior compressed motion, refuse held native keys/buttons, and
+  observe PONG only after its complete batch. Session/device loss revokes it.
+- [x] Implement the separate provider `DrainInputPrefix` and Qt `input-drain`
+  segment with exact correlation, inherited deadline, a nonrecursive empty
+  Clutter queue and later completed frame, two default-queue Qt syncs, QPA
+  dispatch and exact All-fence checks. Resume revokes pending/retained receipts.
+- [ ] Connect those segments to the **same frozen Server point and retained
+  preparation lease**, verifying Mutter's compiled sender-ordering guarantee.
+  The fixture's synthetic Core fields are not a production coordinator.
 - [ ] Fence new legacy key/button/wheel acquisition, explicitly release old
   owners, and establish backend → compositor → Qt consumption ordering while
   the full forwarding gate remains closed. Keep explicitly permitted cursor
@@ -222,30 +236,35 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
 - [ ] Keep unsupported compositor/API/device/layout states unavailable rather
   than using guessed coordinates or a generic Wayland fallback.
 
-**GNOME/Qt research leads — proposals requiring validation, not proven barriers:**
+**GNOME/Qt implementation boundaries — segments are not delivery authority:**
 
 1. An EI ping after the old prefix may establish one sender/native-thread
    boundary. Process the entire returned batch: PONG followed by disconnect in
-   the same batch must not succeed. `EiComputer` now has a connection-time
-   PONG diagnostic; it must become a request for the exact frozen prefix.
+   the same batch must not succeed. `EiComputer` now accepts a requested cutoff
+   bound to the frozen capture stamp; the former connection-time ping is gone.
    PONG alone does not prove compositor dispatch. Verify the supported Mutter
    build's libeis event-reference ordering, not just sender API availability.
-2. A provider operation may combine an empty Clutter input queue with a genuinely
-   later completed stage update. A single `before-update`/`after-update` pair is
+2. The provider operation combines an empty Clutter input queue at a GLib idle
+   with main depth exactly one, then a genuinely later completed stage update.
+   A single arbitrary `before-update`/`after-update` pair is
    insufficient: `before-update` is emitted after stage event draining, and that
    drain detaches its queue before callbacks. Request arrival during reentrant
-   dispatch must be tested. A conservative additional same-view frame cycle is
-   a candidate, not an established proof. Check required APIs at runtime.
-3. After the provider boundary, bind the implemented two asynchronous
+   dispatch must be refused. The new operation ignores a frame begun before
+   the empty-queue checkpoint and checks required APIs at runtime. It still
+   reports `mutter-eis-sync-build-unverified` rather than a total prefix permit.
+3. After the provider boundary, the distinct input-drain operation binds two asynchronous
    `wl_display_sync` callbacks on Qt's **existing default input queue** to the
    exact full forwarding fence. Qt may schedule a deferred-focus sync while
    processing old input; nested dispatch may retain an older handler on stack.
-   Drain QPA window-system events on the GUI thread with the full gate closed
-   and revalidate before reply. `sendWindowSystemEvents`' boolean means whether
+   It tracks GUI input notification and native-handler depth, drains QPA
+   window-system events with the full gate closed and revalidates before reply.
+   `sendWindowSystemEvents`' boolean means whether
    it sent events, not proof of success. No blocking roundtrip/new connection.
 4. Explicit releases must stop key-repeat ownership. Asynchronous IME work can
-   outlive a Wayland fence; explicitly disable/reject unsupported Viewer input-
-   method acceptance or implement and prove its drain as a separate boundary.
+   outlive a Wayland fence. The operation currently accepts only a null input
+   context or the pinned built-in QtWayland context with input methods disabled;
+   context replacement/destruction and other plugins deny. An implementation
+   that supports more contexts needs a separately proven drain for them.
 
 Primary sources to recheck for supported versions: Mutter 50.1
 `src/backends/meta-eis.c`, `meta-eis-client.c`, RemoteDesktop session code and

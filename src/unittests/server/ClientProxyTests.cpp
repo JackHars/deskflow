@@ -19,6 +19,7 @@
 #include "server/ClientProxy1_8.h"
 
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <string>
@@ -61,6 +62,9 @@ public:
   void write(const void *buffer, uint32_t n) override
   {
     m_buffer.append(static_cast<const char *>(buffer), n);
+    const auto callback = onWrite;
+    if (callback)
+      callback(std::string_view(static_cast<const char *>(buffer), n));
   }
 
   void close() override
@@ -110,6 +114,11 @@ public:
   {
     return identity ? identity->ticket() : std::nullopt;
   }
+  std::optional<PeerFingerprint> authenticatedPeerFingerprint() const override
+  {
+    const auto ticket = authenticatedPeerTicket();
+    return ticket ? std::optional(ticket->fingerprint()) : std::nullopt;
+  }
   void authenticate()
   {
     if (identity)
@@ -123,6 +132,7 @@ public:
   QByteArray incoming;
   bool closed = false;
   std::unique_ptr<deskflow::AuthenticatedPeerIssuer> identity;
+  std::function<void(std::string_view)> onWrite;
 
 private:
   QByteArray m_buffer;
@@ -281,6 +291,27 @@ struct TraceFixture
     const auto generation = advertise();
     receive({"CISA" + integer(generation, 4)});
     return generation;
+  }
+  std::uint32_t negotiateCutoff()
+  {
+    const auto generation = proxy->requestInputCutoffCapability();
+    if (!generation)
+      throw std::runtime_error("Cutoff capability request denied");
+    proxy->setOptions({kOptionInputCutoff, *generation});
+    take();
+    receive({"CICA" + integer(*generation, 4)});
+    return *generation;
+  }
+  std::optional<InputCutoffBinding> startCutoff()
+  {
+    return proxy->startInputCutoff(
+        {31, 401, 1}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17,
+        InputCutoffClock::now() + std::chrono::milliseconds(200)
+    );
+  }
+  void cutoffReceipt(const InputCutoffBinding &binding, InputCutoffState state)
+  {
+    receive({QByteArray::fromStdString(encodeInputCutoffReceipt({binding, state}))});
   }
   void receipt(
       std::uint32_t generation, std::uint64_t sequence, InputSequenceOutcome outcome = InputSequenceOutcome::Submitted,
@@ -730,6 +761,202 @@ void ClientProxyTests::inputSequence_callbackMayResetOrDestroy()
       test.take();
       test.proxy->mouseUp(1);
       QCOMPARE(test.take().front(), "DMUP" + QByteArray::fromHex("01"));
+    }
+  }
+}
+
+void ClientProxyTests::inputCutoff_requiresNegotiationAndRetainsBinding()
+{
+  for (int minor : {0, 6, 7, 8}) {
+    for (bool authenticated : {false, true}) {
+      TraceFixture f(minor, authenticated);
+      QCOMPARE(f.proxy->getStream()->authenticatedPeerFingerprint(), f.stream->authenticatedPeerFingerprint());
+      const bool supported = traceBuilt && minor == 8 && authenticated;
+      QVERIFY(!f.startCutoff());
+      const auto generation = f.proxy->requestInputCutoffCapability();
+      QCOMPARE(generation.has_value(), supported);
+      if (!supported) {
+        f.proxy->mouseUp(1);
+        QCOMPARE(f.take().front(), "DMUP" + QByteArray::fromHex("01"));
+        continue;
+      }
+      f.proxy->setOptions({kOptionInputCutoff, *generation});
+      f.take();
+      QVERIFY(!f.startCutoff()); // Ordinary options do not prove peer support.
+      f.receive({"CICA" + integer(*generation, 4)});
+      const auto binding = f.startCutoff();
+      QVERIFY(binding);
+      const auto packets = f.take();
+      QCOMPARE(packets.size(), 1u);
+      const auto request =
+          decodeInputCutoffRequest(std::string_view(packets[0].constData() + 4, packets[0].size() - 4));
+      QVERIFY(request && request->binding == *binding && request->remainingMs > 0 && request->remainingMs <= 200);
+      QCOMPARE(binding->coreConnectionGeneration, *generation);
+      QVERIFY(!f.startCutoff()); // Only one pending or frozen cutoff.
+      f.cutoffReceipt(*binding, InputCutoffState::BackendObserved);
+      QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::BackendObserved);
+      auto wrong = *binding;
+      ++wrong.viewerConnection;
+      QVERIFY(!f.proxy->resumeInputCutoff(wrong));
+      QCOMPARE(f.proxy->inputCutoffState(wrong), InputCutoffState::Denied);
+      QVERIFY(f.proxy->resumeInputCutoff(*binding));
+      QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+      QVERIFY(!f.startCutoff()); // Ordered write is not yet an exact Resumed receipt.
+      f.take();
+      f.cutoffReceipt(*binding, InputCutoffState::BackendObserved); // Late PONG is obsolete after resume starts.
+      QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+      f.cutoffReceipt(*binding, InputCutoffState::Resumed);
+      QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Resumed);
+      const auto newer = f.startCutoff();
+      QVERIFY(newer && newer->request > binding->request);
+      f.cutoffReceipt(*binding, InputCutoffState::BackendObserved);
+      QCOMPARE(f.proxy->inputCutoffState(*newer), InputCutoffState::Pending);
+      QVERIFY(!f.stream->closed);
+      f.proxy->resetOptions();
+      f.take();
+      f.receive({"CICA" + integer(*generation, 4)});
+      QVERIFY(!f.stream->closed);
+      QVERIFY(!f.startCutoff());
+      const auto replacement = f.proxy->requestInputCutoffCapability();
+      QVERIFY(replacement && *replacement > *generation);
+      f.proxy->setOptions({kOptionInputCutoff, *replacement});
+      f.take();
+      f.receive({"CICA" + integer(*generation, 4)});
+      QVERIFY(!f.startCutoff()); // Old ACK cannot acknowledge this new capability.
+      f.receive({"CICA" + integer(*replacement, 4)});
+      QVERIFY(f.startCutoff());
+    }
+  }
+}
+
+void ClientProxyTests::inputCutoff_resumesBeforeEveryLegacyWriter()
+{
+  if (!traceBuilt)
+    QSKIP("Input cutoff is disabled in this build");
+  const std::vector<std::function<void(ClientProxy &)>> writes{
+      [](auto &p) { p.keyDown(kKey, kMask, kButton, kLang); },
+      [](auto &p) { p.keyRepeat(kKey, kMask, 2, kButton, kLang); },
+      [](auto &p) { p.keyUp(kKey, kMask, kButton); },
+      [](auto &p) { p.mouseDown(1); },
+      [](auto &p) { p.mouseUp(1); },
+      [](auto &p) { p.mouseMove(10, 20); },
+      [](auto &p) { p.mouseRelativeMove(1, 2); },
+      [](auto &p) { p.mouseWheel(1, 2); },
+      [](auto &p) { p.enter(1, 2, 3, 0, false); },
+      [](auto &p) { p.leave(); },
+      [](auto &p) { p.screensaver(true); },
+      [](auto &p) { p.setOptions({kOptionHeartbeat, 2000}); },
+      [](auto &p) { p.resetOptions(); }
+  };
+  for (const auto &write : writes) {
+    TraceFixture f;
+    f.negotiateCutoff();
+    const auto binding = f.startCutoff();
+    QVERIFY(binding);
+    f.take();
+    f.cutoffReceipt(*binding, InputCutoffState::BackendObserved);
+    write(*f.proxy);
+    const auto packets = f.take();
+    QVERIFY(packets.size() >= 2);
+    QCOMPARE(packets[0], QByteArray::fromStdString(encodeInputCutoffResume(*binding)));
+    QVERIFY(!packets[1].startsWith("DICX"));
+    QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+    f.cutoffReceipt(*binding, InputCutoffState::Resumed);
+    QVERIFY(!f.stream->closed);
+  }
+}
+
+void ClientProxyTests::inputCutoff_deadlineAndConnectionRevocation()
+{
+  if (!traceBuilt)
+    QSKIP("Input cutoff is disabled in this build");
+  {
+    TraceFixture f;
+    f.negotiateCutoff();
+    const auto binding = f.startCutoff();
+    QVERIFY(binding);
+    f.take();
+    f.proxy->m_cutoff->deadline = InputCutoffClock::now();
+    f.cutoffReceipt(*binding, InputCutoffState::BackendObserved);
+    QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+    QCOMPARE(f.take().front(), QByteArray::fromStdString(encodeInputCutoffResume(*binding)));
+    f.cutoffReceipt(*binding, InputCutoffState::Resumed);
+    QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Resumed);
+  }
+  for (bool replacement : {false, true}) {
+    TraceFixture f;
+    f.negotiateCutoff();
+    const auto binding = f.startCutoff();
+    QVERIFY(binding);
+    f.take();
+    f.cutoffReceipt(*binding, InputCutoffState::BackendObserved);
+    if (replacement)
+      f.stream->authenticate();
+    else
+      f.stream->identity->revoke();
+    QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+    QVERIFY(!f.startCutoff());
+    f.cutoffReceipt(*binding, InputCutoffState::Resumed);
+    QVERIFY(f.stream->closed);
+  }
+}
+
+void ClientProxyTests::inputCutoff_rejectsWrongAndMalformedReceipts()
+{
+  if (!traceBuilt)
+    QSKIP("Input cutoff is disabled in this build");
+  for (int change = 0; change < 5; ++change) {
+    TraceFixture f;
+    f.negotiateCutoff();
+    const auto binding = f.startCutoff();
+    QVERIFY(binding);
+    auto wrong = *binding;
+    if (change == 0)
+      ++wrong.request;
+    if (change == 1)
+      ++wrong.capture.sequence;
+    if (change == 2)
+      ++wrong.forwarding.geometry;
+    if (change == 3)
+      ++wrong.viewerConnection;
+    auto bytes = encodeInputCutoffReceipt({wrong, InputCutoffState::BackendObserved});
+    if (change == 4)
+      bytes.resize(4); // Must not borrow body from the following packet.
+    f.receive({QByteArray::fromStdString(bytes), "CNOP"});
+    QVERIFY(f.stream->closed);
+    QCOMPARE(f.proxy->inputCutoffState(*binding), InputCutoffState::Denied);
+  }
+}
+
+void ClientProxyTests::inputCutoff_callbackMayDestroyDuringOptions()
+{
+  if (!traceBuilt)
+    QSKIP("Input cutoff is disabled in this build");
+  for (bool duringResume : {true, false}) {
+    for (int operation = 0; operation < 3; ++operation) {
+      TraceFixture f;
+      f.negotiateCutoff();
+      const auto binding = f.startCutoff();
+      QVERIFY(binding);
+      f.take();
+      std::vector<std::string> writes;
+      f.stream->onWrite = [&](std::string_view bytes) {
+        if (!bytes.starts_with("DICX") && !bytes.starts_with("DSOP") && !bytes.starts_with("CROP"))
+          return; // PacketStreamFilter writes its length separately.
+        writes.emplace_back(bytes);
+        if (bytes.starts_with("DICX") == duringResume)
+          f.proxy.reset();
+      };
+      if (operation == 0)
+        f.proxy->resetOptions();
+      else if (operation == 1)
+        f.proxy->setOptions({kOptionInputCutoff, 0, kOptionHeartbeat, 2000});
+      else
+        f.proxy->setOptions({kOptionHeartbeat, 2000});
+      QVERIFY(!f.proxy);
+      QCOMPARE(writes.size(), duringResume ? 1u : 2u);
+      QCOMPARE(writes.front(), encodeInputCutoffResume(*binding));
+      QCOMPARE(f.events.disconnections, 0u);
     }
   }
 }

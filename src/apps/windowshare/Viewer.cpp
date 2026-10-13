@@ -316,7 +316,10 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
       fail(QStringLiteral("Video decoder recovery timed out; returning the source window"));
   });
   connect(&m_focusTimeout, &QTimer::timeout, this, [this] {
+    const QPointer<Viewer> guard(this);
     releaseInput(KeyboardRouteReason::Timeout);
+    if (!guard)
+      return;
     if (onError)
       onError(QStringLiteral("The Mac did not acknowledge window focus; pending input was released"));
   });
@@ -357,6 +360,7 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
 Viewer::~Viewer()
 {
   onViewportInvalidated = {};
+  onForwardingFenceChanged = {};
   invalidateViewport();
 #ifdef WINDOWSHARE_X11
   m_x11Observer.reset();
@@ -406,7 +410,10 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
       return;
     }
     m_decodeGeneration->fetch_add(1);
+    const QPointer<Viewer> guard(this);
     releaseInput(KeyboardRouteReason::GeometryChanged);
+    if (!guard)
+      return;
   }
   m_geometry = geometry;
   m_source = QSizeF(sourceWidth, sourceHeight);
@@ -499,13 +506,16 @@ void Viewer::beginVideoRecovery()
 
 void Viewer::requestVideoRecoveryWhenDrained()
 {
-  if (!m_videoRecovering || m_videoRecoveryRequestSent || m_pendingFrames != 0 || !m_connected ||
-      m_returned || m_failed || m_videoRecoveryTimeout.isActive() == false)
+  if (!m_videoRecovering || m_videoRecoveryRequestSent || m_pendingFrames != 0 || !m_connected || m_returned ||
+      m_failed || m_videoRecoveryTimeout.isActive() == false)
     return;
   m_videoRecoveryRequestSent = true; // Before callback reentry.
   ++m_mediaRecoverySequence;
-  send(MessageType::Input, { {"kind", "video-recovery"}, {"geometry", jsonNumber(m_geometry)},
-                             {"request", jsonNumber(m_mediaRecoverySequence)} });
+  send(
+      MessageType::Input, {{"kind", "video-recovery"},
+                           {"geometry", jsonNumber(m_geometry)},
+                           {"request", jsonNumber(m_mediaRecoverySequence)}}
+  );
 }
 
 void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
@@ -521,9 +531,9 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
     // Once old queued work is drained, accept only one independently decodable
     // SPS/PPS/IDR. No interframe is ever forwarded into a reset FFmpeg context.
     if (!m_videoRecoveryRequestSent || m_pendingFrames ||
-        !decoderSyncAccessUnit(std::span(
-            reinterpret_cast<const std::uint8_t *>(accessUnit.constData()), std::size_t(accessUnit.size())
-        )))
+        !decoderSyncAccessUnit(
+            std::span(reinterpret_cast<const std::uint8_t *>(accessUnit.constData()), std::size_t(accessUnit.size()))
+        ))
       return;
     m_videoRecoveryFrameQueued = true;
     resetDecoder = true;
@@ -557,8 +567,8 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
           return;
         QMetaObject::invokeMethod(
             target,
-            [target, result = std::move(result), generation, capturedGeneration, resetDecoder,
-             size = accessUnit.size(), geometry]() mutable {
+            [target, result = std::move(result), generation, capturedGeneration, resetDecoder, size = accessUnit.size(),
+             geometry]() mutable {
               if (!target)
                 return;
               auto *self = target.data();
@@ -570,8 +580,8 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
                 if (!guard)
                   return;
               }
-              if (!result || generation->load(std::memory_order_acquire) != capturedGeneration ||
-                  !self->m_connected || self->m_returned || self->m_failed || geometry != self->m_geometry)
+              if (!result || generation->load(std::memory_order_acquire) != capturedGeneration || !self->m_connected ||
+                  self->m_returned || self->m_failed || geometry != self->m_geometry)
                 return;
               if (!result->error.isEmpty()) {
                 if (++self->m_decodeErrors >= 3)
@@ -648,6 +658,11 @@ bool Viewer::currentKeyboardRoute(const KeyboardRouteBinding &binding) const
          binding.owner == Owner{m_session, m_epoch} && binding.focusRequest == m_focusRequest &&
          binding.focusRevision == m_focusRevision && binding.geometry == m_geometry;
 }
+bool Viewer::allForwardingFenced(const KeyboardRouteBinding &binding) const
+{
+  return validKeyboardRouteBinding(binding) && binding.scope == ForwardingScope::All && m_keyboardBindingValid &&
+         !m_keyboardRouteHandling && m_keyboardBinding == binding && currentKeyboardRoute(binding);
+}
 
 bool Viewer::fencesPointer() const
 {
@@ -710,6 +725,12 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
     }
     reply.result = KeyboardRouteResult::Ready;
     const QPointer<Viewer> guard(this);
+    m_keyboardBindingValid = false;
+    const auto changed = onForwardingFenceChanged;
+    if (changed)
+      changed();
+    if (!guard)
+      return;
     // The acknowledgement precedes any newly forwarded input on the same stream.
     // An invalidated binding remains resumable by its exact host request.
     if (sendKeyboardRoute(reply) && guard && m_keyboardBinding == binding) {
@@ -740,6 +761,11 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
     // callback. Pending pointer events cannot escape a full-input handoff.
     m_keyboardBinding = binding;
     m_keyboardBindingValid = true;
+    const auto changed = onForwardingFenceChanged;
+    if (changed)
+      changed();
+    if (!guard)
+      return;
     quiesceKeyboard();
   }
   if (!guard || !m_connected || m_keyboardBinding != binding || !m_keyboardBindingValid ||
@@ -788,6 +814,12 @@ void Viewer::invalidateKeyboardRoute(KeyboardRouteReason reason)
     return;
   const auto binding = *m_keyboardBinding;
   m_keyboardBindingValid = false;
+  const QPointer<Viewer> guard(this);
+  const auto changed = onForwardingFenceChanged;
+  if (changed)
+    changed();
+  if (!guard)
+    return;
   if (m_connected)
     sendKeyboardRoute(
         {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None, reason}
@@ -800,7 +832,10 @@ void Viewer::disconnected()
   // attempted after the channel callback or its capture has been destroyed.
   m_connected = false;
   m_videoRecoveryTimeout.stop();
+  const QPointer<Viewer> guard(this);
   releaseInput(KeyboardRouteReason::Disconnected);
+  if (!guard)
+    return;
   m_resizeDebounce.stop();
   m_resizeTimeout.stop();
   m_error = QStringLiteral("Disconnected — restoring this window on the Mac");
@@ -877,11 +912,15 @@ bool Viewer::event(QEvent *event)
     m_decodeThread.setPriority(QThread::NormalPriority);
     requestFocus();
     break;
-  case QEvent::WindowDeactivate:
+  case QEvent::WindowDeactivate: {
     m_localActive = false;
+    const QPointer<Viewer> guard(this);
     releaseInput();
+    if (!guard)
+      return true;
     m_decodeThread.setPriority(QThread::LowPriority);
     break;
+  }
   case QEvent::WindowStateChange:
     if (isMinimized()) {
       m_localActive = false;
@@ -1007,14 +1046,16 @@ void Viewer::focusInEvent(QFocusEvent *event)
 void Viewer::focusOutEvent(QFocusEvent *event)
 {
   m_localActive = false;
+  const QPointer<Viewer> guard(this);
   releaseInput();
+  if (!guard)
+    return;
   QWidget::focusOutEvent(event);
 }
 
 bool Viewer::acceptsLocalInput() const
 {
-  return m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint && !m_videoRecovering &&
-         !m_videoPaused &&
+  return m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint && !m_videoRecovering && !m_videoPaused &&
          m_readySent && m_committed && m_localActive && !m_resizing && !isMinimized() &&
          m_paintedGeometry == m_geometry;
 }
@@ -1110,7 +1151,10 @@ void Viewer::queueInput(QJsonObject input)
   } else if (m_pendingInputs.size() < maxPendingInput) {
     m_pendingInputs.push_back(std::move(input));
   } else {
+    const QPointer<Viewer> guard(this);
     releaseInput(KeyboardRouteReason::Failed);
+    if (!guard)
+      return;
     if (onError)
       onError(QStringLiteral("Too much input arrived before focus was acknowledged; input was released"));
     return;
@@ -1351,7 +1395,10 @@ void Viewer::resizeEvent(QResizeEvent *event)
 
 void Viewer::scheduleResize()
 {
+  const QPointer<Viewer> guard(this);
   releaseInput(KeyboardRouteReason::GeometryChanged);
+  if (!guard)
+    return;
   m_resizing = true;
   m_resizeDebounce.start(150);
 }
@@ -1373,7 +1420,10 @@ void Viewer::sendVisibility(bool visible)
 void Viewer::closeEvent(QCloseEvent *event)
 {
   if (!m_returned) {
+    const QPointer<Viewer> guard(this);
     releaseInput(KeyboardRouteReason::Returned);
+    if (!guard)
+      return;
     m_resizeDebounce.stop();
     m_resizeTimeout.stop();
     m_videoRecoveryTimeout.stop();
@@ -1392,7 +1442,10 @@ void Viewer::fail(const QString &message)
 {
   if (m_failed)
     return;
+  const QPointer<Viewer> guard(this);
   releaseInput(KeyboardRouteReason::Failed);
+  if (!guard)
+    return;
   m_failed = true;
   m_error = message;
   m_resizeDebounce.stop();

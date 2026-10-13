@@ -23,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 struct ei;
@@ -60,6 +61,11 @@ public:
   );
 #endif
   ~EiComputer() override;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputCutoff(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point) override;
+  windowshare::InputCutoffState inputCutoffState(const windowshare::InputCutoffBinding &) override;
+  bool resumeInputCutoff(const windowshare::InputCutoffBinding &) override;
+#endif
 
   // IComputer overrides
   void *getEventTarget() const final;
@@ -155,13 +161,15 @@ private:
   void handleGnomeProviderChanged();
   void stopGnomeProvider(const char *reason);
 #ifdef DESKFLOW_GNOME_EI_PING
-  void beginGnomeEiPrefixObservation();
+  bool
+  beginGnomeEiPrefixObservation(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point);
   void retireGnomeEiPing();
   void cancelGnomeEiPrefixObservation();
 #endif
 #endif
   void ensureEmulating() const;
   bool inputSessionLive() const noexcept;
+  bool allowLegacyInput() const noexcept;
   void stopEmulating() const;
   void cancelIdleEmulationTimer() const;
   void updatePortalGlobalShortcuts();
@@ -239,9 +247,16 @@ private:
 #ifdef DESKFLOW_GNOME_EI_PING
   // Only a bounded sender-EIS event-batch diagnostic, NEVER native/Qt drain
   // authority. Owned by the same core event thread that calls ei_dispatch.
-  windowshare::EiPrefixProbe m_gnomePrefixProbe;
+  mutable windowshare::EiPrefixProbe m_gnomePrefixProbe;
+  std::optional<windowshare::InputCutoffBinding> m_gnomePrefixBinding;
   struct ei_ping *m_gnomePrefixPing = nullptr;
   EventQueueTimer *m_gnomePrefixTimer = nullptr;
+  const std::thread::id m_gnomePrefixThread = std::this_thread::get_id();
+  // Track actual sender API presses, independently of translated key state.
+  // Unknown key-code ranges conservatively deny observation until teardown.
+  mutable std::bitset<65536> m_gnomeSubmittedKeys;
+  mutable std::bitset<256> m_gnomeSubmittedButtons;
+  mutable bool m_gnomeUntrackedInput = false;
 #endif
 #endif
 

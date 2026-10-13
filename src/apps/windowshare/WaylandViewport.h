@@ -3,20 +3,42 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #pragma once
-#include <QObject>
+#include <QApplication>
+#include <QDeadlineTimer>
 #include <QMetaObject>
-#include <QPointer>
+#include <QObject>
 #include <QPointF>
-#include <QTimer>
+#include <QPointer>
 #include <QSizeF>
 #include <QString>
+#include <QTimer>
 #include <cstdint>
-#include <optional>
 #include <functional>
+#include <memory>
+#include <optional>
 class QWindow;
 struct wl_display;
 struct wl_callback;
 namespace deskflow::windowshare {
+// The experimental viewer owns its QApplication. Input notifications are
+// counted before application/object filters, including nested processEvents.
+// Native QPA tracking is separately opted in only for its private GNOME
+// endpoint, and never replaces another component's event handler.
+class ViewerApplication final : public QApplication
+{
+public:
+  ViewerApplication(int &argc, char **argv);
+  ~ViewerApplication() override;
+  bool enableInputDrainDispatch();
+  bool inputDispatchIdle() const noexcept;
+  bool ownsInputDrainDispatch() const noexcept;
+  bool notify(QObject *receiver, QEvent *event) override;
+
+private:
+  struct Dispatch;
+  std::shared_ptr<Dispatch> m_dispatch;
+};
+
 struct WaylandViewportGeometry
 {
   quintptr surface = 0;
@@ -48,21 +70,32 @@ public:
   QtWaylandQueueWitness &operator=(const QtWaylandQueueWitness &) = delete;
 
   bool begin(QWindow *window, const WaylandViewportGeometry &expected, Completion completion);
+  bool beginInputDrain(
+      QWindow *window, const WaylandViewportGeometry &expected, QDeadlineTimer deadline,
+      std::function<bool()> exactFence, Completion completion
+  );
   void cancel() noexcept;
 
 private:
   bool issueSync();
-  bool current() const;
+  bool current();
+  bool beginQueue(QWindow *window, const WaylandViewportGeometry &expected, Completion completion);
   void finish(bool observed);
   static void syncDone(void *data, wl_callback *callback, std::uint32_t serial) noexcept;
 
   QPointer<QWindow> m_window;
+  QPointer<QObject> m_inputContext;
+  bool m_hadInputContext = false;
   WaylandViewportGeometry m_expected;
-  wl_display *m_display = nullptr; // Borrowed only during the native Qt lifetime.
+  wl_display *m_display = nullptr;   // Borrowed only during the native Qt lifetime.
   wl_callback *m_callback = nullptr; // Owned and destroyed on this GUI thread.
   QMetaObject::Connection m_windowGone;
   QTimer m_timeout;
   Completion m_completion;
+  std::shared_ptr<const int> m_operation;
+  std::function<bool()> m_exactFence;
+  QDeadlineTimer m_deadline;
+  bool m_inputDrain = false;
   unsigned m_phase = 0;
 };
 } // namespace deskflow::windowshare

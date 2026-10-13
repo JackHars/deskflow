@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "deskflow/InputCutoffProtocol.h"
 #include "deskflow/InputSequence.h"
 #include "io/AuthenticatedPeerTicket.h"
 #include "server/BaseClientProxy.h"
@@ -54,6 +55,16 @@ public:
   deskflow::IStream *getStream() const override;
 
   std::optional<std::uint32_t> requestInputSequenceTrace() override;
+  std::optional<std::uint32_t> requestInputCutoffCapability() override;
+  // Event-thread, one bounded transaction. Existing physical owners must be
+  // released first. Later legacy/control writes revoke this observation and
+  // send exact Resume before their bytes; fallback waits for exact Resumed.
+  std::optional<deskflow::windowshare::InputCutoffBinding> startInputCutoff(
+      deskflow::windowshare::OriginalInputStamp, const deskflow::windowshare::KeyboardRouteBinding &, std::uint64_t,
+      deskflow::windowshare::InputCutoffClock::time_point
+  ) override;
+  deskflow::windowshare::InputCutoffState inputCutoffState(const deskflow::windowshare::InputCutoffBinding &) override;
+  bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &) override;
 
   struct InputSequenceStatistics
   {
@@ -110,6 +121,9 @@ protected:
   void stopInputSequenceTrace() noexcept;
   void receiveInputSequenceAck(std::uint32_t generation);
   void receiveInputSequenceReceipt(const deskflow::windowshare::InputSequenceReceipt &receipt);
+  void receiveInputCutoffAck(std::uint32_t);
+  void receiveInputCutoffReceipt(const deskflow::windowshare::InputCutoffReceipt &);
+  void retireInputCutoffCapability();
   std::shared_ptr<const bool> proxyLifetime() const noexcept
   {
     return m_alive;
@@ -119,10 +133,13 @@ private:
   friend class ClientProxyTests;
   class InputStream;
   void writeInputPacket(const void *buffer, std::uint32_t size);
+  void writeControlPacket(const void *buffer, std::uint32_t size);
   bool inputSequenceTlsLive() const;
+  bool inputCutoffTlsLive() const;
 
   deskflow::IStream *m_stream;
   std::unique_ptr<InputStream> m_inputStream;
+  std::unique_ptr<InputStream> m_controlStream;
   std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
   std::optional<deskflow::AuthenticatedPeerTicket> m_inputSequenceTicket;
   std::uint32_t m_inputSequenceIssued = 0, m_inputSequenceRequested = 0, m_inputSequenceGeneration = 0;
@@ -132,4 +149,16 @@ private:
       std::optional<deskflow::windowshare::InputSequenceToken>, deskflow::windowshare::inputSequenceMaximumOutstanding>
       m_inputSequencePending;
   InputSequenceStatistics m_inputSequenceStatistics;
+  struct Cutoff
+  {
+    deskflow::windowshare::InputCutoffBinding binding;
+    deskflow::windowshare::InputCutoffClock::time_point deadline;
+    deskflow::windowshare::InputCutoffState state = deskflow::windowshare::InputCutoffState::Pending;
+    bool resuming = false;
+  };
+  std::optional<Cutoff> m_cutoff;
+  std::optional<deskflow::windowshare::InputCutoffBinding> m_retiredCutoff;
+  std::optional<deskflow::AuthenticatedPeerTicket> m_cutoffTicket;
+  std::uint32_t m_cutoffGeneration = 0, m_cutoffRequested = 0, m_cutoffIssued = 0;
+  bool m_cutoffAcknowledged = false;
 };

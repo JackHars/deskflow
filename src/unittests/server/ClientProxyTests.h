@@ -36,6 +36,11 @@ private Q_SLOTS:
   void inputSequence_tlsRevocationAndReplacement();
   void inputSequence_counterExhaustion();
   void inputSequence_callbackMayResetOrDestroy();
+  void inputCutoff_requiresNegotiationAndRetainsBinding();
+  void inputCutoff_resumesBeforeEveryLegacyWriter();
+  void inputCutoff_deadlineAndConnectionRevocation();
+  void inputCutoff_rejectsWrongAndMalformedReceipts();
+  void inputCutoff_callbackMayDestroyDuringOptions();
 
 private:
   Log m_log;

@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include "windowshare/InputCutoff.h"
 
 #include "deskflow/IClient.h"
 
@@ -58,6 +59,25 @@ public:
   virtual std::optional<std::uint32_t> requestInputSequenceTrace()
   {
     return std::nullopt;
+  }
+  virtual std::optional<std::uint32_t> requestInputCutoffCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffBinding> startInputCutoff(
+      deskflow::windowshare::OriginalInputStamp, const deskflow::windowshare::KeyboardRouteBinding &, std::uint64_t,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return std::nullopt;
+  }
+  virtual deskflow::windowshare::InputCutoffState inputCutoffState(const deskflow::windowshare::InputCutoffBinding &)
+  {
+    return deskflow::windowshare::InputCutoffState::Denied;
+  }
+  virtual bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &)
+  {
+    return false;
   }
 
   //@}

@@ -14,6 +14,7 @@
 #include "deskflow/KeyTypes.h"
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "deskflow/InputCutoffProtocol.h"
 #include "deskflow/OptionTypes.h"
 #include "io/AuthenticatedPeerTicket.h"
 #endif
@@ -129,6 +130,12 @@ private:
   void setInputSequenceOptions(const OptionsList &options);
   void revokeInputSequence();
   bool inputSequenceConnectionLive() const;
+  void setInputCutoffOptions(const OptionsList &);
+  void inputCutoff(bool resume);
+  void pollInputCutoff();
+  void revokeInputCutoff();
+  void stopInputCutoffTimer();
+  bool inputCutoffConnectionLive() const;
 #endif
 
 private:
@@ -146,6 +153,22 @@ private:
   uint32_t m_messageBytes = 0;
   bool m_sequenceDispatching = false;
   bool m_sequenceProtocolFailed = false;
+  std::shared_ptr<bool> m_alive = std::make_shared<bool>(true);
+  struct Cutoff
+  {
+    deskflow::windowshare::InputCutoffBinding binding;
+    deskflow::windowshare::InputCutoffClock::time_point deadline;
+    bool backendStarted = false;
+    std::optional<deskflow::windowshare::InputCutoffState> reported;
+  };
+  std::optional<Cutoff> m_cutoff;
+  std::optional<deskflow::windowshare::InputCutoffBinding> m_retiredCutoff;
+  std::optional<deskflow::AuthenticatedPeerTicket> m_cutoffPeer;
+  std::uint32_t m_cutoffGeneration = 0, m_cutoffGenerationHighWater = 0;
+  std::uint64_t m_cutoffRequestHighWater = 0;
+  EventQueueTimer *m_cutoffTimer = nullptr;
+  char m_cutoffTimerTarget = 0;
+  bool m_cutoffDispatching = false;
 #endif
 
   uint32_t m_seqNum = 0;

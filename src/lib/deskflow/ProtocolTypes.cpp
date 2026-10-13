@@ -10,6 +10,10 @@
 const char *const kMsgCInputSequenceAck = "CISA%4i";
 const char *const kMsgDInputSequence = "DSEQ";
 const char *const kMsgCInputSequenceReceipt = "CISR";
+const char *const kMsgCInputCutoffAck = "CICA%4i";
+const char *const kMsgDInputCutoff = "DICQ";
+const char *const kMsgDInputCutoffResume = "DICX";
+const char *const kMsgCInputCutoffReceipt = "CICR";
 
 // The protocol name string within the hello and hello back messages must be
 // 7 chars for backward compatibility (Synergy and Barrier are 7 chars).

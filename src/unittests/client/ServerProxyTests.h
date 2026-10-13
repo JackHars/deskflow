@@ -35,6 +35,10 @@ private Q_SLOTS:
   void inputSequence_realPacketFilterPreservesEnvelopeBoundary();
   void inputSequence_malformedOptionsCannotNegotiate();
   void inputSequence_optionsCannotCrossPacketBoundary();
+  void inputCutoff_flushesMotionDelegatesAndResumes();
+  void inputCutoff_requiresNegotiationAndExactBoundedPackets();
+  void inputCutoff_freezeRejectsLaterInputAndWrongResume();
+  void inputCutoff_deadlineInvalidationAndDestruction();
 #endif
 
 private:

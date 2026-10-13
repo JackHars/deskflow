@@ -308,6 +308,25 @@ void Client::mouseWheel(int32_t xDelta, int32_t yDelta)
   m_computer->mouseWheel(xDelta, yDelta);
 }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool Client::beginInputCutoff(
+    const deskflow::windowshare::InputCutoffBinding &binding,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->beginInputCutoff(binding, deadline);
+}
+deskflow::windowshare::InputCutoffState
+Client::inputCutoffState(const deskflow::windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->inputCutoffState(binding);
+}
+bool Client::resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->resumeInputCutoff(binding);
+}
+#endif
+
 void Client::screensaver(bool activate)
 {
   m_computer->screensaver(activate);

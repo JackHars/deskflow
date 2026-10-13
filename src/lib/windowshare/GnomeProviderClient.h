@@ -6,6 +6,7 @@
 
 #include "GnomeProviderConfig.h"
 #include "GnomeViewportProtocol.h"
+#include "InputCutoff.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -67,6 +68,38 @@ public:
     std::string error;
     std::optional<ViewportObservation> observation;
   };
+  struct InputDrainRequest
+  {
+    InputCutoffBinding cutoff;
+    RoutedPoint point;
+    InputCutoffClock::time_point deadline;
+  };
+  // A finite compositor/Qt queue segment requested after the caller's matched
+  // sender PONG. Correlation is retained; the provider cannot inspect Mutter's
+  // compiled native-thread EIS SYNC support. Neither this receipt nor its Qt
+  // fence establishes that missing sender-ordering prerequisite or delivery.
+  class InputDrainSegment
+  {
+  public:
+    bool live() const noexcept;
+    const ViewportSnapshot &snapshot() const noexcept;
+    const InputCutoffBinding &binding() const noexcept;
+    static constexpr const char *orderingLimitation() noexcept
+    {
+      return "mutter-eis-sync-build-unverified";
+    }
+
+  private:
+    friend struct Impl;
+    ViewportObservation m_viewport;
+    InputCutoffBinding m_cutoff;
+  };
+  struct InputDrainUpdate
+  {
+    std::uint64_t request = 0;
+    std::string error;
+    std::optional<InputDrainSegment> segment;
+  };
   struct Update
   {
     // Ownership transfers to the consumer, even when ready is false. Close any
@@ -95,8 +128,12 @@ public:
   // provider's current cursor). Capability-negotiated, single outstanding
   // request, 250ms absolute budget. No native drain or injection is performed.
   std::uint64_t requestRoutedPointObservation(RoutedPoint point);
-  // Consume both update kinds after a wake; neither stores native descriptors
-  // or borrowed Qt objects in the cross-thread notification.
+  // Same single outstanding slot as viewport observations. The caller's
+  // absolute deadline is never renewed; at most 250ms remains at admission.
+  std::uint64_t requestInputDrain(InputDrainRequest request);
+  std::optional<InputDrainUpdate> takeInputDrainUpdate();
+  // Consume lifecycle, viewport and input-drain updates after a wake. No
+  // borrowed Qt object is stored in the cross-thread notification.
   std::optional<ViewportUpdate> takeViewportUpdate();
   bool live() const noexcept;
   // Terminal; cancellation interrupts pending D-Bus calls. No automatic

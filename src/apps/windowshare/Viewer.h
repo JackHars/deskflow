@@ -83,6 +83,7 @@ public:
   void committed();
   void focusAcknowledged(std::uint64_t revision, std::uint64_t request);
   void keyboardRoute(const KeyboardRouteControl &control);
+  bool allForwardingFenced(const KeyboardRouteBinding &binding) const;
   void disconnected();
   bool placeOnScreen(int screenIndex);
   // Unsupported platforms/plugins report unavailable. No Qt global-position
@@ -93,6 +94,9 @@ public:
   // Coalesced owner-thread notification, after the invalidating event unwinds.
   // A snapshot/map query still rechecks all state synchronously at use.
   std::function<void()> onViewportInvalidated;
+  // Synchronous revocation for a retained private queue receipt, before a
+  // resume acknowledgement or any newly forwarded input can be emitted.
+  std::function<void()> onForwardingFenceChanged;
 #ifdef WINDOWSHARE_X11
   std::optional<ViewerViewportObservation> viewportObservation() const;
 #endif
@@ -200,8 +204,7 @@ private:
   // Only the decoder worker uses the FFmpeg state. This atomic lets stale
   // queued work skip decoding after a recovery invalidation without calling
   // FFmpeg from the GUI thread. GUI completions still account every byte.
-  std::shared_ptr<std::atomic<std::uint64_t>> m_decodeGeneration =
-      std::make_shared<std::atomic<std::uint64_t>>(1);
+  std::shared_ptr<std::atomic<std::uint64_t>> m_decodeGeneration = std::make_shared<std::atomic<std::uint64_t>>(1);
   QThread m_decodeThread;
   QObject *m_decodeWorker = nullptr;
   std::shared_ptr<VideoDecoder> m_decoder;
