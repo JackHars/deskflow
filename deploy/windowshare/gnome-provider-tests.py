@@ -635,6 +635,41 @@ def run_fixture(arguments):
                 "staleDenied": True, "unrelatedSurfaceDenied": True,
                 "deliveryAuthorized": False,
             }
+            # Verify the actual running Mutter stage-update callbacks, not
+            # a synthesized service-fixture completion or latest EIS cursor.
+            # This check remains observation-only, never a sender-EIS drain.
+            if caps.get("stageUpdateSequence") is True:
+                stage_id = "frozen_stage_7_19"
+                stage, = provider.call(
+                    "ObserveStageFrames", "(sussddu)",
+                    (session, generation, token, stage_id, frozen_x, frozen_y, current["revision"])
+                )
+                observation_only(stage)
+                require(
+                    stage.get("available") is True and stage.get("stageUpdates") == 2 and
+                    stage.get("sameStageView") is True and stage.get("request") == stage_id and
+                    stage.get("stageX") == frozen_x and stage.get("stageY") == frozen_y and
+                    all(stage.get(k) == current.get(k) for k in
+                        ("session", "generation", "viewer", "revision")),
+                    f"Real stage update pair was absent or changed its exact Viewer/point binding: {stage}"
+                )
+                report["stageUpdateObservation"] = {
+                    "supported": True, "sameViewPairs": 2, "sourcePointFrozen": True,
+                    "oldEisQueueDrained": False, "qtInputConsumed": False,
+                    "originalInputPermitted": False,
+                }
+                expect_rejected(
+                    lambda: provider.call(
+                        "ObserveStageFrames", "(sussddu)",
+                        (session, generation, token, "stale-stage", frozen_x, frozen_y, current["revision"] + 1)
+                    ), "Stage observation reused an obsolete native revision"
+                )
+            else:
+                report["stageUpdateObservation"] = {
+                    "supported": False, "sameViewPairs": 0,
+                    "reason": "Compositor StageView layout or scheduling introspection unavailable",
+                    "originalInputPermitted": False,
+                }
             events = viewer_events()
             report["gtkMotionEvents"] = sum(event.get("event") == "motion" for event in events)
             require(report["gtkMotionEvents"] >= 2, "Dedicated Wayland client did not receive real pointer motion")

@@ -769,6 +769,7 @@ struct GnomeProviderClient::Impl
       snapshot->sourceX = mapped.x;
       snapshot->sourceY = mapped.y;
       snapshot->paint = painted.state;
+      snapshot->stageFramesObserved = stageUpdatesSupported; // Read-only observation, not native input drain.
       ViewportObservation observation;
       observation.m_snapshot = std::move(snapshot);
       observation.m_revoked = std::make_shared<std::atomic_bool>(false);

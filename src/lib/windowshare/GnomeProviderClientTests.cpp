@@ -1069,7 +1069,9 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
     const auto ready = wake.next(client);
     Descriptor descriptor(ready.descriptor);
-    check(ready.ready && observed(client).live() && service.stageRequests == 0,
+    check(ready.ready && service.stageRequests == 0, "Legacy stage fixture did not start");
+    const auto legacy = observed(client);
+    check(legacy.live() && !legacy.snapshot().stageFramesObserved && service.stageRequests == 0,
           "Legacy provider implicitly claimed Clutter stage observation");
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Legacy stage fixture did not close");
@@ -1087,6 +1089,7 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     check(routeId != 0, "Stage-capable routed point request was refused");
     const auto result = viewportResult(client, routeId);
     check(result.observation && result.observation->live() && service.stageRequests == 1 &&
+          result.observation->snapshot().stageFramesObserved &&
           result.observation->snapshot().desktopX == 425,
           "Authenticated real client skipped the negotiated two-cycle stage request");
     service.unavailableStage = true;

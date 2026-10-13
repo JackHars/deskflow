@@ -42,6 +42,9 @@ public:
     double sourceX = 0, sourceY = 0;
     GnomeViewportState paint;
     std::optional<RoutedPoint> routedPoint;
+    // Two actual paired Clutter same-view stage updates were observed if
+    // advertised; never a sender-EIS prefix or input-consumption receipt.
+    bool stageFramesObserved = false;
   };
   // A bounded join of native current-hit and last-painted Qt observations.
   // This does not attribute an input device/event, fence legacy input, prove
