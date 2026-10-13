@@ -1042,7 +1042,7 @@ void nativeHitRecheckedAfterQtQueue(const PrivateBus &bus)
     check(request != 0, "Post-Qt revision check could not be requested");
     const auto result = viewportResult(client, request);
     check(
-        !result.observation && result.error.find("native viewport changed") != std::string::npos &&
+        !result.observation && result.error == "fixture-native-denied" &&
             service.afterQtCheck && service.nativeHitQueries >= 3 && client.live(),
         "A silently replaced native revision escaped the post-Qt queue boundary"
     );
