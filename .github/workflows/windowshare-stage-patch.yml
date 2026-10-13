@@ -1,0 +1,115 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
+# Temporary cloud transport: materializes a pinned, locally tested patch as Git
+# objects. It never executes patched code and never creates commits or moves refs.
+name: Stage verified window sharing patch
+on:
+  push:
+    branches: [feature/seamless-windows]
+    paths: ['.github/workflows/windowshare-stage-patch.yml']
+permissions:
+  contents: write
+jobs:
+  stage:
+    if: github.repository == 'JackHars/deskflow'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact patch bytes and publish immutable objects only
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH_BLOB: dc15a47feb85eb3c06ef18128cf8be86ca6a4f8f
+          BASE_SHA: 85a83d1e6a657cf8cb40df6d9ed0c35488acd096
+        shell: python
+        run: |
+          import base64, hashlib, json, lzma, os, pathlib, re, subprocess, urllib.request
+          root = 'https://api.github.com/repos/JackHars/deskflow/'
+          def git(*args, check=True):
+              return subprocess.run(['git', *args], check=check, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE).stdout
+          def api(path, data=None):
+              assert re.fullmatch(r'git/(blobs(?:/[0-9a-f]{40})?|trees)', path)
+              req = urllib.request.Request(root + path,
+                  data=None if data is None else json.dumps(data).encode(),
+                  headers={'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+                           'Accept': 'application/vnd.github+json',
+                           'X-GitHub-Api-Version': '2022-11-28',
+                           'Content-Type': 'application/json'},
+                  method='GET' if data is None else 'POST')
+              with urllib.request.urlopen(req, timeout=30) as response:
+                  return json.load(response)
+          def blob_sha(data):
+              return hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+          head = git('rev-parse', 'HEAD').decode().strip()
+          assert head == os.environ['GITHUB_SHA']
+          assert git('rev-parse', 'HEAD^').decode().strip() == os.environ['BASE_SHA']
+          assert not git('status', '--porcelain')
+          blob = api('git/blobs/' + os.environ['PATCH_BLOB'])
+          assert blob['encoding'] == 'base64' and blob['size'] < 2 * 1024 * 1024
+          encoded = base64.b64decode(blob['content'])
+          assert blob_sha(encoded) == os.environ['PATCH_BLOB']
+          packed = base64.b64decode(encoded, validate=True)
+          decoder = lzma.LZMADecompressor(memlimit=128 * 1024 * 1024)
+          patch = decoder.decompress(packed, max_length=8 * 1024 * 1024)
+          assert decoder.eof and not decoder.unused_data and len(patch) < 8 * 1024 * 1024
+          text = patch.decode('utf-8')
+          assert '\0' not in text
+          manifest = {}
+          for section in text.split('diff --git ')[1:]:
+              header = re.match(r'a/([A-Za-z0-9_./-]+) b/\1\n', section)
+              assert header, 'Unsupported patch path'
+              path = header[1]
+              parts = pathlib.PurePosixPath(path).parts
+              assert not path.startswith('/') and '..' not in parts and '.git' not in parts
+              assert path in ('TESTING.md', 'WORK_STATE.md') or path.startswith(('src/', 'docs/', 'deploy/'))
+              assert path not in manifest
+              index = re.search(r'^index ([0-9a-f]{40})\.\.([0-9a-f]{40})(?: (100644|100755))?$', section, re.M)
+              assert index, 'Full-index patch required'
+              before, after = index[1], index[2]
+              if before != '0' * 40:
+                  assert git('rev-parse', 'HEAD:' + path).decode().strip() == before
+              else:
+                  assert not (pathlib.Path(path).exists() or pathlib.Path(path).is_symlink())
+              manifest[path] = {'before': before, 'after': after}
+          assert 0 < len(manifest) <= 128
+          patch_path = pathlib.Path(os.environ['RUNNER_TEMP']) / 'verified.patch'
+          patch_path.write_bytes(patch)
+          git('apply', '--check', '--index', '--unidiff-zero', '--whitespace=error-all', str(patch_path))
+          git('apply', '--index', '--unidiff-zero', '--whitespace=error-all', str(patch_path))
+          changed = set(git('diff', '--cached', '--name-only', '-z').decode().rstrip('\0').split('\0'))
+          assert changed == set(manifest)
+          entries, contents = [], {}
+          # Verify the complete result before creating any remote object.
+          for path, expected in manifest.items():
+              if expected['after'] == '0' * 40:
+                  assert not git('ls-files', '--stage', '--', path)
+                  entries.append({'path': path, 'mode': '100644', 'type': 'blob', 'sha': None})
+                  continue
+              mode, sha, stage_path = git('ls-files', '--stage', '--', path).decode().split(maxsplit=2)
+              assert mode in ('100644', '100755') and stage_path == '0\t' + path + '\n'
+              content = git('show', ':' + path)
+              assert sha == expected['after'] == blob_sha(content)
+              contents[path] = content
+              entries.append({'path': path, 'mode': mode, 'type': 'blob', 'sha': sha})
+          for entry in entries:
+              if entry['sha'] is not None:
+                  result = api('git/blobs', {'encoding': 'base64',
+                      'content': base64.b64encode(contents[entry['path']]).decode()})
+                  assert result['sha'] == entry['sha']
+          tree = api('git/trees', {'base_tree': git('rev-parse', 'HEAD^{tree}').decode().strip(),
+                                  'tree': entries})
+          result = {'parent': head, 'base': os.environ['BASE_SHA'],
+                    'patch_blob': os.environ['PATCH_BLOB'], 'tree': tree['sha'], 'files': manifest}
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'staged-tree.json'
+          output.write_text(json.dumps(result, indent=2) + '\n')
+          print(json.dumps(result, sort_keys=True))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-windowshare-tree-${{ github.sha }}
+          path: ${{ runner.temp }}/staged-tree.json
+          if-no-files-found: error
+          retention-days: 7
