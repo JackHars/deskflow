@@ -58,10 +58,13 @@ jobs:
         run: |
           set -euo pipefail
           apt-get update
-          # Download only. This archive never contains credentials or a runner
-          # filesystem; consumers select/install packages in a disposable image.
+          # An empty installed-package database includes the entire dependency
+          # closure. Otherwise already-installed runner libraries are omitted,
+          # breaking offline use on a different Debian security patch level.
+          # Download only; no credentials or runner filesystem enter the archive.
           mkdir -p /tmp/windowshare-dependencies/packages
           apt-get -y --download-only --no-install-recommends \
+            -o Dir::State::status=/dev/null \
             -o Dir::Cache::archives=/tmp/windowshare-dependencies/packages install \
             ca-certificates cmake build-essential ninja-build pkg-config python3 \
             qt6-base-dev qt6-base-private-dev qt6-tools-dev qt6-wayland-dev qt6-wayland-private-dev \
