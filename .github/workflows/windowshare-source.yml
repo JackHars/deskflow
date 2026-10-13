@@ -6,6 +6,11 @@ on:
     branches: [feature/seamless-windows]
     paths: ['.github/workflows/windowshare-source.yml']
   workflow_dispatch:
+    inputs:
+      offline_dependencies:
+        description: Build a Debian 13 dependency archive for offline verification
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -16,16 +21,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Archive tracked source and provenance
+      - name: Archive all tracked files, including export-ignored CI metadata
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/windowshare-source"
-          git archive --format=tar --prefix=deskflow/ HEAD | gzip -n > "$RUNNER_TEMP/windowshare-source/deskflow-source.tar.gz"
+          # git archive intentionally drops export-ignore paths. Verification
+          # needs those paths too, notably the workflow dependency lists.
+          git ls-files -z | tar --null --no-recursion --files-from=- \
+            --mtime="@$(git show -s --format=%ct HEAD)" --owner=0 --group=0 \
+            --numeric-owner --transform='s,^,deskflow/,' -cf - | \
+            gzip -n > "$RUNNER_TEMP/windowshare-source/deskflow-source.tar.gz"
           {
             printf 'commit=%s\n' "$(git rev-parse HEAD)"
             printf 'tree=%s\n' "$(git rev-parse HEAD^{tree})"
             printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+            printf 'tracked_files=%s\n' "$(git ls-files -z | tr -cd '\0' | wc -c)"
           } > "$RUNNER_TEMP/windowshare-source/provenance.txt"
           cd "$RUNNER_TEMP/windowshare-source"
           sha256sum deskflow-source.tar.gz provenance.txt > SHA256SUMS
@@ -35,4 +46,40 @@ jobs:
           path: ${{ runner.temp }}/windowshare-source/
           if-no-files-found: error
           retention-days: 7
+          compression-level: 0
+  offline-linux:
+    if: github.event_name == 'push' || inputs.offline_dependencies
+    runs-on: ubuntu-24.04
+    container: debian:trixie
+    timeout-minutes: 15
+    steps:
+      - name: Download distribution-verified build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt-get update
+          # Download only. This archive never contains credentials or a runner
+          # filesystem; consumers select/install packages in a disposable image.
+          mkdir -p /tmp/windowshare-dependencies/packages
+          apt-get -y --download-only --no-install-recommends \
+            -o Dir::Cache::archives=/tmp/windowshare-dependencies/packages install \
+            ca-certificates cmake build-essential ninja-build pkg-config python3 \
+            qt6-base-dev qt6-base-private-dev qt6-tools-dev qt6-wayland-dev qt6-wayland-private-dev \
+            libavcodec-dev libavutil-dev libswscale-dev libx264-dev openssl libssl-dev help2man \
+            libx11-dev libx11-xcb-dev libxtst-dev libxkbfile-dev libxinerama-dev libxrandr-dev libxi-dev \
+            libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth dbus-daemon dbus-bin \
+            libxkbregistry-dev libxkbcommon-dev libei-dev libportal-dev libwayland-dev \
+            clang-format reuse
+          cd /tmp/windowshare-dependencies
+          rm -rf packages/partial packages/lock
+          for package in packages/*.deb; do
+            dpkg-deb -W --showformat='${Package}\t${Version}\t${Architecture}\n' "$package"
+          done | LC_ALL=C sort > packages.tsv
+          sha256sum packages/*.deb packages.tsv > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windowshare-debian13-dependencies-${{ github.sha }}
+          path: /tmp/windowshare-dependencies/
+          if-no-files-found: error
+          retention-days: 1
           compression-level: 0
