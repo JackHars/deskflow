@@ -328,6 +328,22 @@ struct BridgeTestAccess
   {
     return bridge.m_pendingKeyframes.size();
   }
+  // Fixture for a sendFrame() congestion refusal, exercised through the real
+  // Bridge retry timer path without filling the TLS buffers on every iteration.
+  static void droppedFrame(Bridge &bridge, std::uint64_t session, std::uint64_t epoch)
+  {
+    bridge.m_pendingKeyframes[session] = epoch;
+    if (!bridge.m_keyframeRetry.isActive())
+      bridge.m_keyframeRetry.start();
+  }
+  static void resetKeyframeRetries(Bridge &bridge)
+  {
+    bridge.clearKeyframeRetries();
+  }
+  static void recoveryTick(Bridge &bridge)
+  {
+    bridge.retryKeyframe();
+  }
   static bool retryActive(const Bridge &bridge)
   {
     return bridge.m_keyframeRetry.isActive();
@@ -732,6 +748,39 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
           BridgeTestAccess::pendingKeyframes(host) == 0 && !BridgeTestAccess::retryActive(host),
       "Recovery was not coalesced to one request for the live session"
   );
+  // A low-numbered stream can immediately fail again after a native GOP
+  // restart. The old begin()-based loop would run session 41 twice before ever
+  // attempting session 42. Exercise real Bridge retryKeyframe() with the live
+  // TLS channel ready and a synchronous NativeHost callback that requeues 41.
+  BridgeTestAccess::opened(host, 42, 9);
+  check(
+      waitUntil([&] { return opened == 3 && channel && channel->readyForFrame(); }),
+      "Second stream for fair recovery was not established"
+  );
+  BridgeTestAccess::resetKeyframeRetries(host);
+  QVector<std::uint64_t> recoveryOrder;
+  int repeatedFailures = 0;
+  keyframeReply = [&](NativeHost &, std::uint64_t session, std::uint64_t epoch) {
+    recoveryOrder.push_back(session);
+    if (session == 41 && ++repeatedFailures == 1)
+      BridgeTestAccess::droppedFrame(host, session, epoch);
+  };
+  BridgeTestAccess::droppedFrame(host, 41, 7);
+  BridgeTestAccess::droppedFrame(host, 42, 9);
+  BridgeTestAccess::pauseRetry(host);
+  for (int tick = 0; tick < 3; ++tick) {
+    check(channel && channel->readyForFrame(), "Recovery fairness fixture lost send capacity");
+    BridgeTestAccess::recoveryTick(host);
+    BridgeTestAccess::pauseRetry(host);
+  }
+  keyframeReply = {};
+  check(
+      recoveryOrder == QVector<std::uint64_t>{41, 42, 41} &&
+          BridgeTestAccess::pendingKeyframes(host) == 0 && !BridgeTestAccess::retryActive(host) &&
+          keyframeRequests == QVector<std::pair<std::uint64_t, std::uint64_t>>{{41, 7}, {41, 7}, {42, 9}, {41, 7}},
+      "Repeated keyframe failure starved a different session or lost recovery ownership"
+  );
+
 
   check(
       waitUntil(
@@ -752,7 +801,7 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   BridgeTestAccess::frame(host, 41, 7, QByteArray("P"));
   check(
       BridgeTestAccess::pendingKeyframes(host) == 0 && !BridgeTestAccess::retryActive(host) &&
-          keyframeRequests.size() == 1,
+          keyframeRequests.size() == 4,
       "Disconnect retained or recreated native recovery work"
   );
 }

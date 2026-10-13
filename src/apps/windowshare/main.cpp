@@ -930,6 +930,7 @@ private:
   {
     m_keyframeRetry.stop();
     m_pendingKeyframes.clear();
+    m_lastKeyframeRecoverySession = 0;
   }
   void retryKeyframe()
   {
@@ -946,8 +947,16 @@ private:
     // Limit recovery work to one window per tick. Erase before calling native
     // code: requestKeyframe invalidates old submissions before it can emit the
     // replacement, and a synchronous callback may queue a new recovery request.
-    const auto [session, epoch] = *m_pendingKeyframes.begin();
-    m_pendingKeyframes.erase(m_pendingKeyframes.begin());
+    // A stream that repeatedly drops frames must not starve a second stream.
+    // Select the next live session after the last attempted one, wrapping at
+    // the end. The map is bounded by active sessions and erasure happens before
+    // calling native code, so callback reentry can safely queue new work.
+    auto next = m_pendingKeyframes.upper_bound(m_lastKeyframeRecoverySession);
+    if (next == m_pendingKeyframes.end())
+      next = m_pendingKeyframes.begin();
+    const auto [session, epoch] = *next;
+    m_pendingKeyframes.erase(next);
+    m_lastKeyframeRecoverySession = session;
     if (m_pendingKeyframes.empty())
       m_keyframeRetry.stop();
     const auto found = m_hostSessions.find(session);
@@ -1367,6 +1376,9 @@ private:
   std::unique_ptr<NativeHost> m_native;
   std::map<std::uint64_t, std::uint64_t> m_hostSessions;
   std::map<std::uint64_t, std::uint64_t> m_pendingKeyframes;
+  // Round-robin cursor across live session IDs, not the last keyframe's epoch.
+  // Reset only on terminal channel cleanup, not between successive retries.
+  std::uint64_t m_lastKeyframeRecoverySession = 0;
   std::map<std::uint64_t, View> m_viewers;
   QJsonArray m_lastCatalog;
 };
