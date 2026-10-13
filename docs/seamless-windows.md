@@ -1,5 +1,8 @@
 # Experimental window sharing
 
+### Post-Qt native routed-point freshness (verified read-only P2 slice)
+
+After the actual QtWayland default-queue observation, the client queries GNOME's exact owner/native hit for the original frozen routed coordinate a third time before publishing. A silent native revision change or local surface-transform drift denies the old observation. Code `32cb0cb9`, test checkpoint `13e62c02`, [native six-job CI PASS](https://github.com/JackHars/deskflow/actions/runs/38386740966). The EIS/Clutter old-event drain and original-input permit remain **unproven and disabled**, hardware H03–H05 **NOT_RUN**. See repaired `TESTING.md`.
 ### P2 QtWayland default-queue checkpoint (verified code, original input still disabled)
 
 The GNOME private, authenticated Viewer viewport endpoint now routes final

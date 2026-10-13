@@ -1,5 +1,8 @@
 # Seamless Windows work state
 
+## P2 post-Qt native hit revalidation — verified 2026-10-13
+
+The exact frozen stage point/native session/window/surface hit is now revalidated **after** Qt's asynchronous GUI queue witness, preventing an observation from surviving silent compositor revision or coordinate-transform changes during the wait. Runtime [`32cb0cb9`](https://github.com/JackHars/deskflow/commit/32cb0cb9c5e809f8884a6d53a2f8324d64418aa7), final test correction [`13e62c02`](https://github.com/JackHars/deskflow/commit/13e62c02d3417b162264256f12641f36300d1f46): [CI 38386740966](https://github.com/JackHars/deskflow/actions/runs/38386740966) PASS **6/6 jobs** (Linux CTest 13/13, GCC/Clang sanitizer 12/12 each, Mac, GNOME and transport) and [source bundle 38386740929](https://github.com/JackHars/deskflow/actions/runs/38386740929) PASS. This is **not** EIS-to-Mutter compositor consumption, production input authorization or physical acceptance. Original-input dispatch stays disabled; H01–H12 NOT_RUN. Rebuilt `TESTING.md` from last intact revision after a documentation interpolation error duplicated content.
 ## P2 connected QtWayland queue checkpoint (2026-10-13)
 
 Implementation [`d0b8e8a3`](https://github.com/JackHars/deskflow/commit/d0b8e8a3181dc70fd2ea462e261e3a3685704a70)
