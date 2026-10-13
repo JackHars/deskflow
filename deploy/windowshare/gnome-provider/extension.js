@@ -491,7 +491,12 @@ class Provider {
                 if (session.stageCheck !== check)
                     return;
                 try {
-                    sequence.before(view, view?.get_layout?.(), nowMs());
+                    // Mutter 50 exposes the StageView geometry as the
+                    // boxed `layout` GObject property. get_layout() has a
+                    // native out parameter and is not a callable zero-argument
+                    // GJS accessor. Sequence.before copies four scalars so
+                    // this borrowed boxed rectangle is never retained.
+                    sequence.before(view, view?.layout, nowMs());
                     if (sequence.reason)
                         terminate(sequence.reason);
                 } catch (_) {
