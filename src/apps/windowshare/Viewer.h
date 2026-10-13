@@ -76,6 +76,10 @@ public:
   {
     return m_videoRecovering;
   }
+  bool videoPaused() const noexcept
+  {
+    return m_videoPaused;
+  }
   void committed();
   void focusAcknowledged(std::uint64_t revision, std::uint64_t request);
   void keyboardRoute(const KeyboardRouteControl &control);
@@ -156,6 +160,8 @@ private:
   void fail(const QString &message);
   void beginVideoRecovery();
   void requestVideoRecoveryWhenDrained();
+  void pauseVideoForHiddenViewer();
+  void resumeVideoAfterVisibility();
   void scheduleResize();
   void sendVisibility(bool visible);
   bool acceptsLocalInput() const;
@@ -187,7 +193,7 @@ private:
   QSet<int> m_suppressedButtons;
   QVector<QJsonObject> m_pendingInputs;
   QTimer m_focusTimeout, m_resizeDebounce, m_resizeTimeout, m_videoRecoveryTimeout;
-  bool m_mediaRecoveryEnabled = false, m_videoRecovering = false;
+  bool m_mediaRecoveryEnabled = false, m_videoRecovering = false, m_videoPaused = false;
   bool m_videoRecoveryRequestSent = false, m_videoRecoveryFrameQueued = false;
   bool m_videoRecoveryFramePaintReady = false, m_waitingRecoveryPaint = false;
   std::uint64_t m_mediaRecoverySequence = 0;

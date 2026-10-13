@@ -398,7 +398,9 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     m_videoRecoveryRequestSent = false;
     m_videoRecoveryFrameQueued = false;
     m_videoRecoveryFramePaintReady = false;
-    m_waitingRecoveryPaint = false;
+    // A layout/size change while minimized must not remove the input gate;
+    // the unminimized viewport still needs a decoder-safe painted IDR.
+    m_waitingRecoveryPaint = m_videoPaused;
     if (m_decodeGeneration->load() == std::numeric_limits<std::uint64_t>::max()) {
       fail(QStringLiteral("Decoder lifetime sequence exhausted"));
       return;
@@ -429,6 +431,42 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
   if (metadata.value(QStringLiteral("phase")).toString() == QStringLiteral("remote"))
     committed();
   update();
+}
+
+void Viewer::pauseVideoForHiddenViewer()
+{
+  if (!m_mediaRecoveryEnabled || !m_connected || m_failed || m_returned || !m_readySent || !m_committed) {
+    releaseInput(KeyboardRouteReason::Hidden);
+    return;
+  }
+  if (!m_videoPaused) {
+    if (m_decodeGeneration->load() == std::numeric_limits<std::uint64_t>::max()) {
+      fail(QStringLiteral("Decoder lifetime sequence exhausted"));
+      return;
+    }
+    // Hidden windows may remain parked for hours. Unlike active media
+    // recovery this is *not* an unbounded pending drain: it consumes zero
+    // new video/inputs until visibility is restored, at which point a new
+    // absolute 5s IDR budget starts. Old queued FFmpeg work is revoked.
+    m_videoPaused = true;
+    m_videoRecoveryTimeout.stop();
+    m_videoRecovering = false;
+    m_videoRecoveryRequestSent = false;
+    m_videoRecoveryFrameQueued = false;
+    m_videoRecoveryFramePaintReady = false;
+    m_waitingRecoveryPaint = true;
+    m_requireFocusIntent = true;
+    m_decodeGeneration->fetch_add(1, std::memory_order_acq_rel);
+  }
+  releaseInput(KeyboardRouteReason::Hidden);
+}
+
+void Viewer::resumeVideoAfterVisibility()
+{
+  if (!m_videoPaused || !m_connected || m_returned || m_failed || !isVisible() || isMinimized())
+    return;
+  m_videoPaused = false;
+  beginVideoRecovery();
 }
 
 void Viewer::beginVideoRecovery()
@@ -472,7 +510,7 @@ void Viewer::requestVideoRecoveryWhenDrained()
 
 void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
 {
-  if (!m_connected || m_returned || m_failed || geometry != m_geometry)
+  if (!m_connected || m_returned || m_failed || geometry != m_geometry || m_videoPaused)
     return;
   if (accessUnit.isEmpty() || accessUnit.size() > maxPayload) {
     fail(QStringLiteral("Invalid video packet size"));
@@ -847,20 +885,42 @@ bool Viewer::event(QEvent *event)
   case QEvent::WindowStateChange:
     if (isMinimized()) {
       m_localActive = false;
-      releaseInput(KeyboardRouteReason::Hidden);
+      const QPointer<Viewer> guard(this);
+      pauseVideoForHiddenViewer();
+      if (!guard)
+        return true;
       sendVisibility(false);
+      if (!guard)
+        return true;
     } else {
+      const QPointer<Viewer> guard(this);
       sendVisibility(true);
+      if (!guard)
+        return true;
+      // Qt may dispatch WindowStateChange before the surface is actually
+      // visible. Resume on the next owner-thread turn only when visible.
+      QTimer::singleShot(0, this, [this] { resumeVideoAfterVisibility(); });
     }
     break;
-  case QEvent::Hide:
+  case QEvent::Hide: {
     m_localActive = false;
-    releaseInput(KeyboardRouteReason::Hidden);
+    const QPointer<Viewer> guard(this);
+    pauseVideoForHiddenViewer();
+    if (!guard)
+      return true;
     sendVisibility(false);
+    if (!guard)
+      return true;
     break;
-  case QEvent::Show:
+  }
+  case QEvent::Show: {
+    const QPointer<Viewer> guard(this);
     sendVisibility(true);
+    if (!guard)
+      return true;
+    QTimer::singleShot(0, this, [this] { resumeVideoAfterVisibility(); });
     break;
+  }
   case QEvent::ShortcutOverride:
     if (m_connected && m_committed && m_localActive) {
       event->accept();
@@ -954,6 +1014,7 @@ void Viewer::focusOutEvent(QFocusEvent *event)
 bool Viewer::acceptsLocalInput() const
 {
   return m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint && !m_videoRecovering &&
+         !m_videoPaused &&
          m_readySent && m_committed && m_localActive && !m_resizing && !isMinimized() &&
          m_paintedGeometry == m_geometry;
 }

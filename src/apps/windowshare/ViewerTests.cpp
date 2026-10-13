@@ -684,6 +684,51 @@ void testBoundedMediaRecovery()
   viewer.close();
 }
 
+void testMediaPauseOnHiddenViewer()
+{
+  Recording recording;
+  Viewer viewer(833, 11, metadata());
+  recording.attach(viewer);
+  viewer.setMediaRecoveryEnabled(true);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  const int sentKeys = recording.count(MessageType::Input, "key");
+  viewer.hide();
+  check(viewer.videoPaused(), "Hidden negotiated Viewer did not suspend decoding");
+  check(recording.count(MessageType::Input, "key") == sentKeys + 1,
+        "Hiding a Viewer did not release exactly its held key");
+  check(recording.count(MessageType::Input, "video-recovery") == 0,
+        "Hidden Viewer began a timed IDR recovery before visibility returned");
+  for (int i = 0; i < 64; ++i)
+    viewer.receiveFrame(frame(), viewer.geometryRevision());
+  QCoreApplication::processEvents();
+  check(recording.count(MessageType::Return) == 0 && viewer.videoPaused(),
+        "Hidden frame burst consumed decoding capacity or returned source");
+  viewer.applyMetadata(metadata(2, 800, 600));
+  check(viewer.videoPaused() && viewer.geometryRevision() == 2,
+        "A hidden geometry update reopened unpainted input authority");
+  viewer.show();
+  check(waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
+        "Resuming hidden Viewer did not request exactly one post-drain IDR");
+  check(!viewer.videoPaused() && viewer.videoRecovering(),
+        "Restored visibility bypassed decoder/input recovery fence");
+  check(recording.last(MessageType::Input, "video-recovery").object.value("geometry").toInteger() == 2,
+        "Visibility recovery reused a stale source geometry revision");
+  viewer.receiveFrame(frame(), 1);
+  check(viewer.videoRecovering(), "Stale pre-minimize source video reopened input authority");
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  check(recording.count(MessageType::Input, "key") == sentKeys + 1,
+        "Input leaked before the resumed IDR was painted");
+  viewer.receiveFrame(frame(), viewer.geometryRevision());
+  check(waitUntil([&] { return !viewer.videoRecovering(); }),
+        "Resumed hidden Viewer did not decode and paint independent keyframe");
+  check(recording.count(MessageType::Return) == 0 &&
+            recording.count(MessageType::Input, "video-recovery") == 1,
+        "Resumed window returned source or requested repeated IDRs");
+  viewer.close();
+}
+
 void testKeyboardRouteBusyAndGenerations()
 {
   Recording recording;
@@ -1123,6 +1168,7 @@ int main(int argc, char **argv)
     testResizeAndScroll();
     testBoundedDecodeQueue();
     testBoundedMediaRecovery();
+    testMediaPauseOnHiddenViewer();
     testQueuedFrameRevision();
     testKeyboardRouteFenceAndResume();
     testKeyboardRouteBusyAndGenerations();
@@ -1142,7 +1188,7 @@ int main(int argc, char **argv)
          "letterboxing/scaling, first painted readiness, "
          "queued activating click, stale focus, special keys/repeat, ordered release, resize fencing, "
          "double-click, focus revocation/reclaim, scroll, minimize, safe return, disconnect, bounded video queue, "
-         "queued geometry race, negotiated bounded decoder recovery and input revocation, "
+         "queued geometry race, negotiated bounded decoder recovery, hidden-viewer pause/IDR and input revocation, "
          "keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
          "route generations, pending focus fence, full-input scope, pointer tombstones, "
          "route invalidation/resume and send failure\n";
