@@ -222,6 +222,7 @@ public:
         if (m_shuttingDown)
           return;
         m_hostSessions[session] = epoch;
+        m_hostGeometries[session] = integer(metadata, "geometry");
         if (!send(MessageType::Opened, windowMetadataForWire(metadata), session, epoch))
           QTimer::singleShot(0, this, [this, session] {
             if (!m_shuttingDown)
@@ -264,6 +265,8 @@ public:
         if (m_keyboardRoute && m_keyboardRoute->binding.owner.session == session)
           withdrawOriginalKeyboard(KeyboardRouteReason::Returned, false);
         m_pendingKeyframes.erase(session);
+        m_hostGeometries.erase(session);
+        m_mediaRecoveryRequests.erase(session);
         if (m_pendingKeyframes.empty())
           m_keyframeRetry.stop();
         const auto found = m_hostSessions.find(session);
@@ -972,6 +975,7 @@ private:
     m_negotiating = false;
     m_keyboardCapable = false;
     m_inputCapable = false;
+    m_mediaRecoveryCapable = false;
     m_stableTimer.stop();
     clearKeyframeRetries();
     clearCatalog();
@@ -987,7 +991,7 @@ private:
             MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
                                  {"role", "viewer"},
                                  {"codec", "h264"},
-                                 {"capabilities", keyboardRouteCapabilities(true)}}
+                                 {"capabilities", keyboardRouteCapabilities(true, true)}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1041,6 +1045,9 @@ private:
           m_native->restoreAll();
         }
         m_hostSessions.clear();
+        m_hostGeometries.clear();
+        m_mediaRecoveryRequests.clear();
+        m_mediaRecoveryCapable = false;
         m_cleaning = false;
         if (m_hosting && !m_shuttingDown)
           m_listener.resumeAccepting();
@@ -1068,6 +1075,7 @@ private:
       );
       m_keyboardCapable = peerSupportsKeyboardRoute(object);
       m_inputCapable = peerSupportsInputRoute(object);
+      m_mediaRecoveryCapable = peerSupportsMediaRecovery(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
@@ -1076,7 +1084,8 @@ private:
                 {{"version", static_cast<int>(protocolVersion)},
                  {"role", "host"},
                  {"codec", "h264"},
-                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable) : QJsonArray{}}}
+                 {"capabilities", m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable)
+                                                      : QJsonArray{}}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -1130,6 +1139,27 @@ private:
     // A delayed return/focus acknowledgement cannot address a newer incarnation.
     if (found == m_hostSessions.end() || found->second != packet.epoch)
       return;
+    if (packet.type == MessageType::Input && object.value("kind") == QLatin1String("video-recovery")) {
+      // This is an authenticated, session/epoch-bound media-control request,
+      // never an input/native authority. Reject injected fields and replayed
+      // request IDs; an older geometry must not demand an IDR for a replacement.
+      require(m_mediaRecoveryCapable, "Unnegotiated video recovery request");
+      require(object.size() == 3, "Unexpected video recovery control fields");
+      const auto geometry = integer(object, "geometry");
+      const auto request = integer(object, "request");
+      require(geometry && request, "Invalid video recovery request identity");
+      const auto frame = m_hostGeometries.find(packet.session);
+      if (frame == m_hostGeometries.end() || frame->second != geometry)
+        return;
+      auto &last = m_mediaRecoveryRequests[packet.session];
+      if (request <= last)
+        return;
+      last = request;
+      m_pendingKeyframes[packet.session] = packet.epoch;
+      if (!m_keyframeRetry.isActive())
+        m_keyframeRetry.start();
+      return;
+    }
     switch (packet.type) {
     case MessageType::Ready:
       m_native->ready(packet.session, packet.epoch);
@@ -1180,6 +1210,7 @@ private:
       }
       require(m_viewers.size() < 16, "Too many viewer windows");
       auto *viewer = new Viewer(packet.session, packet.epoch, metadata);
+      viewer->setMediaRecoveryEnabled(m_mediaRecoveryCapable);
       viewer->setAttribute(Qt::WA_DeleteOnClose);
       const auto id = packet.session;
       const auto generation = m_connectionGeneration;
@@ -1366,6 +1397,7 @@ private:
   int m_keyboardTimeoutMs = 3000;
   bool m_keyboardCapable = false;
   bool m_inputCapable = false;
+  bool m_mediaRecoveryCapable = false;
   bool m_reservingKeyboard = false;
   std::uint64_t m_keyboardGeneration = 0;
   std::optional<KeyboardAttempt> m_keyboardRoute;
@@ -1378,6 +1410,8 @@ private:
   int m_stableInterval = 30000;
   std::unique_ptr<NativeHost> m_native;
   std::map<std::uint64_t, std::uint64_t> m_hostSessions;
+  std::map<std::uint64_t, std::uint64_t> m_hostGeometries;
+  std::map<std::uint64_t, std::uint64_t> m_mediaRecoveryRequests;
   std::map<std::uint64_t, std::uint64_t> m_pendingKeyframes;
   // Round-robin cursor across live session IDs, not the last keyframe's epoch.
   // Reset only on terminal channel cleanup, not between successive retries.
