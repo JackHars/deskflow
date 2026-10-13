@@ -67,6 +67,11 @@ constexpr auto introspection = R"xml(
       <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
       <arg type="a{sv}" direction="out"/>
     </method>
+    <method name="ObserveStageFrames">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
     <method name="ValidateCurrentHit">
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
       <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
