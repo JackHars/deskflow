@@ -28,7 +28,8 @@ exporting the interface.
 - `GetCapabilities() -> (u version, s shellVersion, a{sv} capabilities)`.
   Version is 1. Capability types are `providerApi:u`, `backend:s`,
   `nativeHitTesting:b`, `exactWaylandClientBinding:b`, `eisSessionOwned:b`,
-  `trustedDesktopOnly:b`, `viewportChannel:b`, `viewportSocketValidated:b`,
+  `trustedDesktopOnly:b`, `viewportChannel:b`, `routedPointObservation:b`,
+  `viewportSocketValidated:b`,
   `syncFenceVerified:b`, `pointerDeviceAttribution:b`,
   `qtViewportMapping:b`, and `deliveryReady:b`.
 - `CreateSession() -> (s session, u generation, h eisFd)`. One outstanding
@@ -71,6 +72,19 @@ exporting the interface.
   echoed for consumer association. It is not a compositor-generated sequence or
   an anti-replay capability. The caller must retain its own sequence, request
   start/deadline, route, focus, source geometry, and forwarding-fence bindings.
+- `ValidateRoutedPoint(s session, u generation, s viewer, s request, d x, d y,
+  u expectedRevision) -> (a{sv} observation)` is an **optional, read-only**
+  native hit query, available only when `routedPointObservation=true`. The
+  coordinate must be an exact, finite, float-representable compositor-stage
+  coordinate bounded to +/-10,000,000; the native observation returns separate
+  `routedX/routedY` echo fields. It performs a native reactive-stage surface
+  pick and transform at the **supplied frozen point**, not the current EIS
+  cursor location, then rechecks the surface, revision, state and occlusion.
+  The C++ client retains its original `captureEpoch/sequence` outside D-Bus
+  and checks this exact point echo before joining painted Qt geometry. An old
+  provider or malformed/replayed reply cannot silently convert this into the
+  current-cursor path. No native input injection, ordering fence, or delivery
+  authority is established by a successful result.
 - `CloseSession(s session, u generation)` retires the session and owned child.
   The same teardown occurs on caller loss, Mutter closure, viewer loss, or
   extension disable. Only the owned child receives SIGTERM and, if necessary,
@@ -93,11 +107,14 @@ Every observation contains:
 | `window`, `surface` | `s`, `s` | Fresh opaque tokens for retained native object identities, when present |
 | `frameRect`, `bufferRect` | `(dddd)` | Native x/y/width/height, when valid |
 | `pointerX`, `pointerY`, `focused` | `d`, `d`, `b` | Native cursor readback and exact focused-window comparison, when a window exists |
-| `request` | `s` | Current-hit request echo |
+| `request` | `s` | Native hit request echo (not standalone capture authority) |
+| `routedX`, `routedY` | `d`, `d` | Exact requested compositor-stage coordinate echo, only for routed-point queries |
 | `localX`, `localY` | `d`, `d` | Successful current hit in that actual Wayland surface's coordinates |
 
 `GetViewer.available` means the native observation is usable, not that the
-cursor hits the viewer. Only `ValidateCurrentHit` picks the point. It requires
+cursor hits the viewer. Both `ValidateCurrentHit` and the new read-only
+`ValidateRoutedPoint` can pick a point; the first also requires an exact
+current-cursor match. Neither grants original-input delivery. It requires
 the expected revision, exact Graphene float cursor readback, the exact retained
 native surface actor, and successful native stage-to-surface conversion. It
 rechecks native state and cursor after the pick. It rejects locked/greeter

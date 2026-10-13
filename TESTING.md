@@ -4,6 +4,30 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Published incremental results (2026-10-12)
+
+**This branch has NOT finished `CHATGPT_HANDOFF.md` P1–P8.** Production
+original-input delivery is still disabled. No physical hardware test or
+native compositor/Qt input-drain test was run in this cloud session.
+
+| Commit | Verified scope | Limits |
+| --- | --- | --- |
+| [`f86ee404`](https://github.com/JackHars/deskflow/commit/f86ee40430dc89b0612968c956c1f3c51f126df1) | Actual TLS Bridge recovery now rotates after the previously recovered session, including repeat failure on low-ID stream. All six existing GitHub CI jobs passed in [run 38339169894](https://github.com/JackHars/deskflow/actions/runs/38339169894). | No real multi-window frame rate or latency targets measured |
+| [`fb0bf0dd`](https://github.com/JackHars/deskflow/commit/fb0bf0dd8951ada013d1cced450d196e30ac2523) | Read-only optional GNOME routed-point native query, private D-Bus tests for frozen stage point, echo, old capability, stale native hit, and deadline | No EIS/Qt queue drain, original owner, native event delivery, or stage-space conversion |
+| [`fb504a3f`](https://github.com/JackHars/deskflow/commit/fb504a3f1db42de34e3a24c26ea337bb5dfa37dc) | Real private headless Mutter test validates a frozen point **different** from the live cursor and rejects stale revision/unrelated surface; GNOME native job passed in [run 38340048477](https://github.com/JackHars/deskflow/actions/runs/38340048477). | Not a physical or original-input acceptance test |
+
+The P8 partial release packaging is `deploy/windowshare/package-linux.py`,
+`package-linux-tests.py` and `package-linux.md`. It writes an inert
+reproducible archive of explicitly provided Linux ELF binaries, launch wrappers,
+and unenabled GNOME provider; its per-member verifier checks SHA-256 and modes.
+It never touches ordinary Deskflow. CI has a dedicated package/unit/smoke step
+in the newer documentation/packaging commit; do not attribute its results to the
+earlier implementation commits.
+
+The full C01-C12 and H01-H12 matrices below remain the contractual acceptance
+criteria. A native-hit result or a staging-archive pass is **not** a PASS for an
+unfinished complete-roadmap row. Current physical H01-H12 are NOT_RUN.
+
 This is the testing contract for the implementation described in
 `CHATGPT_HANDOFF.md`. Created 2026-10-12; the cloud implementer must update it
 throughout development. The original local chat will execute the hardware

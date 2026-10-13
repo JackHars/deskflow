@@ -1,5 +1,22 @@
 # Experimental window sharing
 
+## Incremental implementation checkpoint (2026-10-12)
+
+Additional partial implementation now includes fair keyframe recovery across
+congested independent streams, a capability-gated read-only
+`ValidateRoutedPoint` GNOME hit query for a frozen compositor-stage coordinate,
+and a headless native Mutter regression demonstrating that this coordinate is
+not silently replaced by the latest cursor sample. Native and painted
+observations retain their existing absolute deadlines and revocation rules.
+None of these tests proves compositor input consumption or original-input
+authority: production original delivery is still disabled.
+
+The experimental Linux binary/core staging archive uses an inert, opt-in layout
+and a reproducible member manifest, without installing or enabling the GNOME
+extension or overwriting ordinary Deskflow. See
+[`package-linux.md`](../deploy/windowshare/package-linux.md) and
+[`TESTING.md`](../TESTING.md) for scoped verification.
+
 This branch contains a native Mac capture host and independent Qt viewer windows.
 It is an opt-in development milestone, not yet the completed drag-between-desktops
 feature. The ordinary Deskflow build remains the default.

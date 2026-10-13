@@ -165,6 +165,16 @@ jobs:
           cmake -S . -B build/legacy -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
           cmake --build build/legacy --target ClientProxyTests ServerProxyTests --parallel 2
           QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(ClientProxyTests|ServerProxyTests)$' --output-on-failure
+      - name: Package and verify inert experimental Linux binaries
+        run: |
+          python3 deploy/windowshare/package-linux-tests.py
+          python3 deploy/windowshare/package-linux.py \
+            --viewer build/app/deskflow-windowshare \
+            --core build/integrated/bin/deskflow-core \
+            --source-sha "${{ github.sha }}" \
+            --output build/DeskflowSeamless-Linux-Experimental.tar.gz
+          python3 deploy/windowshare/package-linux.py \
+            --verify build/DeskflowSeamless-Linux-Experimental.tar.gz
   gnome-provider:
     runs-on: ubuntu-24.04
     container:

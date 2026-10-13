@@ -1,5 +1,27 @@
 # Seamless Windows work state
 
+## Cloud partial integration checkpoint (2026-10-12)
+
+Three commits are published on `feature/seamless-windows`:
+`f86ee40430dc89b0612968c956c1f3c51f126df1` (fair live-TLS
+multi-session keyframe recovery), `fb0bf0dd8951ada013d1cced450d196e30ac2523`
+(read-only, capability-negotiated GNOME frozen-point lookup retaining capture
+identity/native surface and painted Qt observation), and
+`fb504a3f1db42de34e3a24c26ea337bb5dfa37dc` (real headless
+Mutter stage-hit tests independent of the latest EIS cursor). Full six-job CI
+passed on the first; the third's native-GNOME job passed. See
+`TESTING.md` for exact claims and run links.
+
+New partial P8 experimental Linux archive scripts stage a reproducible, inert
+package and verified SHA manifest. They do not enable Shell extensions, replace
+ordinary Deskflow, bundle system libraries or run on the actual Ubuntu machine.
+
+**The handoff remains incomplete**: compositor/Qt/native input queue drain,
+production coordinator and original event delivery, multi-window focus
+ownership, full bidirectional edge drag, app compatibility, two physical
+monitors and crash-recovery acceptance are still open. Never treat the new
+read-only GNOME hit result as input-delivery permission. H01-H12 remain unrun.
+
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
