@@ -300,6 +300,21 @@ public:
       const auto mapped = found->second.window->mapWaylandSurface(expected, point);
       return alive && alive->viewportState() == std::optional(expected) ? mapped : std::nullopt;
     };
+    endpoint.onQtQueue = [alive, &endpoint](
+                             const GnomeViewportState &expected, std::function<void(bool)> finished
+                         ) {
+      if (!alive || alive->viewportState() != std::optional(expected))
+        return false;
+      const auto found = alive->m_viewers.find(expected.session);
+      if (found == alive->m_viewers.end() || !found->second.window ||
+          found->second.window->geometryRevision() != expected.geometry)
+        return false;
+      auto *window = found->second.window->windowHandle();
+      const auto geometry = readWaylandViewport(window);
+      if (!geometry || !alive || alive->viewportState() != std::optional(expected))
+        return false;
+      return endpoint.startWaylandQueue(window, *geometry, std::move(finished));
+    };
   }
 #endif
   // A local controller must revoke its private original-input authority before

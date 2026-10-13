@@ -251,6 +251,123 @@ void endpointLifetime()
   pair.send({GnomeViewportOperation::Snapshot, 8});
   check(waitUntil([&] { return closed; }), "Repeated request did not close endpoint");
 }
+void deferredQtQueueCheckpoint()
+{
+  {
+    Pair pair;
+    auto state = fixtureState();
+    std::function<void(bool)> complete;
+    unsigned starts = 0;
+    pair.endpoint->onSnapshot = [&] { return std::optional(state); };
+    pair.endpoint->onCheck = [&](const auto &expected) { return expected == state; };
+    pair.endpoint->onQtQueue = [&](const auto &expected, std::function<void(bool)> callback) {
+      check(expected == state, "Qt queue request lost exact painted viewport association");
+      ++starts;
+      complete = std::move(callback);
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Qt queue fixture has no snapshot");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    check(waitUntil([&] { return starts == 1; }), "Qt queue callback was not requested");
+    pair.drain();
+    check(std::none_of(pair.replies.begin(), pair.replies.end(),
+                       [](const auto &reply) { return reply.request == 2; }),
+          "A Qt check replied before two native queue sync callbacks could finish");
+    complete(true);
+    check(pair.reply(2).ok, "Completed owned Qt observation did not publish one check");
+    complete(true);
+    pair.drain();
+    check(std::count_if(pair.replies.begin(), pair.replies.end(),
+                        [](const auto &reply) { return reply.request == 2; }) == 1,
+          "Duplicate Qt completion published another reply");
+
+    pair.send({GnomeViewportOperation::Snapshot, 3});
+    check(pair.reply(3).ok, "Replacement Qt queue snapshot was refused");
+    pair.send({GnomeViewportOperation::Check, 4, 3});
+    check(waitUntil([&] { return starts == 2; }), "Replacement Qt queue was not started");
+    ++state.viewportRevision;
+    complete(true);
+    check(!pair.reply(4).ok, "Qt completion with changed painted geometry escaped final recheck");
+  }
+  {
+    Pair pair;
+    auto state = fixtureState();
+    std::function<void(bool)> late;
+    pair.endpoint->onSnapshot = [&] { return std::optional(state); };
+    pair.endpoint->onCheck = [&](const auto &expected) { return expected == state; };
+    pair.endpoint->onQtQueue = [&](const auto &, std::function<void(bool)> callback) {
+      late = std::move(callback);
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Invalidation fixture snapshot unavailable");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    check(waitUntil([&] { return bool(late); }), "Deferred Qt check never began");
+    pair.endpoint->invalidate(QStringLiteral("window-destroyed"));
+    check(!pair.reply(2).ok, "Invalidated Qt observation remained eligible");
+    late(true);
+    pair.drain();
+    check(std::count_if(pair.replies.begin(), pair.replies.end(),
+                        [](const auto &reply) { return reply.request == 2; }) == 1,
+          "Late Qt event reused the canceled reply identity");
+    check(std::any_of(pair.replies.begin(), pair.replies.end(), [](const auto &reply) {
+            return reply.operation == GnomeViewportOperation::Invalidated && reply.snapshot == 1;
+          }), "Qt invalidation did not also revoke its retained native snapshot");
+  }
+  {
+    Pair pair;
+    std::function<void(bool)> late;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onQtQueue = [&](const auto &, std::function<void(bool)> callback) {
+      late = std::move(callback);
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Pipelining fixture snapshot unavailable");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    check(waitUntil([&] { return bool(late); }), "Pipelining fixture did not start");
+    bool closed = false;
+    pair.endpoint->onClosed = [&] { closed = true; };
+    pair.send({GnomeViewportOperation::Check, 3, 1});
+    check(waitUntil([&] { return closed; }), "Pipelined requests failed to close native private endpoint");
+    late(true);
+    pair.endpoint.reset();
+    late(true); // No borrowed destroyed native/Qt pointers in retained completion.
+  }
+  {
+    Pair pair;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onQtQueue = [&pair](const auto &, std::function<void(bool)> finished) {
+      return pair.endpoint->startWaylandQueue(nullptr, {}, std::move(finished));
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Unavailable-native fixture could not establish snapshot");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    const auto result = pair.reply(2);
+    check(!result.ok && result.reason == QStringLiteral("qt-wayland-queue-unavailable"),
+          "Missing native QtWayland queue was accidentally a success-returning drain");
+  }
+  {
+    Pair pair;
+    pair.endpoint->onSnapshot = fixtureState;
+    pair.endpoint->onCheck = [](const auto &) { return true; };
+    pair.endpoint->onQtQueue = [&](const auto &, std::function<void(bool)> completion) {
+      completion(true); // Explicit immediate reentry from a fixture.
+      return true;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Reentrant fixture snapshot unavailable");
+    pair.send({GnomeViewportOperation::Check, 2, 1});
+    check(pair.reply(2).ok, "Synchronous fixture reentry lost its exact request");
+    pair.drain();
+    check(std::count_if(pair.replies.begin(), pair.replies.end(),
+                        [](const auto &reply) { return reply.request == 2; }) == 1,
+          "Synchronous callback and return path sent duplicate Qt receipts");
+  }
+}
 void destruction()
 {
   for (int phase = 0; phase < 3; ++phase) {
@@ -373,10 +490,11 @@ int main(int argc, char **argv)
   try {
     protocol();
     endpointLifetime();
+    deferredQtQueueCheckpoint();
     destruction();
     bootstrap();
     QTextStream(stdout) << "PASS: bounded viewport framing/schema, mapping association, invalidation/expiry, monotonic "
-                           "requests, EOF and destructive callbacks\n";
+                           "requests, async Qt queue checkpoints, stale/duplicate/unsupported denial, EOF and destructive callbacks\n";
     return 0;
   } catch (const std::exception &error) {
     QTextStream(stderr) << "FAIL: " << error.what() << '\n';

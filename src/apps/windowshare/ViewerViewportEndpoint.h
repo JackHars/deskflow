@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "GnomeViewportProtocol.h"
+#include "WaylandViewport.h"
 #include <QDeadlineTimer>
 #include <QObject>
 #include <QPointF>
@@ -42,7 +43,14 @@ public:
   std::function<std::optional<GnomeViewportState>()> onSnapshot;
   std::function<bool(const GnomeViewportState &)> onCheck;
   std::function<std::optional<QPointF>(const GnomeViewportState &, QPointF)> onMap;
+  // Only the authenticated GNOME Bridge installs the native implementation.
+  // Fixture callbacks may test delayed/stale responses, but cannot mint
+  // production original-input authority.
+  std::function<bool(const GnomeViewportState &, std::function<void(bool)>)> onQtQueue;
   std::function<void()> onClosed;
+  bool startWaylandQueue(
+      QWindow *window, const WaylandViewportGeometry &expected, std::function<void(bool)> finished
+  );
   void invalidate(const QString &reason = QStringLiteral("viewport-changed"));
   void close();
   bool live() const noexcept
@@ -56,6 +64,7 @@ private:
   void handle(const GnomeViewportRequest &request);
   bool send(const GnomeViewportReply &reply);
   bool current(std::uint64_t snapshot);
+  void finishQtQueue(bool observed);
   int m_descriptor = -1;
   std::unique_ptr<QSocketNotifier> m_read, m_write;
   GnomeViewportDecoder m_decoder;
@@ -64,6 +73,8 @@ private:
   std::uint64_t m_lastRequest = 0, m_snapshot = 0;
   QDeadlineTimer m_deadline;
   QTimer m_expiry;
+  QtWaylandQueueWitness m_queueWitness;
+  std::optional<GnomeViewportRequest> m_pendingCheck;
   bool m_reading = false;
 };
 } // namespace deskflow::windowshare

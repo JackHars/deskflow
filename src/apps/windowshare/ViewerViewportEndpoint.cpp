@@ -120,6 +120,8 @@ void ViewerViewportEndpoint::close()
   m_write->setEnabled(false);
   ::close(std::exchange(m_descriptor, -1));
   m_expiry.stop();
+  m_queueWitness.cancel();
+  m_pendingCheck.reset();
   m_snapshot = 0;
   m_state.reset();
   m_output.clear();
@@ -174,6 +176,18 @@ void ViewerViewportEndpoint::write()
 }
 void ViewerViewportEndpoint::invalidate(const QString &reason)
 {
+  m_queueWitness.cancel();
+  if (const auto pending = std::exchange(m_pendingCheck, std::nullopt); pending && live()) {
+    GnomeViewportReply denied;
+    denied.operation = pending->operation;
+    denied.request = pending->request;
+    denied.snapshot = pending->snapshot;
+    denied.reason = QStringLiteral("qt-queue-invalidated");
+    const QPointer<ViewerViewportEndpoint> alive(this);
+    send(denied);
+    if (!alive)
+      return;
+  }
   if (!m_snapshot)
     return;
   const auto snapshot = std::exchange(m_snapshot, 0);
@@ -195,9 +209,37 @@ bool ViewerViewportEndpoint::current(std::uint64_t snapshot)
   const bool valid = check && check(state);
   return alive && live() && valid && m_state && snapshot == m_snapshot && *m_state == state && !m_deadline.hasExpired();
 }
+bool ViewerViewportEndpoint::startWaylandQueue(
+    QWindow *window, const WaylandViewportGeometry &expected, std::function<void(bool)> finished
+)
+{
+  return m_queueWitness.begin(window, expected, std::move(finished));
+}
+
+void ViewerViewportEndpoint::finishQtQueue(bool observed)
+{
+  const auto pending = std::exchange(m_pendingCheck, std::nullopt);
+  if (!pending || !live())
+    return; // Canceled/revoked/late callbacks cannot publish a new reply.
+  GnomeViewportReply reply;
+  reply.operation = GnomeViewportOperation::Check;
+  reply.request = pending->request;
+  reply.snapshot = pending->snapshot;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  reply.ok = observed && current(pending->snapshot);
+  if (!alive)
+    return;
+  if (!reply.ok)
+    reply.reason = QStringLiteral("qt-queue-incomplete-or-viewport-changed");
+  send(reply);
+}
+
 void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
 {
-  if (request.request <= m_lastRequest) {
+  // Only one native queue operation may be outstanding. Pipelining while
+  // callbacks are unresolved could reorder response identities or overrun
+  // the snapshot deadline. Fail the inherited private stream closed.
+  if (m_pendingCheck || request.request <= m_lastRequest) {
     close();
     return;
   }
@@ -238,9 +280,30 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
     const bool valid = current(request.snapshot);
     if (!alive || !live())
       return;
-    if (valid && request.operation == GnomeViewportOperation::Check)
-      reply.ok = true;
-    else if (valid) {
+    if (valid && request.operation == GnomeViewportOperation::Check) {
+      if (onQtQueue) {
+        const auto start = onQtQueue;
+        const auto state = *m_state;
+        m_pendingCheck = request; // Before any callback can reenter the endpoint.
+        const bool started = start(state, [alive](bool observed) {
+          if (alive)
+            alive->finishQtQueue(observed);
+        });
+        if (!alive || !live())
+          return;
+        if (!m_pendingCheck)
+          return; // Synchronous test callback already published exactly once.
+        if (started)
+          return; // The native Wayland callbacks arrive asynchronously.
+        m_pendingCheck.reset();
+        reply.reason = QStringLiteral("qt-wayland-queue-unavailable");
+      } else {
+        // Legacy/fixture-only Check remains a read-only geometry observation.
+        // The real GNOME Bridge always supplies onQtQueue and refuses it
+        // when its exact QtWayland private-API dependency is missing.
+        reply.ok = true;
+      }
+    } else if (valid) {
       const auto callback = onMap;
       const auto expected = *m_state;
       const auto point = callback ? callback(expected, QPointF(request.x, request.y)) : std::nullopt;
