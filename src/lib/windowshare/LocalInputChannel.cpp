@@ -109,6 +109,7 @@ QByteArray encodeOffer(const LocalInputOffer &offer)
   out.fixed(offer.deskflowClientIncarnation);
   out.fixed(offer.deskflowPeerPin);
   out.fixed(offer.windowSharePeerPin);
+  out.number(offer.scope == ForwardingScope::Keyboard ? 1 : 2, 8);
   return out.data;
 }
 LocalInputOffer decodeOffer(Reader &in)
@@ -122,6 +123,9 @@ LocalInputOffer decodeOffer(Reader &in)
   offer.deskflowClientIncarnation = in.fixed<16>();
   offer.deskflowPeerPin = in.fixed<32>();
   offer.windowSharePeerPin = in.fixed<32>();
+  const auto scope = in.number(8);
+  require(scope == 1 || scope == 2, "Unknown local input scope");
+  offer.scope = scope == 1 ? ForwardingScope::Keyboard : ForwardingScope::All;
   require(validLocalInputOffer(offer), "Invalid local input offer binding");
   return offer;
 }
@@ -262,6 +266,22 @@ OriginalInputRecord decodeOriginal(Reader &in, std::uint64_t epoch)
   require(validOriginalInputRecord(record) && !stopsCapture(record), "Invalid or discontinuous original input record");
   return record;
 }
+bool validCapabilities(std::uint64_t value)
+{
+  return (value & localInputKeyboardCapability) && !(value & ~localInputKnownCapabilities);
+}
+bool scopeAllows(ForwardingScope scope, const OriginalInputRecord &record)
+{
+  return scope == ForwardingScope::All ||
+         (scope == ForwardingScope::Keyboard && (std::holds_alternative<OriginalInputKey>(record.payload) ||
+                                                 std::holds_alternative<OriginalInputBoundary>(record.payload)));
+}
+QByteArray capabilityPayload(std::uint64_t value)
+{
+  Writer out;
+  out.number(value, 8);
+  return out.data;
+}
 QByteArray processes(LocalInputProcess core, LocalInputProcess host)
 {
   Writer out;
@@ -373,7 +393,8 @@ std::optional<LocalInputProcess> currentLocalInputProcess()
 }
 bool validLocalInputOffer(const LocalInputOffer &offer)
 {
-  return offer.routeGeneration != 0 && offer.coreServerIncarnation != 0 && offer.coreRecipient != 0 &&
+  return (offer.scope == ForwardingScope::Keyboard || offer.scope == ForwardingScope::All) &&
+         offer.routeGeneration != 0 && offer.coreServerIncarnation != 0 && offer.coreRecipient != 0 &&
          offer.coreSelectionGeneration != 0 && offer.captureEpoch != 0 && nonzero(offer.deskflowClientIncarnation) &&
          nonzero(offer.deskflowPeerPin) && nonzero(offer.windowSharePeerPin);
 }
@@ -433,6 +454,7 @@ LocalInputChannel::LocalInputChannel(
           limits.timeoutMs <= 10000 && limits.handshakeMs >= 100 && limits.handshakeMs <= 30000,
       "Invalid local input deadlines"
   );
+  require(validCapabilities(limits.capabilities), "Invalid local input capabilities");
   require(privateEndpoint(descriptor), "Local input requires an unnamed inherited Unix socketpair");
   require(m_socket.setSocketDescriptor(descriptor, QLocalSocket::ConnectedState), "Cannot adopt local input socket");
   owned.value = -1;
@@ -459,7 +481,7 @@ LocalInputChannel::LocalInputChannel(
       m_hostIncarnation = incarnation();
     } while (m_coreIncarnation == m_hostIncarnation);
     QTimer::singleShot(0, this, [this] {
-      if (send(Type::CoreHello, processes(m_self, m_peer)))
+      if (send(Type::CoreHello, processes(m_self, m_peer) + capabilityPayload(m_limits.capabilities)))
         m_handshake = 1;
     });
   }
@@ -480,11 +502,20 @@ bool LocalInputChannel::authenticated() const
   return m_authenticated && !m_closed && m_socket.state() == QLocalSocket::ConnectedState &&
          m_lastRead.elapsed() < m_limits.timeoutMs && peerAlive();
 }
+bool LocalInputChannel::supports(ForwardingScope scope) const
+{
+  if (QThread::currentThread() != thread() || !authenticated())
+    return false;
+  const auto capability = scope == ForwardingScope::Keyboard ? localInputKeyboardCapability
+                          : scope == ForwardingScope::All    ? localInputFullCapability
+                                                             : 0;
+  return capability && (m_capabilities & capability);
+}
 std::optional<LocalInputAuthenticatedIdentity> LocalInputChannel::authenticatedIdentity() const
 {
   if (QThread::currentThread() != thread() || !authenticated() || currentLocalInputProcess() != m_self)
     return std::nullopt;
-  return LocalInputAuthenticatedIdentity{m_role, m_self, m_peer, m_coreIncarnation, m_hostIncarnation};
+  return LocalInputAuthenticatedIdentity{m_role, m_self, m_peer, m_coreIncarnation, m_hostIncarnation, m_capabilities};
 }
 LocalInputPhase LocalInputChannel::phase() const
 {
@@ -528,7 +559,7 @@ bool LocalInputChannel::permits(const LocalInputLease &lease, LocalInputCheck ch
 {
   const QPointer<LocalInputChannel> alive(this);
   const auto requested = lease;
-  if (!fresh() || !authenticated() || m_authorizing || !validLocalInputLease(requested) || !authorize)
+  if (!fresh() || !supports(requested.scope) || m_authorizing || !validLocalInputLease(requested) || !authorize)
     return false;
   const auto phase = m_phase;
   const auto current = m_lease;
@@ -660,20 +691,34 @@ void LocalInputChannel::read()
 void LocalInputChannel::bootstrap(Type type, const QByteArray &payload)
 {
   require(peerAlive(), "Local input bootstrap peer changed");
+  const auto readCapabilities = [&](const QByteArray &identity) {
+    require(
+        payload.size() == identity.size() + 8 && payload.first(identity.size()) == identity,
+        "Local input launch identity or capability framing mismatch"
+    );
+    Reader in{payload};
+    in.offset = identity.size();
+    const auto peerCapabilities = in.number(8);
+    in.end();
+    require(validCapabilities(peerCapabilities), "Unknown or missing local input capabilities");
+    m_peerCapabilities = peerCapabilities;
+    m_capabilities = peerCapabilities & m_limits.capabilities;
+  };
   if (m_role == LocalInputRole::Host && m_handshake == 0 && type == Type::CoreHello) {
-    require(payload == processes(m_peer, m_self), "Local input launch identity mismatch");
-    if (send(Type::HostHello, processes(m_peer, m_self)))
+    readCapabilities(processes(m_peer, m_self));
+    if (send(Type::HostHello, processes(m_peer, m_self) + capabilityPayload(m_limits.capabilities)))
       m_handshake = 1;
     return;
   }
   if (m_role == LocalInputRole::Core && m_handshake == 1 && type == Type::HostHello) {
-    require(payload == processes(m_self, m_peer), "Local input child identity mismatch");
-    if (!send(Type::Ready))
+    readCapabilities(processes(m_self, m_peer));
+    if (!send(Type::Ready, capabilityPayload(m_capabilities)))
       return;
   } else {
     require(
-        m_role == LocalInputRole::Host && m_handshake == 1 && type == Type::Ready && payload.isEmpty(),
-        "Unexpected local input handshake message"
+        m_role == LocalInputRole::Host && m_handshake == 1 && type == Type::Ready &&
+            payload == capabilityPayload(m_capabilities) && validCapabilities(m_capabilities),
+        "Unexpected local input handshake message or capability confirmation"
     );
   }
   // Recheck the absolute bootstrap age after validation and any reply write.
@@ -688,22 +733,22 @@ void LocalInputChannel::bootstrap(Type type, const QByteArray &payload)
 bool LocalInputChannel::offer(LocalInputOffer offer)
 {
   return fresh() && authenticated() && m_role == LocalInputRole::Core && validLocalInputOffer(offer) &&
-         send(Type::Offer, encodeOffer(offer));
+         supports(offer.scope) && send(Type::Offer, encodeOffer(offer));
 }
 bool LocalInputChannel::candidate(LocalInputLease lease)
 {
   return fresh() && authenticated() && m_role == LocalInputRole::Host && validLocalInputLease(lease) &&
-         send(Type::Candidate, encodeLease(lease));
+         supports(lease.scope) && send(Type::Candidate, encodeLease(lease));
 }
 bool LocalInputChannel::quiesced(LocalInputLease lease)
 {
   return fresh() && authenticated() && m_role == LocalInputRole::Host && validLocalInputLease(lease) &&
-         send(Type::Quiesced, encodeLease(lease));
+         supports(lease.scope) && send(Type::Quiesced, encodeLease(lease));
 }
 bool LocalInputChannel::cancelOffer(LocalInputOffer offer, LocalInputRevocation reason)
 {
   const auto value = static_cast<unsigned>(reason);
-  return fresh() && authenticated() && validLocalInputOffer(offer) && value >= 1 &&
+  return fresh() && authenticated() && validLocalInputOffer(offer) && supports(offer.scope) && value >= 1 &&
          value <= static_cast<unsigned>(LocalInputRevocation::TransportLost) &&
          send(Type::CancelOffer, encodeOffer(offer) + QByteArray(1, static_cast<char>(reason)));
 }
@@ -743,7 +788,8 @@ bool LocalInputChannel::sendOriginal(LocalInputLease lease, OriginalInputRecord 
   const QPointer<LocalInputChannel> alive(this);
   if (!fresh() || m_role != LocalInputRole::Core || m_phase != LocalInputPhase::Active || m_lease != lease)
     return false;
-  if (!validOriginalInputRecord(record) || record.epoch != lease.captureEpoch || record.epoch != m_captureEpoch) {
+  if (!validOriginalInputRecord(record) || !scopeAllows(lease.scope, record) || record.epoch != lease.captureEpoch ||
+      record.epoch != m_captureEpoch) {
     close("Invalid original input record or capture epoch");
     return false;
   }
@@ -778,6 +824,7 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
   if (type == Type::Offer || type == Type::CancelOffer) {
     require(type == Type::CancelOffer || m_role == LocalInputRole::Host, "Invalid local input offer sender role");
     const auto offer = decodeOffer(in);
+    require(supports(offer.scope), "Unnegotiated local input offer scope");
     if (type == Type::Offer) {
       in.end();
       notify(this, onOffer, offer);
@@ -793,6 +840,7 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     return;
   }
   auto lease = decodeLease(in);
+  require(supports(lease.scope), "Unnegotiated local input lease scope");
   if (type == Type::Candidate || type == Type::Quiesced) {
     require(m_role == LocalInputRole::Core, "Invalid local input candidate sender role");
     in.end();
@@ -851,6 +899,7 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
   if (type == Type::Original) {
     require(m_role == LocalInputRole::Host, "Invalid original input sender role");
     const auto record = decodeOriginal(in, lease.captureEpoch);
+    require(scopeAllows(lease.scope, record), "Original input exceeded its private lease scope");
     require(
         record.epoch == m_captureEpoch && record.sequence > m_originalSequence &&
             record.sourceTimestampNs >= m_originalTimestamp,

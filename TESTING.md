@@ -30,6 +30,38 @@ Do not store private keys, credentials, typed private text or full environment
 dumps in results. Keep useful logs/artifacts and their hashes, not just screenshots
 or an unexplained "all tests pass."
 
+## Cloud implementation progress: private protocol v4
+
+This is an incremental implementation checkpoint, not completion of P1 or P2–P8.
+The private channel and preflight now retain keyboard/all-input scope end to end,
+negotiate explicit code-support capabilities, and reject v3, malformed scope,
+capability downgrade, and pointer delivery under a keyboard lease. No new native
+input authority is installed by this checkpoint.
+
+Debian 13 disposable cloud environment: GCC 14.2.0, Qt 6.8.2, CMake 3.31.6.
+The dependency archive is from source-helper run `38326221704`; SHA-256
+`c8cdc4abc44124ac163e51ebcee4a20f0c2cf90b07f7ae6eedf351084880ca0e`.
+Its package hashes were verified before installation. Existing libsystemd0 was
+retained to avoid replacing the container's systemd; no user machine was touched.
+
+PASS: configure `src/apps/windowshare` with `WINDOWSHARE_APP=ON`, Debug;
+build `windowshare-local-input-tests` and `windowshare-preflight-tests`.
+PASS: `LC_ALL=C.UTF-8 QT_QPA_PLATFORM=offscreen ctest --test-dir build/cloud-app
+--output-on-failure --no-tests=error -R '^windowshare-(local-input|preflight)$'`;
+exit 0, 2 suites passed, 0 failed, 26.13 seconds. These prove private-process
+framing, scope, state and release behavior, not compositor or Mac app receipt.
+
+New concrete cases: `negotiatedScope`, `fullInputScope`, expanded
+`malformedBootstrap`, `malformedPreflight`, and `changedBindings`. The full-scope
+preflight receiver confirms all eight ordered records before revoking its owner;
+this test does not infer success from a sleep. Existing cancellation, capture
+revocation, deadline, callback destruction and malformed mixed-record cases remain.
+Two first-run failures were test migrations (old fixed offsets and a pointer
+used under a now-enforced keyboard lease); neither was suppressed or relabelled.
+
+Current checkpoint native/CI/sanitizer checks beyond the above are NOT_RUN until
+recorded for an exact published source SHA. Hardware H01–H12 remain NOT_RUN.
+
 ## Historical baseline
 
 All six jobs pass for `ef5145665` in

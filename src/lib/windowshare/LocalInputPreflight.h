@@ -82,10 +82,10 @@ public:
   struct Host
   {
     std::function<std::optional<AuthenticatedPeerObservation>()> connection;
-    // The private lease represents keyboard scope only. Any other reservation
-    // closes the connection before Candidate or startQuiescence; connection
-    // teardown must clean up that unstarted reservation, without a lease release.
-    std::function<std::optional<KeyboardRouteBinding>()> reserve;
+    // Reserve the requested scope without downgrade. A mismatched binding is
+    // terminal before Candidate/startQuiescence; connection teardown owns the
+    // invalid unstarted reservation, never a scope-erased lease release.
+    std::function<std::optional<KeyboardRouteBinding>(ForwardingScope)> reserve;
     std::function<bool(const KeyboardRouteBinding &)> startQuiescence, isQuiesced;
     // Required exact-binding transfer from the reservation deadline to active
     // ownership. Called once during host Commit authorization, after neutral
@@ -113,7 +113,7 @@ public:
   // cannot regress across attempts. The host binds the offered ID without
   // claiming it independently observes the core's physical capture stream.
   // Does not retry or start automatically on a heartbeat.
-  bool begin(OriginalInputEpoch capture);
+  bool begin(OriginalInputEpoch capture, ForwardingScope scope = ForwardingScope::Keyboard);
   // Host's deferred, independently revalidated Bridge notification.
   void quiesced(const KeyboardRouteBinding &binding);
   void cancel(LocalInputRevocation reason = LocalInputRevocation::Requested);

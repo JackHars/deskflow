@@ -102,6 +102,9 @@ int child(int descriptor, const QString &mode)
   check(process.has_value(), "Fixture parent unavailable");
   auto channel = LocalInputChannel::adoptHost(descriptor, *process);
   const bool unsupportedScope = mode.startsWith("full-scope-") || mode == "invalid-scope-reserve";
+  auto expectedBinding = binding();
+  if (mode == "all-input")
+    expectedBinding.scope = ForwardingScope::All;
   bool closed = false, quiescent = false, reserved = false, active = false, held = false, providerLost = false;
   int releases = 0, reads = 0, originals = 0, activations = 0, neutralAfterActivation = 0,
       quiescenceAfterActivation = 0, starts = 0, reservationShutdowns = 0;
@@ -109,14 +112,25 @@ int child(int descriptor, const QString &mode)
     closed = true;
     if (unsupportedScope && reserved) {
       // Simulate the owning connection shutting down its unstarted reservation.
-      // A private keyboard lease cannot perform this exact-scope cleanup.
+      // A scope-mismatched lease cannot perform this exact-scope cleanup.
       ++reservationShutdowns;
       reserved = false;
     }
   };
-  channel->onOriginal = [&](const auto &, const auto &) {
+  channel->onOriginal = [&](const auto &lease, const auto &record) {
     ++originals;
     held = true;
+    if (mode == "all-input") {
+      constexpr std::array<std::size_t, 8> families{0, 2, 1, 3, 2, 1, 0, 4};
+      check(
+          lease.scope == ForwardingScope::All && originals <= 8 &&
+              record.sequence == static_cast<std::uint64_t>(originals) &&
+              record.payload.index() == families[originals - 1],
+          "Full-input receiver lost scope, family, or source order"
+      );
+      if (originals == 8)
+        channel->revoke();
+    }
     if (mode.startsWith("host-watchdog-"))
       QTimer::singleShot(25, QCoreApplication::instance(), [&] { providerLost = true; });
   };
@@ -133,7 +147,7 @@ int child(int descriptor, const QString &mode)
         *ticket, mode == "stale-host-after-read" && reads == 1 ? 5900 : 0
     );
   };
-  host.reserve = [&]() -> std::optional<KeyboardRouteBinding> {
+  host.reserve = [&](ForwardingScope scope) -> std::optional<KeyboardRouteBinding> {
     reserved = true;
     if (mode == "destroy-reserve" || mode == "full-scope-destroy-reserve")
       coordinator.reset();
@@ -142,13 +156,14 @@ int child(int descriptor, const QString &mode)
     if (mode == "throw-reserve")
       throw std::runtime_error("Fixture reserve failed");
     auto candidate = binding();
+    candidate.scope = scope;
     if (unsupportedScope)
       candidate.scope = mode == "invalid-scope-reserve" ? static_cast<ForwardingScope>(123) : ForwardingScope::All;
     return candidate;
   };
   host.startQuiescence = [&](const auto &candidate) {
     ++starts;
-    check(candidate == binding(), "Host started a different reservation");
+    check(candidate == expectedBinding, "Host started a different reservation");
     check(channel->phase() == LocalInputPhase::Idle, "Preflight acquired channel authority");
     if (mode == "no-quiescence")
       return true;
@@ -158,11 +173,11 @@ int child(int descriptor, const QString &mode)
   };
   host.isQuiesced = [&](const auto &candidate) {
     quiescenceAfterActivation += active;
-    return !active && quiescent && candidate == binding() && mode != "stale-focus";
+    return !active && quiescent && candidate == expectedBinding && mode != "stale-focus";
   };
   host.activate = [&](const auto &candidate) {
     check(
-        candidate == binding() && quiescent && !active && channel->phase() == LocalInputPhase::Prepared &&
+        candidate == expectedBinding && quiescent && !active && channel->phase() == LocalInputPhase::Prepared &&
             coordinator->phase() == Phase::Quiesced,
         "Host activation preceded exact neutral Commit or followed its acknowledgment"
     );
@@ -191,7 +206,7 @@ int child(int descriptor, const QString &mode)
     return true;
   };
   host.isActive = [&](const auto &candidate) {
-    check(candidate == binding(), "Active host query changed exact owner");
+    check(candidate == expectedBinding, "Active host query changed exact owner");
     if (mode == "reject-host-active" || (providerLost && mode == "host-watchdog-active"))
       return false;
     if (mode == "throw-host-active")
@@ -219,7 +234,8 @@ int child(int descriptor, const QString &mode)
   };
   checks.release = [&](const auto &lease, auto) {
     check(
-        lease.session == binding().owner.session && lease.keyboardRouteGeneration == binding().generation,
+        lease.session == expectedBinding.owner.session && lease.keyboardRouteGeneration == expectedBinding.generation &&
+            lease.scope == expectedBinding.scope,
         "Release changed host owner"
     );
     ++releases;
@@ -240,6 +256,11 @@ int child(int descriptor, const QString &mode)
             (!coordinator || (coordinator->phase() == Phase::Stopped && !coordinator->lease())),
         "Unsupported scope started a fence or used a downgraded private lease for reservation cleanup"
     );
+  if (mode == "all-input")
+    check(
+        originals == 8 && releases == 1 && activations == 1 && !held && !active,
+        "Full-input preflight lost input families or exact release ownership"
+    );
   if (mode == "destroy-reserve")
     check(!reserved && releases == 1, "Destroyed reservation was not released exactly once");
   if (mode.startsWith("host-watchdog-"))
@@ -247,7 +268,7 @@ int child(int descriptor, const QString &mode)
         originals == 1 && activations == 1 && releases == 1 && !held && !active && providerLost,
         "Idle host provider loss failed to release its held owner exactly once"
     );
-  else if (mode != "normal")
+  else if (mode != "normal" && mode != "all-input")
     check(originals == 0, "Original input escaped failed preflight");
   if (mode.endsWith("-activation") || mode.endsWith("-active") || mode.startsWith("activation-loses-")) {
     const bool missing = mode.startsWith("missing-");
@@ -335,14 +356,14 @@ struct Fixture
       childProcess.waitForFinished(2000);
     }
   }
-  void begin()
+  void begin(ForwardingScope scope = ForwardingScope::Keyboard)
   {
-    check(coordinator->begin(capture.epoch()), "Preflight did not offer selected peer");
+    check(coordinator->begin(capture.epoch(), scope), "Preflight did not offer selected peer");
     check(channel->phase() == LocalInputPhase::Idle, "Offer acquired channel authority");
   }
-  void active()
+  void active(ForwardingScope scope = ForwardingScope::Keyboard)
   {
-    begin();
+    begin(scope);
     check(
         until([&] { return coordinator->phase() == Phase::Active || closed; }) && !closed &&
             channel->phase() == LocalInputPhase::Active,
@@ -413,6 +434,44 @@ void successAndRetirement()
   check(!f.closed && f.coordinator->phase() == Phase::Idle, "Retired replies revived or broke authority");
   f.finish();
 }
+void fullInputScope()
+{
+  Fixture f("all-input");
+  f.active(ForwardingScope::All);
+  const auto lease = *f.coordinator->lease();
+  check(
+      lease.scope == ForwardingScope::All && f.channel->supports(ForwardingScope::All),
+      "Full scope was erased between offer and activation"
+  );
+  const std::array<decltype(OriginalInputRecord::payload), 8> payloads{
+      OriginalInputKey{40, 0},
+      OriginalInputButton{0, true, 1},
+      OriginalInputMotion{3, -4, 0},
+      OriginalInputScroll{},
+      OriginalInputButton{0, false, 1},
+      OriginalInputMotion{-2, 1, 32},
+      OriginalInputKey{40, 0, OriginalKeyKind::Up, OriginalKeyTransition::Up, false},
+      OriginalInputBoundary::Checkpoint
+  };
+  std::uint64_t sequence = 0;
+  for (const auto &payload : payloads) {
+    ++sequence;
+    const OriginalInputRecord record{lease.captureEpoch, sequence, 100 + sequence, 0, payload};
+    check(f.channel->sendOriginal(lease, record), "Full lease rejected a valid original input family");
+  }
+  // The receiver revokes only after consuming all eight records. This is a
+  // private receiver receipt, not a native compositor/application receipt.
+  check(
+      until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }) && !f.closed,
+      "Full input failed at its private receiver"
+  );
+  check(
+      f.releases == 1 && f.coordinator->phase() == Phase::Idle,
+      "Full-input cancellation failed exact-owner synchronous release"
+  );
+  f.finish();
+}
+
 void consecutiveControlAndOriginal()
 {
   {
@@ -521,7 +580,7 @@ void unsupportedReservationScope()
         candidates == 0 && activations == 0 && f.preparedChecks == 0 && f.releases == 0 && f.revokeNotifications == 0 &&
             f.coordinator->phase() == Phase::Stopped && !f.coordinator->lease() && !f.channel->lease() &&
             f.channel->phase() == LocalInputPhase::Idle,
-        "Unsupported host scope crossed the private keyboard-only lease boundary"
+        "Mismatched host scope crossed the authenticated offer boundary"
     );
     f.finish();
   }
@@ -879,7 +938,7 @@ void captureEpochAuthority()
     const auto lease = *f.coordinator->lease();
     f.capture.revoke(OriginalInputRevocation::Overflow);
     if (atUse) {
-      OriginalInputRecord record{lease.captureEpoch, 900, 1000, 0, OriginalInputMotion{1, -1, 32}};
+      OriginalInputRecord record{lease.captureEpoch, 900, 1000, 0, OriginalInputKey{40, 0}};
       check(!f.channel->sendOriginal(lease, record), "Revoked capture delivered before a timer could run");
     } else {
       check(
@@ -946,6 +1005,7 @@ int main(int argc, char **argv)
       return child(args[2].toInt(), args[3]);
     policyValidation();
     successAndRetirement();
+    fullInputScope();
     consecutiveControlAndOriginal();
     defaultDeny();
     hostFailureCases();

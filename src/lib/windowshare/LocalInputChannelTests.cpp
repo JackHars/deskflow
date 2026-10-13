@@ -64,7 +64,10 @@ struct LocalInputChannelTestAccess
   }
   static void ready(LocalInputChannel &channel)
   {
-    channel.bootstrap(static_cast<LocalInputChannel::Type>(3), {});
+    QByteArray payload;
+    for (int index = 7; index >= 0; --index)
+      payload.append(static_cast<char>(channel.m_capabilities >> (index * 8)));
+    channel.bootstrap(static_cast<LocalInputChannel::Type>(3), payload);
   }
   static void flush(LocalInputChannel &channel)
   {
@@ -149,6 +152,7 @@ LocalInputLease fixtureLease()
   lease.focusRequest = 19;
   lease.keyboardRouteGeneration = 20;
   lease.captureEpoch = 21;
+  lease.scope = ForwardingScope::All;
   return lease;
 }
 OriginalInputRecord fixtureEvent(std::uint64_t sequence, OriginalKeyTransition transition = OriginalKeyTransition::Down)
@@ -204,6 +208,7 @@ QByteArray offerPayload(const LocalInputOffer &offer)
   append(offer.deskflowClientIncarnation);
   append(offer.deskflowPeerPin);
   append(offer.windowSharePeerPin);
+  number(bytes, offer.scope == ForwardingScope::Keyboard ? 1 : 2, 8);
   return bytes;
 }
 QByteArray leasePayload(const LocalInputLease &lease)
@@ -263,9 +268,12 @@ struct Fixture
   bool closed = false, ready = false, prepared = false, active = false;
   int revoked = 0;
   QString reason;
+  LocalInputLease expectedLease = fixtureLease();
 
   explicit Fixture(const QString &mode = "passive", LocalInputLimits coreLimits = limits)
   {
+    if (mode.startsWith("keyboard-"))
+      expectedLease.scope = ForwardingScope::Keyboard;
     auto pair = LocalInputSocketPair::create();
 #ifdef Q_OS_UNIX
     check((fcntl(pair.childDescriptor(), F_GETFD) & FD_CLOEXEC) != 0, "Parent capability is inheritable");
@@ -281,18 +289,18 @@ struct Fixture
     // interleave periodic heartbeats with those synthetic frames.
     if (mode == "synthetic")
       LocalInputChannelTestAccess::stopTimer(*core);
-    core->authorize = [](const LocalInputLease &lease, LocalInputCheck) { return lease == fixtureLease(); };
+    core->authorize = [this](const LocalInputLease &lease, LocalInputCheck) { return lease == expectedLease; };
     core->onAuthenticated = [&] { ready = true; };
     core->onPrepared = [&](const LocalInputLease &lease) {
-      check(lease == fixtureLease(), "Prepared acknowledgement changed lease");
+      check(lease == expectedLease, "Prepared acknowledgement changed lease");
       prepared = true;
     };
     core->onActivated = [&](const LocalInputLease &lease) {
-      check(lease == fixtureLease(), "Commit acknowledgement changed lease");
+      check(lease == expectedLease, "Commit acknowledgement changed lease");
       active = true;
     };
     core->onRevoked = [&](const LocalInputLease &lease, LocalInputRevocation) {
-      check(lease == fixtureLease(), "Revocation changed the release owner");
+      check(lease == expectedLease, "Revocation changed the release owner");
       ++revoked;
     };
     core->onClosed = [&](QString why) {
@@ -320,21 +328,22 @@ struct Fixture
   void prepare()
   {
     establish();
-    check(!core->sendOriginal(fixtureLease(), fixtureEvent(1)), "Original event escaped before preparation");
-    check(core->prepare(fixtureLease()), "Core could not prepare lease");
+    check(!core->sendOriginal(expectedLease, fixtureEvent(1)), "Original event escaped before preparation");
+    check(core->prepare(expectedLease), "Core could not prepare lease");
     check(until([&] { return prepared || closed; }) && prepared && !closed, "Host did not acknowledge prepare");
-    check(!core->sendOriginal(fixtureLease(), fixtureEvent(1)), "Original event escaped before commit");
+    check(!core->sendOriginal(expectedLease, fixtureEvent(1)), "Original event escaped before commit");
   }
   void activate()
   {
     prepare();
-    check(core->commit(fixtureLease()), "Core could not commit lease");
+    check(core->commit(expectedLease), "Core could not commit lease");
     check(until([&] { return active || closed; }) && active && !closed, "Lease did not become active");
   }
   void childExitedCleanly()
   {
     check(until([&] { return child.state() == QProcess::NotRunning; }), "Fixture child failed to exit");
-    check(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0, "Fixture child rejected invariant");
+    if (child.exitStatus() != QProcess::NormalExit || child.exitCode() != 0)
+      throw std::runtime_error("Fixture child rejected invariant: " + child.readAllStandardError().toStdString());
   }
 };
 
@@ -362,7 +371,7 @@ wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t s
 {
   QByteArray header;
   number(header, 0x444c4931, 4);
-  number(header, 3, 2);
+  number(header, 4, 2);
   number(header, type, 1);
   number(header, role, 1);
   number(header, payload.size(), 4);
@@ -372,20 +381,20 @@ wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t s
 }
 int wireChild(int descriptor)
 {
-  const auto hello = readBytes(descriptor, 76);
-  check(hello == wireFrame(hello, 1, 1, 1, hello.mid(52)), "Unexpected protocol v3 bootstrap layout");
+  const auto hello = readBytes(descriptor, 84);
+  check(hello == wireFrame(hello, 1, 1, 1, hello.mid(52)), "Unexpected protocol v4 bootstrap layout");
   const auto write = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
     const auto frame = wireFrame(hello, type, 2, sequence, payload);
     check(::write(descriptor, frame.constData(), frame.size()) == frame.size(), "Raw fixture write failed");
   };
   const auto expect = [&](unsigned type, std::uint64_t sequence, const QByteArray &payload = {}) {
     const auto expected = wireFrame(hello, type, 1, sequence, payload);
-    check(readBytes(descriptor, expected.size()) == expected, "Protocol v3 wire bytes changed");
+    check(readBytes(descriptor, expected.size()) == expected, "Protocol v4 wire bytes changed");
   };
   const auto lease = fixtureLease();
   const auto offer = offerPayload(lease), binding = leasePayload(lease);
   write(2, 1, hello.mid(52));
-  expect(3, 2);
+  expect(3, 2, hello.last(8));
   expect(12, 3, offer);
   write(13, 2, binding);
   write(14, 3, binding);
@@ -407,13 +416,13 @@ int wireChild(int descriptor)
 }
 int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
 {
-  auto frame = readBytes(descriptor, 76);
+  auto frame = readBytes(descriptor, 84);
   frame[6] = 2;
   frame[7] = 2;
   if (mode == "raw-magic")
     frame[0] = 'X';
   else if (mode == "raw-version")
-    frame[5] = 2; // The prior keyboard-only v2 must not negotiate.
+    frame[5] = 3; // A v3 lease has no scope/capability evidence and must not negotiate.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -422,7 +431,10 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     frame.replace(20, 16, QByteArray(16, '\0'));
   else if (mode == "raw-process")
     frame[75] = static_cast<char>(frame[75] ^ 1);
-  else if (mode == "raw-sequence")
+  else if (mode.startsWith("raw-capabilities-")) {
+    frame.replace(76, 8, QByteArray(8, '\0'));
+    frame[83] = mode.endsWith("unknown") ? 7 : mode.endsWith("no-keyboard") ? 2 : 0;
+  } else if (mode == "raw-sequence")
     frame.replace(12, 8, QByteArray(8, '\0'));
   else if (mode == "raw-oversize") {
     frame[10] = 1;
@@ -433,7 +445,7 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
   else if (mode == "raw-partial-payload")
     frame.resize(62);
   else if (mode == "raw-trailing") {
-    frame[11] = 25;
+    frame[11] = 33;
     frame.append('x');
   } else if (mode == "raw-unknown")
     frame[6] = static_cast<char>(255);
@@ -508,15 +520,16 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 #ifdef Q_OS_UNIX
   if (mode.startsWith("raw-"))
     return rawChild(application, descriptor, mode);
-  if (mode == "wire-v3")
+  if (mode == "wire-v4")
     return wireChild(descriptor);
   const auto expectedCore = localInputProcess(getppid());
   check(expectedCore.has_value(), "Controlled fixture launcher is unavailable");
   if (mode == "late-ready" || mode == "late-ready-transition" || mode == "slow-ready")
     return delayedReadyChild(application, descriptor, *expectedCore, mode);
-  auto host = LocalInputChannel::adoptHost(
-      descriptor, *expectedCore, mode == "patient" ? LocalInputLimits{20, 2000, 2000} : limits
-  );
+  auto hostLimits = mode == "patient" ? LocalInputLimits{20, 2000, 2000} : limits;
+  if (mode == "keyboard-only")
+    hostLimits.capabilities = localInputKeyboardCapability;
+  auto host = LocalInputChannel::adoptHost(descriptor, *expectedCore, hostLimits);
   check((fcntl(descriptor, F_GETFD) & FD_CLOEXEC) != 0, "Adopted child capability is inheritable");
   if (mode == "synthetic")
     LocalInputChannelTestAccess::stopTimer(*host);
@@ -544,6 +557,11 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       return true;
     }
     auto binding = lease;
+    if (mode.startsWith("keyboard-")) {
+      if (lease.scope != ForwardingScope::Keyboard)
+        return false;
+      binding.scope = ForwardingScope::All;
+    }
     if (mode == "reuse" || mode == "revoke-prepared" || mode.startsWith("retired-") || mode == "epochs")
       binding.routeGeneration = fixtureLease().routeGeneration;
     if (mode == "epochs")
@@ -597,6 +615,15 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   };
   host->onOriginal = [&, marker = QString(256, 'o')](const LocalInputLease &lease, const OriginalInputRecord &event) {
     ++originalEvents;
+    if (mode.startsWith("keyboard-")) {
+      check(
+          lease.scope == ForwardingScope::Keyboard && originalEvents == 1 &&
+              std::holds_alternative<OriginalInputKey>(event.payload),
+          "Keyboard-only lease delivered pointer input or changed scope"
+      );
+      host->revoke();
+      return;
+    }
     if (mode == "mixed") {
       const auto records = mixedRecords();
       check(
@@ -723,17 +750,17 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 3);
+  static_assert(LocalInputChannel::version == 4);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 256);
-  static_assert(LocalInputChannel::offerPayloadBytes == 120 && LocalInputChannel::leasePayloadBytes == 184);
-  static_assert(LocalInputChannel::maxOriginalPayloadBytes == 236);
+  static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
+  static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
   const auto original = fixtureLease();
   const auto offer = leaseOffer(original);
-  check(validLocalInputOffer(offer) && validLocalInputLease(original), "Invalid version 3 fixture");
+  check(validLocalInputOffer(offer) && validLocalInputLease(original), "Invalid version 4 fixture");
   check(
-      offerPayload(offer).size() == 120 && leasePayload(original).size() == 184 &&
-          originalPayload(original, fixtureEvent(1)).size() == 218,
-      "Version 3 golden payload sizes changed"
+      offerPayload(offer).size() == 128 && leasePayload(original).size() == 192 &&
+          originalPayload(original, fixtureEvent(1)).size() == 226,
+      "Version 4 golden payload sizes changed"
   );
   const std::array suffixes{
       "01000000280038030001",
@@ -750,13 +777,13 @@ void preflightValues()
     const auto payload = originalPayload(original, records[i]);
     check(
         validOriginalInputRecord(records[i]) && payload.size() <= LocalInputChannel::maxOriginalPayloadBytes &&
-            payload.mid(208) == QByteArray::fromHex(suffixes[i]),
+            payload.mid(216) == QByteArray::fromHex(suffixes[i]),
         "Mixed original golden record bytes changed"
     );
   }
-  check(originalPayload(original, records[4]).size() == 236, "Scroll payload exceeded its fixed bounded layout");
+  check(originalPayload(original, records[4]).size() == 244, "Scroll payload exceeded its fixed bounded layout");
   check(
-      originalPayload(original, records[0]).mid(184, 24) ==
+      originalPayload(original, records[0]).mid(192, 24) ==
           QByteArray::fromHex("000000000000006400000000000003e88000000000020002"),
       "Original capture sequence/time/flags byte order changed"
   );
@@ -844,7 +871,7 @@ void preflightRoundtrip()
 }
 void preflightWireLayout()
 {
-  Fixture fixture("wire-v3", {1000, 4000, 4000});
+  Fixture fixture("wire-v4", {1000, 4000, 4000});
   LocalInputChannelTestAccess::stopTimer(*fixture.core);
   int replies = 0, cancellations = 0;
   const auto receive = [&](const LocalInputLease &lease) {
@@ -929,7 +956,7 @@ void preflightDoesNotOwnLeaseState()
 void malformedPreflight()
 {
   for (const unsigned type : {12, 13, 14, 15}) {
-    for (int fault = 0; fault < 3; ++fault) {
+    for (int fault = 0; fault < 6; ++fault) {
       Fixture fixture("synthetic");
       fixture.establish();
       int delivered = 0;
@@ -943,8 +970,15 @@ void malformedPreflight()
         payload.chop(1);
       else if (fault == 1)
         payload.append('x');
-      else
+      else if (fault == 2)
         payload.replace(0, 8, QByteArray(8, '\0'));
+      else if (fault == 3)
+        payload.replace(120, 8, QByteArray(8, '\0'));
+      else if (fault == 4) {
+        payload.replace(120, 8, QByteArray(8, '\0'));
+        payload[127] = 3;
+      } else
+        payload.remove(120, 8); // A v3 offer/lease must never decode as v4.
       if (type == 12) {
         check(LocalInputChannelTestAccess::raw(*fixture.core, type, payload), "Cannot send malformed offer fixture");
         check(until([&] { return fixture.closed; }), "Malformed offer did not close receiver");
@@ -1031,10 +1065,8 @@ void preflightCallbacks()
       check(callbacks == 1 && fixture.revoked == 1, "Preflight callback lost or duplicated lease release");
       if (action == "revoke") {
         if (nested != 1 || fixture.closed || fixture.core->lease())
-          throw std::runtime_error(QStringLiteral(
-                                       "Reentrant preflight notification failed: type=%1 action=%2 "
-                                       "nested=%3 closed=%4 reason=%5"
-          )
+          throw std::runtime_error(QStringLiteral("Reentrant preflight notification failed: type=%1 action=%2 "
+                                                  "nested=%3 closed=%4 reason=%5")
                                        .arg(type)
                                        .arg(action)
                                        .arg(nested)
@@ -1123,11 +1155,72 @@ void authoritativeCommit()
       "Core commit bypassed host's local authority"
   );
 }
+void negotiatedScope()
+{
+  // Independent endpoint capability declarations intersect; neither side's
+  // full-input code support alone grants a full-input private contract.
+  for (const bool limitedHost : {false, true}) {
+    auto coreLimits = limits;
+    if (!limitedHost)
+      coreLimits.capabilities = localInputKeyboardCapability;
+    Fixture f(limitedHost ? "keyboard-only" : "keyboard-lease", coreLimits);
+    f.establish();
+    check(
+        f.core->supports(ForwardingScope::Keyboard) && !f.core->supports(ForwardingScope::All) &&
+            !f.core->supports(static_cast<ForwardingScope>(255)) &&
+            f.core->authenticatedIdentity()->capabilities == localInputKeyboardCapability,
+        "Private bootstrap widened or erased capability intersection"
+    );
+    check(
+        !f.core->offer(leaseOffer(fixtureLease())) && !f.core->prepare(fixtureLease()) &&
+            f.core->phase() == LocalInputPhase::Idle && !f.closed,
+        "Unnegotiated full scope entered local preflight or acquired authority"
+    );
+    f.activate();
+    check(f.core->sendOriginal(f.expectedLease, fixtureEvent(1)), "Negotiated keyboard lease could not deliver a key");
+    check(
+        until([&] { return f.revoked || f.closed; }) && !f.closed && f.revoked == 1,
+        "Keyboard-only receiver did not release the exact owner"
+    );
+    f.core->close();
+    f.childExitedCleanly();
+  }
+  for (const bool bypassLocalCheck : {false, true}) {
+    Fixture f("keyboard-lease");
+    f.activate();
+    auto motion = fixtureEvent(1);
+    motion.payload = OriginalInputMotion{1, -1, 32};
+    if (bypassLocalCheck) {
+      check(
+          LocalInputChannelTestAccess::rawOriginal(*f.core, originalPayload(f.expectedLease, motion)),
+          "Cannot send over-scope receiver fixture"
+      );
+      check(until([&] { return f.closed; }), "Receiver accepted a pointer under a keyboard lease");
+    } else
+      check(
+          !f.core->sendOriginal(f.expectedLease, motion) && f.closed, "Sender accepted a pointer under a keyboard lease"
+      );
+    check(f.revoked == 1, "Scope violation failed to release the exact keyboard owner");
+    f.childExitedCleanly();
+  }
+  Fixture forged("synthetic", {20, 400, 400, localInputKeyboardCapability});
+  forged.establish();
+  int candidates = 0;
+  forged.core->onCandidate = [&](const LocalInputLease &) { ++candidates; };
+  LocalInputChannelTestAccess::incoming(*forged.core, 13, leasePayload(fixtureLease()));
+  check(
+      forged.closed && candidates == 0 && !forged.core->lease(),
+      "An unnegotiated full-scope reply reached the coordinator"
+  );
+  forged.childExitedCleanly();
+}
+
 void malformedBootstrap()
 {
   for (const auto *mode :
        {"magic", "version", "role", "incarnation", "zero-incarnation", "process", "sequence", "oversize",
-        "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent"}) {
+        "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent", "capabilities-zero",
+        "capabilities-unknown", "capabilities-no-keyboard"}) {
     Fixture fixture(QStringLiteral("raw-") + mode);
     check(until([&] { return fixture.closed; }), "Malformed bootstrap did not fail closed");
     check(
@@ -1189,7 +1282,7 @@ void handshakeDeadlines()
 }
 void changedBindings()
 {
-  for (int field = 0; field < 15; ++field) {
+  for (int field = 0; field < 16; ++field) {
     Fixture fixture;
     fixture.activate();
     auto lease = fixtureLease();
@@ -1238,6 +1331,9 @@ void changedBindings()
       break;
     case 14:
       ++lease.captureEpoch;
+      break;
+    case 15:
+      lease.scope = ForwardingScope::Keyboard;
       break;
     }
     check(!fixture.core->sendOriginal(lease, fixtureEvent(1)), "Local API accepted a different lease");
@@ -1632,26 +1728,26 @@ void mixedInputAndMalformedRecords()
   }
   const auto altered = [&](int index, qsizetype offset, unsigned value) {
     auto payload = originalPayload(fixtureLease(), records[index]);
-    payload[offset] = static_cast<char>(value);
+    payload[192 + offset] = static_cast<char>(value);
     malformed.push_back(payload);
   };
-  altered(0, 208, 0); // Unknown tag.
-  altered(0, 208, 255);
-  altered(0, 215, 0);   // Key kind.
-  altered(0, 216, 2);   // Key repeat is a strict bool.
-  altered(0, 217, 255); // Key transition.
-  altered(1, 217, 33);  // Invalid drag owner.
-  altered(2, 209, 32);  // Invalid button.
-  altered(2, 210, 2);   // Button direction is a strict bool.
-  altered(2, 211, 128); // Click count exceeds signed32.
-  altered(4, 233, 3);   // Scroll phase is an enum, never a bitmask.
-  altered(4, 234, 4);   // Momentum phase.
-  altered(4, 234, 1);   // Gesture and momentum cannot overlap.
-  altered(4, 235, 2);   // Continuous is a strict bool.
-  altered(4, 235, 0);   // Phased discrete scroll is inconsistent.
-  altered(7, 209, 1);   // Discontinuity/emergency are never delivered.
-  altered(7, 209, 2);
-  altered(7, 209, 255);
+  altered(0, 24, 0); // Unknown tag.
+  altered(0, 24, 255);
+  altered(0, 31, 0);   // Key kind.
+  altered(0, 32, 2);   // Key repeat is a strict bool.
+  altered(0, 33, 255); // Key transition.
+  altered(1, 33, 33);  // Invalid drag owner.
+  altered(2, 25, 32);  // Invalid button.
+  altered(2, 26, 2);   // Button direction is a strict bool.
+  altered(2, 27, 128); // Click count exceeds signed32.
+  altered(4, 49, 3);   // Scroll phase is an enum, never a bitmask.
+  altered(4, 50, 4);   // Momentum phase.
+  altered(4, 50, 1);   // Gesture and momentum cannot overlap.
+  altered(4, 51, 2);   // Continuous is a strict bool.
+  altered(4, 51, 0);   // Phased discrete scroll is inconsistent.
+  altered(7, 25, 1);   // Discontinuity/emergency are never delivered.
+  altered(7, 25, 2);
+  altered(7, 25, 255);
   auto unknownFlags = records[1];
   unknownFlags.flags = originalKey::shiftFlag;
   malformed.push_back(originalPayload(fixtureLease(), unknownFlags));
@@ -1993,32 +2089,56 @@ int main(int argc, char **argv)
       return application.exec();
     }
     check(arguments.size() == 1, "Unexpected local input test argument");
+    QTextStream(stdout) << "RUN: descriptorAndIdentityGuards\n" << Qt::flush;
     descriptorAndIdentityGuards();
+    QTextStream(stdout) << "RUN: authenticatedIdentityValues\n" << Qt::flush;
     authenticatedIdentityValues();
+    QTextStream(stdout) << "RUN: exclusiveInheritance\n" << Qt::flush;
     exclusiveInheritance();
+    QTextStream(stdout) << "RUN: preflightValues\n" << Qt::flush;
     preflightValues();
+    QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;
     preflightRoundtrip();
+    QTextStream(stdout) << "RUN: preflightWireLayout\n" << Qt::flush;
     preflightWireLayout();
+    QTextStream(stdout) << "RUN: preflightDoesNotOwnLeaseState\n" << Qt::flush;
     preflightDoesNotOwnLeaseState();
+    QTextStream(stdout) << "RUN: malformedPreflight\n" << Qt::flush;
     malformedPreflight();
+    QTextStream(stdout) << "RUN: preflightCallbacks\n" << Qt::flush;
     preflightCallbacks();
+    QTextStream(stdout) << "RUN: preflightExpiry\n" << Qt::flush;
     preflightExpiry();
+    QTextStream(stdout) << "RUN: roundtrip\n" << Qt::flush;
     roundtrip();
+    QTextStream(stdout) << "RUN: authoritativeCommit\n" << Qt::flush;
     authoritativeCommit();
+    QTextStream(stdout) << "RUN: malformedBootstrap\n" << Qt::flush;
     malformedBootstrap();
+    QTextStream(stdout) << "RUN: negotiatedScope\n" << Qt::flush;
+    negotiatedScope();
+    QTextStream(stdout) << "RUN: handshakeDeadlines\n" << Qt::flush;
     handshakeDeadlines();
+    QTextStream(stdout) << "RUN: changedBindings\n" << Qt::flush;
     changedBindings();
+    QTextStream(stdout) << "RUN: expiryAtUse\n" << Qt::flush;
     expiryAtUse();
+    QTextStream(stdout) << "RUN: reentrantAuthorization\n" << Qt::flush;
     reentrantAuthorization();
+    QTextStream(stdout) << "RUN: destructiveNotifications\n" << Qt::flush;
     destructiveNotifications();
+    QTextStream(stdout) << "RUN: cancelledLeaseReuse\n" << Qt::flush;
     cancelledLeaseReuse();
+    QTextStream(stdout) << "RUN: retiredOriginals\n" << Qt::flush;
     retiredOriginals();
+    QTextStream(stdout) << "RUN: mixedInputAndMalformedRecords\n" << Qt::flush;
     mixedInputAndMalformedRecords();
+    QTextStream(stdout) << "RUN: captureEpochCutover\n" << Qt::flush;
     captureEpochCutover();
+    QTextStream(stdout) << "RUN: lossAndLimits\n" << Qt::flush;
     lossAndLimits();
-    QTextStream(
-        stdout
-    ) << "PASS: inherited IPC, process/role/incarnation binding, version 3 preflight isolation and framing, "
+    QTextStream(stdout
+    ) << "PASS: inherited IPC, process/role/incarnation binding, version 4 preflight isolation and framing, "
          "absolute bootstrap deadlines, independent authenticated expiry, authoritative leases, "
          "original-event framing, stale/replayed/malformed rejection, bounded queues and owner revocation\n";
     return 0;

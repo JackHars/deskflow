@@ -3,6 +3,16 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Cloud checkpoint: scoped private protocol (2026-10-12)
+
+The private channel is now protocol v4: both endpoints negotiate code-support
+capabilities, the offer/lease retain keyboard or all-input scope, and host
+reservation/activation/release cannot downgrade it. Keyboard-only leases reject
+pointer records at both sender and receiver. The real private-process channel
+and preflight suites pass in the cloud; detailed commands and scope are in
+`TESTING.md`. This checkpoint does not enable production original delivery.
+Server asynchronous preparation and the native ordering coordinator remain next.
+
 ## Original input before legacy dispatch (2026-10-12)
 
 Implementation `eda21b39b19004af9f4abfaacb707bb9b380f6f8` and portable linkage

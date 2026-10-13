@@ -565,19 +565,26 @@ Queued traffic checks the old deadline before refreshing it, so an overdue timer
 cannot revive a connection. Closing, socket failure and destruction revoke its
 ticket before notifying the owner; a reconnect requires a new Channel instance.
 
-Private protocol version 3 carries keys, motion, buttons, scroll and checkpoints
-in a single ordered stream. Its 120-byte offer binds a private route generation,
+Private protocol version 4 carries keys, motion, buttons, scroll and checkpoints
+in a single ordered stream. Its 128-byte offer binds a private route generation,
 core server/recipient/selection tokens, the capture epoch, the Deskflow connection
-incarnation, and both approved pins. A 184-byte
+incarnation, both approved pins, and the explicit keyboard/all-input scope. A 192-byte
 lease also binds the WindowShare incarnation, session, epoch, focus request,
 focus revision, geometry revision and independent keyboard-fence generation.
 Original event payloads use explicit tags and signed 32-bit motion/scroll values;
-the largest is 236 bytes, within the unchanged 256-byte private limit. Capture
+the largest is 244 bytes, within the unchanged 256-byte private limit. Capture
 sequences may skip events outside a route but must increase within their epoch.
 Replay marks survive same-epoch lease replacement; a greater capture epoch needs
 a fresh Prepare, and an older epoch cannot return. Emergency/discontinuity
-boundaries revoke rather than deliver native input. Version 2 is rejected; none
+boundaries revoke rather than deliver native input. Versions 2 and 3 are rejected; none
 of these original records is carried over network JSON.
+
+Bootstrap independently advertises keyboard/full-input code capabilities and
+confirms their intersection before authentication completes. A keyboard-only
+endpoint cannot negotiate full scope. Code support is not native authority.
+The lease retains scope through Candidate, Quiesced, Prepare, Commit, Original
+and release, and a keyboard lease cannot carry pointer records. Host reservation
+must match the requested scope exactly, including through reentrant cancellation.
 
 `LocalInputPreflight` implements the exchange as an isolated, default-deny
 coordinator. Each endpoint checks its own live connection and an explicit immutable

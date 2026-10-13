@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "KeyboardRoute.h"
 #include "OriginalInput.h"
 #include <QByteArray>
 #include <QElapsedTimer>
@@ -43,19 +44,21 @@ bool protectLocalInputDescriptor(int descriptor);
 // Private, core-attested selection. All five counters are full nonzero u64s;
 // none is a JSON/window counter. Names and addresses never establish identity.
 // Wire order: selection counters then captureEpoch (40), Deskflow incarnation
-// (16), both pins (64). captureEpoch is separate from the host/session epoch.
+// (16), both pins (64), explicit scope tag (8). The scope is retained by every
+// reply and release. captureEpoch is separate from the host/session epoch.
 struct LocalInputOffer
 {
   std::uint64_t routeGeneration = 0, coreServerIncarnation = 0, coreRecipient = 0, coreSelectionGeneration = 0;
   std::uint64_t captureEpoch = 0;
   LocalInputIncarnation deskflowClientIncarnation{};
   LocalInputPin deskflowPeerPin{}, windowSharePeerPin{};
+  ForwardingScope scope = ForwardingScope::Keyboard;
   bool operator==(const LocalInputOffer &) const = default;
 };
 bool validLocalInputOffer(const LocalInputOffer &offer);
 
-// Adds the independently host-attested connection and exact keyboard fence.
-// Wire order: Offer (120), WindowShare incarnation (16), six counters (48).
+// Adds the independently host-attested connection and exact forwarding fence.
+// Wire order: Offer (128), WindowShare incarnation (16), six counters (48).
 // These six host counters must be in [1, 2^53-1], matching the JSON protocol.
 // keyboardRouteGeneration and the private routeGeneration are distinct scopes.
 struct LocalInputLease : LocalInputOffer
@@ -80,6 +83,7 @@ struct LocalInputAuthenticatedIdentity
   LocalInputRole role;
   LocalInputProcess self, peer;
   LocalInputIncarnation coreIncarnation{}, hostIncarnation{};
+  std::uint64_t capabilities = 0;
   bool operator==(const LocalInputAuthenticatedIdentity &) const = default;
 };
 enum class LocalInputCheck
@@ -102,6 +106,11 @@ enum class LocalInputPhase
   Committing,
   Active
 };
+// Wire capabilities describe code support, never provider readiness/authority.
+// Every v4 endpoint supports keyboard leases; full-input leases are optional.
+inline constexpr std::uint64_t localInputKeyboardCapability = 1, localInputFullCapability = 2;
+inline constexpr std::uint64_t localInputKnownCapabilities = localInputKeyboardCapability | localInputFullCapability;
+
 struct LocalInputLimits
 {
   int heartbeatMs = 500;
@@ -109,6 +118,7 @@ struct LocalInputLimits
   // Absolute adoption-to-authentication budget, never extended by traffic.
   // Independent of the authenticated heartbeat timeout; valid range 100–30000.
   int handshakeMs = 15000;
+  std::uint64_t capabilities = localInputKnownCapabilities;
 };
 
 class LocalInputSocketPair;
@@ -125,9 +135,9 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 3;
+  static constexpr std::uint16_t version = 4;
   static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 256, maxQueueBytes = 16 * 1024;
-  static constexpr qsizetype offerPayloadBytes = 120, leasePayloadBytes = 184, maxOriginalPayloadBytes = 236;
+  static constexpr qsizetype offerPayloadBytes = 128, leasePayloadBytes = 192, maxOriginalPayloadBytes = 244;
 
   // Takes ownership even on failure. expectedCore must come from an independently
   // trusted bootstrap, not argv, an environment variable, or peer packet fields.
@@ -136,6 +146,8 @@ public:
   ~LocalInputChannel() override;
 
   bool authenticated() const;
+  // Qt owner thread only. Negotiated code support is not a delivery permit.
+  bool supports(ForwardingScope scope) const;
   // Owner Qt thread only; wrong-thread, stale and unauthenticated queries deny.
   // Does not invoke callbacks or refresh the authenticated-read deadline.
   std::optional<LocalInputAuthenticatedIdentity> authenticatedIdentity() const;
@@ -209,6 +221,7 @@ private:
   LocalInputIncarnation m_coreIncarnation{}, m_hostIncarnation{};
   QByteArray m_incoming;
   qsizetype m_expected = headerBytes;
+  std::uint64_t m_peerCapabilities = 0, m_capabilities = 0;
   std::uint64_t m_sent = 0, m_received = 0, m_originalSequence = 0, m_originalTimestamp = 0, m_routeGeneration = 0,
                 m_captureEpoch = 0;
   int m_handshake = 0;

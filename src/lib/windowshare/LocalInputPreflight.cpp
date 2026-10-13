@@ -33,13 +33,8 @@ std::uint64_t nextGeneration()
 }
 KeyboardRouteBinding keyboardBinding(const LocalInputLease &lease)
 {
-  return {
-      {lease.session, lease.epoch},
-      lease.keyboardRouteGeneration,
-      lease.focusRequest,
-      lease.focusRevision,
-      lease.geometryRevision
-  };
+  return {{lease.session, lease.epoch}, lease.keyboardRouteGeneration, lease.focusRequest,
+          lease.focusRevision,          lease.geometryRevision,        lease.scope};
 }
 bool canonical(const LocalInputIncarnation &incarnation)
 {
@@ -303,10 +298,10 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if (attempt && !live())
       cancel(LocalInputRevocation::AuthorityLost, true);
   }
-  bool begin(OriginalInputEpoch capture)
+  bool begin(OriginalInputEpoch capture, ForwardingScope scope)
   {
     if (!running || cancelling || authorizing || processing || !controls.empty() || role != LocalInputRole::Core ||
-        attempt || !channel || !channel->authenticated() || !mailbox || !capture.live() ||
+        attempt || !channel || !channel->supports(scope) || !mailbox || !capture.live() ||
         capture.id() < captureHighWater)
       return false;
     const auto value = mailbox->read();
@@ -325,6 +320,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     offer.deskflowClientIncarnation = localInputConnectionIncarnation(peer.ticket().incarnation());
     offer.deskflowPeerPin = peer.ticket().fingerprint();
     offer.windowSharePeerPin = *pin;
+    offer.scope = scope;
     if (!validLocalInputOffer(offer)) {
       fail("Preflight generation exhausted");
       return false;
@@ -569,18 +565,17 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       return;
     }
     const auto reserve = host.reserve;
-    const auto binding = reserve();
+    const auto binding = reserve(offer.scope);
     if (!binding) {
       if (current(offer))
         cancel(LocalInputRevocation::AuthorityLost, true);
       return;
     }
-    if (binding->scope != ForwardingScope::Keyboard) {
-      // The private lease cannot represent a full forwarding fence. Reject it
-      // before constructing a downgraded lease, including after a reentrant
-      // cancellation. Closing the connection owns the unstarted reservation's
-      // cleanup; a scope-erased lease cannot identify it for checks.release.
-      fail("Private input preflight requires a keyboard-only reservation");
+    if (binding->scope != offer.scope) {
+      // Never relabel an unexpected reservation with the requested scope,
+      // including when reserve cancelled or destroyed this coordinator.
+      // Connection teardown must release the unstarted exact reservation.
+      fail("Private input reservation scope differs from the authenticated offer");
       return;
     }
     LocalInputLease lease;
@@ -708,10 +703,10 @@ LocalInputPreflight::~LocalInputPreflight()
 {
   stop();
 }
-bool LocalInputPreflight::begin(OriginalInputEpoch capture)
+bool LocalInputPreflight::begin(OriginalInputEpoch capture, ForwardingScope scope)
 {
   const auto state = m_state;
-  return state->begin(std::move(capture));
+  return state->begin(std::move(capture), scope);
 }
 void LocalInputPreflight::quiesced(const KeyboardRouteBinding &binding)
 {
