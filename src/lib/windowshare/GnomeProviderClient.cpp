@@ -5,6 +5,7 @@
 #include "GnomeProviderClient.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <cmath>
@@ -87,6 +88,43 @@ bool boolean(GVariant *dictionary, const char *key)
 bool bounded(const char *text)
 {
   return text && *text && std::strlen(text) <= 128;
+}
+// Strictly validate the provider-owned two-stage observation dictionary.
+// GVariant's lookup returns the first matching entry, which alone cannot
+// reject a duplicate key or an unrecognized substituted field. This is
+// read-only evidence, but it must never admit malformed native bindings.
+bool exactStageFields(GVariant *dictionary)
+{
+  static constexpr std::array<std::pair<const char *, const char *>, 13> schema{{
+      {"available", "b"}, {"reason", "s"}, {"observationOnly", "b"}, {"deliveryReady", "b"},
+      {"session", "s"}, {"viewer", "s"}, {"request", "s"}, {"generation", "u"},
+      {"revision", "u"}, {"stageUpdates", "u"}, {"sameStageView", "b"},
+      {"stageX", "d"}, {"stageY", "d"}
+  }};
+  if (!dictionary || !g_variant_is_of_type(dictionary, G_VARIANT_TYPE("a{sv}")) ||
+      g_variant_n_children(dictionary) != schema.size())
+    return false;
+  unsigned seen = 0;
+  GVariantIter iterator;
+  g_variant_iter_init(&iterator, dictionary);
+  const char *key = nullptr;
+  GVariant *value = nullptr;
+  while (g_variant_iter_next(&iterator, "{&sv}", &key, &value)) {
+    bool accepted = false;
+    for (std::size_t index = 0; index < schema.size(); ++index) {
+      if (std::strcmp(key, schema[index].first) != 0)
+        continue;
+      if (!(seen & (1u << index)) && g_variant_is_of_type(value, G_VARIANT_TYPE(schema[index].second))) {
+        seen |= 1u << index;
+        accepted = true;
+      }
+      break;
+    }
+    g_variant_unref(value);
+    if (!accepted)
+      return false;
+  }
+  return seen == ((1u << schema.size()) - 1);
 }
 } // namespace
 
@@ -657,8 +695,8 @@ struct GnomeProviderClient::Impl
     if (!reply.value)
       throw std::runtime_error(error.message("GNOME stage observation incomplete"));
     Variant values(g_variant_get_child_value(reply.value, 0));
-    if (g_variant_n_children(values.value) != 13)
-      throw ChannelError("Malformed GNOME stage observation field count");
+    if (!exactStageFields(values.value))
+      throw ChannelError("Malformed GNOME stage observation field schema");
     const auto text = [&](const char *key) -> std::string {
       const char *value = nullptr;
       if (!g_variant_lookup(values.value, key, "&s", &value) || !bounded(value))

@@ -289,6 +289,7 @@ struct Service
   unsigned nativeHitQueries = 0;
   bool advertiseRoutedPoint = true, advertiseStage = false;
   bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false, unknownStageMethod = false;
+  bool duplicateStageField = false, substituteStageField = false, wrongStageFieldType = false;
   unsigned stageRequests = 0;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
@@ -623,7 +624,12 @@ struct Service
       const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
       const bool permitted = !unavailableStage && requestedRevision == revision;
       add("available", g_variant_new_boolean(permitted));
-      add("reason", g_variant_new_string(permitted ? "" : "fixture-stage-unavailable"));
+      if (duplicateStageField)
+        add("available", g_variant_new_boolean(permitted));
+      else if (substituteStageField)
+        add("unexpected-field", g_variant_new_string(""));
+      else
+        add("reason", g_variant_new_string(permitted ? "" : "fixture-stage-unavailable"));
       add("observationOnly", g_variant_new_boolean(true));
       add("deliveryReady", g_variant_new_boolean(false));
       add("session", g_variant_new_string(sessionId));
@@ -631,7 +637,8 @@ struct Service
       add("request", g_variant_new_string(request));
       add("generation", g_variant_new_uint32(generation));
       add("revision", g_variant_new_uint32(revision));
-      add("stageUpdates", g_variant_new_uint32(shortStageReply ? 1 : 2));
+      add("stageUpdates",
+          wrongStageFieldType ? g_variant_new_string("two") : g_variant_new_uint32(shortStageReply ? 1 : 2));
       add("sameStageView", g_variant_new_boolean(true));
       add("stageX", g_variant_new_double(wrongStagePoint ? stageX + 1 : stageX));
       add("stageY", g_variant_new_double(stageY));
@@ -1153,6 +1160,34 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Unknown stage method fixture did not close");
     check(service.failure.empty(), "Unknown stage method fixture failed");
+  }
+  // A dictionary with thirteen entries can still substitute an unknown
+  // field or repeat a known one; GVariant lookup alone does not reject either.
+  for (int corruption = 0; corruption < 3; ++corruption) {
+    Service service(bus);
+    service.advertiseStage = true;
+    service.duplicateStageField = corruption == 0;
+    service.substituteStageField = corruption == 1;
+    service.wrongStageFieldType = corruption == 2;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Malformed stage dictionary fixture not Ready");
+    const auto request =
+        client.requestRoutedPointObservation({9, 38u + static_cast<unsigned>(corruption), 425, 325});
+    check(request != 0, "Malformed stage dictionary request not queued");
+    const auto result = viewportResult(client, request);
+    check(
+        !result.observation && result.error == "Malformed GNOME stage observation field schema" &&
+            service.stageRequests == 1,
+        "Malformed or duplicate native stage schema published an observation"
+    );
+    waitUntil([&] { return !client.live(); }, "Malformed stage dictionary did not retire private provider");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Malformed stage dictionary did not close");
+    check(service.failure.empty(), "Malformed stage dictionary service failed");
   }
   for (const bool substitute : {true, false}) {
     Service service(bus);
