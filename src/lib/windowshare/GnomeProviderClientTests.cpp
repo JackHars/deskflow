@@ -282,7 +282,9 @@ struct Service
   bool changeNativeRevisionAfterCheck = false, changeNativeTransformAfterCheck = false;
   bool afterQtCheck = false;
   unsigned nativeHitQueries = 0;
-  bool advertiseRoutedPoint = true;
+  bool advertiseRoutedPoint = true, advertiseStage = false;
+  bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false;
+  unsigned stageRequests = 0;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
   Mode mode;
@@ -529,6 +531,8 @@ struct Service
         g_variant_builder_add(&values, "{sv}", key, g_variant_new_boolean(true));
       if (advertiseRoutedPoint)
         g_variant_builder_add(&values, "{sv}", "routedPointObservation", g_variant_new_boolean(true));
+      if (advertiseStage)
+        g_variant_builder_add(&values, "{sv}", "stageUpdateSequence", g_variant_new_boolean(true));
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
@@ -592,6 +596,35 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
+    } else if (!std::strcmp(name, "ObserveStageFrames")) {
+      check(caller == g_dbus_method_invocation_get_sender(invocation), "Stage request changed authenticated caller");
+      const char *sessionKey = nullptr, *token = nullptr, *request = nullptr;
+      guint g = 0, requestedRevision = 0;
+      double stageX = 0, stageY = 0;
+      g_variant_get(parameters, "(&su&s&sddu)", &sessionKey, &g, &token, &request, &stageX, &stageY,
+                    &requestedRevision);
+      check(sessionKey && !std::strcmp(sessionKey, sessionId) && g == generation &&
+            token && !std::strcmp(token, viewerId) && request && *request && advertiseStage,
+            "Stage observation changed exact session or lacked capability");
+      ++stageRequests;
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
+      const bool permitted = !unavailableStage && requestedRevision == revision;
+      add("available", g_variant_new_boolean(permitted));
+      add("reason", g_variant_new_string(permitted ? "" : "fixture-stage-unavailable"));
+      add("observationOnly", g_variant_new_boolean(true));
+      add("deliveryReady", g_variant_new_boolean(false));
+      add("session", g_variant_new_string(sessionId));
+      add("viewer", g_variant_new_string(viewerId));
+      add("request", g_variant_new_string(request));
+      add("generation", g_variant_new_uint32(generation));
+      add("revision", g_variant_new_uint32(revision));
+      add("stageUpdates", g_variant_new_uint32(shortStageReply ? 1 : 2));
+      add("sameStageView", g_variant_new_boolean(true));
+      add("stageX", g_variant_new_double(wrongStagePoint ? stageX + 1 : stageX));
+      add("stageY", g_variant_new_double(stageY));
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
     } else if (!std::strcmp(name, "GetViewer") || !std::strcmp(name, "ValidateCurrentHit") ||
                !std::strcmp(name, "ValidateRoutedPoint")) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Viewport query changed private caller");
@@ -1025,6 +1058,73 @@ void viewportInvalidatedBeforePublication(const PrivateBus &bus)
   waitUntil([&] { return service.callerGone; }, "Invalidation fixture did not clean up");
   check(service.failure.empty(), "Invalidation fixture service failed");
 }
+void stageUpdateObservationCapabilities(const PrivateBus &bus)
+{
+  // The unadvertised legacy provider remains usable for observation, but
+  // cannot invent a compositor stage or original input-drain receipt.
+  {
+    Service service(bus);
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready && observed(client).live() && service.stageRequests == 0,
+          "Legacy provider implicitly claimed Clutter stage observation");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Legacy stage fixture did not close");
+  }
+  {
+    Service service(bus);
+    service.advertiseStage = true;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Stage-capable fixture not Ready");
+    const auto routeId = client.requestRoutedPointObservation({9, 32, 425, 325});
+    check(routeId != 0, "Stage-capable routed point request was refused");
+    const auto result = viewportResult(client, routeId);
+    check(result.observation && result.observation->live() && service.stageRequests == 1 &&
+          result.observation->snapshot().desktopX == 425,
+          "Authenticated real client skipped the negotiated two-cycle stage request");
+    service.unavailableStage = true;
+    const auto refusedId = client.requestViewportObservation();
+    check(refusedId != 0, "Stage-denial request did not start");
+    const auto refused = viewportResult(client, refusedId);
+    check(!refused.observation && refused.error == "fixture-stage-unavailable" && client.live() &&
+          service.stageRequests == 2,
+          "A stage refusal silently permitted viewport observation or killed the session");
+    service.unavailableStage = false;
+    check(observed(client).live(), "Fresh native stage after refusal could not recover");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Negotiated stage fixture did not close");
+    check(service.failure.empty(), "Negotiated stage fixture failed");
+  }
+  for (const bool substitute : {true, false}) {
+    Service service(bus);
+    service.advertiseStage = true;
+    service.wrongStagePoint = substitute;
+    service.shortStageReply = !substitute;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Malformed stage fixture not Ready");
+    const auto request = client.requestRoutedPointObservation({9, substitute ? 33u : 34u, 425, 325});
+    check(request != 0, "Malformed stage request did not begin");
+    const auto reply = viewportResult(client, request);
+    check(!reply.observation && !reply.error.empty() && service.stageRequests == 1,
+          "Substituted routed stage point or incomplete cycle created a viewport observation");
+    waitUntil([&] { return !client.live(); },
+              "Malformed authenticated stage reply did not retire provider session");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Malformed stage fixture not cleaned");
+  }
+}
+
 void nativeHitRecheckedAfterQtQueue(const PrivateBus &bus)
 {
   // Case 1: native focus/geometry revision silently changes after the
@@ -1138,6 +1238,8 @@ int main(int argc, char **argv)
     std::puts("PASS: final child invalidation prevents viewport publication and permits a fresh request");
     nativeHitRecheckedAfterQtQueue(bus);
     std::puts("PASS: final frozen GNOME native hit and local transform are rechecked after Qt queue completion");
+    stageUpdateObservationCapabilities(bus);
+    std::puts("PASS: optional native stage update counts/binding are tested without an input-drain permit");
     viewportWrongAuthenticatedPeer(bus);
     std::puts("PASS: wrong authenticated viewer peer ends the viewport session");
     return 0;

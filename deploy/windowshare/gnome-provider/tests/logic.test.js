@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
     unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validViewportHandle,
+    StageUpdateSequence,
 } from '../logic.js';
 
 test('only stable Shell 50 is supported', () => {
@@ -66,6 +67,59 @@ test('rectangles preserve nonzero origins and reject empty/invalid geometry', ()
     assert.equal(Boolean(validRect(null)), false);
     assert.equal(validRect({x: 0, y: 0, width: 0, height: 1}), false);
     assert.equal(validRect({x: Infinity, y: 0, width: 1, height: 1}), false);
+});
+
+test('stage observation requires two paired later updates on one exact physical view', () => {
+    const view = {}, unrelated = {};
+    const selected = {x: -1920, y: 0, width: 1920, height: 1080};
+    const elsewhere = {x: 0, y: 0, width: 1920, height: 1080};
+    const seq = new StageUpdateSequence('p_12', -100, 250, 8, 100);
+    assert.equal(seq.before(unrelated, elsewhere, 101), false);
+    assert.equal(seq.after(unrelated, 102), false);
+    assert.equal(seq.count, 0);
+    assert.equal(seq.before(view, selected, 103), true);
+    assert.equal(seq.after(view, 104), false);
+    assert.equal(seq.count, 1);
+    assert.equal(seq.before(view, {...selected}, 118), true);
+    assert.equal(seq.after(view, 119), true);
+    assert.equal(seq.complete, true);
+    assert.equal(seq.count, 2);
+    assert.equal(seq.before(view, selected, 120), false);
+});
+
+test('stage updates refuse deadline, reentry, view changes, layout drift and unpaired callbacks', () => {
+    const rect = {x: 0, y: -1080, width: 2560, height: 1440};
+    const view = {}, replaced = {};
+    const fresh = () => new StageUpdateSequence('p', 125, -200, 4, 100);
+    const timeout = fresh();
+    assert.equal(timeout.before(view, rect, 220), false);
+    assert.equal(timeout.reason, 'stage-update-timeout');
+    const unpaired = fresh();
+    unpaired.before(view, rect, 101);
+    unpaired.after(view, 102);
+    unpaired.after(view, 103);
+    assert.equal(unpaired.reason, 'unpaired-stage-update');
+    const reentrant = fresh();
+    reentrant.before(view, rect, 101);
+    reentrant.before(view, rect, 102);
+    assert.equal(reentrant.reason, 'stage-update-reentered');
+    const switched = fresh();
+    switched.before(view, rect, 101);
+    switched.after(view, 102);
+    switched.before(replaced, rect, 103);
+    assert.equal(switched.reason, 'stage-view-replaced');
+    const shifted = fresh();
+    shifted.before(view, rect, 101);
+    shifted.after(view, 102);
+    shifted.before(view, {...rect, x: 1}, 103);
+    assert.equal(shifted.reason, 'stage-layout-changed');
+    for (const bad of [null, {x: 0, y: 0, width: 0, height: 100}, {x: Infinity, y: 0, width: 2, height: 3}]) {
+        const denied = fresh();
+        denied.before(view, bad, 101);
+        assert.equal(denied.reason, 'invalid-stage-view');
+    }
+    assert.throws(() => new StageUpdateSequence('p', 1, 2, 1, 0, 500));
+    assert.throws(() => new StageUpdateSequence('p', 1, 2, 0, 0));
 });
 
 test('native hit prerequisites deny each unsupported state explicitly', () => {

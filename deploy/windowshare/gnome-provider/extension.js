@@ -13,7 +13,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
-    validRequest, validRoutedPointRequest,
+    validRequest, validRoutedPointRequest, StageUpdateSequence,
 } from './logic.js';
 import {closeDescriptorList, withViewerLauncher} from './launcher.js';
 
@@ -106,6 +106,7 @@ class Provider {
         this._ownerSubscription = 0;
         this._object = null;
         this._native = false;
+        this._stageCapable = false;
     }
 
     async start() {
@@ -119,6 +120,11 @@ class Provider {
         this._native = this._backend === 'MetaBackendNative';
         if (!this._native || typeof Meta.WaylandClient.new_subprocess !== 'function')
             throw new Error('A Mutter 50 native Wayland backend is required');
+        // Only claim the optional read-only compositor frame observation when
+        // this exact Shell exposes its real Clutter StageView layout method.
+        // This does not enable the compositor input-consumption drain.
+        this._stageCapable = typeof global.stage.schedule_update === 'function' &&
+            typeof Clutter.StageView?.prototype?.get_layout === 'function';
         this._address = GLib.getenv('DBUS_SESSION_BUS_ADDRESS');
         if (!this._address)
             throw new Error('An explicit session bus address is required');
@@ -177,6 +183,7 @@ class Provider {
             this._close(session, 'revision-exhausted');
             return;
         }
+        this._finishStageCheck(session, session.stageCheck, 'native-state-invalidated');
         this._object?.emit_signal('Invalidated',
             new GLib.Variant('(suus)', [session.id, session.generation, session.revision, reason]));
     }
@@ -187,6 +194,7 @@ class Provider {
             nativeHitTesting: ['b', this._native], exactWaylandClientBinding: ['b', true],
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
             viewportChannel: ['b', true], routedPointObservation: ['b', true],
+            stageUpdateSequence: ['b', this._stageCapable],
             viewportSocketValidated: ['b', false],
             syncFenceVerified: ['b', false], pointerDeviceAttribution: ['b', false],
             qtViewportMapping: ['b', false], deliveryReady: ['b', false],
@@ -199,7 +207,7 @@ class Provider {
             session = this._state.begin(invocation.get_sender(), uuid(), nowMs());
             Object.assign(session, {
                 cancel: new Gio.Cancellable(), invocation, signals: [], connection: null,
-                viewer: null, window: null, surface: null, signature: '',
+                viewer: null, window: null, surface: null, signature: '', stageCheck: null,
             });
             session.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, STARTUP_MS, () => {
                 session.timeout = 0;
@@ -433,6 +441,113 @@ class Provider {
         return {values, surface, pointerX, pointerY};
     }
 
+    _finishStageCheck(session, check, reason = '') {
+        if (!check || session.stageCheck !== check)
+            return; // Terminal, late and reentrant callbacks are harmless.
+        session.stageCheck = null; // Clear ownership before signals/DBus callbacks.
+        removeSource(check.timeout);
+        removeSource(check.nextUpdate);
+        disconnect(check.signals);
+        const valid = !reason && check.sequence.complete &&
+            this._state.matches(session) && session.revision === check.revision;
+        const result = {
+            available: ['b', valid], reason: ['s', valid ? '' : (reason || 'stage-incomplete')],
+            observationOnly: ['b', true], deliveryReady: ['b', false],
+            session: ['s', session.id], generation: ['u', session.generation],
+            viewer: ['s', check.viewer], request: ['s', check.request],
+            revision: ['u', session.revision], stageUpdates: ['u', valid ? 2 : check.sequence.count],
+            sameStageView: ['b', valid], stageX: ['d', check.x], stageY: ['d', check.y],
+        };
+        try {
+            check.invocation.return_value(new GLib.Variant('(a{sv})', [variants(result)]));
+        } catch (_) {
+            // The private caller may already have closed; a late reply never
+            // grants ownership or survives the invalidated session.
+        }
+    }
+
+    // A conservative two-cycle Clutter observation, never a native-input
+    // barrier: before/after-update signals are not tied to one sender EIS
+    // event, and the queue may be re-filled by reentrant dispatch. This
+    // request is bound to the actual focused Viewer and frozen stage point.
+    ObserveStageFramesAsync([id, generation, token, request, x, y, revision], invocation) {
+        let session, check;
+        try {
+            session = this._lookup(invocation, id, generation);
+            if (!this._stageCapable || !validRequest(request, x, y, revision) ||
+                session.stageCheck)
+                throw new Error('Stage update observation unsupported or busy');
+            const initial = this._observe(session, token);
+            if (initial.values.reason[1] || initial.values.revision[1] !== revision ||
+                !initial.surface ||
+                global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== initial.surface)
+                throw new Error('Frozen point is not on the current owned Viewer');
+            const sequence = new StageUpdateSequence(request, x, y, revision, nowMs());
+            check = {request, revision, viewer: token, invocation, sequence, x, y, surface: initial.surface,
+                signals: [], timeout: 0, nextUpdate: 0};
+            session.stageCheck = check; // Before registering any reentrant callbacks.
+            const terminate = why => this._finishStageCheck(session, check, why);
+            check.signals.push([global.stage, global.stage.connect('before-update', (_stage, view) => {
+                if (session.stageCheck !== check)
+                    return;
+                try {
+                    sequence.before(view, view?.get_layout?.(), nowMs());
+                    if (sequence.reason)
+                        terminate(sequence.reason);
+                } catch (_) {
+                    terminate('unsupported-stage-view-layout');
+                }
+            })]);
+            check.signals.push([global.stage, global.stage.connect('after-update', (_stage, view) => {
+                if (session.stageCheck !== check)
+                    return;
+                try {
+                    const completed = sequence.after(view, nowMs());
+                    if (sequence.reason) {
+                        terminate(sequence.reason);
+                        return;
+                    }
+                    if (view !== sequence.view)
+                        return;
+                    const current = this._observe(session, token);
+                    if (session.stageCheck !== check)
+                        return; // Observation invalidated itself via native signal.
+                    if (current.values.reason[1] || current.values.revision[1] !== revision ||
+                        current.surface !== check.surface ||
+                        global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== check.surface) {
+                        terminate('stage-hit-or-focus-changed');
+                        return;
+                    }
+                    if (completed) {
+                        this._finishStageCheck(session, check);
+                    } else if (!check.nextUpdate) {
+                        // Schedule the second frame only after the first
+                        // after-update unwinds and Mutter clears its update flag.
+                        check.nextUpdate = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                            check.nextUpdate = 0;
+                            if (session.stageCheck === check)
+                                global.stage.schedule_update();
+                            return GLib.SOURCE_REMOVE;
+                        });
+                    }
+                } catch (_) {
+                    terminate('native-stage-check-failed');
+                }
+            })]);
+            check.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
+                check.timeout = 0;
+                terminate('stage-update-deadline');
+                return GLib.SOURCE_REMOVE;
+            });
+            global.stage.schedule_update(); // No input posting or new display connection.
+        } catch (error) {
+            if (check && session?.stageCheck === check)
+                this._finishStageCheck(session, check, 'stage-start-failed');
+            else
+                errorReply(invocation, error);
+        }
+    }
+
     GetViewerAsync([id, generation, token], invocation) {
         try {
             const session = this._lookup(invocation, id, generation);
@@ -511,6 +626,7 @@ class Provider {
         if (!session || session.cleaned)
             return;
         session.cleaned = true;
+        this._finishStageCheck(session, session.stageCheck, 'viewer-or-provider-closed');
         this._state.detach(session);
         session.cancel?.cancel();
         removeSource(session.timeout);

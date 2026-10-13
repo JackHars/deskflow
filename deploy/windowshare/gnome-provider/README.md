@@ -29,6 +29,7 @@ exporting the interface.
   Version is 1. Capability types are `providerApi:u`, `backend:s`,
   `nativeHitTesting:b`, `exactWaylandClientBinding:b`, `eisSessionOwned:b`,
   `trustedDesktopOnly:b`, `viewportChannel:b`, `routedPointObservation:b`,
+  `stageUpdateSequence:b` (optional real two-frame read-only diagnostic),
   `viewportSocketValidated:b`,
   `syncFenceVerified:b`, `pointerDeviceAttribution:b`,
   `qtViewportMapping:b`, and `deliveryReady:b`.
@@ -85,6 +86,28 @@ exporting the interface.
   provider or malformed/replayed reply cannot silently convert this into the
   current-cursor path. No native input injection, ordering fence, or delivery
   authority is established by a successful result.
+- `ObserveStageFrames(s session, u generation, s viewer, s request, d x, d y,
+  u expectedRevision) -> (a{sv} observation)` is an **optional, read-only**
+  same-view stage-update observation. The provider accepts only the exact
+  caller and owned viewer and requires the frozen point to be the reactive hit
+  on its sole native surface. It listens to Mutter's actual
+  `ClutterStage::before-update/after-update` signals and requires two distinct,
+  correctly paired cycles on the **same** stage view whose *native layout*
+  contains that point. Unsupported `StageView.get_layout`, layout drift,
+  source focus/occlusion changes, reentry, invalidation, caller loss, or the
+  **120 ms absolute** deadline refuse the result. A second stage update is
+  scheduled on the GNOME main context only after the first completion. It
+  never opens a second display, posts input, or copies a borrowed native
+  pointer to the core worker. The strict reply has
+  `session/generation/viewer/request/revision,stageX/stageY,stageUpdates=2,
+  sameStageView=true,observationOnly=true,deliveryReady=false` with explicit
+  `available/reason`; the core validates the complete tuple. The session
+  permits only one outstanding check. This method is connected between the
+  exact GNOME hit and Qt's queued observation when advertised.
+  **Important:** `after-update` runs after that stage's event-queue pass,
+  but queued input may be detached or reentrantly scheduled and no source EIS
+  device/prefix is associated with these two frames. This is *not* a native
+  old-input drain or a permission to enable original-input forwarding.
 - `CloseSession(s session, u generation)` retires the session and owned child.
   The same teardown occurs on caller loss, Mutter closure, viewer loss, or
   extension disable. Only the owned child receives SIGTERM and, if necessary,

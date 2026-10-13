@@ -95,6 +95,7 @@ struct GnomeProviderClient::Impl
   GnomeProviderConfig configuration;
   std::function<void()> changed;
   std::atomic<bool> stopping = false, alive = false, routedPointSupported = false;
+  bool stageUpdatesSupported = false; // Worker-owned; read-only Clutter observation only.
   std::mutex mutex;
   Update update;
   std::optional<ViewportUpdate> viewportUpdate;
@@ -312,6 +313,7 @@ struct GnomeProviderClient::Impl
         std::strcmp(backend, "MetaBackendNative"))
       throw std::runtime_error("Unsupported GNOME provider capabilities or Shell version");
     routedPointSupported.store(boolean(values, "routedPointObservation"), std::memory_order_release);
+    stageUpdatesSupported = boolean(values, "stageUpdateSequence");
     DescriptorList descriptors;
     Variant created(g_dbus_connection_call_with_unix_fd_list_sync(
         bus, owner.c_str(), object, interface, "CreateSession", nullptr, G_VARIANT_TYPE("(suh)"),
@@ -634,6 +636,58 @@ struct GnomeProviderClient::Impl
     }
     return result;
   }
+  // Optional real GNOME StageView observation between native-hit and Qt
+  // queue checks. Clutter's before/after-update pairs are not bound to one
+  // EIS sender event, and therefore NEVER constitute old-input drain.
+  void observeStageFrames(Clock::time_point deadline, const NativeViewport &native, std::uint64_t request)
+  {
+    if (!stageUpdatesSupported)
+      return; // Older/unsupported providers retain read-only diagnostics.
+    const std::string requestText = std::to_string(request);
+    Error error;
+    Variant reply(g_dbus_connection_call_sync(
+        bus, owner.c_str(), object, interface, "ObserveStageFrames",
+        g_variant_new(
+            "(sussddu)", session.c_str(), generation, viewer.c_str(), requestText.c_str(),
+            native.x, native.y, native.revision
+        ),
+        G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, remainingMs(deadline), cancel, &error.value
+    ));
+    checkpoint(deadline);
+    if (!reply.value)
+      throw std::runtime_error(error.message("GNOME stage observation incomplete"));
+    Variant values(g_variant_get_child_value(reply.value, 0));
+    if (g_variant_n_children(values.value) != 13)
+      throw ChannelError("Malformed GNOME stage observation field count");
+    const auto text = [&](const char *key) -> std::string {
+      const char *value = nullptr;
+      if (!g_variant_lookup(values.value, key, "&s", &value) || !bounded(value))
+        throw ChannelError("Malformed GNOME stage observation binding");
+      return value;
+    };
+    guint returnedGeneration = 0, revision = 0, cycles = 0;
+    gboolean available = false, observationOnly = false, deliveryReady = true, sameView = false;
+    double stageX = 0, stageY = 0;
+    if (text("session") != session || text("viewer") != viewer || text("request") != requestText ||
+        !g_variant_lookup(values.value, "generation", "u", &returnedGeneration) ||
+        returnedGeneration != generation ||
+        !g_variant_lookup(values.value, "revision", "u", &revision) || revision != native.revision ||
+        !g_variant_lookup(values.value, "available", "b", &available) ||
+        !g_variant_lookup(values.value, "observationOnly", "b", &observationOnly) || !observationOnly ||
+        !g_variant_lookup(values.value, "deliveryReady", "b", &deliveryReady) || deliveryReady ||
+        !g_variant_lookup(values.value, "sameStageView", "b", &sameView) ||
+        !g_variant_lookup(values.value, "stageUpdates", "u", &cycles) ||
+        !g_variant_lookup(values.value, "stageX", "d", &stageX) ||
+        !g_variant_lookup(values.value, "stageY", "d", &stageY) ||
+        !std::isfinite(stageX) || !std::isfinite(stageY) ||
+        stageX != native.x || stageY != native.y)
+      throw ChannelError("GNOME stage observation substituted its exact native binding");
+    if (!available)
+      throw std::runtime_error(text("reason"));
+    if (!sameView || cycles != 2)
+      throw ChannelError("GNOME stage observation lacked two same-view update pairs");
+  }
+
   std::uint64_t scheduleViewport(std::optional<RoutedPoint> routedPoint)
   {
     const auto requestedAt = Clock::now();
@@ -678,6 +732,10 @@ struct GnomeProviderClient::Impl
       const auto fresh = nativeViewport(request->deadline, &native, request->id, routed);
       if (fresh.localX != hit.localX || fresh.localY != hit.localY)
         throw std::runtime_error("GNOME native surface transform changed");
+      // Observe two actual same-view Mutter frame updates before the Qt
+      // default-input-queue witness, when explicitly available. This is
+      // intentionally read-only: still no EIS/Clutter consumption proof.
+      observeStageFrames(request->deadline, hit, request->id);
       viewportCall(GnomeViewportOperation::Check, request->deadline, activeSnapshot);
       // Qt's real GUI/default Wayland queue may take up to 200ms to finish its
       // ordered observations. A previously valid compositor hit cannot be

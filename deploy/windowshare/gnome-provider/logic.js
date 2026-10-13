@@ -49,6 +49,87 @@ export function validRect(rect) {
         rect.width > 0 && rect.height > 0;
 }
 
+// Read-only bounded observation of two *different* Clutter stage updates on
+// one stable output view containing the exact previously retained stage point.
+// Stage's before/after-update pair does not prove compositor event consumption
+// or bind an EIS input device. This is one prerequisite observation only.
+export class StageUpdateSequence {
+    constructor(request, x, y, revision, startedMs, budgetMs = 120) {
+        if (!validRequest(request, x, y, revision) || !Number.isFinite(startedMs) ||
+            !Number.isFinite(budgetMs) || budgetMs <= 0 || budgetMs > 120)
+            throw new Error('Invalid bounded stage observation');
+        this.point = {x, y};
+        this.revision = revision;
+        this.deadline = startedMs + budgetMs;
+        this.view = null;
+        this.layout = null;
+        this.pending = false;
+        this.count = 0;
+        this.complete = false;
+        this.reason = '';
+    }
+
+    deny(reason) {
+        if (!this.complete && !this.reason)
+            this.reason = reason;
+    }
+
+    _live(at) {
+        if (this.reason || this.complete)
+            return false;
+        if (!Number.isFinite(at) || at >= this.deadline) {
+            this.deny('stage-update-timeout');
+            return false;
+        }
+        return true;
+    }
+
+    before(view, layout, at) {
+        if (!this._live(at))
+            return false;
+        if (!view || !validRect(layout)) {
+            this.deny('invalid-stage-view');
+            return false;
+        }
+        const {x, y} = this.point;
+        if (x < layout.x || x >= layout.x + layout.width ||
+            y < layout.y || y >= layout.y + layout.height)
+            return false; // An unrelated monitor's stage update is not ours.
+        if (this.view && this.view !== view) {
+            this.deny('stage-view-replaced');
+            return false;
+        }
+        if (this.layout && ['x', 'y', 'width', 'height'].some(k => this.layout[k] !== layout[k])) {
+            this.deny('stage-layout-changed');
+            return false;
+        }
+        if (this.pending) {
+            this.deny('stage-update-reentered');
+            return false;
+        }
+        this.view = view;
+        this.layout = {...layout};
+        this.pending = true;
+        return true;
+    }
+
+    after(view, at) {
+        if (!this._live(at))
+            return false;
+        if (view !== this.view || !this.view)
+            return false; // Ignore unrelated outputs, never use them as evidence.
+        if (!this.pending) {
+            this.deny('unpaired-stage-update');
+            return false;
+        }
+        this.pending = false;
+        this.count++;
+        if (this.count === 2)
+            this.complete = true;
+        return this.complete;
+    }
+}
+
 // MetaCursorTracker returns Graphene float coordinates. Compare that exact
 // representation, without a pixel-distance tolerance or ShellGlobal's integer
 // truncation. This does not attribute a source device or prove EIS ordering.
