@@ -188,7 +188,13 @@ class CollectorTests(unittest.TestCase):
             collector = module.Collector(path, 321, "Exact owner", log)
             try:
                 module.CROSS.wait_for(lambda: collector.snapshot()["receipt"], "first stable receipt", timeout=3)
-                path.write_text('{"pid":321,"pid":321,"title":"Exact owner"}')
+                # Publish stable malformed input in one rename, not by
+                # truncating the watched path and exposing a transient empty
+                # file. The collector must still reject *genuine* duplicate
+                # keys, not a test-created partial-write artifact.
+                replacement = path.with_name("invalid-receipt.next")
+                replacement.write_text('{"pid":321,"pid":321,"title":"Exact owner"}')
+                replacement.replace(path)
                 module.CROSS.wait_for(lambda: collector.error is not None,
                                       "stable malformed source JSON refusal", timeout=3)
                 with self.assertRaisesRegex(RuntimeError, "Duplicate JSON field"):
