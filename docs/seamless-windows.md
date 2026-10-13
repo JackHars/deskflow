@@ -1,5 +1,21 @@
 # Experimental window sharing
 
+### P4 local Mac monitor-topology safety (verified partial; not H05/H06 acceptance)
+
+The experimental Mac host now records physical display identity, logical
+bounds, pixel-mode dimensions and rotation. A changed/disappeared output
+during export, holding-display relocation or the 500 ms owned safety poll
+revokes held input owners and restores journaled source windows; equal geometry
+alone never proves display identity. Malformed/unavailable display state fails
+closed. The private holding display remains excluded from this fingerprint.
+
+Implementation [`ec2fd2f8`](https://github.com/JackHars/deskflow/commit/ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079):
+GCC/Clang sanitizer suites **11/11 each**, native [six-job CI](https://github.com/JackHars/deskflow/actions/runs/38352550451)
+**PASS**, and [source bundle](https://github.com/JackHars/deskflow/actions/runs/38352550445)
+**PASS**. Physical hotplug, scaling, multi-window focus, Qt/Clutter input
+drain and original delivery are **not validated**. See `TESTING.md` for the
+exact test commands, recovery instructions and remaining H05/H06 scenarios.
+
 ### Independent Mac crash-recovery watchdog (verified partial P7)
 
 The experimental Mac host now requires an independent watchdog's private

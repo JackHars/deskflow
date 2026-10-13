@@ -1,5 +1,24 @@
 # Seamless Windows work state
 
+## Latest P4 output-mode/identity recovery checkpoint (2026-10-13)
+
+Implementation `ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079` introduces
+local Mac physical-monitor identity, bounds, pixel-mode and rotation
+fingerprints. It prevents a stale export/holding-display relocation on a
+changed topology and revokes/restores exact held owners during the 500 ms
+native host safety poll. Invalid, missing or duplicate display observations
+cannot be interpreted as identical layouts, and the helper's owned virtual
+monitor is excluded. The existing durable journal handles unresolved returns.
+
+Portable GCC/Clang ASan+UBSan each **PASS 11/11** suites (exit 0); hosted
+CI [38352550451](https://github.com/JackHars/deskflow/actions/runs/38352550451)
+**PASS 6/6**, including macOS application/core and Linux enabled/disabled
+compatibility; [source bundle 38352550445](https://github.com/JackHars/deskflow/actions/runs/38352550445)
+**PASS**. All published code matches the sanitizer-tested local blobs.
+No physical monitor was disconnected or scaled by this cloud run. H05/H06 and
+all other hardware tests stay **NOT_RUN**; the compositor/Qt input-drain and
+production original-input dispatcher are still *disabled*. See `TESTING.md`.
+
 ## P7 independent Mac recovery watchdog (commit `5cc1b760`; H10 NOT_RUN)
 
 **Runtime code:** The experimental Mac host creates a separate process-group

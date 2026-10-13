@@ -4,6 +4,73 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P4 monitor-identity/mode restore safety — tested source `ec2fd2f8` (2026-10-13)
+
+**Implemented:** The experimental Mac native host retains one validated
+physical-output fingerprint (CoreGraphics display ID, bounded logical frame,
+native pixel-mode dimensions and exact quarter-turn rotation), excluding its
+owned virtual holding display. The same output set is compared independent of
+CG enumeration order before any new export, before source-window relocation,
+after virtual display creation, and in the existing 500 ms owner-thread safety
+poll. Missing/invalid outputs, replaced IDs, negative-origin changes, rotation
+or a changed native pixel mode are **not** proof of retained identity. On loss
+the host revokes its exact held owners and calls `restoreAll(AuthorityLost)`;
+physical output selection tries to return each source to a surviving actual
+display, preserving unresolved records in the durable journal. It never uses a
+peer-supplied display ID, arbitrary new focus target or raw-native-input
+endpoint. Original-input delivery remains disabled.
+
+**Executed, not inferred:**
+
+- Commit: [`ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079`](https://github.com/JackHars/deskflow/commit/ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079).
+  All four committed code files were independently checked against the local
+  source with exact Git blob identities.
+- Portable Debian GCC/Clang ASan+UBSan: **PASS 11/11 CTest suites each,
+  exit 0**, including invalid/duplicate output, equal-frame/replaced ID,
+  native pixel mode, rotation, negative origin and reordered enumeration.
+  Reproduce on a fresh source checkout:
+  ```sh
+  cmake -S src/unittests/windowshare -B build/topology-gcc -G Ninja -DWINDOWSHARE_SANITIZERS=ON -DCMAKE_CXX_COMPILER=g++
+  cmake --build build/topology-gcc --parallel 4
+  ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build/topology-gcc --output-on-failure
+  cmake -S src/unittests/windowshare -B build/topology-clang -G Ninja -DWINDOWSHARE_SANITIZERS=ON -DCMAKE_CXX_COMPILER=clang++
+  cmake --build build/topology-clang --parallel 4
+  ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 ctest --test-dir build/topology-clang --output-on-failure
+  ```
+- Hosted [CI **38352550451**](https://github.com/JackHars/deskflow/actions/runs/38352550451):
+  **PASS all six jobs**, including native macOS experimental application build
+  and tests, Linux application/ON-OFF compatibility, real private GNOME
+  headless integration, transport and the GCC/Clang foundations. Independent
+  [source bundle **38352550445**](https://github.com/JackHars/deskflow/actions/runs/38352550445):
+  **PASS**.
+- These cloud results show portable topology logic and native compilation,
+  **not** real monitor hotplug, CoreGraphics frame restitution, user focus,
+  compositor output scaling or physical input ownership.
+
+**H05/H06 manual verification on the actual computers: NOT_RUN.** Use only
+the separately packaged opt-in experimental host and an authorized disposable
+source window, with its private identity, peer pin and restore-journal location
+recorded. First verify normal export/restore, then with a window held on the
+helper display change *one* physical Mac output via System Settings > Displays
+(rotation, resolution or second-display disconnection). Expect host denial of
+new exports or an `AuthorityLost` restore after its next owner-thread poll,
+without choosing a replacement by matching dimensions. Confirm exact old
+pressed-input releases, source visibility on a surviving physical output, and
+no extra restoration of unrelated windows. If no usable output remains,
+**do not delete the journal**; restore display connectivity and run
+`deskflow-windowshare --recover --journal /absolute/private/restore.json`
+with the prior host exited and valid Accessibility permission. Separately run
+GNOME two-physical-output/mixed-scale/negative-coordinate and native input
+tests for H05/H06; Mac fingerprint tests cannot substitute for these.
+
+Evidence to retain privately: candidate implementation SHA and bundle checksum,
+Mac display arrangements/modes before and after, session/epoch, exact window
+identity and recovery journal outcome, source/Viewer native receipts, mode change
+time and restoration observation, logs/errors and any failed recoveries.
+Do not store passwords, keys, typed text or private windows in GitHub.
+The P2 upstream native drain, P3 original coordinator, full multi-window
+handoff, bidirectional edge-drag and all physical H rows remain unfinished.
+
 ## P7 independent Mac recovery watchdog (commit `5cc1b760`; H10 NOT_RUN)
 
 **Runtime code:** The experimental Mac host creates a separate process-group
@@ -151,7 +218,7 @@ sections after receiving the final branch.
 ## Candidate identity and result rules
 
 - Baseline implementation: `ef51456659edae1acf06a6c03b730bcaf66f2f8b`.
-- Cloud **final** implementation SHA: **NOT_AVAILABLE: plan incomplete**. Most recent tested partial code SHA: `868d9d9e6db6cb9896cd577cb2951d434117e8a3`.
+- Cloud **final** implementation SHA: **NOT_AVAILABLE: plan incomplete**. Latest CI-tested partial runtime SHA: `ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079` (physical acceptance pending); prior `868d9d9e` checkpoint remains historical.
 - Returned branch: `feature/seamless-windows` in `JackHars/deskflow`; incremental changes pushed directly, no PR.
 - Toolchain and build options for the tested partial code: documented in the exact checkpoint section above and the successful CI run. Physical machines: NOT_RUN.
 - Source reproducibility: linked GitHub implementation SHA and CI source bundle; inert Linux package instructions: `deploy/windowshare/package-linux.md` (not installed).
