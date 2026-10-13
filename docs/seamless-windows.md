@@ -1,5 +1,25 @@
 # Experimental window sharing
 
+### P2 native GNOME StageView observation and strict reply validation (verified partial)
+
+The actual GNOME Shell 50 extension now observes two same-stage-view
+`before-update`/`after-update` pairs at the Server's frozen stage point.
+It uses Mutter's `StageView.layout` boxed property on the native owner
+thread, retaining only primitive x/y/width/height values across updates,
+and rejects changed focus/point/surface/layout, stage mismatch, deadline,
+and reentrancy. Its authenticated private D-Bus response schema is
+validated with all thirteen mandatory **unique, correctly typed** keys,
+including duplicate and substituted field rejection.
+
+[`e117b66e`](https://github.com/JackHars/deskflow/commit/e117b66e22e7f2141b4a17b93f81e22c736f5b4c)
+passed [six-job native CI](https://github.com/JackHars/deskflow/actions/runs/38408250298)
+and [source bundle](https://github.com/JackHars/deskflow/actions/runs/38408250240).
+This observation precedes the existing default QtWayland queue witness
+and frozen GNOME hit recheck; it is **not** native input queue drainage,
+device/EIS attribution, original-input delivery permission or physical
+acceptance. The full original route remains **disabled**, H01–H12
+**NOT_RUN**. Reproduction instructions in `TESTING.md`.
+
 ### Post-Qt native routed-point freshness (verified read-only P2 slice)
 
 After the actual QtWayland default-queue observation, the client queries GNOME's exact owner/native hit for the original frozen routed coordinate a third time before publishing. A silent native revision change or local surface-transform drift denies the old observation. Code `32cb0cb9`, test checkpoint `13e62c02`, [native six-job CI PASS](https://github.com/JackHars/deskflow/actions/runs/38386740966). The EIS/Clutter old-event drain and original-input permit remain **unproven and disabled**, hardware H03–H05 **NOT_RUN**. See repaired `TESTING.md`.

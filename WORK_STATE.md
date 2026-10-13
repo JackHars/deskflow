@@ -1,5 +1,28 @@
 # Seamless Windows work state
 
+## Latest P2 verified GNOME StageView/native binding checkpoint (2026-10-13)
+
+Implementation [`e117b66e`](https://github.com/JackHars/deskflow/commit/e117b66e22e7f2141b4a17b93f81e22c736f5b4c)
+and its ancestors now exercise two real same-view Clutter stage updates on
+the frozen native point, then continue the existing QtWayland default-queue
+witness and exact post-Qt GNOME hit recheck. GJS uses the Mutter 50
+`StageView.layout` boxed GObject property, immediately copying native
+coordinates by value. The authenticated GIO service has a real matching
+`ObserveStageFrames` method signature; its response parser rejects every
+duplicate, unknown or wrong-typed field even if a substitute keeps the
+total dictionary count at thirteen. Earlier actual Linux/GNOME failures
+were diagnosed and fixed, not skipped or relabelled.
+
+[GitHub CI 38408250298](https://github.com/JackHars/deskflow/actions/runs/38408250298)
+**PASS 6/6 jobs**, including the real private GNOME headless integration,
+macOS app/core, Linux opt-in ON and ordinary OFF, transport and GCC/Clang.
+[Source bundle 38408250240](https://github.com/JackHars/deskflow/actions/runs/38408250240)
+**PASS**. The cloud does not provide the user's Mac/Ubuntu hardware. These
+are only read-only stage/viewport freshness proofs: **no event-specific
+libei → Mutter/Clutter → Qt consumption fence exists**; original-input
+delivery is disabled and all physical H tests remain NOT_RUN.
+See top of `TESTING.md` for exact commands and limitations.
+
 ## P2 post-Qt native hit revalidation — verified 2026-10-13
 
 The exact frozen stage point/native session/window/surface hit is now revalidated **after** Qt's asynchronous GUI queue witness, preventing an observation from surviving silent compositor revision or coordinate-transform changes during the wait. Runtime [`32cb0cb9`](https://github.com/JackHars/deskflow/commit/32cb0cb9c5e809f8884a6d53a2f8324d64418aa7), final test correction [`13e62c02`](https://github.com/JackHars/deskflow/commit/13e62c02d3417b162264256f12641f36300d1f46): [CI 38386740966](https://github.com/JackHars/deskflow/actions/runs/38386740966) PASS **6/6 jobs** (Linux CTest 13/13, GCC/Clang sanitizer 12/12 each, Mac, GNOME and transport) and [source bundle 38386740929](https://github.com/JackHars/deskflow/actions/runs/38386740929) PASS. This is **not** EIS-to-Mutter compositor consumption, production input authorization or physical acceptance. Original-input dispatch stays disabled; H01–H12 NOT_RUN. Rebuilt `TESTING.md` from last intact revision after a documentation interpolation error duplicated content.
