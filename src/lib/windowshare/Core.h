@@ -35,6 +35,12 @@ struct Rect
 // not accept input. Geometry revisions are checked by the caller before mapping.
 std::optional<Point> mapPoint(Point p, Rect viewport, Rect source, bool clampDrag = false);
 Rect fitInside(Rect original, Rect workArea);
+// Choose the physical output to restore to, even if it was unplugged while
+// the source was hidden. Prefer overlap with the *saved* frame, then the
+// nearest output. Never assume the first enumerated output is the primary.
+// Callers must exclude Deskflow's private holding display from this list.
+// A missing/invalid output is a refusal to move a source window.
+std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDisplays);
 
 enum class MessageType : std::uint16_t
 {

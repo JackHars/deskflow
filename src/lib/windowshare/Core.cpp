@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <tuple>
 
 namespace deskflow::windowshare {
 namespace {
@@ -69,6 +70,47 @@ Rect fitInside(Rect original, Rect workArea)
   original.x = std::clamp(original.x, workArea.x, workArea.x + workArea.width - original.width);
   original.y = std::clamp(original.y, workArea.y, workArea.y + workArea.height - original.height);
   return original;
+}
+std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDisplays)
+{
+  if (!original.valid())
+    return std::nullopt;
+  std::optional<Rect> chosen;
+  double bestOverlap = -1, bestGap = std::numeric_limits<double>::infinity();
+  double bestCenterDistance = std::numeric_limits<double>::infinity();
+  for (const auto &display : physicalDisplays) {
+    if (!display.valid())
+      continue;
+    const double left = std::max(original.x, display.x);
+    const double top = std::max(original.y, display.y);
+    const double right = std::min(original.x + original.width, display.x + display.width);
+    const double bottom = std::min(original.y + original.height, display.y + display.height);
+    const double overlap = std::max(0.0, right - left) * std::max(0.0, bottom - top);
+    const double dx = std::max({0.0, original.x - (display.x + display.width),
+                                display.x - (original.x + original.width)});
+    const double dy = std::max({0.0, original.y - (display.y + display.height),
+                                display.y - (original.y + original.height)});
+    const double gap = dx * dx + dy * dy;
+    const double centerX = (original.x + original.width / 2) - (display.x + display.width / 2);
+    const double centerY = (original.y + original.height / 2) - (display.y + display.height / 2);
+    const double centerDistance = centerX * centerX + centerY * centerY;
+    // Full ties are independent of display enumeration order. This matters
+    // when a hotplug reverses CGGetActiveDisplayList's ordering.
+    if (!chosen || overlap > bestOverlap ||
+        (overlap == bestOverlap &&
+         (gap < bestGap ||
+          (gap == bestGap &&
+           (centerDistance < bestCenterDistance ||
+            (centerDistance == bestCenterDistance &&
+             std::tie(display.x, display.y, display.width, display.height) <
+                 std::tie(chosen->x, chosen->y, chosen->width, chosen->height))))))) {
+      chosen = display;
+      bestOverlap = overlap;
+      bestGap = gap;
+      bestCenterDistance = centerDistance;
+    }
+  }
+  return chosen ? std::optional<Rect>(fitInside(original, *chosen)) : std::nullopt;
 }
 std::vector<std::uint8_t> encode(const Packet &p)
 {

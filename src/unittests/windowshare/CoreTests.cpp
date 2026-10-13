@@ -41,6 +41,32 @@ int main()
     check(p && p->x <= 0 && p->y <= 550, "drag clamp");
     const auto r = fitInside({900, 900, 800, 600}, {-100, 0, 1024, 768});
     check(r.x == 124 && r.y == 168, "recover after monitor removal");
+    const std::array<Rect, 3> outputs{{{-1920, 0, 1920, 1080}, {0, 0, 1920, 1080},
+                                       {1920, -1080, 2560, 1440}}};
+    auto restored = recoveryRect({-1800, 400, 800, 600}, outputs);
+    check(restored && restored->x == -1800 && restored->y == 400, "negative physical screen preserved");
+    restored = recoveryRect({2100, -800, 500, 400}, outputs);
+    check(restored && restored->x == 2100 && restored->y == -800, "upper output preserved");
+    restored = recoveryRect({2400, 600, 600, 400}, outputs);
+    check(restored && restored->x == 2400 && restored->y == -40,
+          "offscreen source chooses nearest remaining upper-right display");
+    restored = recoveryRect({-2500, 150, 400, 200}, outputs);
+    check(restored && restored->x == -1920 && restored->y == 150,
+          "missing left output recovers to the closest screen");
+    const std::array<Rect, 2> reversed{{outputs[2], outputs[0]}};
+    auto choiceOne = recoveryRect({0, -600, 500, 500}, reversed);
+    auto choiceTwo = recoveryRect({0, -600, 500, 500}, std::array<Rect, 2>{{outputs[0], outputs[2]}});
+    check(choiceOne && choiceTwo && choiceOne->x == choiceTwo->x && choiceOne->y == choiceTwo->y,
+          "output enumeration is irrelevant");
+    restored = recoveryRect({1000, 1000, 1600, 700}, outputs);
+    check(restored && restored->width == 1600 && restored->height == 700 && restored->x == 320 &&
+              restored->y == 380, "overlap selects physical output even near another monitor");
+    check(!recoveryRect({0, 0, 800, 400}, {}), "absent outputs do not trigger unsafe move");
+    check(!recoveryRect({0, 0, 0, 400}, outputs), "invalid saved window does not trigger move");
+    const std::array<Rect, 1> invalid{{{0, 0, 0, 400}}};
+    check(!recoveryRect({0, 0, 200, 200}, invalid), "invalid only output rejected");
+    const std::array<Rect, 2> mixed{{invalid[0], outputs[0]}};
+    check(recoveryRect({-400, 30, 100, 80}, mixed).has_value(), "malformed output is ignored");
     Session s;
     s.id = 42;
     rejects([&] { s.prepare(1, source, source); });

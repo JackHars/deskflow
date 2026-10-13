@@ -412,20 +412,9 @@ std::vector<Rect> physicalDisplays()
 }
 std::optional<Rect> recoverFrame(Rect original)
 {
-  auto displays = physicalDisplays();
-  if (displays.empty())
-    return std::nullopt;
-  auto best = displays.front();
-  double bestArea = -1;
-  for (auto display : displays) {
-    const auto intersection = CGRectIntersection(rect(original), rect(display));
-    const auto area = CGRectIsNull(intersection) ? 0 : intersection.size.width * intersection.size.height;
-    if (area > bestArea) {
-      best = display;
-      bestArea = area;
-    }
-  }
-  return fitInside(original, best);
+  // Use the same deterministic physical-output policy for ordinary return
+  // and post-crash journal recovery; never choose the private holding output.
+  return recoveryRect(original, physicalDisplays());
 }
 bool setBounds(AXUIElementRef element, Rect desired)
 {
