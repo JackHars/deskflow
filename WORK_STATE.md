@@ -12,6 +12,11 @@ Mutter stage-hit tests independent of the latest EIS cursor). Full six-job CI
 passed on the first; the third's native-GNOME job passed. See
 `TESTING.md` for exact claims and run links.
 
+A separate fail-closed Viewer edit prohibits asynchronous Qt IME composition
+until Qt's real input-method lifetime can be proven drained. It is tested by
+direct preedit/commit injections; normal Unicode composition is explicitly
+**not** supported by the experimental Viewer.
+
 New partial P8 experimental Linux archive scripts stage a reproducible, inert
 package and verified SHA manifest. They do not enable Shell extensions, replace
 ordinary Deskflow, bundle system libraries or run on the actual Ubuntu machine.

@@ -11,6 +11,10 @@ observations retain their existing absolute deadlines and revocation rules.
 None of these tests proves compositor input consumption or original-input
 authority: production original delivery is still disabled.
 
+The experimental Viewer refuses input-method preedit and commit events rather
+than treating asynchronous composition as drained; Unicode IME workflows
+remain **unsupported** pending a proven lifecycle and hardware acceptance.
+
 The experimental Linux binary/core staging archive uses an inert, opt-in layout
 and a reproducible member manifest, without installing or enabling the GNOME
 extension or overwriting ordinary Deskflow. See

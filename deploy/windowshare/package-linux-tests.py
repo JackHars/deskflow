@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 from pathlib import Path
 import shutil
 import stat
@@ -107,9 +108,23 @@ class LinuxArchiveTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unlisted"):
             package.verify_archive(bad)
 
+    def test_duplicate_entries_are_rejected_even_with_valid_manifest(self):
+        valid = self.root / "single.tar.gz"
+        package.write_archive(valid, self.files())
+        duplicated = self.root / "duplicated.tar.gz"
+        with tarfile.open(valid, "r:gz") as source, tarfile.open(duplicated, "w:gz") as archive:
+            first = None
+            for member in source:
+                data = source.extractfile(member).read()
+                archive.addfile(member, io.BytesIO(data))
+                if first is None:
+                    first = (member, data)
+            self.assertIsNotNone(first)
+            archive.addfile(first[0], io.BytesIO(first[1]))
+        with self.assertRaisesRegex(ValueError, "Duplicated"):
+            package.verify_archive(duplicated)
+
     def test_source_link_and_unwritable_output_parent_are_denied(self):
-        linked_root = self.root / "provider-link"
-        linked_root.symlink_to(REPO / "deploy/windowshare/gnome-provider", target_is_directory=True)
         expected_source = self.root / "other" / "deploy" / "windowshare"
         expected_source.mkdir(parents=True)
         (expected_source / "gnome-provider").symlink_to(

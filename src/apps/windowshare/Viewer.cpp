@@ -294,6 +294,10 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
 {
   setAttribute(Qt::WA_OpaquePaintEvent);
   setFocusPolicy(Qt::StrongFocus);
+  // Qt input methods can emit deferred preedit/commit after a native input
+  // fence. No proven compositor->Qt IME drain exists yet, so never advertise
+  // acceptance or synthesize text from composition events.
+  setAttribute(Qt::WA_InputMethodEnabled, false);
   setMouseTracking(true);
   setMinimumSize(96, 64);
   setWindowTitle(QStringLiteral("Mac window — Deskflow"));
@@ -1027,6 +1031,13 @@ QJsonObject Viewer::keyInput(const QKeyEvent *event, bool down) const
       {"native", static_cast<qint64>(event->nativeScanCode())},
       {"modifiers", static_cast<int>(event->modifiers())}
   };
+}
+
+void Viewer::inputMethodEvent(QInputMethodEvent *event)
+{
+  // Explicitly reject even directly delivered or queued composition events.
+  // Ordinary physical key routing remains governed by the existing owner fence.
+  event->ignore();
 }
 
 void Viewer::keyPressEvent(QKeyEvent *event)

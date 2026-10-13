@@ -8,6 +8,7 @@
 #include <QApplication>
 #include <QEventLoop>
 #include <QFocusEvent>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QMoveEvent>
@@ -173,6 +174,26 @@ KeyboardRouteControl resumeRoute(KeyboardRouteControl control)
 {
   control.mode = KeyboardRouteMode::Viewer;
   return control;
+}
+
+void testInputMethodIsExplicitlyUnsupported()
+{
+  Viewer viewer(205, 17, metadata());
+  Recording recording;
+  recording.attach(viewer);
+  check(!viewer.testAttribute(Qt::WA_InputMethodEnabled), "Viewer advertised unproved input-method support");
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  const auto before = recording.events.size();
+  QInputMethodEvent preedit(QStringLiteral("pending"), {});
+  QCoreApplication::sendEvent(&viewer, &preedit);
+  check(!preedit.isAccepted(), "Viewer accepted a deferred input-method preedit");
+  QInputMethodEvent commit;
+  commit.setCommitString(QStringLiteral("dangerous composition"));
+  QCoreApplication::sendEvent(&viewer, &commit);
+  check(!commit.isAccepted(), "Viewer accepted a deferred input-method commit");
+  check(recording.events.size() == before, "Input method bypassed the native/Qt forwarding fence");
+  viewer.close();
 }
 
 void testDecoder()
@@ -1044,6 +1065,7 @@ int main(int argc, char **argv)
   application.setQuitOnLastWindowClosed(false);
   try {
     testDecoder();
+    testInputMethodIsExplicitlyUnsupported();
     testMappingAndReadiness();
     testViewportLifecycle();
     testFocusQueueAndOwnership();
@@ -1066,7 +1088,8 @@ int main(int argc, char **argv)
     testKeyboardRouteSendFailure(ForwardingScope::All);
     QTextStream(
         stdout
-    ) << "PASS: H.264 decode/reset, malformed video, letterboxing/scaling, first painted readiness, "
+    ) << "PASS: H.264 decode/reset, malformed video, rejected input-method compositions, "
+         "letterboxing/scaling, first painted readiness, "
          "queued activating click, stale focus, special keys/repeat, ordered release, resize fencing, "
          "double-click, focus revocation/reclaim, scroll, minimize, safe return, disconnect, bounded video queue, "
          "queued geometry race, keyboard fence ordering, pointer/focus preservation, held-key tombstones, "

@@ -16,6 +16,12 @@ native compositor/Qt input-drain test was run in this cloud session.
 | [`fb0bf0dd`](https://github.com/JackHars/deskflow/commit/fb0bf0dd8951ada013d1cced450d196e30ac2523) | Read-only optional GNOME routed-point native query, private D-Bus tests for frozen stage point, echo, old capability, stale native hit, and deadline | No EIS/Qt queue drain, original owner, native event delivery, or stage-space conversion |
 | [`fb504a3f`](https://github.com/JackHars/deskflow/commit/fb504a3f1db42de34e3a24c26ea337bb5dfa37dc) | Real private headless Mutter test validates a frozen point **different** from the live cursor and rejects stale revision/unrelated surface; GNOME native job passed in [run 38340048477](https://github.com/JackHars/deskflow/actions/runs/38340048477). | Not a physical or original-input acceptance test |
 
+The Viewer additionally explicitly disables Qt input-method acceptance and
+ignores injected preedit/commit `QInputMethodEvent`s. A Qt regression checks
+there is no forwarded input even after a painted, focused Viewer is ready.
+This is a **documented lack of IME/composition support**, not completed
+Unicode/IME compatibility or an ordered Qt input-event drain.
+
 The P8 partial release packaging is `deploy/windowshare/package-linux.py`,
 `package-linux-tests.py` and `package-linux.md`. It writes an inert
 reproducible archive of explicitly provided Linux ELF binaries, launch wrappers,

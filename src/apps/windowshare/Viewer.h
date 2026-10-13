@@ -9,6 +9,7 @@
 #include "KeyboardRoute.h"
 #include "WaylandViewport.h"
 #include <QImage>
+#include <QInputMethodEvent>
 #include <QJsonObject>
 #include <QMap>
 #include <QPointF>
@@ -104,6 +105,7 @@ protected:
   void paintEvent(QPaintEvent *event) override;
   void focusInEvent(QFocusEvent *event) override;
   void focusOutEvent(QFocusEvent *event) override;
+  void inputMethodEvent(QInputMethodEvent *event) override;
   void keyPressEvent(QKeyEvent *event) override;
   void keyReleaseEvent(QKeyEvent *event) override;
   void mousePressEvent(QMouseEvent *event) override;

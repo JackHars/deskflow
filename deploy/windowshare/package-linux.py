@@ -140,14 +140,18 @@ def verify_archive(path: Path) -> dict:
     total = 0
     with tarfile.open(path, "r:gz") as archive:
         for item in archive:
-            if not item.isfile() or item.size < 0 or item.size > MAX_ARCHIVE_MEMBER or item.name in contents:
-                raise ValueError("Invalid, duplicated or oversized package member")
+            if not item.isfile() or item.size < 0 or item.size > MAX_ARCHIVE_MEMBER:
+                raise ValueError("Invalid or oversized package member")
             prefix = PACKAGE_ROOT + "/"
             if not item.name.startswith(prefix):
                 raise ValueError("Unexpected package prefix")
             name = item.name[len(prefix):]
             if not name or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")):
                 raise ValueError("Unsafe archive member path")
+            if name in contents:
+                raise ValueError("Duplicated package member")
+            if len(contents) >= 32:
+                raise ValueError("Too many package members")
             total += item.size
             if total > MAX_ARCHIVE_TOTAL:
                 raise ValueError("Unpacked archive exceeds size limit")
@@ -158,7 +162,8 @@ def verify_archive(path: Path) -> dict:
     if "MANIFEST.json" not in contents:
         raise ValueError("Package manifest missing")
     manifest = json.loads(contents.pop("MANIFEST.json")[0])
-    if (manifest.get("schema") != 1 or manifest.get("kind") != "inert-experimental-linux" or
+    if (not re.fullmatch(r"[0-9a-f]{40}", manifest.get("sourceCommit", "")) or
+            manifest.get("schema") != 1 or manifest.get("kind") != "inert-experimental-linux" or
             manifest.get("ordinaryDeskflowModified") is not False or
             manifest.get("gnomeProviderEnabled") is not False or
             manifest.get("bundledSystemLibraries") is not False):

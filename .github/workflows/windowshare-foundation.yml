@@ -175,6 +175,10 @@ jobs:
             --output build/DeskflowSeamless-Linux-Experimental.tar.gz
           python3 deploy/windowshare/package-linux.py \
             --verify build/DeskflowSeamless-Linux-Experimental.tar.gz
+          mkdir -p build/verify-stage
+          tar -xzf build/DeskflowSeamless-Linux-Experimental.tar.gz -C build/verify-stage
+          QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-viewer --help
+          QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-core --help
   gnome-provider:
     runs-on: ubuntu-24.04
     container:
