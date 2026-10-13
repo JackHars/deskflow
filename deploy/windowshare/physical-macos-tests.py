@@ -146,6 +146,56 @@ class CollectorTests(unittest.TestCase):
                 collector.close()
 
 
+    def test_torn_read_never_renews_freshness_or_kills_monitor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, log = Path(directory) / "receipt.json", Path(directory) / "events.jsonl"
+            value = receipt()
+            value.update({"pid": 321, "title": "Exact owner", "ready": True, "windowId": 9})
+            module.atomic_json(path, value)
+            collector = module.Collector(path, 321, "Exact owner", log)
+            try:
+                module.CROSS.wait_for(lambda: collector.snapshot()["receipt"], "first stable receipt", timeout=3)
+                with collector.lock:
+                    collector.publication_observed -= 3
+                real_read = module.read_json_with_identity
+                # Simulate a concurrent fstat/open/file rewrite without
+                # creating a permanently malformed or newer publication.
+                with patch.object(module, "read_json_with_identity",
+                                  side_effect=module.ConcurrentPublicationChange("torn read")):
+                    time.sleep(0.09)
+                    self.assertIsNone(collector.error)
+                    self.assertTrue(collector.thread.is_alive())
+                    with self.assertRaisesRegex(RuntimeError, "stale"):
+                        collector.snapshot()
+                module.atomic_json(path, value)
+                def recovered():
+                    try:
+                        return collector.snapshot()["receipt"]
+                    except RuntimeError:
+                        return None
+                module.CROSS.wait_for(recovered, "stable replacement after torn read", timeout=3)
+                self.assertIsNone(collector.error)
+                self.assertIs(module.read_json_with_identity, real_read)
+            finally:
+                collector.close()
+
+    def test_stable_duplicate_json_remains_terminal(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, log = Path(directory) / "receipt.json", Path(directory) / "events.jsonl"
+            value = receipt()
+            value.update({"pid": 321, "title": "Exact owner", "ready": True, "windowId": 9})
+            module.atomic_json(path, value)
+            collector = module.Collector(path, 321, "Exact owner", log)
+            try:
+                module.CROSS.wait_for(lambda: collector.snapshot()["receipt"], "first stable receipt", timeout=3)
+                path.write_text('{"pid":321,"pid":321,"title":"Exact owner"}')
+                module.CROSS.wait_for(lambda: collector.error is not None,
+                                      "stable malformed source JSON refusal", timeout=3)
+                with self.assertRaisesRegex(RuntimeError, "Duplicate JSON field"):
+                    collector.snapshot()
+            finally:
+                collector.close()
+
 class DriverTests(unittest.TestCase):
     @contextlib.contextmanager
     def driver(self, replies, check=lambda: None):

@@ -48,6 +48,14 @@ def unique_object(pairs):
     return result
 
 
+class ConcurrentPublicationChange(RuntimeError):
+    """A source changed the file during an otherwise identity-checked read.
+
+    A torn read is never a valid publication, but it also must not terminate
+    the receipt monitor before it can see the next atomic replacement.
+    """
+
+
 def read_json_with_identity(path, limit=131072):
     with Path(path).open("rb") as stream:
         before = os.fstat(stream.fileno())
@@ -57,7 +65,8 @@ def read_json_with_identity(path, limit=131072):
     require(len(raw) <= limit, "JSON file exceeds its bound")
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
-    require(identity(before) == identity(after), "JSON file changed while being read")
+    if identity(before) != identity(after):
+        raise ConcurrentPublicationChange("JSON file changed while being read")
     value = json.loads(raw, object_pairs_hook=unique_object,
                        parse_constant=lambda _: require(False, "Non-finite JSON number"))
     return value, identity(after)
@@ -213,11 +222,13 @@ class Collector:
             while not self.stopping.is_set():
                 try:
                     data, identity = read_json_with_identity(self.path)
-                except FileNotFoundError:
-                    # The owner may atomically remove/replace a publication
-                    # between stat and open during teardown. Absence never
-                    # renews its freshness or authorizes another owner, but
-                    # it is not a corrupt receipt or a terminal worker fault.
+                except (FileNotFoundError, ConcurrentPublicationChange):
+                    # A publication may be removed or modified between open,
+                    # fstat and read while the source is being replaced. A torn
+                    # read is NOT a fresh receipt: retain the prior timestamp,
+                    # sequence and PID/title owner until a complete stable
+                    # publication passes all checks. Stable malformed JSON
+                    # and owner/sequence errors still terminate the collector.
                     self.stopping.wait(0.025)
                     continue
                 require(data.get("pid") == self.pid, "Source PID mismatch")
