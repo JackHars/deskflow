@@ -12,7 +12,9 @@ namespace deskflow::windowshare {
 
 inline constexpr auto keyboardRouteCapability = "keyboard-route-v1";
 inline constexpr auto inputRouteCapability = "input-route-v1";
-QJsonArray keyboardRouteCapabilities(bool includeInput = false);
+inline constexpr auto mediaRecoveryCapability = "media-recovery-v1";
+QJsonArray keyboardRouteCapabilities(bool includeInput = false, bool includeMediaRecovery = false);
+bool peerSupportsMediaRecovery(const QJsonObject &negotiation);
 bool peerSupportsKeyboardRoute(const QJsonObject &negotiation);
 bool peerSupportsInputRoute(const QJsonObject &negotiation);
 MessageType forwardingRouteMessageType(const KeyboardRouteBinding &binding);

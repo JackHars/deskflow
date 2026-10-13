@@ -68,12 +68,20 @@ void validate(const KeyboardRouteControl &control)
     );
 }
 } // namespace
-QJsonArray keyboardRouteCapabilities(bool includeInput)
+QJsonArray keyboardRouteCapabilities(bool includeInput, bool includeMediaRecovery)
 {
   QJsonArray capabilities{QLatin1String(keyboardRouteCapability)};
   if (includeInput)
     capabilities.append(QLatin1String(inputRouteCapability));
+  if (includeMediaRecovery)
+    capabilities.append(QLatin1String(mediaRecoveryCapability));
   return capabilities;
+}
+bool peerSupportsMediaRecovery(const QJsonObject &negotiation)
+{
+  // The shared parser enforces a bounded list of unique, well-formed names.
+  return peerSupportsKeyboardRoute(negotiation) &&
+         negotiation["capabilities"].toArray().contains(QLatin1String(mediaRecoveryCapability));
 }
 bool peerSupportsKeyboardRoute(const QJsonObject &negotiation)
 {
