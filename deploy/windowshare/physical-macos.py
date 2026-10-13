@@ -211,18 +211,25 @@ class Collector:
     def loop(self):
         try:
             while not self.stopping.is_set():
-                if self.path.exists():
+                try:
                     data, identity = read_json_with_identity(self.path)
-                    require(data.get("pid") == self.pid, "Source PID mismatch")
-                    if data.get("ready") or data.get("windowId"):
-                        require(data.get("title") == self.title, "Source title mismatch")
-                        with self.lock:
-                            for line in self.history.merge(data):
-                                self.stream.write(line)
-                            self.latest = data
-                            if identity != self.publication_identity:
-                                self.publication_identity = identity
-                                self.publication_observed = time.monotonic()
+                except FileNotFoundError:
+                    # The owner may atomically remove/replace a publication
+                    # between stat and open during teardown. Absence never
+                    # renews its freshness or authorizes another owner, but
+                    # it is not a corrupt receipt or a terminal worker fault.
+                    self.stopping.wait(0.025)
+                    continue
+                require(data.get("pid") == self.pid, "Source PID mismatch")
+                if data.get("ready") or data.get("windowId"):
+                    require(data.get("title") == self.title, "Source title mismatch")
+                    with self.lock:
+                        for line in self.history.merge(data):
+                            self.stream.write(line)
+                        self.latest = data
+                        if identity != self.publication_identity:
+                            self.publication_identity = identity
+                            self.publication_observed = time.monotonic()
                 self.stopping.wait(0.025)
         except Exception as error:
             self.error = str(error)

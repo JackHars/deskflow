@@ -134,6 +134,14 @@ class CollectorTests(unittest.TestCase):
                 path.unlink()
                 with self.assertRaisesRegex(RuntimeError, "missing"):
                     collector.snapshot()
+                # A concurrent publication removal cannot permanently poison
+                # the worker or make it reuse the last fresh receipt. Even
+                # after a normal poll cycle the snapshot still refuses it.
+                time.sleep(0.075)
+                self.assertIsNone(collector.error)
+                self.assertTrue(collector.thread.is_alive())
+                with self.assertRaisesRegex(RuntimeError, "missing"):
+                    collector.snapshot()
             finally:
                 collector.close()
 
