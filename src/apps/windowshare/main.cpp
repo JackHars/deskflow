@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "KeyboardRouteProtocol.h"
+#if defined(__APPLE__) && !defined(WINDOWSHARE_BRIDGE_TEST)
+#include "RecoveryWatchdog.h"
+#endif
 #include "NativeHost.h"
 #include "Transport.h"
 #include "Viewer.h"
@@ -1453,6 +1456,12 @@ void configureApplicationLifetime(QApplication &application, Bridge &bridge, std
 int main(int argc, char **argv)
 {
   try {
+#ifdef __APPLE__
+    // This exact private entry point deliberately runs before Qt/GUI,
+    // transport identity parsing, permissions and any native window action.
+    if (native::recoveryWatchdogMode(argc, argv))
+      return native::runRecoveryWatchdog(argc, argv);
+#endif
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
     auto viewportBootstrap = ViewerViewportBootstrap::inspect(argc, argv);
 #endif
@@ -1584,6 +1593,21 @@ int main(int argc, char **argv)
       native.onError = [](const QString &error) { QTextStream(stderr) << error << '\n'; };
       return native.recover() ? 0 : 1;
     }
+#ifdef __APPLE__
+    // Arm an independent recovery process while we hold the exclusive
+    // journal lock and *before* a source may be relocated to the holding
+    // display. Startup must fail closed if the child cannot acknowledge its
+    // pipe. Its recovery uses the existing exact-identity journal reader.
+    std::unique_ptr<native::RecoveryWatchdog> watchdog;
+    if (hosting) {
+      std::string watchdogError;
+      watchdog = std::make_unique<native::RecoveryWatchdog>(
+          QCoreApplication::applicationFilePath().toStdString(),
+          QFileInfo(parser.value("journal")).absoluteFilePath().toStdString(), &watchdogError
+      );
+      require(watchdog->armed(), watchdogError.c_str());
+    }
+#endif
     // Install shutdown handling before native startup so a core-requested stop
     // always follows the host's ordinary window restoration path.
     std::signal(SIGINT, interruptHandler);
@@ -1607,6 +1631,18 @@ int main(int argc, char **argv)
     );
     configureApplicationLifetime(app, bridge, [&shutdown] { shutdown.request(); });
     shutdown.attach(bridge);
+#ifdef __APPLE__
+    QTimer watchdogHealth;
+    if (watchdog) {
+      QObject::connect(&watchdogHealth, &QTimer::timeout, &shutdown, [&shutdown, &watchdog] {
+        if (!watchdog->alive()) {
+          QTextStream(stderr) << "Window sharing recovery watchdog exited; restoring all exports\n";
+          shutdown.request();
+        }
+      });
+      watchdogHealth.start(250);
+    }
+#endif
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
     std::unique_ptr<ViewerViewportEndpoint> viewport;
     if (viewportBootstrap.inherited()) {
