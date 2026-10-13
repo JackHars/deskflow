@@ -91,6 +91,25 @@ reservation. Its retained connection and capture evidence can still be revoked.
 It does not prove that a compositor, Qt widget or Mac application consumed an
 event.
 
+## Deferred private preparation
+
+`LocalInputPreflight::core` can retain its exact quiesced lease while a local
+controller performs asynchronous preparation. Its optional notification receives
+the lease and the existing absolute two-second attempt deadline. With no
+notification installed, the previous synchronous behavior is preserved.
+
+The controller calls `continuePreparation(exactLease)` on the Qt owner thread.
+This queues at most one continuation and is not a readiness receipt. Processing
+it rechecks the retained capture, selected connection, peer policy, code
+admission, delivery readiness and physical neutrality before the ordinary
+private Prepare/Commit exchange. Old, canceled, mismatched, duplicate and
+expired continuations cannot activate an owner or renew the deadline.
+
+The future dispatcher adapter must also obey the Server's earlier 500 ms
+deadline and cancel its native work through exact-owner release. The private
+two-second budget never extends a pending Server reservation. No production
+controller or native drain permission is created by this scheduling hook.
+
 ## Remaining integration
 
 The production coordinator must install a dispatcher only after native queue
@@ -98,6 +117,15 @@ draining, exact routed-point validation, physical neutrality and a full-scope
 forwarding handoff have been established. It must retain those conditions
 through delivery and release. Neither the viewer handoff acknowledgment nor a
 legacy backend submission receipt provides compositor-consumption evidence.
+
+The next connected transaction needs an independently negotiated cutoff marker
+on the existing Core stream, after compressed motion and old-owner releases;
+a requested EI PONG for that prefix; a supported Mutter consumption boundary;
+and an exact full-scope-fenced Qt completion. Current startup PONG, stage-frame
+observations and generic Qt viewport checks are separate diagnostics. They do
+not establish that causal chain. Recursive Mutter/Qt event dispatch and exact
+resume completion also require explicit handling before refusal can safely
+return to legacy input.
 
 The Server tests use local dispatcher fixtures and actual protocol proxies;
 they do not post native input. Physical two-machine acceptance remains separate.

@@ -103,10 +103,10 @@ int child(int descriptor, const QString &mode)
   auto channel = LocalInputChannel::adoptHost(descriptor, *process);
   const bool unsupportedScope = mode.startsWith("full-scope-") || mode == "invalid-scope-reserve";
   auto expectedBinding = binding();
-  if (mode == "all-input")
+  if (mode == "all-input" || mode == "deferred-all")
     expectedBinding.scope = ForwardingScope::All;
   bool closed = false, quiescent = false, reserved = false, active = false, held = false, providerLost = false;
-  int releases = 0, reads = 0, originals = 0, activations = 0, neutralAfterActivation = 0,
+  int releases = 0, reads = 0, originals = 0, prepares = 0, activations = 0, neutralAfterActivation = 0,
       quiescenceAfterActivation = 0, starts = 0, reservationShutdowns = 0;
   channel->onClosed = [&](QString) {
     closed = true;
@@ -248,6 +248,11 @@ int child(int descriptor, const QString &mode)
   if (mode == "missing-host-neutral")
     checks.neutralBoundary = {};
   coordinator = LocalInputPreflight::host(*channel, policy(), std::move(host), std::move(checks));
+  const auto prepare = channel->onPrepare;
+  channel->onPrepare = [&, prepare](const auto &lease) {
+    ++prepares;
+    prepare(lease);
+  };
   check(until([&] { return closed; }, 12000), "Fixture child did not close");
   if (unsupportedScope)
     check(
@@ -260,6 +265,11 @@ int child(int descriptor, const QString &mode)
     check(
         originals == 8 && releases == 1 && activations == 1 && !held && !active,
         "Full-input preflight lost input families or exact release ownership"
+    );
+  if (mode == "deferred-all")
+    check(
+        prepares == activations && originals == 0 && !reserved && !quiescent && !active,
+        "Deferred continuation sent an extra Prepare, delivered input, or retained its reservation"
     );
   if (mode == "destroy-reserve")
     check(!reserved && releases == 1, "Destroyed reservation was not released exactly once");
@@ -300,7 +310,10 @@ struct Fixture
   int releases = 0, preparedChecks = 0, revokeNotifications = 0;
   QString closeReason;
 
-  explicit Fixture(const QString &mode = "normal", LocalInputPreflight::Checks checks = allow())
+  explicit Fixture(
+      const QString &mode = "normal", LocalInputPreflight::Checks checks = allow(),
+      LocalInputPreflight::PreparationNotification preparation = {}
+  )
   {
     auto pair = LocalInputSocketPair::create();
     pair.configureChild(childProcess);
@@ -341,7 +354,7 @@ struct Fixture
         return release(lease, reason);
       };
     channel->onRevoked = [&](const auto &, auto) { ++revokeNotifications; };
-    coordinator = LocalInputPreflight::core(*channel, mailbox, policy(), std::move(checks));
+    coordinator = LocalInputPreflight::core(*channel, mailbox, policy(), std::move(checks), std::move(preparation));
   }
   ~Fixture()
   {
@@ -539,6 +552,195 @@ void defaultDeny()
     check(
         f.channel->phase() == LocalInputPhase::Idle && f.coordinator->phase() != Phase::Active,
         "Missing integrity/neutral/ordering/release provider granted authority"
+    );
+    f.finish();
+  }
+}
+void deferredPreparation()
+{
+  using Clock = std::chrono::steady_clock;
+  std::optional<LocalInputLease> notified;
+  Clock::time_point deadline;
+  int notifications = 0;
+  bool ready = false;
+  auto checks = allow();
+  checks.deliveryReady = [&](const auto &) { return ready; };
+  Fixture f("deferred-all", std::move(checks), [&](const auto &lease, auto expires) {
+    ++notifications;
+    notified = lease;
+    deadline = expires;
+  });
+  const auto before = Clock::now();
+  f.begin(ForwardingScope::All);
+  const auto after = Clock::now();
+  check(until([&] { return notified || f.closed; }) && !f.closed, "Deferred quiescence notification did not arrive");
+  check(
+      notifications == 1 && notified == f.coordinator->lease() && notified->scope == ForwardingScope::All &&
+          deadline >= before + std::chrono::seconds(2) && deadline <= after + std::chrono::seconds(2) &&
+          deadline > Clock::now() && f.coordinator->phase() == Phase::Quiesced &&
+          f.channel->phase() == LocalInputPhase::Idle && !f.channel->lease() && f.preparedChecks == 0,
+      "Deferred notification lost its exact lease/deadline or prepared before continuation"
+  );
+  // Neither the notification nor a direct channel call can skip the queued
+  // continuation, even if the independent providers already permit preparation.
+  ready = true;
+  check(!f.channel->prepare(*notified), "Direct channel preparation bypassed deferred continuation");
+  for (int change = 0; change < 5; ++change) {
+    auto wrong = *notified;
+    if (change == 0)
+      wrong.scope = ForwardingScope::Keyboard;
+    if (change == 1)
+      ++wrong.focusRequest;
+    if (change == 2)
+      ++wrong.captureEpoch;
+    if (change == 3)
+      ++wrong.routeGeneration;
+    if (change == 4)
+      ++wrong.coreRecipient;
+    check(!f.coordinator->continuePreparation(wrong), "Mismatched continuation changed a live attempt");
+  }
+  QCoreApplication::processEvents();
+  check(
+      !f.closed && notifications == 1 && f.coordinator->phase() == Phase::Quiesced && f.preparedChecks == 0 &&
+          !f.channel->lease(),
+      "A mismatched continuation or event-loop turn prepared the pending route"
+  );
+  check(f.coordinator->continuePreparation(*notified), "Exact continuation did not queue");
+  check(!f.coordinator->continuePreparation(*notified), "Duplicate continuation entered the control queue");
+  check(
+      f.coordinator->phase() == Phase::Quiesced && f.channel->phase() == LocalInputPhase::Idle &&
+          !f.channel->prepare(*notified) && f.preparedChecks == 0,
+      "Continuation prepared inline or before its control was dequeued"
+  );
+  check(
+      until([&] { return f.closed || f.coordinator->phase() == Phase::Active; }) && !f.closed &&
+          f.channel->phase() == LocalInputPhase::Active && f.preparedChecks >= 2 && notifications == 1 &&
+          !f.coordinator->continuePreparation(*notified),
+      "Later continuation failed to recheck and activate once"
+  );
+  f.finish();
+}
+void deferredCancellationAndStale()
+{
+  std::optional<LocalInputLease> notified;
+  int notifications = 0;
+  Fixture f("deferred-all", allow(), [&](const auto &lease, auto) {
+    ++notifications;
+    notified = lease;
+  });
+  f.begin(ForwardingScope::All);
+  check(until([&] { return notified || f.closed; }) && !f.closed, "No lease for canceled continuation");
+  const auto old = *notified;
+  check(f.coordinator->continuePreparation(old), "Canceled fixture did not queue continuation");
+  f.coordinator->cancel();
+  check(!f.coordinator->continuePreparation(old), "Canceled continuation was accepted");
+  QCoreApplication::processEvents();
+  check(
+      !f.closed && f.coordinator->phase() == Phase::Idle && f.channel->phase() == LocalInputPhase::Idle &&
+          f.releases == 1 && f.preparedChecks == 0,
+      "Queued continuation revived its canceled owner"
+  );
+  notified.reset();
+  f.begin(ForwardingScope::All);
+  check(until([&] { return notified || f.closed; }) && !f.closed, "Replacement deferred lease did not arrive");
+  check(
+      notifications == 2 && notified->routeGeneration > old.routeGeneration &&
+          !f.coordinator->continuePreparation(old) && f.coordinator->phase() == Phase::Quiesced &&
+          f.coordinator->continuePreparation(*notified),
+      "Stale continuation affected a newer exact lease"
+  );
+  check(
+      until([&] { return f.closed || f.coordinator->phase() == Phase::Active; }) && !f.closed,
+      "Current continuation did not survive stale completion"
+  );
+  f.finish();
+  check(f.releases == 2, "Deferred cancellation or shutdown repeated its exact release");
+}
+void deferredChecks()
+{
+  for (int denied = 0; denied < 4; ++denied) {
+    bool allowed = true;
+    std::optional<LocalInputLease> notified;
+    auto checks = allow();
+    const auto query = [&](const auto &) { return allowed; };
+    if (denied == 0)
+      checks.codeAdmission = query;
+    if (denied == 1)
+      checks.deliveryReady = query;
+    if (denied == 2)
+      checks.neutralBoundary = query;
+    Fixture f("deferred-all", std::move(checks), [&](const auto &lease, auto) { notified = lease; });
+    f.begin(ForwardingScope::All);
+    check(until([&] { return notified || f.closed; }) && !f.closed, "No lease for deferred revalidation");
+    allowed = false;
+    if (denied == 3)
+      f.capture.revoke(OriginalInputRevocation::Discontinuity);
+    check(
+        f.coordinator->continuePreparation(*notified) == (denied != 3),
+        "Continuation skipped retained capture liveness or ran providers inline"
+    );
+    check(
+        until([&] { return f.closed || f.coordinator->phase() == Phase::Idle; }) && !f.closed &&
+            f.channel->phase() == LocalInputPhase::Idle && !f.channel->lease() && f.releases == 1,
+        "Deferred continuation bypassed independent admission, route, neutrality, or capture checks"
+    );
+    f.finish();
+  }
+}
+void deferredNotificationReentry()
+{
+  {
+    Fixture *fixture = nullptr;
+    bool returnedWithoutPrepare = false;
+    Fixture f("deferred-all", allow(), [&](const auto &lease, auto) {
+      check(fixture->coordinator->continuePreparation(lease), "Reentrant continuation was rejected");
+      check(!fixture->coordinator->continuePreparation(lease), "Reentrant duplicate continuation queued");
+      QCoreApplication::processEvents();
+      returnedWithoutPrepare = fixture->coordinator->phase() == Phase::Quiesced &&
+                               fixture->channel->phase() == LocalInputPhase::Idle && fixture->preparedChecks == 0;
+    });
+    fixture = &f;
+    f.active(ForwardingScope::All);
+    check(returnedWithoutPrepare, "Nested event processing sent Prepare before the notification returned");
+    f.finish();
+  }
+  enum class Action
+  {
+    Cancel,
+    Stop,
+    DestroyCoordinator,
+    DestroyChannel,
+    Throw
+  };
+  for (const auto action :
+       {Action::Cancel, Action::Stop, Action::DestroyCoordinator, Action::DestroyChannel, Action::Throw}) {
+    Fixture *fixture = nullptr;
+    std::optional<LocalInputLease> notified;
+    bool queued = false;
+    Fixture f("deferred-all", allow(), [&](const auto &lease, auto) {
+      notified = lease;
+      queued = fixture->coordinator->continuePreparation(lease);
+      if (action == Action::Cancel)
+        fixture->coordinator->cancel();
+      else if (action == Action::Stop)
+        fixture->coordinator->stop();
+      else if (action == Action::DestroyCoordinator)
+        fixture->coordinator.reset();
+      else if (action == Action::DestroyChannel)
+        fixture->channel.reset();
+      else
+        throw std::runtime_error("Fixture preparation notification failed");
+    });
+    fixture = &f;
+    f.begin(ForwardingScope::All);
+    check(until([&] { return notified.has_value(); }), "Reentrant preparation notification did not run");
+    QCoreApplication::processEvents();
+    check(
+        queued && f.releases == 1 && f.preparedChecks == 0 &&
+            (!f.channel || (f.channel->phase() == LocalInputPhase::Idle && !f.channel->lease())) &&
+            (!f.coordinator || (!f.coordinator->continuePreparation(*notified) &&
+                                (f.coordinator->phase() == Phase::Idle || f.coordinator->phase() == Phase::Stopped))),
+        "Reentrant notification cancellation/destruction granted authority or repeated release"
     );
     f.finish();
   }
@@ -757,13 +959,39 @@ void deadlineAndQueue()
 {
   {
     Fixture f("no-quiescence");
+    std::optional<LocalInputLease> notified;
+    std::chrono::steady_clock::time_point deadline;
+    Fixture deferred("deferred-all", allow(), [&](const auto &lease, auto expires) {
+      notified = lease;
+      deadline = expires;
+    });
+    f.mailbox->replace(f.selected);
     f.begin();
+    deferred.begin(ForwardingScope::All);
     check(
-        until([&] { return f.coordinator->phase() == Phase::Idle || f.closed; }, 3500),
+        until([&] { return notified || deferred.closed; }) && !deferred.closed &&
+            deferred.coordinator->phase() == Phase::Quiesced,
+        "Deadline fixture did not hold deferred quiescence"
+    );
+    check(
+        until(
+            [&] {
+              return (f.coordinator->phase() == Phase::Idle || f.closed) &&
+                     (deferred.coordinator->phase() == Phase::Idle || deferred.closed);
+            },
+            3500
+        ),
         "Preflight deadline was extended by refresh"
     );
     check(f.preparedChecks == 0, "Unquiesced attempt reached prepare");
+    check(
+        !deferred.closed && std::chrono::steady_clock::now() >= deadline &&
+            !deferred.coordinator->continuePreparation(*notified) && deferred.preparedChecks == 0 &&
+            deferred.channel->phase() == LocalInputPhase::Idle && !deferred.channel->lease() && deferred.releases == 1,
+        "Deferred continuation renewed an expired deadline or prepared its retired lease"
+    );
     f.finish();
+    deferred.finish();
   }
   {
     Fixture *fixture = nullptr;
@@ -782,6 +1010,22 @@ void deadlineAndQueue()
     check(
         until([&] { return f.closed; }) && f.releases == 1 && f.preparedChecks == 0,
         "Ninth reentrant control did not fail closed and release"
+    );
+    f.finish();
+  }
+  {
+    Fixture *fixture = nullptr;
+    bool continued = true;
+    Fixture f("deferred-all", allow(), [&](const auto &lease, auto) {
+      for (int i = 0; i < 7; ++i)
+        fixture->channel->onCandidate(lease);
+      continued = fixture->coordinator->continuePreparation(lease);
+    });
+    fixture = &f;
+    f.begin(ForwardingScope::All);
+    check(
+        until([&] { return f.closed; }) && !continued && f.releases == 1 && f.preparedChecks == 0,
+        "Deferred continuation bypassed the bounded control queue"
     );
     f.finish();
   }
@@ -1008,6 +1252,10 @@ int main(int argc, char **argv)
     fullInputScope();
     consecutiveControlAndOriginal();
     defaultDeny();
+    deferredPreparation();
+    deferredCancellationAndStale();
+    deferredChecks();
+    deferredNotificationReentry();
     hostFailureCases();
     unsupportedReservationScope();
     hostActivation();

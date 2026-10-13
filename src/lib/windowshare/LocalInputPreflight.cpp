@@ -92,7 +92,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     Prepare,
     Prepared,
     Activated,
-    LocalQuiesced
+    LocalQuiesced,
+    ContinuePreparation
   };
   struct Control
   {
@@ -103,6 +104,13 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   };
   struct Attempt
   {
+    // Local scheduling only; reaching Started still requires every Check.
+    enum class Continuation
+    {
+      Waiting,
+      Queued,
+      Started
+    };
     LocalInputOffer offer;
     std::optional<LocalInputLease> lease;
     std::optional<SelectedPeerMailbox::Observation> core;
@@ -111,11 +119,13 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     Clock::time_point deadline = Clock::now() + preflightTimeout;
     Phase phase = Phase::Offered;
     bool hostActivationAttempted = false, hostActivated = false;
+    Continuation continuation = Continuation::Waiting;
   };
   QPointer<LocalInputChannel> channel;
   LocalInputRole role;
   LocalInputPeerPolicy policy;
   Checks checks;
+  PreparationNotification preparation;
   Host host;
   std::shared_ptr<SelectedPeerMailbox> mailbox;
   std::optional<Attempt> attempt;
@@ -334,6 +344,23 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     }
     return current(offer);
   }
+  bool continuePreparation(LocalInputLease lease)
+  {
+    if (QThread::currentThread() != thread() || !running || role != LocalInputRole::Core || !preparation ||
+        cancelling || authorizing || !attempt || attempt->phase != Phase::Quiesced || attempt->lease != lease ||
+        attempt->continuation != Attempt::Continuation::Waiting)
+      return false;
+    if (!live()) {
+      cancel(LocalInputRevocation::AuthorityLost, true);
+      return false;
+    }
+    // This is a queue-deduplication marker, never readiness evidence. Set it
+    // before scheduling so a reentrant or duplicate completion cannot consume
+    // the bounded control queue or send Prepare twice.
+    attempt->continuation = Attempt::Continuation::Queued;
+    enqueue({Kind::ContinuePreparation, leaseOffer(lease), lease});
+    return current(leaseOffer(lease)) && attempt->continuation == Attempt::Continuation::Queued;
+  }
   bool wellFormed(const Control &control) const
   {
     return validLocalInputOffer(control.offer) && canonical(control.offer.deskflowClientIncarnation) &&
@@ -437,6 +464,16 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     }
     return true;
   }
+  void prepare(const LocalInputLease &lease)
+  {
+    if (!permits(lease, LocalInputCheck::Prepare)) {
+      cancel(LocalInputRevocation::AuthorityLost, true);
+      return;
+    }
+    attempt->phase = Phase::Preparing;
+    if (!channel || !channel->prepare(lease))
+      cancel(LocalInputRevocation::AuthorityLost, true);
+  }
   void receive(const Control &control)
   {
     if (!running)
@@ -467,13 +504,24 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
         return;
       }
       attempt->phase = Phase::Quiesced;
-      if (!permits(control.lease, LocalInputCheck::Prepare)) {
-        cancel(LocalInputRevocation::AuthorityLost, true);
+      if (preparation) {
+        const auto notify = preparation;
+        const auto deadline = attempt->deadline;
+        notify(control.lease, deadline);
+        if (current(offer) && !live())
+          cancel(LocalInputRevocation::AuthorityLost, true);
+      } else {
+        prepare(control.lease);
+      }
+      break;
+    case Kind::ContinuePreparation:
+      if (role != LocalInputRole::Core || !preparation || attempt->phase != Phase::Quiesced ||
+          attempt->continuation != Attempt::Continuation::Queued) {
+        fail("Unexpected preflight preparation continuation");
         return;
       }
-      attempt->phase = Phase::Preparing;
-      if (!channel || !channel->prepare(control.lease))
-        cancel(LocalInputRevocation::AuthorityLost, true);
+      attempt->continuation = Attempt::Continuation::Started;
+      prepare(control.lease);
       break;
     case Kind::LocalQuiesced:
       if (role != LocalInputRole::Host || attempt->phase != Phase::Candidate || !host.isQuiesced) {
@@ -621,6 +669,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   {
     if (authorizing || cancelling || pendingAuthorityControl() || !checks.release || !attempt ||
         attempt->lease != lease ||
+        (role == LocalInputRole::Core && preparation && attempt->continuation != Attempt::Continuation::Started) ||
         (attempt->phase != Phase::Quiesced && attempt->phase != Phase::Preparing &&
          attempt->phase != Phase::Committing && attempt->phase != Phase::Active))
       return false;
@@ -681,13 +730,15 @@ LocalInputPreflight::LocalInputPreflight(std::shared_ptr<State> state) : m_state
 {
 }
 std::unique_ptr<LocalInputPreflight> LocalInputPreflight::core(
-    LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy, Checks checks
+    LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
+    Checks checks, PreparationNotification preparation
 )
 {
   if (!mailbox)
     throw std::invalid_argument("Preflight requires a selected-peer mailbox");
   auto state = std::make_shared<State>(channel, LocalInputRole::Core, std::move(policy), std::move(checks));
   state->mailbox = std::move(mailbox);
+  state->preparation = std::move(preparation);
   state->attach();
   return std::unique_ptr<LocalInputPreflight>(new LocalInputPreflight(std::move(state)));
 }
@@ -707,6 +758,11 @@ bool LocalInputPreflight::begin(OriginalInputEpoch capture, ForwardingScope scop
 {
   const auto state = m_state;
   return state->begin(std::move(capture), scope);
+}
+bool LocalInputPreflight::continuePreparation(const LocalInputLease &lease)
+{
+  const auto state = m_state;
+  return state->continuePreparation(lease);
 }
 void LocalInputPreflight::quiesced(const KeyboardRouteBinding &binding)
 {

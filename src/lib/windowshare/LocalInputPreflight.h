@@ -9,6 +9,7 @@
 #include "LocalInputChannel.h"
 #include "SelectedPeerMailbox.h"
 #include <array>
+#include <chrono>
 #include <span>
 
 namespace deskflow::windowshare {
@@ -51,6 +52,11 @@ LocalInputIncarnation localInputConnectionIncarnation(std::uint64_t counter);
 class LocalInputPreflight final
 {
 public:
+  // Core-only scheduling notification after the exact host fence is quiesced.
+  // It grants no input/drain authority. When installed, preparation remains
+  // deferred until continuePreparation(), within this existing absolute
+  // deadline. The controller retains any native evidence independently.
+  using PreparationNotification = std::function<void(const LocalInputLease &, std::chrono::steady_clock::time_point)>;
   enum class Phase
   {
     Idle,
@@ -99,7 +105,7 @@ public:
   };
   static std::unique_ptr<LocalInputPreflight> core(
       LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
-      Checks checks = {}
+      Checks checks = {}, PreparationNotification preparation = {}
   );
   static std::unique_ptr<LocalInputPreflight>
   host(LocalInputChannel &channel, LocalInputPeerPolicy policy, Host host, Checks checks = {});
@@ -114,6 +120,12 @@ public:
   // claiming it independently observes the core's physical capture stream.
   // Does not retry or start automatically on a heartbeat.
   bool begin(OriginalInputEpoch capture, ForwardingScope scope = ForwardingScope::Keyboard);
+  // Qt owner thread only. Queue one continuation for the notified exact lease;
+  // false means stale, mismatched, canceled, expired, or already queued. True
+  // acknowledges queueing only. All existing Checks and channel authorization
+  // still run before Prepare; neither call nor notification renews the deadline.
+  // Without a notification callback, the original synchronous path is retained.
+  bool continuePreparation(const LocalInputLease &lease);
   // Host's deferred, independently revalidated Bridge notification.
   void quiesced(const KeyboardRouteBinding &binding);
   void cancel(LocalInputRevocation reason = LocalInputRevocation::Requested);
