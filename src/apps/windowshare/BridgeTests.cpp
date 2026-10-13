@@ -272,6 +272,10 @@ struct BridgeTestAccess
   {
     return bridge.m_inputCapable;
   }
+  static bool mediaCapable(const Bridge &bridge)
+  {
+    return bridge.m_mediaRecoveryCapable;
+  }
   static void receive(Bridge &bridge, const Packet &packet)
   {
     bridge.receiveViewer(packet);
@@ -804,6 +808,71 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
           keyframeRequests.size() == 4,
       "Disconnect retained or recreated native recovery work"
   );
+}
+
+void negotiatedMediaRecovery(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  keyframeRequests.clear();
+  keyframeReply = {};
+  AutomaticNative native;
+  Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false);
+  Channel peer(viewerIdentity, parseFingerprint(hostIdentity.fingerprint()));
+  bool negotiated = false;
+  int opened = 0;
+  peer.onAuthenticated = [&] {
+    check(
+        peer.send(
+            MessageType::Hello,
+            {{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"},
+             {"capabilities", keyboardRouteCapabilities(true, true)}}
+        ),
+        "Cannot send media recovery capability negotiation"
+    );
+  };
+  peer.onPacket = [&](const Packet &packet) {
+    if (packet.type == MessageType::Accepted) {
+      check(peerSupportsMediaRecovery(parseObject(packet)), "Host omitted negotiated media recovery capability");
+      negotiated = true;
+    } else if (packet.type == MessageType::Opened) {
+      ++opened;
+    }
+  };
+  check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for media recovery fixture");
+  peer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+  check(waitUntil([&] { return negotiated && BridgeTestAccess::mediaCapable(host); }),
+        "Media capability did not bind to the authenticated connection");
+  BridgeTestAccess::opened(host, 815, 8);
+  check(waitUntil([&] { return opened == 1; }), "Host did not publish the bound media session");
+  auto recovery = [&](std::uint64_t request, std::uint64_t geometry = 1, std::uint64_t session = 815,
+                      std::uint64_t epoch = 8) {
+    return peer.send(MessageType::Input,
+                     {{"kind", "video-recovery"}, {"geometry", number(geometry)}, {"request", number(request)}},
+                     session, epoch);
+  };
+  check(recovery(1), "Cannot send a session-bound video recovery request");
+  check(waitUntil([&] { return keyframeRequests.size() == 1; }),
+        "Bounded authenticated media recovery did not reach the real native callback");
+  check(keyframeRequests[0] == std::pair<std::uint64_t, std::uint64_t>{815, 8},
+        "Video recovery selected another session or epoch");
+  check(recovery(1) && recovery(2, 999) && recovery(3, 1, 9999),
+        "Cannot send duplicate/stale/wrong-session recovery variants");
+  QEventLoop settle;
+  QTimer::singleShot(130, &settle, &QEventLoop::quit);
+  settle.exec();
+  check(keyframeRequests.size() == 1 && BridgeTestAccess::established(host),
+        "Duplicate, stale geometry or foreign owner restarted the native encoder");
+  // An ordinary replay/refusal must not consume the next valid request ID.
+  check(recovery(2), "Cannot send next valid recovery request");
+  check(waitUntil([&] { return keyframeRequests.size() == 2; }),
+        "A new monotonic media request did not restart its own stream");
+  check(BridgeTestAccess::established(host), "Media recovery request closed a live peer");
+  check(peer.send(MessageType::Input,
+                  {{"kind", "video-recovery"}, {"geometry", 1}, {"request", 3}, {"nativeCode", 777}}, 815, 8),
+        "Cannot send malformed recovery envelope");
+  check(waitUntil([&] { return !BridgeTestAccess::established(host); }),
+        "Malformed media control envelope did not fail the authenticated channel closed");
+  check(keyframeRequests.size() == 2 && BridgeTestAccess::pendingKeyframes(host) == 0,
+        "Malformed control or terminal connection retained video recovery work");
 }
 
 void reconnectRefusedThenAvailable(const Identity &hostIdentity, const Identity &viewerIdentity)
@@ -2150,6 +2219,7 @@ int main(int argc, char **argv)
     startupShutdownLifetime(hostIdentity, viewerIdentity);
     initialExportWaitsForCatalog(hostIdentity, viewerIdentity);
     congestionRecovery(hostIdentity, viewerIdentity);
+    negotiatedMediaRecovery(hostIdentity, viewerIdentity);
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);
     reconnectCleanupAndIsolation(hostIdentity, viewerIdentity);
     keyboardFenceRoundTrip(hostIdentity, viewerIdentity);
@@ -2171,7 +2241,8 @@ int main(int argc, char **argv)
     QTextStream(
         stdout
     ) << "PASS: bounded catalog/title wire data, delayed viewer cleanup with reused incarnation, "
-         "catalog completion, congestion recovery, reconnect backoff/cleanup/isolation, terminal "
+         "catalog completion, congestion and negotiated decoder recovery, media replay/geometry bounds, "
+         "reconnect backoff/cleanup/isolation, terminal "
          "failures, cancellation, keyboard/full-input fencing and capability isolation, panel lifetime and terminal "
          "private-channel shutdown ordering\n";
     return 0;
