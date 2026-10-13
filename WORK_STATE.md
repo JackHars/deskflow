@@ -1,5 +1,25 @@
 # Seamless Windows work state
 
+## Verified partial code identity (2026-10-12)
+
+Most recent tested implementation:
+[`868d9d9e6db6cb9896cd577cb2951d434117e8a3`](https://github.com/JackHars/deskflow/commit/868d9d9e6db6cb9896cd577cb2951d434117e8a3).
+It extends the earlier three published native observations with an inert
+reproducible Linux archive, SHA-256 verification and no-overwrite staging,
+explicit Qt IME composition denial until true drain proof, and native packaged
+launch smoke. Hosted GitHub Actions
+[38341136093](https://github.com/JackHars/deskflow/actions/runs/38341136093)
+passed all **six of six** jobs; portable GCC/Clang ASan/UBSan tests each
+passed all 11 suites. The directly executed Node and Python helper suites also
+passed; exact counts and commands are in `TESTING.md`.
+
+These results are **not** full implementation. P2 native old-input drain and
+P3 enabled original delivery are blocked on genuine EI/Clutter/Qt/QtWayland
+ordering and identity proof, which cannot be inferred from read-only stage
+hits. P4/P5/P6/P7 work and all physical H tests remain incomplete/unrun.
+Original-input dispatch remains *disabled* to avoid duplicate or misrouted
+input. The final SHA should not be filled in until actual code completion.
+
 ## Cloud partial integration checkpoint (2026-10-12)
 
 Three commits are published on `feature/seamless-windows`:

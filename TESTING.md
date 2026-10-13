@@ -4,6 +4,46 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Verified published code checkpoint (2026-10-12; implementation incomplete)
+
+- **Tested implementation SHA:** `868d9d9e6db6cb9896cd577cb2951d434117e8a3`
+  (source tree `106c1527abc5f949b599d7825b111fd7d213cca3`).
+  Branch: [`feature/seamless-windows`](https://github.com/JackHars/deskflow/tree/feature/seamless-windows).
+- **Cloud CI:** [GitHub Actions run 38341136093](https://github.com/JackHars/deskflow/actions/runs/38341136093)
+  finished `success`, six of six jobs passed: GNU GCC and Clang foundation,
+  Mac application, Linux application/integrated ON/OFF core, transport, real
+  headless GNOME provider and QtWayland fixture, and the newly staged Linux
+  package/checksum/launcher smoke. Source-bundle run
+  [38341136096](https://github.com/JackHars/deskflow/actions/runs/38341136096)
+  succeeded independently. CI uses its own hosted runners, not either of
+  the user's physical computers.
+- **Separate local portable run on source archive for the exact tested SHA:**
+  CMake 3.31.6, Ninja 1.12.1, GNU G++ 14.2.0 and Clang from the local toolchain;
+  configure `src/unittests/windowshare` with `WINDOWSHARE_SANITIZERS=ON`,
+  build all targets and run `ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1
+  ctest --output-on-failure` for each compiler. **PASS: 11/11 suites on GCC,
+  11/11 suites on Clang**, 0 failed, exit 0. This environment lacks Qt and
+  libei developer packages; full native builds came from hosted CI, not here.
+- **Additional local scripts on the exact source:** `node --test
+  deploy/windowshare/gnome-provider/tests/logic.test.js` **PASS: 13/13**;
+  `python3 deploy/windowshare/package-linux-tests.py` **PASS: 7/7**;
+  `python3 deploy/windowshare/physical-linux-tests.py` **PASS: 20/20**;
+  `python3 deploy/windowshare/physical-macos-tests.py` **PASS: 11/11**;
+  all exit 0. The last two test only the supervisor/schema/harness with no
+  physical input or user desktop; they do **not** change any H-row to PASS.
+- **Implementation still outstanding:** native EI/Clutter/Qt input-consumption
+  proof and release drain, exact source-stage coordinate authority, native
+  P2 permit, P3 enabled trusted original-input coordinator/delivery, P4
+  multi-window/multi-monitor native ownership, P5 bidirectional edge drag,
+  P6 popups/clipboard/Unicode IME, and remaining P7 watchdog, crash, soak and
+  latency targets. All H01–H12 remain **NOT_RUN**. No test above demonstrates
+  original Mac input receipt or authorizes re-enabling that path.
+
+The SHA is a **verified partial code checkpoint**, *not* the final implementation
+of the handoff. Any documentation-only follow-up commit can have a newer branch
+SHA without changing the tested implementation; never attribute a test to an
+untested code revision.
+
 ## Published incremental results (2026-10-12)
 
 **This branch has NOT finished `CHATGPT_HANDOFF.md` P1–P8.** Production
@@ -42,11 +82,11 @@ sections after receiving the final branch.
 ## Candidate identity and result rules
 
 - Baseline implementation: `ef51456659edae1acf06a6c03b730bcaf66f2f8b`.
-- Cloud final implementation SHA: **TO BE FILLED BY CLOUD IMPLEMENTER**.
-- Returned branch/PR or patch: **TO BE FILLED**.
-- Dependency/toolchain versions and build options: **TO BE FILLED**.
-- Artifact locations and reproduction instructions: **TO BE FILLED**.
-- Implemented changes, unsupported capabilities and code gaps: **TO BE FILLED**.
+- Cloud **final** implementation SHA: **NOT_AVAILABLE: plan incomplete**. Most recent tested partial code SHA: `868d9d9e6db6cb9896cd577cb2951d434117e8a3`.
+- Returned branch: `feature/seamless-windows` in `JackHars/deskflow`; incremental changes pushed directly, no PR.
+- Toolchain and build options for the tested partial code: documented in the exact checkpoint section above and the successful CI run. Physical machines: NOT_RUN.
+- Source reproducibility: linked GitHub implementation SHA and CI source bundle; inert Linux package instructions: `deploy/windowshare/package-linux.md` (not installed).
+- Partial implemented changes, unsupported capabilities and outstanding code gaps: linked checkpoint and P1–P8 inventory above; final full-plan delivery remains incomplete.
 
 Use `PASS`, `FAIL`, `NOT_RUN` or `NOT_APPLICABLE` with a reason. A skipped case is
 not a pass. Separate historical baseline results from results for the returned
