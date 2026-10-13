@@ -288,7 +288,7 @@ struct Service
   bool afterQtCheck = false;
   unsigned nativeHitQueries = 0;
   bool advertiseRoutedPoint = true, advertiseStage = false;
-  bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false;
+  bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false, unknownStageMethod = false;
   unsigned stageRequests = 0;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
@@ -612,6 +612,12 @@ struct Service
             token && !std::strcmp(token, viewerId) && request && *request && advertiseStage,
             "Stage observation changed exact session or lacked capability");
       ++stageRequests;
+      if (unknownStageMethod) {
+        g_dbus_method_invocation_return_dbus_error(
+            invocation, "org.freedesktop.DBus.Error.UnknownMethod", "Stage observation method is unavailable"
+        );
+        return;
+      }
       GVariantBuilder values;
       g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
       const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
@@ -1115,6 +1121,38 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Negotiated stage fixture did not close");
     check(service.failure.empty(), "Negotiated stage fixture failed");
+  }
+  {
+    // Advertising a capability is not a successful stage observation. A
+    // provider with a missing method must deny this request without silently
+    // falling back to the earlier native/painted snapshot.
+    Service service(bus);
+    service.advertiseStage = true;
+    service.unknownStageMethod = true;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Unknown stage method fixture not Ready");
+    const auto request = client.requestRoutedPointObservation({9, 35, 425, 325});
+    check(request != 0, "Unknown stage method request did not start");
+    const auto denied = viewportResult(client, request);
+    check(
+        !denied.observation && denied.error.find("UnknownMethod") != std::string::npos && service.stageRequests == 1 &&
+            !service.afterQtCheck && client.live(),
+        "Missing advertised stage method silently fell back to a viewport observation"
+    );
+    service.unknownStageMethod = false;
+    const auto fresh = observed(client);
+    check(
+        fresh.live() && fresh.snapshot().request != request && fresh.snapshot().stageFramesObserved &&
+            service.stageRequests == 2,
+        "A fresh successful stage observation could not recover after a missing method"
+    );
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Unknown stage method fixture did not close");
+    check(service.failure.empty(), "Unknown stage method fixture failed");
   }
   for (const bool substitute : {true, false}) {
     Service service(bus);
