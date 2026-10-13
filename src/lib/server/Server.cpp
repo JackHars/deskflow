@@ -250,6 +250,17 @@ Server::~Server()
     m_events->deleteTimer(m_originalDispatchTimer);
   m_events->removeHandler(EventTypes::Timer, &m_originalDispatchTimer);
   const auto dispatcher = m_originalDispatcher;
+  auto pending = std::move(m_originalPending);
+  m_originalPending.clear();
+  if (dispatcher) {
+    for (const auto &input : pending)
+      if (input.preparation)
+        dispatcher->cancelPreparation(input.preparation);
+    if (!m_originalAbortSent) {
+      m_originalAbortSent = true;
+      dispatcher->abort();
+    }
+  }
   auto releases = std::move(m_originalReleases);
   m_originalReleases.clear();
   if (dispatcher)
@@ -1274,10 +1285,8 @@ void Server::processOptions()
     } else if (id == kOptionClipboardSharingSize) {
       if (value <= 0) {
         m_maximumClipboardSize = 0;
-        LOG_INFO(
-            "clipboard sharing is disabled because the "
-            "maximum shared clipboard size is set to 0"
-        );
+        LOG_INFO("clipboard sharing is disabled because the "
+                 "maximum shared clipboard size is set to 0");
       } else {
         m_maximumClipboardSize = static_cast<size_t>(value);
       }
@@ -1514,7 +1523,7 @@ void Server::handleClientCloseTimeout(BaseClientProxy *client)
 
 void Server::handleSwitchToComputerEvent(const Event &event)
 {
-  const auto *info = static_cast<SwitchToComputerInfo *>(event.getData());
+  const auto *info = static_cast<SwitchToComputerInfo *>(event.getDataObject());
 
   ClientList::const_iterator index = m_clients.find(info->m_computer);
   if (index == m_clients.end()) {
@@ -1526,7 +1535,7 @@ void Server::handleSwitchToComputerEvent(const Event &event)
 
 void Server::handleSwitchInDirectionEvent(const Event &event)
 {
-  const auto *info = static_cast<SwitchInDirectionInfo *>(event.getData());
+  const auto *info = static_cast<SwitchInDirectionInfo *>(event.getDataObject());
 
   // jump to computer in chosen direction from center of this computer
   int32_t x = m_x;
@@ -1576,7 +1585,7 @@ void Server::handleToggleComputerEvent(const Event &)
 
 void Server::handleKeyboardBroadcastEvent(const Event &event)
 {
-  const auto *info = static_cast<KeyboardBroadcastInfo *>(event.getData());
+  const auto *info = static_cast<KeyboardBroadcastInfo *>(event.getDataObject());
 
   // choose new state
   bool newState;
@@ -1616,7 +1625,7 @@ void Server::handleKeyboardBroadcastEvent(const Event &event)
 
 void Server::handleLockCursorToComputerEvent(const Event &event)
 {
-  const auto *info = static_cast<LockCursorToComputerInfo *>(event.getData());
+  const auto *info = static_cast<LockCursorToComputerInfo *>(event.getDataObject());
 
   // choose new state
   bool newState;
@@ -1842,7 +1851,10 @@ bool Server::deferOriginalInput(PendingOperation operation, InputRoutes::Recipie
     m_originalRouteObservation->deferred = true;
   if (pending.route.stamp && (!m_originalInputRoutes || !m_originalInputRoutes->defer(pending.route.stamp)))
     cancelOriginalDispatch();
-  if (m_originalPending.size() == originalPendingCapacity) {
+  // A detached reserve/poll call still occupies one pending slot. Reentry may
+  // enqueue behind it but cannot force an asynchronous requeue to slot 257.
+  if (m_originalPending.size() + (m_originalReservationCall && !m_originalReservationCall->cancelled ? 1 : 0) >=
+      originalPendingCapacity) {
     cancelOriginalDispatch();
     // Reentrant producers cannot grow the queue. Existing presses still own
     // their releases; pending acquisitions become tombstones before draining.
@@ -1864,11 +1876,11 @@ bool Server::deferOriginalInput(PendingOperation operation, InputRoutes::Recipie
       while (!m_originalPending.empty()) {
         auto queued = std::move(m_originalPending.front());
         m_originalPending.pop_front();
-        executeOriginalInput(std::move(queued), nullptr);
+        executeOriginalInput(queued, nullptr);
         if (!*lifetime)
           return true;
       }
-      executeOriginalInput(std::move(pending), nullptr);
+      executeOriginalInput(pending, nullptr);
       return true;
     }
     const auto lifetime = m_originalLifetime;
@@ -1896,30 +1908,71 @@ void Server::revokeOriginalOwner(std::uint64_t owner) noexcept
   m_originalReleases.insert(owner);
 }
 
+Server::OriginalReservationScope::OriginalReservationScope(Server &server, OriginalReservationCall &call) noexcept
+    : m_server(server),
+      m_lifetime(server.m_originalLifetime),
+      m_previous(server.m_originalReservationCall)
+{
+  m_server.m_originalReservationCall = &call;
+}
+Server::OriginalReservationScope::~OriginalReservationScope()
+{
+  if (*m_lifetime)
+    m_server.m_originalReservationCall = m_previous;
+}
+
+void Server::suppressOriginalInput(
+    const PendingInput &pending, const deskflow::windowshare::OriginalInputCaptured *captured
+)
+{
+  using namespace deskflow::windowshare;
+  const auto lifetime = m_originalLifetime;
+  const auto &operation = pending.operation;
+  const auto *key = std::get_if<PendingKey>(&operation);
+  const auto *button = std::get_if<PendingButton>(&operation);
+  std::optional<InputRoutes::Control> control;
+  if (key && key->id != kKeySetModifiers && key->id != kKeyClearModifiers)
+    control = InputRoutes::keyControl(key->id, key->button);
+  else if (button)
+    control = InputRoutes::Control{InputRoutes::Kind::Button, button->id};
+  const bool down = (key && key->phase == PendingKey::Phase::Down) || (button && button->down);
+  const bool up = (key && key->phase == PendingKey::Phase::Up) || (button && !button->down);
+  auto held = control ? m_inputRoutes.repeat(*control) : std::nullopt;
+  if (held && held->originalOwner)
+    revokeOriginalOwner(held->originalOwner);
+  if (control && down && !held)
+    held = m_inputRoutes.down(*control, key ? key->id : 0, key ? key->mask : 0, key ? key->button : button->id, {});
+  // Pending/failed acquisition tombstones need the same physical-up join as
+  // delivered originals. An untranslated raw up must be able to retire them.
+  if (control && down && held && captured) {
+    if (key) {
+      const auto *raw = std::get_if<OriginalInputKey>(&captured->input.record.payload);
+      if (raw && raw->transition == OriginalKeyTransition::Down &&
+          m_originalKeyControls.size() < InputRoutes::maxPresses)
+        m_originalKeyControls.insert_or_assign(raw->code, OriginalPhysicalPress{*control, held->incarnation});
+    } else {
+      const auto *raw = std::get_if<OriginalInputButton>(&captured->input.record.payload);
+      if (raw && raw->down)
+        m_originalButtonControls.insert_or_assign(raw->button, OriginalPhysicalPress{*control, held->incarnation});
+    }
+  }
+  if (control && up)
+    takeInputPress(*control);
+  if (key && up)
+    releaseRoutedModifiers(held ? held->key : key->id, key->mask);
+  if (!*lifetime)
+    return;
+  if (std::holds_alternative<PendingMotion>(operation))
+    executeLegacyInput(pending); // Cursor presentation is not application-input authority.
+}
+
 void Server::cancelInFlightOriginal()
 {
   auto *flight = m_originalReservationCall;
   if (!flight || flight->cancelled)
     return;
-  flight->cancelled = true;
-  const auto &operation = flight->pending.operation;
-  if (const auto *key = std::get_if<PendingKey>(&operation)) {
-    const auto control = InputRoutes::keyControl(key->id, key->button);
-    if (key->phase == PendingKey::Phase::Down)
-      m_inputRoutes.down(control, key->id, key->mask, key->button, {});
-    else if (key->phase == PendingKey::Phase::Up) {
-      const auto held = takeInputPress(control);
-      releaseRoutedModifiers(held ? held->key : key->id, key->mask);
-    }
-  } else if (const auto *button = std::get_if<PendingButton>(&operation)) {
-    const InputRoutes::Control control{InputRoutes::Kind::Button, button->id};
-    if (button->down)
-      m_inputRoutes.down(control, 0, 0, button->id, {});
-    else
-      takeInputPress(control);
-  } else if (std::holds_alternative<PendingMotion>(operation)) {
-    executeLegacyInput(flight->pending); // Cursor positioning precedes later queued input.
-  }
+  flight->cancelled = true; // Fence before any release/packet callback can reenter.
+  suppressOriginalInput(flight->pending, flight->captured);
 }
 
 void Server::flushOriginalBeforeSelection()
@@ -1945,7 +1998,7 @@ void Server::flushOriginalBeforeSelection()
     auto pending = std::move(m_originalPending.front());
     m_originalPending.pop_front();
     try {
-      executeOriginalInput(std::move(pending), nullptr);
+      executeOriginalInput(pending, nullptr);
     } catch (...) {
       if (!*lifetime)
         return;
@@ -2035,6 +2088,8 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
   const auto dispatcher = m_originalDispatcher;
   if (m_selectedPeer && !m_selectedPeer->live())
     invalidateSelectedPeer();
+  if (!*lifetime)
+    return;
   if (!m_originalInputCaptured->live() || (m_originalInputRoutes && !m_originalInputRoutes->live()))
     cancelOriginalDispatch();
   while (auto captured = m_originalInputCaptured->pop()) {
@@ -2063,7 +2118,8 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     {
       const auto &record = captured->input.record;
       m_originalCompleted.emplace(
-          std::pair{record.epoch, record.sequence}, CompletedInput{std::move(*captured), now + originalDispatchTimeout}
+          std::pair{record.epoch, record.sequence},
+          CompletedInput{std::move(*captured), now + originalDispatchTimeout, now}
       );
     }
   }
@@ -2095,29 +2151,33 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
       break;
     if (m_originalPending.front().route.stamp != stamp)
       continue;
-    const auto &front = m_originalPending.front();
-    const auto found = m_originalCompleted.find({front.route.stamp.epoch, front.route.stamp.sequence});
-    if (!m_originalDispatchTerminal && front.route.stamp && found == m_originalCompleted.end() && now < front.deadline)
-      break;
-    if (!m_originalDispatchTerminal && now >= front.deadline)
-      cancelOriginalDispatch();
-    std::optional<OriginalInputCaptured> captured;
-    if (!m_originalDispatchTerminal && found != m_originalCompleted.end()) {
-      const auto part = front.route.stamp.part;
-      if (part && part <= maximumOriginalInputParts && !(found->second.parts & (1u << part))) {
-        captured = found->second.captured;
-        found->second.parts |= 1u << part;
+    auto &front = m_originalPending.front();
+    if (!front.captureResolved) {
+      const auto found = m_originalCompleted.find({front.route.stamp.epoch, front.route.stamp.sequence});
+      if (!m_originalDispatchTerminal && front.route.stamp && found == m_originalCompleted.end() &&
+          now < front.deadline)
+        break;
+      if (!m_originalDispatchTerminal &&
+          ((found == m_originalCompleted.end() && now >= front.deadline) ||
+           (found != m_originalCompleted.end() && found->second.receivedAt > front.deadline)))
+        cancelOriginalDispatch();
+      front.captureResolved = true;
+      if (!m_originalDispatchTerminal && found != m_originalCompleted.end()) {
+        const auto part = front.route.stamp.part;
+        if (part && part <= maximumOriginalInputParts && !(found->second.parts & (1u << part))) {
+          front.captured = found->second.captured;
+          found->second.parts |= 1u << part;
+        }
+        const auto *key = std::get_if<PendingKey>(&front.operation);
+        const auto *button = std::get_if<PendingButton>(&front.operation);
+        found->second.upResolved |= (key && key->phase == PendingKey::Phase::Up) || (button && !button->down);
       }
-    }
-    if (!m_originalDispatchTerminal && found != m_originalCompleted.end()) {
-      const auto *key = std::get_if<PendingKey>(&front.operation);
-      const auto *button = std::get_if<PendingButton>(&front.operation);
-      found->second.upResolved |= (key && key->phase == PendingKey::Phase::Up) || (button && !button->down);
     }
     auto pending = std::move(m_originalPending.front());
     m_originalPending.pop_front();
+    bool complete = true;
     try {
-      executeOriginalInput(std::move(pending), captured ? &*captured : nullptr);
+      complete = executeOriginalInput(pending, pending.captured ? &*pending.captured : nullptr, now);
     } catch (...) {
       if (!*lifetime)
         return;
@@ -2125,6 +2185,10 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     }
     if (!*lifetime)
       return;
+    if (!complete) {
+      m_originalPending.push_front(std::move(pending));
+      break; // No later operation, including a release, can pass this frozen input.
+    }
   }
   while (true) {
     const auto found = std::find_if(m_originalCompleted.begin(), m_originalCompleted.end(), [&](const auto &entry) {
@@ -2152,6 +2216,12 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
       if (!*lifetime)
         return;
     }
+  if (dispatcher && m_originalDispatchTerminal && !m_originalAbortSent) {
+    m_originalAbortSent = true;
+    dispatcher->abort();
+    if (!*lifetime)
+      return;
+  }
   m_originalDraining = false;
 }
 
@@ -2216,9 +2286,12 @@ void Server::executeLegacyInput(const PendingInput &pending)
     m_originalExecutingObservation = previousObservation;
 }
 
-void Server::executeOriginalInput(PendingInput pending, const deskflow::windowshare::OriginalInputCaptured *captured)
+bool Server::executeOriginalInput(
+    PendingInput &pending, const deskflow::windowshare::OriginalInputCaptured *captured, OriginalClock::time_point now
+)
 {
   using namespace deskflow::windowshare;
+  using State = OriginalInputDispatcher::State;
   const auto lifetime = m_originalLifetime;
   const auto dispatcher = m_originalDispatcher;
   Event event(EventTypes::Unknown, nullptr, nullptr, Event::EventFlags::DontFreeData, pending.route.stamp);
@@ -2260,7 +2333,6 @@ void Server::executeOriginalInput(PendingInput pending, const deskflow::windowsh
     } else if (motion) {
       const auto *raw = std::get_if<OriginalInputMotion>(&payload);
       eligible = raw && !motion->relative && pending.route.pointKnown;
-      // A drag may only follow a button already delivered by this path.
       if (eligible && raw->dragButton != originalInputButtonCount) {
         const auto mapped = m_originalButtonControls.find(raw->dragButton);
         const auto press =
@@ -2273,68 +2345,128 @@ void Server::executeOriginalInput(PendingInput pending, const deskflow::windowsh
       eligible = std::holds_alternative<OriginalInputScroll>(payload) && pending.route.pointKnown;
     }
   }
-  std::optional<OriginalInputDispatcher::Reservation> reservation;
-  OriginalReservationCall flight{pending};
-  if (eligible) {
-    m_originalReservationCall = &flight;
-    try {
-      reservation = dispatcher->reserve(*captured, pending.route, *pending.selected, existingOwner);
-    } catch (...) {
-      // A throwing provider may have partially reserved output. It cannot be
-      // treated as an ordinary denial and retried through legacy dispatch.
-      if (!*lifetime)
-        return;
-      m_originalReservationCall = nullptr;
+  const auto ticket = pending.preparation;
+  const auto deadline = ticket ? pending.preparationDeadline : now + originalPreparationTimeout;
+  OriginalReservationCall flight{pending, captured ? captured : pending.captured ? &*pending.captured : nullptr};
+  // Suppress before entering a provider cleanup callback. The in-flight marker
+  // also orders any reentrant selection flush before later queued operations.
+  const auto suppress = [&] {
+    if (!*lifetime || flight.cancelled)
+      return;
+    OriginalReservationScope inFlight(*this, flight);
+    cancelInFlightOriginal();
+  };
+  if (ticket && (!eligible || now >= deadline)) {
+    pending.preparation = 0;
+    if (now >= deadline)
       cancelOriginalDispatch();
-      if (!flight.cancelled && control && down && !held)
-        m_inputRoutes.down(*control, key ? key->id : 0, key ? key->mask : 0, key ? key->button : button->id, {});
-      if (!flight.cancelled && up && control)
-        takeInputPress(*control);
-      if (!flight.cancelled && key && up)
-        releaseRoutedModifiers(held ? held->key : key->id, key->mask);
-      observation.decision.outcome = OriginalInputRouteOutcome::Failed;
-      return;
-    }
-    if (!*lifetime) {
-      if (reservation)
-        dispatcher->cancel(*reservation);
-      return;
-    }
-    m_originalReservationCall = nullptr;
-  }
-  if (flight.cancelled) {
-    if (reservation) {
-      revokeOriginalOwner(reservation->owner);
-      dispatcher->cancel(*reservation);
-    }
+    suppress();
+    dispatcher->cancelPreparation(ticket);
     observation.decision.outcome = OriginalInputRouteOutcome::Failed;
-    return;
+    return true;
   }
+  OriginalInputDispatcher::Result result;
+  if (eligible) {
+    try {
+      OriginalReservationScope inFlight(*this, flight);
+      result = ticket ? dispatcher->poll(ticket)
+                      : dispatcher->reserve(*captured, pending.route, *pending.selected, existingOwner, deadline);
+    } catch (...) {
+      // A throwing provider may have partially acquired authority. Never turn
+      // an exceptional/unfinished handoff into a fresh legacy acquisition.
+      pending.preparation = 0;
+      if (*lifetime) {
+        cancelOriginalDispatch();
+        suppress();
+      }
+      if (ticket)
+        dispatcher->cancelPreparation(ticket);
+      if (!*lifetime)
+        dispatcher->abort();
+      observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+      return true;
+    }
+    // Discard uses only retained provider/stack values. In particular, a poll
+    // callback can destroy Server after the request left its pending deque.
+    const auto discard = [&] {
+      if (result.reservation)
+        dispatcher->cancel(*result.reservation);
+      if (ticket)
+        dispatcher->cancelPreparation(ticket);
+      else if (result.state == State::Pending && result.ticket)
+        dispatcher->cancelPreparation(result.ticket);
+    };
+    if (!*lifetime) {
+      discard();
+      return true;
+    }
+    if (flight.cancelled) {
+      pending.preparation = 0;
+      if (result.reservation)
+        revokeOriginalOwner(result.reservation->owner);
+      discard();
+      observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+      return true;
+    }
+    const bool identity = ticket                           ? result.ticket == ticket
+                          : result.state == State::Pending ? result.ticket > m_originalLastPreparation
+                                                           : result.ticket == 0;
+    if (!result.wellFormed() || !identity || std::max(now, OriginalClock::now()) >= deadline) {
+      pending.preparation = 0;
+      cancelOriginalDispatch();
+      suppress();
+      discard();
+      observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+      return true;
+    }
+    if (result.state == State::Pending) {
+      if (!ticket) {
+        m_originalLastPreparation = result.ticket;
+        pending.preparation = result.ticket;
+        pending.preparationDeadline = deadline;
+      }
+      observation.deferred = true;
+      return false;
+    }
+    pending.preparation = 0;
+    if (result.state == State::Revoked) {
+      if (existingOwner)
+        revokeOriginalOwner(existingOwner);
+      suppress();
+      observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+      return true;
+    }
+  }
+  const auto reservation = result.reservation;
   if (!reservation) {
     if (existingOwner)
       revokeOriginalOwner(existingOwner);
     executeLegacyInput(pending);
     if (*lifetime && up && captured)
       retireOriginalCapture(*captured);
-    return;
+    return true;
   }
   const auto owner = reservation->owner;
   if (!m_originalOwners.contains(owner) && !m_originalRevokedOwners.contains(owner) &&
       m_originalOwners.size() + m_originalRevokedOwners.size() >= originalPendingCapacity)
     cancelOriginalDispatch();
   // No callback below an accepted reservation may cause a legacy acquisition.
-  bool valid = owner && reservation->nonce && !m_originalRevokedOwners.contains(owner) &&
-               (!existingOwner || existingOwner == owner) && !m_originalDispatchTerminal && captured->input.live() &&
-               m_originalInputCaptured->live() && pending.selected->live() && m_selectedPeer &&
-               m_selectedPeer->sameSelection(*pending.selected) && inputRecipient(pending.route.recipient);
+  bool valid = !m_originalRevokedOwners.contains(owner) && (!existingOwner || existingOwner == owner) &&
+               !m_originalDispatchTerminal && captured->input.live() && m_originalInputCaptured->live() &&
+               pending.selected->live() && m_selectedPeer && m_selectedPeer->sameSelection(*pending.selected) &&
+               inputRecipient(pending.route.recipient);
   if (valid) {
-    valid = dispatcher->live(owner);
+    {
+      OriginalReservationScope inFlight(*this, flight);
+      valid = dispatcher->live(owner);
+    }
     if (!*lifetime) {
       dispatcher->cancel(*reservation);
-      return;
+      return true;
     }
-    valid = valid && pending.selected->live() && m_selectedPeer && m_selectedPeer->sameSelection(*pending.selected) &&
-            !m_originalDispatchTerminal && m_originalInputCaptured->live();
+    valid = valid && !flight.cancelled && pending.selected->live() && m_selectedPeer &&
+            m_selectedPeer->sameSelection(*pending.selected) && !m_originalDispatchTerminal &&
+            m_originalInputCaptured->live();
   }
   if (valid && control && down && !held) {
     if (key && m_originalKeyControls.size() >= InputRoutes::maxPresses)
@@ -2347,21 +2479,13 @@ void Server::executeOriginalInput(PendingInput pending, const deskflow::windowsh
     valid = acquired && acquired->originalOwner == owner;
   }
   if (!valid) {
-    if (control && down && !held)
-      m_inputRoutes.down(*control, key ? key->id : 0, key ? key->mask : 0, key ? key->button : button->id, {});
-    if (owner)
-      revokeOriginalOwner(owner);
+    revokeOriginalOwner(owner);
     if (existingOwner && existingOwner != owner)
       revokeOriginalOwner(existingOwner);
-    if (up && control)
-      takeInputPress(*control);
+    suppress();
     dispatcher->cancel(*reservation);
-    if (!*lifetime)
-      return;
-    if (key && up)
-      releaseRoutedModifiers(held ? held->key : key->id, key->mask);
     observation.decision.outcome = OriginalInputRouteOutcome::Failed;
-    return;
+    return true;
   }
   m_originalOwners.insert(owner);
   if (button && down)
@@ -2388,12 +2512,12 @@ void Server::executeOriginalInput(PendingInput pending, const deskflow::windowsh
       executeLegacyInput(pending);
     if (!*lifetime) {
       dispatcher->cancel(*reservation);
-      return;
+      return true;
     }
     const bool outputLive = dispatcher->live(owner);
     if (!*lifetime) {
       dispatcher->cancel(*reservation);
-      return;
+      return true;
     }
     if (outputLive && captured->input.live() && m_originalInputCaptured->live() && pending.selected->live() &&
         m_selectedPeer && m_selectedPeer->sameSelection(*pending.selected) && m_originalOwners.contains(owner) &&
@@ -2403,20 +2527,20 @@ void Server::executeOriginalInput(PendingInput pending, const deskflow::windowsh
     committed = false;
   }
   if (!*lifetime)
-    return;
+    return true;
   if (!committed || !pending.selected->live() || !captured->input.live())
     revokeOriginalOwner(owner);
   if (!committed) {
     dispatcher->cancel(*reservation);
     if (!*lifetime)
-      return;
+      return true;
   }
   if (key && up)
     releaseRoutedModifiers(held ? held->key : key->id, key->mask);
-  // Synthetic legacy modifier cleanup has its own press recipients and must
-  // not rewrite the identity of the original reservation recorded here.
+  // Synthetic legacy modifier cleanup cannot rewrite original ownership.
   observation.decision = pending.route;
   observation.decision.outcome = committed ? OriginalInputRouteOutcome::Original : OriginalInputRouteOutcome::Failed;
+  return true;
 }
 Server::OriginalRouteObservation::OriginalRouteObservation(
     Server &owner, const Event &event, deskflow::windowshare::OriginalInputRouteKind kind

@@ -37,7 +37,7 @@ jobs:
           # needs those paths too, notably the workflow dependency lists.
           git ls-files -z | tar --null --no-recursion --files-from=- \
             --mtime="@$(git show -s --format=%ct HEAD)" --owner=0 --group=0 \
-            --numeric-owner --transform='s,^,deskflow/,' -cf - | \
+            --numeric-owner --transform='flags=r;s,^,deskflow/,' -cf - | \
             gzip -n > "$RUNNER_TEMP/windowshare-source/deskflow-source.tar.gz"
           # Raw, credential-free Git values allow an offline verifier to
           # reconstruct the exact tree and shallow commit, not a lookalike

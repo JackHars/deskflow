@@ -62,6 +62,104 @@ used under a now-enforced keyboard lease); neither was suppressed or relabelled.
 Current checkpoint native/CI/sanitizer checks beyond the above are NOT_RUN until
 recorded for an exact published source SHA. Hardware H01–H12 remain NOT_RUN.
 
+## Cloud implementation progress: asynchronous Server preparation
+
+This checkpoint implements the Server half of P1's asynchronous contract. It is
+not completion of the native coordinator or the whole handoff. `reserve` and
+`poll` distinguish `Pending`, `Refused`, `Accepted` and `Revoked`; pending input
+retains its exact completed capture, recipient, selection and routed point at
+the head of the existing bounded queue. No callback or nested event-loop wait
+is added to the event tap. Only a finished refusal may use legacy delivery.
+
+The capture-arrival budget remains 100 ms. Asynchronous preparation has a
+separate **500 ms absolute budget**, starting on the first provider request;
+polls do not extend it. Captures received on time remain eligible while waiting
+behind that request. Pending and detached/reentrant operations share the
+256-entry bound. Native output must already be reserved before an accepted
+reply, and the dispatcher abort/release contract keeps unfinished native release
+explicit rather than treating cancellation as permission to resume forwarding.
+
+Regression cases added to the actual `ServerTests` target:
+`originalDispatch_pendingOrderingAndCaptureArrival`,
+`originalDispatch_pendingRefusalAndRawRelease`,
+`originalDispatch_pendingCancellationLifetime`,
+`originalDispatch_pendingMalformedRepliesAndDeadline`,
+`originalDispatch_pendingReentryAndLimit`,
+`originalDispatch_pendingFrozenPointAndTicketReuse`, and
+`originalDispatch_pendingDragRevocation`.
+These use real protocol proxies plus a local provider fixture, not a native
+compositor. They test delayed and malformed replies, a reused ticket, exact
+frozen coordinates, exceptions, callback destruction, selection/disconnect,
+queue saturation, and untranslated key/button releases. A first regression run
+caught missing raw-up tracking on selection cancellation; it was fixed, not
+skipped. A revoked drag also releases its exact held original owner immediately.
+
+Source checkout reconstructed and verified against `6e977ff05c6e787fed6814a5094d0152b1eb63e3`
+and tree `f66c58c6b07b845b9b937d67a39897b97ff09e77` before edits; all 1,035 file
+bytes/modes matched the authenticated source index. Debian 13, GCC 14.2.0,
+Qt 6.8.2, CMake 3.31.6, Ninja. The source helper now preserves symlink targets
+when adding an archive prefix. Candidate implementation identity and CI results
+will be recorded after publishing the hash-verified source objects.
+
+Executed commands and exact logs are under `build/cloud-logs/`:
+
+```sh
+cmake -S . -B build/cloud-on -G Ninja -DBUILD_WINDOWSHARE=ON \
+  -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build/cloud-on --parallel 3 --target deskflow-core \
+  ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests
+QT_QPA_PLATFORM=offscreen ctest --test-dir build/cloud-on/src/unittests \
+  --no-tests=error --output-on-failure \
+  -R '^(ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests)$'
+
+cmake -S . -B build/cloud-off -G Ninja -DBUILD_WINDOWSHARE=OFF \
+  -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+cmake --build build/cloud-off --parallel 3 --target deskflow-core \
+  ServerTests ClientProxyTests ServerProxyTests
+QT_QPA_PLATFORM=offscreen ctest --test-dir build/cloud-off/src/unittests \
+  --no-tests=error --output-on-failure \
+  -R '^(ServerTests|ClientProxyTests|ServerProxyTests)$'
+
+cmake -S . -B build/cloud-asan -G Ninja -DBUILD_WINDOWSHARE=ON \
+  -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON \
+  -DCMAKE_BUILD_TYPE=Debug \
+  '-DCMAKE_CXX_FLAGS=-fsanitize=address,undefined -fno-omit-frame-pointer' \
+  '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
+cmake --build build/cloud-asan --parallel 3 --target \
+  ServerTests ClientProxyTests ServerProxyTests ArchTests
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  QT_QPA_PLATFORM=offscreen ctest --test-dir build/cloud-asan/src/unittests \
+  --no-tests=error --output-on-failure -R '^(ServerTests|ClientProxyTests|ServerProxyTests|ArchTests)$'
+```
+
+PASS: enabled core build and five suites, exit 0, 170 Qt entries, zero failures
+or skips. PASS: disabled core build and three suites, exit 0, 31 Qt entries,
+zero failures and 29 explicit disabled-feature skips. PASS: ASan/UBSan plus leak
+detection, four suites (`ArchTests`, `ServerProxyTests`, `ServerTests`,
+`ClientProxyTests`), exit 0, 124 Qt entries, zero failures or skips. Counts include
+Qt initialization/cleanup. Logs: `build-core-on.log`, `test-core-on.log`,
+`build-core-off.log`, `test-core-off.log`, `build-asan-cleanup.log` and
+`test-asan-cleanup.log`; detailed Qt counts are in each build's
+`src/unittests/Testing/Temporary/LastTest.log`.
+
+The first sanitizer run failed on fixture-owned queued events, an explicitly
+detached test client and the POSIX architecture's initial main-thread reference.
+Freeing event payloads correctly then exposed a production `new`/`free` mismatch
+in connection notifications. Fixed real C++ notification ownership, all four
+related InputFilter action payloads/consumers and the filter's synchronous
+borrowed-event view; no sanitizer check was disabled. New regressions
+`connectionEvent_destroysOwnedPayload`,
+`inputFilter_ownedActionsAndConnectionLifetime` and
+`mainThreadOwner_repeatedConstructionReleasesItsReference` exercise those fixes.
+The POSIX destructor releases only its own initial reference, not externally
+retained worker references. Existing allocation/state tests remain enabled.
+
+The production compiler flags, not just fixture flags, include ASan/UBSan in
+this sanitizer build. Distribution-provided Qt and system libraries are not
+rebuilt with sanitizers. H01–H12 remain `NOT_RUN — requires local hardware`.
+
 ## Historical baseline
 
 All six jobs pass for `ef5145665` in

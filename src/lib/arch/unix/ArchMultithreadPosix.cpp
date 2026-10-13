@@ -101,6 +101,11 @@ ArchMultithreadPosix::ArchMultithreadPosix()
 ArchMultithreadPosix::~ArchMultithreadPosix()
 {
   assert(s_instance != nullptr);
+  // Balance the reference created by this object's constructor. Worker and
+  // external handles own their own references; do not delete those here.
+  // Like the remaining arch state, this owner is destroyed after its users.
+  closeThread(m_mainThread);
+  m_mainThread = nullptr;
   s_instance = nullptr;
 }
 

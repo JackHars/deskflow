@@ -50,8 +50,23 @@ commands, stale selection and missing authentication cannot acquire original
 input through this path. The dispatcher must separately establish the native
 destination, coordinate mapping and full viewer forwarding fence.
 
-`reserve` reserves output capacity without delivering input. Once a reservation
-is accepted, failure cannot fall back to a legacy acquisition. `commit` is the
+`reserve` reserves output capacity without delivering input. Its result is an
+explicit `Refused`, `Pending`, `Accepted` or `Revoked`, not an optional value
+that conflates missing authority with asynchronous preparation. A pending result
+retains capacity and a strictly increasing request ticket. The Server polls it
+on its existing core-thread timer; later operations cannot pass the pending
+head. Every reply must echo the exact ticket. Duplicate, reused, malformed,
+exceptional or late replies are terminal for original eligibility.
+
+Preparation uses a separate, nonrenewable 500 ms deadline. The existing 100 ms
+budget still limits arrival of each completed capture, but a timely capture is
+not invalidated by waiting behind older preparation. Pending cancellation is
+explicit and idempotent, and provider destruction/Server shutdown aborts retained
+work. A provider can return `Refused` after starting a handoff only when its
+release/drain has completely finished; `Revoked` suppresses the acquisition.
+Callback reentry and destruction cannot expose a dangling in-flight record.
+
+Once a reservation is accepted, failure cannot fall back to a legacy acquisition. `commit` is the
 original delivery operation; cancellation releases unused reservations, and
 owner revocation requests cleanup at the original destination. Absolute motion
 still sends its frozen desktop position to the Linux cursor while the reserved

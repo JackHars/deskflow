@@ -3,6 +3,31 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Cloud checkpoint: asynchronous pre-dispatch state
+
+Server preparation now has explicit pending/refused/accepted/revoked outcomes,
+nonreused request identities, ordered polling and a separate 500 ms preparation
+budget. Completed captures retain their original 100 ms arrival bound without
+expiring merely because older preparation holds the queue. Exact capture,
+selection, recipient and routed point remain frozen. Pending cancellation tracks
+physical releases, including untranslated ups; malformed/late replies, callback
+reentry/destruction and bounded-capacity failures cannot cause a legacy down.
+
+The portable dispatcher interface is in `OriginalInputDispatch.h`; production
+Server paths use it, and compatibility builds remain independently tested with
+the feature enabled and disabled. Tests and actual result details are in
+`TESTING.md`. The remaining native/Qt preparation service, complete native drain
+and production activation are not supplied by a fixture's `Accepted` result.
+No new native-input enablement is claimed at this checkpoint.
+
+Sanitizer verification additionally corrected C++ ownership for connection and
+InputFilter action events, the filter's borrowed event view, and the POSIX
+architecture's initial main-thread reference. Fixture cleanup now releases
+dropped notifications and a deliberately detached client. Enabled core: five
+suites / 170 Qt entries; disabled: three / 31 with 29 explicit skips; ASan,
+UBSan and leak detection: four / 124. All exit 0. These are cloud protocol/core
+checks, not native input receipt or hardware acceptance. See `TESTING.md`.
+
 ## Cloud checkpoint: scoped private protocol (2026-10-12)
 
 The private channel is now protocol v4: both endpoints negotiate code-support

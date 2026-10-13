@@ -4,6 +4,16 @@ This branch contains a native Mac capture host and independent Qt viewer windows
 It is an opt-in development milestone, not yet the completed drag-between-desktops
 feature. The ordinary Deskflow build remains the default.
 
+## Current cloud integration checkpoint
+
+The Server now holds pending asynchronous preparation without emitting the
+original or a legacy acquisition. Polls retain exact source order, frozen routed
+coordinates and the original selection. Capture-arrival and native-preparation
+deadlines are separate, and reentrant cancellation preserves physical-release
+tracking. This is tested against the actual enabled/disabled core and protocol
+proxies; it is not native drain authority or hardware acceptance. See
+[`TESTING.md`](../TESTING.md) for the candidate's actual commands and results.
+
 ## Roadmap status
 
 The overall completion estimate is about 50%. The project is in integration:

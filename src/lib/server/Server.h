@@ -20,6 +20,7 @@
 #include "deskflow/InputSequence.h"
 #include "windowshare/InputRouteState.h"
 #include "windowshare/OriginalInputCapturedInbox.h"
+#include "windowshare/OriginalInputDispatch.h"
 #include "windowshare/OriginalInputRoute.h"
 #include "windowshare/SelectedPeer.h"
 #endif
@@ -103,7 +104,7 @@ public:
   };
 
   //! Computer connected data
-  class ComputerConnectedInfo
+  class ComputerConnectedInfo : public EventData
   {
   public:
     explicit ComputerConnectedInfo(std::string computer) : m_computer(computer)
@@ -112,7 +113,7 @@ public:
     }
 
   public:
-    std::string m_computer; // was char[1]
+    std::string m_computer;
   };
 
   //! Keyboard broadcast data
@@ -224,32 +225,10 @@ public:
   bool setOriginalInputRoutes(std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> routes) noexcept;
   bool setOriginalInputCapturedInbox(std::shared_ptr<deskflow::windowshare::OriginalInputCapturedInbox> inbox);
 
-  // Trusted, local, core-thread provider. reserve must retain the immutable
-  // record and reserve output capacity without delivering it. An accepted
-  // reservation is irrevocably original, including when commit fails. The
-  // provider must hold the exact native/coordinate authority and all-input
-  // forwarding fence; neither a route observation nor TLS identity supplies it.
-  class OriginalInputDispatcher
-  {
-  public:
-    struct Reservation
-    {
-      std::uint64_t owner = 0, nonce = 0;
-    };
-    virtual ~OriginalInputDispatcher() = default;
-    virtual std::optional<Reservation> reserve(
-        const deskflow::windowshare::OriginalInputCaptured &captured,
-        const deskflow::windowshare::OriginalInputRouteDecision &route,
-        const deskflow::windowshare::SelectedPeer &selected, std::uint64_t existingOwner
-    ) = 0;
-    virtual bool commit(const Reservation &reservation) = 0;
-    virtual void cancel(const Reservation &reservation) noexcept = 0;
-    virtual void release(std::uint64_t owner) noexcept = 0;
-    virtual bool live(std::uint64_t owner) const noexcept = 0;
-  };
-  // One-shot and deliberately absent in production until a native authorizer
-  // can implement the provider contract. Inbox registration alone changes no
-  // legacy packets or ownership.
+  using OriginalInputDispatcher = deskflow::windowshare::OriginalInputDispatcher;
+  // One-shot registration of a trusted provider. Inbox registration alone
+  // changes no legacy packets or ownership. Production must establish native
+  // prerequisites independently before installing this provider.
   bool setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher> dispatcher) noexcept;
 #endif
 
@@ -498,20 +477,33 @@ private:
     InputRoutes::Recipients recipients;
     deskflow::windowshare::OriginalInputRouteDecision route;
     std::optional<deskflow::windowshare::SelectedPeer> selected;
-    OriginalClock::time_point deadline;
+    OriginalClock::time_point deadline; // Capture-arrival deadline, not time spent waiting behind other input.
+    std::optional<deskflow::windowshare::OriginalInputCaptured> captured{};
+    bool captureResolved = false;
+    std::uint64_t preparation = 0;
+    OriginalClock::time_point preparationDeadline{};
   };
   struct CompletedInput
   {
     deskflow::windowshare::OriginalInputCaptured captured;
-    OriginalClock::time_point deadline;
+    OriginalClock::time_point deadline, receivedAt;
     std::uint32_t parts = 0;
     bool upResolved = false;
   };
   static constexpr std::size_t originalPendingCapacity = 256;
   static constexpr auto originalDispatchTimeout = std::chrono::milliseconds(100);
+  // Native preparation has a separate, explicit budget. The 100 ms capture
+  // deadline remains unchanged; a timely capture can wait behind preparation.
+  static constexpr auto originalPreparationTimeout = std::chrono::milliseconds(500);
   bool deferOriginalInput(PendingOperation operation, InputRoutes::Recipients recipients);
   void drainOriginalInput(OriginalClock::time_point now = OriginalClock::now());
-  void executeOriginalInput(PendingInput pending, const deskflow::windowshare::OriginalInputCaptured *captured);
+  // False retains this exact operation at the queue head until preparation is
+  // resolved. Its diagnostic decision remains deferred, not an early denial.
+  bool executeOriginalInput(
+      PendingInput &pending, const deskflow::windowshare::OriginalInputCaptured *captured,
+      OriginalClock::time_point now = OriginalClock::now()
+  );
+  void suppressOriginalInput(const PendingInput &pending, const deskflow::windowshare::OriginalInputCaptured *captured);
   void executeLegacyInput(const PendingInput &pending);
   void cancelOriginalDispatch() noexcept;
   void cancelInFlightOriginal();
@@ -541,12 +533,27 @@ private:
   struct OriginalReservationCall
   {
     const PendingInput &pending;
+    const deskflow::windowshare::OriginalInputCaptured *captured = nullptr;
     bool cancelled = false;
+  };
+  class OriginalReservationScope
+  {
+  public:
+    OriginalReservationScope(Server &server, OriginalReservationCall &call) noexcept;
+    ~OriginalReservationScope();
+    OriginalReservationScope(const OriginalReservationScope &) = delete;
+    OriginalReservationScope &operator=(const OriginalReservationScope &) = delete;
+
+  private:
+    Server &m_server;
+    std::shared_ptr<bool> m_lifetime;
+    OriginalReservationCall *m_previous;
   };
   OriginalReservationCall *m_originalReservationCall = nullptr;
   const PendingInput *m_originalExecuting = nullptr;
   const OriginalRouteObservation *m_originalExecutingObservation = nullptr;
-  bool m_originalDraining = false, m_originalDispatchTerminal = false;
+  std::uint64_t m_originalLastPreparation = 0;
+  bool m_originalDraining = false, m_originalDispatchTerminal = false, m_originalAbortSent = false;
   OriginalRouteObservation *m_originalRouteObservation = nullptr;
   std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> m_originalInputRoutes;
   InputRoutes m_inputRoutes;

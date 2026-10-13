@@ -14,10 +14,12 @@ class ServerTests : public QObject
 {
   Q_OBJECT
 private Q_SLOTS:
+  void connectionEvent_destroysOwnedPayload();
   void SwitchToComputerInfo_alloc_computer();
   void KeyboardBroadcastInfo_alloc_stateAndComputers();
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   void initTestCase();
+  void inputFilter_ownedActionsAndConnectionLifetime();
   void originalCapture_legacyKeyExpansion();
   void originalCapture_exactDispatchAndOwnership();
   void originalCapture_motionCrossingUsesEnterDecision();
@@ -29,6 +31,13 @@ private Q_SLOTS:
   void originalDispatch_mixedOrderingAndCoordinates();
   void originalDispatch_timeoutOverflowAndFeatureDefault();
   void originalDispatch_reentrantFailureAndDestruction();
+  void originalDispatch_pendingOrderingAndCaptureArrival();
+  void originalDispatch_pendingRefusalAndRawRelease();
+  void originalDispatch_pendingCancellationLifetime();
+  void originalDispatch_pendingMalformedRepliesAndDeadline();
+  void originalDispatch_pendingReentryAndLimit();
+  void originalDispatch_pendingFrozenPointAndTicketReuse();
+  void originalDispatch_pendingDragRevocation();
   void originalDispatch_missingUpsAndDragOwner();
   void originalDispatch_transitionAndReentrantOrdering();
   void originalDispatch_terminalAndPartialReleaseAccounting();

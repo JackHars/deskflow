@@ -187,7 +187,7 @@ std::string InputFilter::ComputerConnectedCondition::format() const
 InputFilter::FilterStatus InputFilter::ComputerConnectedCondition::match(const Event &event)
 {
   if (event.getType() == EventTypes::ServerConnected) {
-    const auto *info = static_cast<Server::ComputerConnectedInfo *>(event.getData());
+    const auto *info = static_cast<Server::ComputerConnectedInfo *>(event.getDataObject());
     if (m_computer == info->m_computer || m_computer.empty()) {
       return FilterStatus::Activate;
     }
@@ -233,9 +233,11 @@ void InputFilter::LockCursorToComputerAction::perform(const Event &event)
 
   // send event
   auto *info = new Server::LockCursorToComputerInfo(s_state[m_mode]);
-  m_events->addEvent(
-      Event(EventTypes::ServerLockCursorToComputer, event.getTarget(), info, Event::EventFlags::DeliverImmediately)
+  Event action(
+      EventTypes::ServerLockCursorToComputer, event.getTarget(), nullptr, Event::EventFlags::DeliverImmediately
   );
+  action.setDataObject(info);
+  m_events->addEvent(std::move(action));
 }
 
 InputFilter::RestartServer::RestartServer(Mode mode) : m_mode(mode)
@@ -294,15 +296,15 @@ void InputFilter::SwitchToComputerAction::perform(const Event &event)
   // event if it has one.
   std::string computer = m_computer;
   if (computer.empty() && event.getType() == EventTypes::ServerConnected) {
-    const auto *info = static_cast<Server::ComputerConnectedInfo *>(event.getData());
+    const auto *info = static_cast<Server::ComputerConnectedInfo *>(event.getDataObject());
     computer = info->m_computer;
   }
 
   // send event
   auto *info = new Server::SwitchToComputerInfo(computer);
-  m_events->addEvent(
-      Event(EventTypes::ServerSwitchToComputer, event.getTarget(), info, Event::EventFlags::DeliverImmediately)
-  );
+  Event action(EventTypes::ServerSwitchToComputer, event.getTarget(), nullptr, Event::EventFlags::DeliverImmediately);
+  action.setDataObject(info);
+  m_events->addEvent(std::move(action));
 }
 
 InputFilter::SwitchInDirectionAction::SwitchInDirectionAction(IEventQueue *events, Direction direction)
@@ -332,9 +334,9 @@ std::string InputFilter::SwitchInDirectionAction::format() const
 void InputFilter::SwitchInDirectionAction::perform(const Event &event)
 {
   auto *info = new Server::SwitchInDirectionInfo(m_direction);
-  m_events->addEvent(
-      Event(EventTypes::ServerSwitchInDirection, event.getTarget(), info, Event::EventFlags::DeliverImmediately)
-  );
+  Event action(EventTypes::ServerSwitchInDirection, event.getTarget(), nullptr, Event::EventFlags::DeliverImmediately);
+  action.setDataObject(info);
+  m_events->addEvent(std::move(action));
 }
 
 InputFilter::SwitchToNextComputerAction::SwitchToNextComputerAction(IEventQueue *events) : m_events(events)
@@ -416,9 +418,9 @@ void InputFilter::KeyboardBroadcastAction::perform(const Event &event)
 
   // send event
   auto *info = new Server::KeyboardBroadcastInfo(s_state[m_mode], m_computers);
-  m_events->addEvent(
-      Event(EventTypes::ServerKeyboardBroadcast, event.getTarget(), info, Event::EventFlags::DeliverImmediately)
-  );
+  Event action(EventTypes::ServerKeyboardBroadcast, event.getTarget(), nullptr, Event::EventFlags::DeliverImmediately);
+  action.setDataObject(info);
+  m_events->addEvent(std::move(action));
 }
 
 InputFilter::KeystrokeAction::KeystrokeAction(IEventQueue *events, IPlatformComputer::KeyInfo *info, bool press)
@@ -908,6 +910,9 @@ void InputFilter::handleEvent(const Event &event)
       event.getFlags() | Event::EventFlags::DontFreeData | Event::EventFlags::DeliverImmediately,
       event.originalInputStamp()
   );
+  // This synchronous view borrows both payload forms. DontFreeData applies to
+  // the original C++ object too; dropping it would break connection rules.
+  myEvent.setDataObject(event.getDataObject());
 
   // let each rule try to match the event until one does
   for (auto rule = m_ruleList.begin(); rule != m_ruleList.end(); ++rule) {
