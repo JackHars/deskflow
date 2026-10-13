@@ -4,9 +4,133 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Requested Core cutoff and exact GNOME/Qt drain — 2026-10-13
+
+Implementation: [`bbe9ed3f2`](https://github.com/JackHars/deskflow/commit/bbe9ed3f2fb4d8519397bca61bb5b539082d00f6).
+P2 components are implemented; the original-input route remains disabled.
+
+**Hosted PASS:** [CI 38420241004](https://github.com/JackHars/deskflow/actions/runs/38420241004)
+passed all six jobs at that exact implementation: Mac application/core,
+Linux application/core ON/OFF, native GNOME, transport, and GCC/Clang sanitizer
+foundations. The [source bundle](https://github.com/JackHars/deskflow/actions/runs/38420240757)
+also passed. Retained hosted native reports independently show both scales
+passing and gate revocation with 183 ms remaining in each run.
+
+The optional Core `IPC1` capability retains its actual authenticated peer and
+nonreused generation. `DICQ` carries the exact capture/full-forwarding/Viewer
+binding and remaining deadline; prior compressed motion is submitted before
+the real EI backend starts its requested ping. Held native keys/buttons,
+invalid session/device/emulation, same-batch loss, malformed/stale requests and
+expiry deny. `DICX` resumes that exact transaction; new writes revoke the old
+receipt before the ordered resume. Old peers and feature-disabled builds do
+not negotiate the new capability.
+
+The separate owned GNOME operation validates that binding and frozen point,
+waits for an empty Clutter queue outside recursive dispatch and a later
+completed same-view frame, then asks the actual Qt Viewer for `input-drain`.
+Two default-queue syncs, QPA dispatch, native/paint/focus checks and the exact
+All gate share the inherited deadline. Input/IME-query/native handler depth,
+handler ownership and supported disabled input-context checks prevent nested
+or unsupported delivery from being mistaken for completion. Gate resume
+revokes pending and retained snapshots before acknowledgement.
+
+**Mac PASS:** both applications built; nine targeted CTest suites passed,
+including five Core suites with **180 Qt entries**, zero failures/skips.
+AddressSanitizer/UndefinedBehaviorSanitizer runs passed **54 ClientProxy** and
+**36 ServerProxy** entries. Those runs instrument the changed proxy, Client
+and Computer implementations plus tests; dependency archives and Qt are not
+fully instrumented. The fixture policy suite passes **28 tests**, including
+red/green proof for explicitly requested TLS shutdown handling.
+
+**Home Ubuntu PASS:** 31/31 integrated application/core suites and 3/3 actual
+`BUILD_WINDOWSHARE=OFF` suites, with no failed/skipped CTest suites. The disabled
+build intentionally skips 33 opt-in per-case checks and passes 32 Qt entries.
+GNOME policy (20 cases), readiness and fixture policy (28 cases) pass. Actual
+private GNOME/Qt acceptance passes at scales **1 and 1.25**. Retained receipts
+were revoked with **165 ms and 156 ms** remaining, respectively, and runtime
+logs confirm the built-in `QtWaylandClient::QWaylandInputContext`.
+
+The isolated dependency image uses Qt 6.10.2, GNOME Shell 50.1, Mutter
+50.1-0ubuntu2.4, libei/libeis 1.5.0 and GCC 15.2. Actual compiled EI production
+objects were independently checked for ON/OFF feature flags. Before/after
+process births/configuration hashes and final independent cleanup confirm
+ordinary Deskflow and unrelated containers were preserved; the owned container,
+supervisor and wrapper are gone. No host desktop or input devices were used.
+
+The frozen candidate and every changed implementation/regression file match
+this commit, verified by `ubuntu/final-candidate-2/commit-binding.json` under
+`build/wifiman-resumed-20261013/`. Archive SHA-256:
+`219d8d2ae62d02ca4978c017df49a34a79dcaf39f7ddb9de2e16cff31b73a58c`.
+`evidence.json`, hash-verified `artifacts/`, full logs/JUnit/native reports,
+runner identities and real compile commands retain the result. Mac evidence
+is in `mac/final-results.json`, `mac/final-ctest.xml` and `mac/proxy-sanitize/`.
+Hosted job metadata, logs and native artifacts are in `ci-38420241004/`.
+The preceding candidate passed all 31 application/core suites and scale-1
+native drain assertions, then failed on a `BrokenPipeError` during requested
+Viewer shutdown. The harness now accepts only the expected EOF/reset/broken-
+pipe exceptions after that shutdown request. Protocol errors, timeouts and
+unexpected disconnects still fail. The original failure and cleanup evidence
+remain under `ubuntu/final-candidate-1/`; it is not recorded as a passing run.
+
+Reproduce the changed paths after installing dependencies from the workflow:
+
+```sh
+cmake -S . -B build/input-cutoff -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
+cmake --build build/input-cutoff --parallel 4 --target deskflow-core deskflow-windowshare InputSequenceTests ComputerInputSequenceTests ClientProxyTests ServerProxyTests ServerTests windowshare-ei-prefix-probe-tests windowshare-viewer-viewport-tests windowshare-viewer-tests windowshare-bridge-tests windowshare-gnome-client-tests
+QT_QPA_PLATFORM=offscreen ctest --test-dir build/input-cutoff/src/unittests --no-tests=error --output-on-failure -R '^(InputSequenceTests|ComputerInputSequenceTests|ClientProxyTests|ServerProxyTests|ServerTests|windowshare-(ei-prefix-probe|viewer-viewport|viewer|bridge|gnome-client))$'
+node --test deploy/windowshare/gnome-provider/tests/logic.test.js
+python3 -B deploy/windowshare/gnome-qt-viewer-fixture-tests.py
+bash deploy/windowshare/gnome-provider-container.sh "$PWD" "$PWD/build/input-cutoff-native"
+cmake -S . -B build/input-cutoff-off -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
+cmake --build build/input-cutoff-off --parallel 4 --target deskflow-core ServerTests ClientProxyTests ServerProxyTests
+QT_QPA_PLATFORM=offscreen ctest --test-dir build/input-cutoff-off/src/unittests --no-tests=error --output-on-failure -R '^(ServerTests|ClientProxyTests|ServerProxyTests)$'
+```
+
+Expected native results include exact positive cutoff echoes, wrong-gate and
+wrong-Viewer-connection refusal, refusal after resume, a new nonreused cutoff,
+and retained-receipt revocation **before expiry**. The fixture records the
+actual Qt input-context messages. These tests use a private compositor and
+synthetic Core correlation; they do not execute the entire production
+ClientProxy → ServerProxy → real EiComputer → provider chain.
+
+**Remaining P2/P3:** connect the Core result to the provider using the same
+Server frozen point and retained preparation lease, finish old-owner releases,
+verify the supported Mutter build's sender-ordering prerequisite, and install
+the production dispatcher only with all required evidence. Provider receipts
+still explicitly report `mutter-eis-sync-build-unverified` and no original
+input authority. An imported `eis_event_ref` symbol in the installed Mutter
+binary is not sufficient runtime attestation. H01 is partial; physical H02–H12,
+packaging installation, multiple monitors/windows and edge-drag remain pending.
+
+## WiFiman-restored home Ubuntu baseline — 2026-10-13
+
+**PASS at exact source `2a72867e95892011a1597ecc811c5279227edf4c`:** 31/31
+integrated application/core suites, 3/3 actual `BUILD_WINDOWSHARE=OFF` core
+suites, GNOME provider policy/readiness/fixture tests, and real private native
+GNOME/Qt acceptance at scales 1 and 1.25. The code matches `c867af9d0`; the
+remaining changes in this baseline are documentation. No CTest suite failed
+or skipped. The disabled suites retain their intentional per-case trace skips.
+
+Host: Ubuntu 26.04.1, kernel 7.0.0-34-generic. The already-installed dependency
+image was pinned to
+`sha256:65f389a94c05ac9eb2b72d62424d80a52650849918582b0bacc9f12507290086`.
+Its disposable run used a read-only root and source mount, private HOME/XDG,
+no network, no capabilities, no host display/GPU/input devices, and bounded
+CPU/memory/process/time limits. Native sessions were private headless GNOME
+instances. Ordinary Deskflow process births/configuration hashes and unrelated
+Docker containers were unchanged; independent final cleanup passed.
+
+Evidence under `build/wifiman-resumed-20261013/ubuntu/baseline/` includes the
+frozen source manifest/archive hash, runner hashes, launch identity, actual
+container inspection, complete build/test logs/JUnit, both native reports,
+binary hashes, supervisor exit and independently verified cleanup. Start with
+`evidence.json`; exact argv for each phase is in `artifacts/result.json`.
+H01 remains partial because fresh experimental packaging/native capability
+acceptance is separate. H02–H12 remain unrun on this baseline.
+
 ## Local return: deferred preflight and crash recovery (2026-10-13)
 
-Current implementation: [`c867af9d0`](https://github.com/JackHars/deskflow/commit/c867af9d029897f860bc391aa68d4cafee49e601).
+Earlier implementation: [`c867af9d0`](https://github.com/JackHars/deskflow/commit/c867af9d029897f860bc391aa68d4cafee49e601).
 Its optional private-preflight notification holds the exact lease in Quiesced
 until one explicit continuation is dequeued. Notification and continuation are
 scheduling only: they do not grant input permission. The existing private
@@ -370,7 +494,7 @@ sections after receiving the final branch.
 ## Candidate identity and result rules
 
 - Baseline implementation: `ef51456659edae1acf06a6c03b730bcaf66f2f8b`.
-- Cloud **final** implementation SHA: **NOT_AVAILABLE: P1–P8 incomplete**. Current implementation SHA: `c867af9d029897f860bc391aa68d4cafee49e601` (local targeted checks PASS; all six hosted jobs PASS in run 38410153483). Earlier checkpoints below are historical; physical acceptance remains incomplete.
+- Cloud **final** implementation SHA: **NOT_AVAILABLE — roadmap incomplete**. Latest component implementation: `bbe9ed3f2fb4d8519397bca61bb5b539082d00f6` (Mac and home Ubuntu checks PASS; see the newest entry for hosted CI). Earlier checkpoints below are historical; physical acceptance remains incomplete.
 - Returned branch: `feature/seamless-windows` in `JackHars/deskflow`; incremental changes pushed directly, no PR.
 - Toolchain and build options for the tested partial code: documented in the exact checkpoint section above and the successful CI run. Native hardware acceptance remains NOT_RUN; local Mac automated checks are recorded above.
 - Source reproducibility: linked GitHub implementation SHA and CI source bundle; inert Linux package instructions: `deploy/windowshare/package-linux.md` (not installed).
@@ -671,7 +795,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 
 | ID | Procedure and required observations | Result / evidence |
 | --- | --- | --- |
-| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | NOT_RUN for complete row — current Mac builds and targeted suites PASS; home Ubuntu, fresh package and native capabilities pending. |
+| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — bbe9ed3f2: Mac builds, 9/9 targeted suites and scoped proxy sanitizers PASS; home Ubuntu 31/31 integrated, 3/3 OFF and private GNOME scales 1/1.25 PASS. Fresh package and complete native capability acceptance pending. |
 | H02 | Repeat actual disposable Mac capture → Ubuntu viewer → Mac tagged native-receiver tests at Qt scales 1 and 1.25. Check frame identity/geometry, pointer/click/scroll/key receipts, no stuck input and restoration. This is synthetic, not physical acceptance. | NOT_RUN |
 | H03 | Run visible user-started physical flow. Confirm Start/Stop and countdown, actual Option hotkeys, type a/Shift+b/c, hold/release x, move/click/drag and scroll both axes, return to Mac. Match exact native source/host receipts and human result; no duplicate text or missing release. | NOT_RUN |
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |

@@ -1,5 +1,25 @@
 # Experimental window sharing
 
+### Requested input cutoff and exact GNOME/Qt drain (2026-10-13)
+
+The Core now negotiates a bounded, authenticated cutoff for a captured input
+prefix, asks its real EI sender for a whole-batch PONG observation, and resumes
+only that exact transaction. A separate provider operation joins an empty
+Clutter queue and later frame to the Viewer's exact full-input fence and Qt
+queue drain. Resume invalidates retained receipts before acknowledgement;
+unsupported input contexts and nested dispatch refuse the drain.
+
+The Mac build, nine targeted suites and scoped proxy sanitizers pass. Home
+Ubuntu passes 31 integrated suites, three actual feature-disabled suites and
+private GNOME/Qt at scales 1/1.25, including revocation before expiry.
+`TESTING.md` records frozen source, scope, cleanup and the fixture correction.
+Implementation `bbe9ed3f2` also passed all six
+[hosted CI jobs](https://github.com/JackHars/deskflow/actions/runs/38420241004).
+This is a P2 component milestone:
+the production coordinator and verified Mutter sender-ordering prerequisite
+are still required before original-input delivery can be enabled.
+
+
 ### Local implementation return (2026-10-13)
 
 The cloud code is integrated. Private preflight now supports a bounded wait
@@ -14,7 +34,10 @@ Its isolated native regression failed before the fix and passes afterward.
 Both local applications build, the five core suites pass 170 Qt entries, and
 the new preflight/channel/companion suites pass. See `TESTING.md` for current
 hosted CI and the precise distinction between these checks and hardware tests.
-Home Ubuntu retesting awaits WiFiman connectivity; physical input, two-monitor,
+WiFiman is restored. The home Ubuntu baseline passed 31 application/core
+suites, three feature-disabled core suites and private GNOME runs at scales
+1 and 1.25, with ordinary Deskflow and unrelated containers preserved.
+Physical input, two-monitor,
 multiple-window and bidirectional edge-drag acceptance remain unfinished.
 
 ### P2 native GNOME StageView observation and strict reply validation (verified partial)
@@ -143,8 +166,9 @@ proxies; it is not native drain authority or hardware acceptance. See
 The project remains in integration. The original cloud handoff estimated about
 50% overall; that historical estimate is not a count of passing tests. Private
 full-input scope and asynchronous preparation contracts are now implemented.
-The next implementation milestone is the causal native input cutoff followed
-by the production coordinator. Earlier two-machine synthetic capture/input
+Core cutoff and separate GNOME/Qt drain components are implemented. The next
+milestone joins them under the verified Mutter ordering prerequisite and the
+production coordinator. Earlier two-machine synthetic capture/input
 checks passed, but physical keyboard/trackpad ownership and window return still
 need acceptance on the current code.
 
@@ -156,7 +180,7 @@ pending until the returned code is tested on the actual machines.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Private protocol v4 retains full-input scope; Server and private preflight can defer preparation without renewing deadlines. The viewer/host gate fences keys and pointers together, and GNOME/Qt supply exact read-only observations. Production original delivery remains disabled. | Connect an exact input cutoff through EI, Mutter and the fenced Qt viewer, then the production coordinator. |
+| Original input integration | Private protocol v4 retains full-input scope; Server and private preflight can defer preparation without renewing deadlines. Core negotiates an exact cutoff/PONG/resume, and GNOME/Qt implement a distinct exact-fenced drain segment. Production original delivery remains disabled. | Join the segments using the same Server frozen point/lease, verify Mutter sender ordering, and connect the production coordinator. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |

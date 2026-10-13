@@ -1,8 +1,60 @@
 # Seamless Windows work state
 
+## Requested cutoff and exact GNOME/Qt drain components — 2026-10-13
+
+Implementation `bbe9ed3f2fb4d8519397bca61bb5b539082d00f6` adds negotiated,
+authenticated Core cutoff/PONG/exact-resume messages and separately connects
+the owned GNOME empty-queue/later-frame segment to an exact-fenced Qt input
+drain. Absolute deadlines, whole EI batches, held native input, nested Qt/IME
+callbacks, stale bindings and resume invalidation are covered. Independent
+review found and fixed cleanup-callback lifetime gaps and a stream-wrapper
+compatibility omission; destructive-callback regressions cover the corrections.
+
+Both Mac applications build. Nine targeted suites pass, including 180 Core Qt
+entries. The changed proxy/Client/Computer paths pass scoped ASan/UBSan with
+54 ClientProxy and 36 ServerProxy entries. Home Ubuntu passes 31/31 integrated
+application/core suites, 3/3 actual OFF suites and private native GNOME/Qt at
+scales 1/1.25. Both scales prove retained-receipt revocation before expiry.
+The frozen source and all artifacts are hash verified and bound to this commit
+under `build/wifiman-resumed-20261013/ubuntu/final-candidate-2/`. Independent
+cleanup confirms ordinary Deskflow and unrelated containers were preserved.
+The preceding shutdown-fixture failure is retained; its TLS-close correction
+has a failing-before/passing-after regression. See the newest `TESTING.md`
+entry for commands, exact scope and hosted CI.
+
+Exact implementation `bbe9ed3f2` passed all six jobs in
+[CI 38420241004](https://github.com/JackHars/deskflow/actions/runs/38420241004)
+and [source bundle 38420240757](https://github.com/JackHars/deskflow/actions/runs/38420240757).
+Hosted native GNOME artifacts independently pass both scales and revocation
+before expiry. REUSE lint and formatting checks pass.
+
+P2 remains incomplete: the production controller still must join the Core
+receipt and provider using the same frozen Server point/lease, release old
+owners, and verify Mutter's sender-ordering build prerequisite. The provider
+reports that missing prerequisite explicitly. Original-input dispatch remains
+unregistered. Physical acceptance, multi-window/monitor behavior, bidirectional
+edge dragging and the rest of P3–P9 remain unfinished.
+
+
+## WiFiman restored: home Ubuntu baseline verified — 2026-10-13
+
+Strict-key SSH again reaches `jack` through WiFiman. Frozen source
+`2a72867e95892011a1597ecc811c5279227edf4c` passed **31/31** application/core
+suites and **3/3** actual feature-disabled core suites on the home Ubuntu
+machine. Private native GNOME/Qt integration passed at scales **1 and 1.25**.
+The GNOME policy, readiness and fixture checks passed as well.
+
+The run used the existing immutable dependency image in a disposable container
+with no host display/input devices or network. Before/after and independent
+cleanup checks verified ordinary Deskflow process identities, configuration
+hashes and unrelated containers; all passed and the owned container is gone.
+Evidence: `build/wifiman-resumed-20261013/ubuntu/baseline/evidence.json` and its
+hash-verified `artifacts/`. This clears the connectivity/retest blocker below;
+it does not complete physical input, package installation or P2/P3 integration.
+
 ## Local implementation resumed — 2026-10-13
 
-Current code: `c867af9d029897f860bc391aa68d4cafee49e601` on
+Earlier code checkpoint: `c867af9d029897f860bc391aa68d4cafee49e601` on
 `feature/seamless-windows`. The cloud changes were fetched and integrated,
 including its subsequent GNOME fixture, boxed-layout and strict-reply fixes.
 
@@ -26,15 +78,15 @@ The watchdog has retained failing/passing proof and no leftover fixture
 processes; the receipt-policy helper passes **13 tests**. Independent reviews
 found no further actionable issues in these changes.
 
-Current implementation `c867af9d0` passed **all six** hosted jobs in
+That implementation `c867af9d0` passed **all six** hosted jobs in
 [CI 38410153483](https://github.com/JackHars/deskflow/actions/runs/38410153483),
 including Mac/Linux integration, native headless GNOME, transport and both
 sanitizer builds. Its [source bundle](https://github.com/JackHars/deskflow/actions/runs/38410153441)
 also passed. Local evidence is retained privately in
 `build/cloud-return-20261013/`; exact commands and scope are in `TESTING.md`.
 
-Home Ubuntu retesting is pending: WiFiman no longer routes its address and
-strict-key SSH timed out. Fresh physical readiness and the outstanding Mac
+Home Ubuntu retesting was initially blocked by WiFiman and has now passed as
+recorded above. Fresh physical readiness and the outstanding Mac
 App Management step remain prerequisites for installation/native acceptance.
 No native user input, real-window recovery, package installation or two-machine
 session was performed on this return. Original input remains disabled; the
@@ -42,7 +94,7 @@ next P2 work is one causal cutoff transaction through Core, EI, Mutter and the
 exact fenced Qt viewer, followed by P3 production coordination. Multi-window,
 edge-drag and physical acceptance remain unfinished.
 
-## Latest P2 verified GNOME StageView/native binding checkpoint (2026-10-13)
+## Earlier P2 verified GNOME StageView/native binding checkpoint (2026-10-13)
 
 Implementation [`e117b66e`](https://github.com/JackHars/deskflow/commit/e117b66e22e7f2141b4a17b93f81e22c736f5b4c)
 and its ancestors now exercise two real same-view Clutter stage updates on
