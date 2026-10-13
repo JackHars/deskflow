@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
+name: Window sharing source bundle
+on:
+  push:
+    branches: [feature/seamless-windows]
+    paths: ['.github/workflows/windowshare-source.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Archive tracked source and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/windowshare-source"
+          git archive --format=tar --prefix=deskflow/ HEAD | gzip -n > "$RUNNER_TEMP/windowshare-source/deskflow-source.tar.gz"
+          {
+            printf 'commit=%s\n' "$(git rev-parse HEAD)"
+            printf 'tree=%s\n' "$(git rev-parse HEAD^{tree})"
+            printf 'repository=%s\n' "$GITHUB_REPOSITORY"
+          } > "$RUNNER_TEMP/windowshare-source/provenance.txt"
+          cd "$RUNNER_TEMP/windowshare-source"
+          sha256sum deskflow-source.tar.gz provenance.txt > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windowshare-source-${{ github.sha }}
+          path: ${{ runner.temp }}/windowshare-source/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
