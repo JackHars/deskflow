@@ -87,6 +87,19 @@ test('stage observation requires two paired later updates on one exact physical 
     assert.equal(seq.before(view, selected, 120), false);
 });
 
+test('boxed non-enumerable native layouts retain exact stable stage coordinates', () => {
+    const view = {}, rect = {};
+    for (const [key, value] of Object.entries({x: -1920, y: 0, width: 1920, height: 1080}))
+        Object.defineProperty(rect, key, {get: () => value, enumerable: false});
+    assert.deepEqual({...rect}, {}, 'The fixture must model a non-enumerable native boxed layout');
+    const witness = new StageUpdateSequence('box', -500, 300, 1, 100);
+    assert.equal(witness.before(view, rect, 101), true);
+    assert.equal(witness.after(view, 102), false);
+    assert.equal(witness.before(view, rect, 103), true);
+    assert.equal(witness.after(view, 104), true);
+    assert.equal(witness.complete, true);
+});
+
 test('stage updates refuse deadline, reentry, view changes, layout drift and unpaired callbacks', () => {
     const rect = {x: 0, y: -1080, width: 2560, height: 1440};
     const view = {}, replaced = {};

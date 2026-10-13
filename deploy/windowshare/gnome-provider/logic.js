@@ -108,7 +108,10 @@ export class StageUpdateSequence {
             return false;
         }
         this.view = view;
-        this.layout = {...layout};
+        // GJS exposes native Mtk.Rectangle as a boxed object whose fields
+        // need not be enumerable. Copy exactly four primitive coordinates,
+        // never retain a borrowed compositor boxed rectangle across frames.
+        this.layout = {x: layout.x, y: layout.y, width: layout.width, height: layout.height};
         this.pending = true;
         return true;
     }
