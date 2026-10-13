@@ -635,6 +635,55 @@ void testKeyboardRouteFenceAndResume()
   viewer.disconnected();
 }
 
+void testBoundedMediaRecovery()
+{
+  Recording recording;
+  Viewer viewer(811, 37, metadata());
+  recording.attach(viewer);
+  viewer.setMediaRecoveryEnabled(true);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  const auto delivered = recording.count(MessageType::Input, "key");
+  check(delivered > 0, "Recovery test did not establish a held keyboard owner");
+  // Queue the overload without processing GUI completion events. The original
+  // implementation returned the entire window on its 17th incoming access
+  // unit. Negotiated media recovery must keep the window, revoke input and
+  // discard the old GOP before requesting a self-contained replacement.
+  for (int i = 0; i < 17; ++i)
+    viewer.receiveFrame(frame(), viewer.geometryRevision());
+  check(viewer.videoRecovering(), "Decoder overflow did not enter the bounded recovery state");
+  check(recording.count(MessageType::Return) == 0, "Decoder overload returned the window prematurely");
+  check(recording.count(MessageType::Input, "key") > delivered,
+        "Decoder overload did not release the exact held keyboard owner");
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+  check(recording.count(MessageType::Input, "key") == delivered + 1,
+        "A new press escaped through a suspended video/input route");
+  check(waitUntil([&] { return recording.count(MessageType::Input, "video-recovery") == 1; }),
+        "Draining the decoder queue did not send exactly one recovery request");
+  const auto &requested = recording.last(MessageType::Input, "video-recovery");
+  check(requested.session == 811 && requested.epoch == 37 &&
+            requested.object.value("geometry").toInteger() == 1 &&
+            requested.object.value("request").toInteger() == 1,
+        "Recovery request lost its session, geometry or monotonic identity");
+  viewer.receiveFrame(QByteArray::fromHex("000000014188"), viewer.geometryRevision());
+  check(viewer.videoRecovering() && recording.count(MessageType::Input, "video-recovery") == 1,
+        "Dependent frame bypassed recovery or triggered a repeat request");
+  viewer.receiveFrame(frame(), viewer.geometryRevision());
+  check(waitUntil([&] { return !viewer.videoRecovering(); }),
+        "A self-contained keyframe did not reset, decode and paint after the drain");
+  check(recording.count(MessageType::Return) == 0 &&
+            recording.count(MessageType::Input, "video-recovery") == 1,
+        "Completed recovery returned the window or repeated its one-shot request");
+  // Input must remain blocked until fresh user intent reestablishes focus.
+  const auto beforeFocus = recording.count(MessageType::Input, "focus");
+  QCoreApplication::processEvents();
+  check(recording.count(MessageType::Input, "focus") == beforeFocus,
+        "Recovered paint silently reused stale input focus");
+  viewer.close();
+}
+
 void testKeyboardRouteBusyAndGenerations()
 {
   Recording recording;
@@ -1073,6 +1122,7 @@ int main(int argc, char **argv)
     testFocusRevocation();
     testResizeAndScroll();
     testBoundedDecodeQueue();
+    testBoundedMediaRecovery();
     testQueuedFrameRevision();
     testKeyboardRouteFenceAndResume();
     testKeyboardRouteBusyAndGenerations();
@@ -1092,7 +1142,8 @@ int main(int argc, char **argv)
          "letterboxing/scaling, first painted readiness, "
          "queued activating click, stale focus, special keys/repeat, ordered release, resize fencing, "
          "double-click, focus revocation/reclaim, scroll, minimize, safe return, disconnect, bounded video queue, "
-         "queued geometry race, keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
+         "queued geometry race, negotiated bounded decoder recovery and input revocation, "
+         "keyboard fence ordering, pointer/focus preservation, held-key tombstones, "
          "route generations, pending focus fence, full-input scope, pointer tombstones, "
          "route invalidation/resume and send failure\n";
     return 0;
