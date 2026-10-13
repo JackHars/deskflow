@@ -22,8 +22,8 @@ jobs:
       - name: Verify exact patch bytes and publish immutable objects only
         env:
           GH_TOKEN: ${{ github.token }}
-          PATCH_BLOB: dc15a47feb85eb3c06ef18128cf8be86ca6a4f8f
-          BASE_SHA: 85a83d1e6a657cf8cb40df6d9ed0c35488acd096
+          PATCH_BLOB: d2712fc0690c4c25e4f78f7420b141d035332bf7
+          BASE_SHA: 6e977ff05c6e787fed6814a5094d0152b1eb63e3
         shell: python
         run: |
           import base64, hashlib, json, lzma, os, pathlib, re, subprocess, urllib.request
@@ -111,5 +111,57 @@ jobs:
         with:
           name: verified-windowshare-tree-${{ github.sha }}
           path: ${{ runner.temp }}/staged-tree.json
+          if-no-files-found: error
+          retention-days: 7
+
+  native-contract-sources:
+    # Research/verification evidence only. Downloaded upstream text is never
+    # compiled or executed and this job has no repository write permission.
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Retain versioned primary sources for native ordering review
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, urllib.request
+          out = pathlib.Path(os.environ['RUNNER_TEMP']) / 'native-contract-sources'
+          out.mkdir()
+          groups = [
+            ('GNOME/mutter', '50.1', [
+              'src/backends/meta-eis.c',
+              'src/backends/meta-eis-client.c',
+              'src/backends/native/meta-seat-impl.c',
+              'clutter/clutter/clutter-main.c',
+              'clutter/clutter/clutter-stage.c',
+              'clutter/clutter/clutter-stage-view.c']),
+            ('qt/qtbase', 'v6.10.2', [
+              'src/plugins/platforms/wayland/qwaylanddisplay.cpp',
+              'src/plugins/platforms/wayland/qwaylandinputdevice.cpp',
+              'src/gui/kernel/qwindowsysteminterface.cpp']),
+            ('qt/qtwayland', 'v6.8.3', [
+              'src/client/qwaylanddisplay.cpp',
+              'src/client/qwaylandinputdevice.cpp']),
+            ('qt/qtbase', 'v6.8.3', ['src/gui/kernel/qwindowsysteminterface.cpp'])]
+          records = []
+          for repo, ref, paths in groups:
+            for path in paths:
+              url = f'https://raw.githubusercontent.com/{repo}/{ref}/{path}'
+              with urllib.request.urlopen(url, timeout=30) as response:
+                data = response.read(4 * 1024 * 1024 + 1)
+              assert len(data) <= 4 * 1024 * 1024
+              data.decode('utf-8')
+              name = repo.replace('/', '-') + '-' + ref + '-' + path.replace('/', '_')
+              (out / name).write_bytes(data)
+              records.append({'file': name, 'url': url, 'bytes': len(data),
+                              'sha256': hashlib.sha256(data).hexdigest()})
+          (out / 'manifest.json').write_text(json.dumps(records, indent=2) + '\n')
+          (out / 'SHA256SUMS').write_text(''.join(
+              record['sha256'] + '  ' + record['file'] + '\n' for record in records))
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windowshare-native-contracts-${{ github.sha }}
+          path: ${{ runner.temp }}/native-contract-sources/
           if-no-files-found: error
           retention-days: 7
