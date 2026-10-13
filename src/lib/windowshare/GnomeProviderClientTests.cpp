@@ -1088,10 +1088,16 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     const auto routeId = client.requestRoutedPointObservation({9, 32, 425, 325});
     check(routeId != 0, "Stage-capable routed point request was refused");
     const auto result = viewportResult(client, routeId);
-    check(result.observation && result.observation->live() && service.stageRequests == 1 &&
-          result.observation->snapshot().stageFramesObserved &&
-          result.observation->snapshot().desktopX == 425,
-          "Authenticated real client skipped the negotiated two-cycle stage request");
+    if (!result.observation || !result.observation->live() || service.stageRequests != 1 ||
+        !result.observation->snapshot().stageFramesObserved ||
+        result.observation->snapshot().desktopX != 425) {
+      throw std::runtime_error(
+          "Authenticated stage observation failed: requests=" + std::to_string(service.stageRequests) +
+          " observation=" + (result.observation ? "present" : "absent") +
+          " error=" + result.error + " service=" + service.failure +
+          " client=" + (client.live() ? "live" : "closed")
+      );
+    }
     service.unavailableStage = true;
     const auto refusedId = client.requestViewportObservation();
     check(refusedId != 0, "Stage-denial request did not start");
