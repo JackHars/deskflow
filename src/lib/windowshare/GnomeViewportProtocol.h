@@ -4,12 +4,14 @@
  */
 #pragma once
 #include "InputCutoff.h"
+#include "InputPreparation.h"
 
 #include <QByteArray>
 #include <QJsonObject>
 #include <QString>
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace deskflow::windowshare {
 
@@ -26,7 +28,39 @@ enum class GnomeViewportOperation
   Map,
   Check,
   Invalidated,
-  InputDrain
+  InputDrain,
+  InputSeal,
+  InputMap,
+  SealInvalidated,
+  InputMapBatch,
+  PreparationInventory,
+  PreparationMap,
+  PreparationDrain,
+  PreparationFocus,
+  PreparationPromote,
+  PreparationCleanup
+};
+inline bool isGnomePreparationOperation(GnomeViewportOperation operation)
+{
+  return operation >= GnomeViewportOperation::PreparationInventory &&
+         operation <= GnomeViewportOperation::PreparationCleanup;
+}
+
+// Unfocused painted identity: deliberately no focus lease or All binding.
+// The Viewer retains the actual complete paint transform behind this revision.
+struct GnomePreparationTarget
+{
+  std::uint64_t session = 0, epoch = 0, geometry = 0, surfaceIncarnation = 0, paintRevision = 0;
+  std::uint32_t nativeSurface = 0;
+  QString windowAssociation;
+  bool operator==(const GnomePreparationTarget &) const = default;
+};
+struct GnomePreparationInventory
+{
+  std::uint64_t connection = 0;
+  QString peerFingerprint;
+  std::vector<GnomePreparationTarget> targets;
+  bool operator==(const GnomePreparationInventory &) const = default;
 };
 
 struct GnomeViewportState
@@ -34,6 +68,7 @@ struct GnomeViewportState
   std::uint64_t connection = 0, session = 0, epoch = 0, geometry = 0;
   std::uint64_t focusRequest = 0, focusRevision = 0, surfaceIncarnation = 0, viewportRevision = 0;
   QString peerFingerprint;
+  QString windowAssociation;
   std::uint32_t nativeSurface = 0;
   double clientWidth = 0, clientHeight = 0, sourceWidth = 0, sourceHeight = 0;
   std::uint32_t imageWidth = 0, imageHeight = 0;
@@ -51,6 +86,16 @@ struct GnomeViewportRequest
   double x = 0, y = 0;
   InputCutoffBinding cutoff{};
   std::uint32_t budgetMs = 0;
+  std::uint64_t seal = 0;
+  struct MapItem
+  {
+    InputCutoffBinding cutoff;
+    double x = 0, y = 0;
+    bool operator==(const MapItem &) const = default;
+  };
+  std::vector<MapItem> points{};
+  InputPreparationBinding preparation{};
+  GnomePreparationTarget target{};
   bool operator==(const GnomeViewportRequest &) const = default;
 };
 
@@ -63,6 +108,11 @@ struct GnomeViewportReply
   GnomeViewportState state;
   double x = 0, y = 0;
   InputCutoffBinding cutoff{};
+  std::uint64_t seal = 0;
+  std::vector<GnomeViewportRequest::MapItem> points{};
+  InputPreparationBinding preparation{};
+  GnomePreparationTarget target{};
+  GnomePreparationInventory inventory{};
 };
 
 // Snapshot success: {version,operation,request,ok:true,state}. Its request ID

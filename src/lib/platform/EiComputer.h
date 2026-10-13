@@ -62,7 +62,42 @@ public:
 #endif
   ~EiComputer() override;
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  ) override;
+  deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &) override;
+  deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &) override;
+  std::optional<deskflow::windowshare::PreparedInputFocusResult>
+  preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &) override;
+  bool promoteInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffClock::time_point
+  ) override;
+  bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  ) override;
+  void abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &) noexcept override;
+
   bool beginInputCutoff(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point) override;
+  bool beginMappedInputCutoff(
+      const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint, windowshare::InputCutoffClock::time_point
+  ) override;
+  std::optional<windowshare::InputCutoffMappedResult>
+  mappedInputCutoffResult(const windowshare::InputCutoffBinding &) override;
+  bool beginSealedInputCutoff(
+      const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint, windowshare::InputCutoffClock::time_point
+  ) override;
+  bool refreshMappedInputCutoff(
+      const windowshare::InputCutoffBinding &, const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint,
+      windowshare::InputCutoffClock::time_point, bool
+  ) override;
+  bool beginMappedInputBatch(
+      const windowshare::InputCutoffBinding &, const std::vector<windowshare::InputCutoffBatchItem> &
+  ) override;
+  bool inputCutoffSealLive(const windowshare::InputCutoffBinding &) override;
   windowshare::InputCutoffState inputCutoffState(const windowshare::InputCutoffBinding &) override;
   bool resumeInputCutoff(const windowshare::InputCutoffBinding &) override;
 #endif
@@ -163,6 +198,8 @@ private:
 #ifdef DESKFLOW_GNOME_EI_PING
   bool
   beginGnomeEiPrefixObservation(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point);
+  bool beginGnomeEiPrefixObservation(std::uint64_t, windowshare::InputCutoffClock::time_point);
+  void invalidateGnomeInputCutoff() const noexcept;
   void retireGnomeEiPing();
   void cancelGnomeEiPrefixObservation();
 #endif
@@ -249,6 +286,13 @@ private:
   // authority. Owned by the same core event thread that calls ei_dispatch.
   mutable windowshare::EiPrefixProbe m_gnomePrefixProbe;
   std::optional<windowshare::InputCutoffBinding> m_gnomePrefixBinding;
+  mutable bool m_gnomeCutoffInvalidated = false;
+  struct GnomePreparation;
+  std::unique_ptr<GnomePreparation> m_gnomePreparation;
+  std::uint64_t m_gnomePrefixRequest = 0;
+  std::uint32_t m_gnomePrefixEmulationGeneration = 0;
+  struct GnomeMappedCutoff;
+  std::unique_ptr<GnomeMappedCutoff> m_gnomeMappedCutoff;
   struct ei_ping *m_gnomePrefixPing = nullptr;
   EventQueueTimer *m_gnomePrefixTimer = nullptr;
   const std::thread::id m_gnomePrefixThread = std::this_thread::get_id();

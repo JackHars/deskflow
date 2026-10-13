@@ -247,6 +247,7 @@ void XWindowsComputer::setWindowShareObservationEnabled(bool enabled)
   m_windowShareObserver = std::make_unique<deskflow::windowshare::X11DisplayObserver>(
       XGetXCBConnection(m_display), DefaultScreen(m_display)
   );
+  m_windowShareCoordinates = std::make_unique<deskflow::windowshare::X11CoordinateEndpoint>(*m_windowShareObserver);
   m_events->addHandler(EventTypes::Timer, &m_windowShareObserver, [this](const auto &) {
     pollWindowShareObservation();
   });
@@ -263,6 +264,9 @@ void XWindowsComputer::stopWindowShareObservation()
   }
   m_events->removeHandler(EventTypes::Timer, &m_windowShareObserver);
   // Invalidate retained snapshots before the Xlib owner closes its socket.
+  if (m_windowShareCoordinates)
+    m_windowShareCoordinates->close();
+  m_windowShareCoordinates.reset();
   if (m_windowShareObserver)
     m_windowShareObserver->close();
   m_windowShareObserver.reset();
@@ -274,6 +278,7 @@ void XWindowsComputer::pollWindowShareObservation()
   if (!m_display || !m_windowShareObserver)
     return;
   m_windowShareObserver->poll();
+  m_windowShareCoordinates->poll();
   const auto observation = m_windowShareObserver->observe();
   const auto status = observation ? std::string("available") : m_windowShareObserver->unavailableReason();
   if (status != m_windowShareStatus) {
@@ -294,6 +299,36 @@ void XWindowsComputer::pollWindowShareObservation()
 std::optional<deskflow::windowshare::X11DisplayObservation> XWindowsComputer::windowShareObservation() const
 {
   return m_windowShareObserver ? m_windowShareObserver->observe() : std::nullopt;
+}
+
+bool XWindowsComputer::createWindowShareWitness(
+    std::uint64_t request, deskflow::windowshare::X11CoordinateClock::time_point deadline
+)
+{
+  if (!m_display || !m_windowShareCoordinates)
+    return false;
+  // Order the witness after this actual injection connection's buffered Xlib
+  // requests. This is a namespace rendezvous, not native input consumption.
+  XFlush(m_display);
+  return m_windowShareCoordinates->create(request, deadline);
+}
+
+bool XWindowsComputer::confirmWindowShareWitness(const deskflow::windowshare::X11NamespaceWitness &published)
+{
+  if (!m_display || !m_windowShareCoordinates)
+    return false;
+  XFlush(m_display);
+  return m_windowShareCoordinates->confirm(published);
+}
+
+std::optional<deskflow::windowshare::X11CoordinateEndpoint::Update> XWindowsComputer::takeWindowShareCoordinateUpdate()
+{
+  return m_windowShareCoordinates ? m_windowShareCoordinates->takeUpdate() : std::nullopt;
+}
+
+bool XWindowsComputer::cancelWindowShareCoordinate(std::uint64_t request)
+{
+  return m_windowShareCoordinates && m_windowShareCoordinates->cancel(request);
 }
 #endif
 
@@ -1165,6 +1200,19 @@ void XWindowsComputer::handleSystemEvent(const Event &event)
 {
   auto *xevent = static_cast<XEvent *>(event.getData());
   assert(xevent != nullptr);
+#if defined(BUILD_WINDOWSHARE) && defined(__linux__)
+  // Xlib remains the event owner. Forward our private resource notifications
+  // before input-method/screensaver handling can return early.
+  if (m_windowShareCoordinates) {
+    if (xevent->type == PropertyNotify)
+      m_windowShareCoordinates->propertyChanged(
+          static_cast<std::uint32_t>(xevent->xproperty.window), static_cast<std::uint32_t>(xevent->xproperty.atom),
+          static_cast<std::uint32_t>(xevent->xproperty.serial)
+      );
+    else if (xevent->type == DestroyNotify)
+      m_windowShareCoordinates->windowDestroyed(static_cast<std::uint32_t>(xevent->xdestroywindow.window));
+  }
+#endif
 
   // update key state
   bool isRepeat = false;

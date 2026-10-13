@@ -8,6 +8,7 @@
 #include <QEventLoop>
 #include <QGuiApplication>
 #include <QPointer>
+#include <QRandomGenerator>
 #include <QThread>
 #include <QWindow>
 #include <algorithm>
@@ -23,10 +24,13 @@
 #include <QtGui/qpa/qwindowsysteminterface.h>
 #include <QtGui/qpa/qwindowsysteminterface_p.h>
 #include <QtWaylandClient/private/qwaylanddisplay_p.h>
+#include <QtWaylandClient/private/qwaylandshellsurface_p.h>
 #include <QtWaylandClient/private/qwaylandwindow_p.h>
 #include <wayland-client-core.h>
 #include <wayland-client-protocol.h>
 #endif
+
+struct xdg_toplevel;
 
 namespace deskflow::windowshare {
 #ifdef WINDOWSHARE_SUPPORTED_QT_WAYLAND
@@ -190,6 +194,68 @@ std::optional<QPointF> mapWaylandViewport(QWindow *window, const WaylandViewport
     return {};
   return local;
 #else
+  return {};
+#endif
+}
+
+bool currentWaylandAssociation(
+    QWindow *window, const WaylandViewportGeometry &expected, const WaylandWindowAssociation &association
+)
+{
+#ifdef WINDOWSHARE_SUPPORTED_QT_WAYLAND
+  if (!association.role || association.token.isEmpty() || association.surface != expected.surface ||
+      association.resource != expected.resource || readWaylandViewport(window) != std::optional(expected))
+    return false;
+  auto *platform = dynamic_cast<QtWaylandClient::QWaylandWindow *>(window->handle());
+  auto *role = platform ? platform->shellSurface() : nullptr;
+  if (!role || role != association.role ||
+      QByteArrayView(role->metaObject()->className()) != "QtWaylandClient::QWaylandXdgSurface")
+    return false;
+  const auto nativeRole = role->surfaceRole();
+  auto *const *topLevel = std::any_cast<xdg_toplevel *>(&nativeRole);
+  return topLevel && *topLevel && reinterpret_cast<quintptr>(*topLevel) == association.topLevel;
+#else
+  (void)window;
+  (void)expected;
+  (void)association;
+  return false;
+#endif
+}
+std::optional<WaylandWindowAssociation> associateWaylandWindow(QWindow *window, const WaylandViewportGeometry &expected)
+{
+#ifdef WINDOWSHARE_SUPPORTED_QT_WAYLAND
+  if (readWaylandViewport(window) != std::optional(expected) || window->transientParent() ||
+      window->type() != Qt::Window)
+    return {};
+  auto *platform = dynamic_cast<QtWaylandClient::QWaylandWindow *>(window->handle());
+  auto *role = platform ? platform->shellSurface() : nullptr;
+  if (!role || QByteArrayView(role->metaObject()->className()) != "QtWaylandClient::QWaylandXdgSurface")
+    return {};
+  const auto nativeRole = role->surfaceRole();
+  auto *const *topLevel = std::any_cast<xdg_toplevel *>(&nativeRole);
+  if (!topLevel || !*topLevel)
+    return {}; // A popup/unknown role cannot answer the top-level challenge.
+  QByteArray random(32, '\0');
+  auto *generator = QRandomGenerator::system();
+  for (int i = 0; i < 8; ++i) {
+    const auto value = generator->generate();
+    for (int byte = 0; byte < 4; ++byte)
+      random[i * 4 + byte] = static_cast<char>(value >> (byte * 8));
+  }
+  WaylandWindowAssociation result{
+      QStringLiteral("org.deskflow.window.") + QString::fromLatin1(random.toHex()), role, expected.surface,
+      reinterpret_cast<quintptr>(*topLevel), expected.resource
+  };
+  role->setAppId(result.token);
+  if (!currentWaylandAssociation(window, expected, result))
+    return {};
+  // The provider accepts only the native echo of this exact role request.
+  // Flushing is nonblocking; unavailable/unprocessed echoes remain denied.
+  const auto flushed = wl_display_flush(platform->display()->wl_display());
+  return (flushed >= 0 || errno == EAGAIN) ? std::optional(result) : std::nullopt;
+#else
+  (void)window;
+  (void)expected;
   return {};
 #endif
 }

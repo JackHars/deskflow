@@ -17,9 +17,11 @@
 #include "deskflow/ServerApp.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #ifdef WINDOWSHARE_CORE_COMPANION
+#include "windowshare/InputEvidenceRuntime.h"
 #include "windowshare/LocalInputBootstrap.h"
 #include "windowshare/LocalInputCodeAdmission.h"
 #include "windowshare/LocalInputSession.h"
+#include "windowshare/OriginalInputCoordinator.h"
 #endif
 
 #if defined(Q_OS_WIN)
@@ -151,17 +153,22 @@ int main(int argc, char **argv)
 #ifdef WINDOWSHARE_CORE_COMPANION
   // Retain the parsed local policy for the lifetime of this launch. Merely
   // configuring a pair never supplies any of the required input providers.
+  std::unique_ptr<InputEvidenceRuntime> inputEvidenceRuntime;
   std::optional<LocalInputHostConfiguration> inputHostConfiguration;
   std::unique_ptr<LocalInputCoreSession> inputSession;
   // The timer and admission guard are destroyed before the channel owner.
   // The worker holds only independent inspection state, never these objects.
   std::unique_ptr<LocalInputCodeAdmission> inputAdmission;
   QTimer inputAdmissionTimer;
+  std::unique_ptr<OriginalInputCoordinator> inputCoordinator;
   if (inputBootstrap->pair) {
     try {
       if (parser.windowShareHostConfig() != inputBootstrap->hostConfig || !parser.serverMode())
         throw std::runtime_error("Invalid WindowShare companion invocation");
       inputHostConfiguration.emplace(LocalInputHostConfiguration::load(parser.windowShareHostConfig()));
+      if (!inputHostConfiguration->inputEvidenceConfig().isEmpty())
+        inputEvidenceRuntime =
+            InputEvidenceRuntime::open(inputHostConfiguration->inputEvidenceConfig(), InputEvidenceRole::Core);
       QString failure;
       // Native restoration makes several bounded AX calls per window, followed
       // by holding-helper teardown. The short diagnostic grace is insufficient.
@@ -190,14 +197,28 @@ int main(int argc, char **argv)
               return;
             inputAdmissionTimer.stop();
             if (state == LocalInputCodeAdmission::State::Ready)
-              LOG_INFO("window sharing exact library admission verified; original input remains disabled");
+              LOG_INFO("window sharing exact library admission verified; waiting for an eligible full-input handoff");
             else
               LOG_WARN("window sharing code admission unavailable: %s", qPrintable(inputAdmission->error()));
           });
           inputAdmissionTimer.start(100);
         }
+        inputCoordinator = std::make_unique<OriginalInputCoordinator>(
+            *inputSession->channel(), inputSession->selectedPeerMailbox(), inputHostConfiguration->peerPolicy(),
+            OriginalInputCoordinator::Providers{
+                [&inputAdmission] {
+                  const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
+                  return proof && proof->live();
+                },
+                [](const OriginalInputCaptured &captured) {
+                  return captured.transition.permitsAcquisition(captured.input);
+                }
+            }
+        );
       }
-      LOG_INFO("trusted window host connected; original input route remains disabled");
+      LOG_INFO(
+          "trusted window host connected; original input requires explicit policy and live native handoff evidence"
+      );
     } catch (const std::exception &error) {
       QTextStream(stderr) << "Window sharing: " << error.what() << '\n';
       return s_exitConfig;
@@ -223,6 +244,8 @@ int main(int argc, char **argv)
     // Configure the value-only mailbox before moving App onto its core thread.
     static_cast<ServerApp *>(coreApp)->setSelectedPeerMailbox(inputSession->selectedPeerMailbox());
     static_cast<ServerApp *>(coreApp)->setOriginalInputCapture(inputSession->captureSource());
+    if (inputCoordinator)
+      static_cast<ServerApp *>(coreApp)->setOriginalInputDispatcherFactory(inputCoordinator->dispatcherFactory());
   }
 #endif
 

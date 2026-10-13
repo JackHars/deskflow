@@ -134,7 +134,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   std::uint64_t highWater = 0, captureHighWater = 0;
   std::deque<Control> controls;
   QTimer timer;
-  bool running = true, scheduled = false, authorizing = false, processing = false, cancelling = false;
+  bool running = true, scheduled = false, authorizing = false, processing = false, cancelling = false,
+       reserving = false;
 
   State(LocalInputChannel &input, LocalInputRole endpoint, LocalInputPeerPolicy approved, Checks gate)
       : channel(&input),
@@ -253,6 +254,12 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       channel->close("Preflight owner release failed");
     else if (channel && notify && channel->authenticated() && !channel->cancelOffer(old->offer, reason) && channel)
       channel->close("Preflight cancellation could not be delivered");
+    // A declined offer never acquired native or Viewer ownership. A reserve
+    // callback still on the stack may return an owned binding; its exact
+    // asynchronous release, rather than this cancellation, must acknowledge it.
+    if (channel && role == LocalInputRole::Host && !old->lease && !reserving &&
+        old->offer.scope == ForwardingScope::All && channel->supportsMappedInput())
+      (void)channel->sendReleased(old->offer);
     cancelling = wasCancelling;
     schedule();
   }
@@ -613,10 +620,21 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       return;
     }
     const auto reserve = host.reserve;
-    const auto binding = reserve(offer.scope);
+    std::optional<KeyboardRouteBinding> binding;
+    reserving = true;
+    try {
+      binding = reserve(offer.scope);
+    } catch (...) {
+      // The callback may have partially reserved native ownership. The
+      // ensuing terminal close must not claim a completed empty release.
+      throw;
+    }
+    reserving = false;
     if (!binding) {
       if (current(offer))
         cancel(LocalInputRevocation::AuthorityLost, true);
+      else if (channel && offer.scope == ForwardingScope::All && channel->supportsMappedInput())
+        (void)channel->sendReleased(offer);
       return;
     }
     if (binding->scope != offer.scope) {
@@ -676,6 +694,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if ((check == LocalInputCheck::Deliver && attempt->phase != Phase::Active) ||
         (check != LocalInputCheck::Deliver && attempt->phase == Phase::Active))
       return false;
+    if (checks.neutralBoundary && checks.acquisitionBoundary)
+      return false;
     authorizing = true;
     const auto offer = attempt->offer;
     const auto phase = attempt->phase;
@@ -685,7 +705,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     };
     bool result = false;
     try {
-      const auto integrity = checks.codeAdmission, route = checks.deliveryReady, neutral = checks.neutralBoundary;
+      const auto integrity = checks.codeAdmission, route = checks.deliveryReady,
+                 neutral = checks.neutralBoundary ? checks.neutralBoundary : checks.acquisitionBoundary;
       result =
           stillCurrent() && integrity && route && integrity(lease) && stillCurrent() && route(lease) && stillCurrent();
       if (result && check != LocalInputCheck::Deliver)

@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "InputEvidence.h"
 #include "OriginalInputRoute.h"
 #include <limits>
 #include <utility>
@@ -21,6 +22,7 @@ public:
   static constexpr std::size_t capacity = 256;
   explicit OriginalInputCapturedInbox(OriginalInputEpoch epoch) : m_epoch(std::move(epoch))
   {
+    inputEvidenceInitialize(InputEvidenceQueue::Completed, this, capacity);
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic_bool::is_always_lock_free);
   }
@@ -66,6 +68,7 @@ public:
       revoke();
       return false;
     }
+    InputEvidenceMutation evidence(InputEvidenceQueue::Completed, this, 1, 0);
     m_records[written % capacity] = captured;
     m_lastSequence = record.sequence;
     m_lastTimestamp = record.sourceTimestampNs;
@@ -79,6 +82,7 @@ public:
     const auto read = m_read.load(std::memory_order_relaxed);
     if (read == m_written.load(std::memory_order_acquire))
       return {};
+    InputEvidenceMutation evidence(InputEvidenceQueue::Completed, this, 0, 1);
     auto result = m_records[read % capacity];
     m_read.store(read + 1, std::memory_order_release);
     // A successful copy is still only evidence. The consumer must recheck
@@ -95,6 +99,7 @@ public:
   }
   void revoke() noexcept
   {
+    inputEvidenceInvalidate(InputEvidenceLoss::PipelineRevoked);
     m_revoked->store(true, std::memory_order_release);
   }
   std::shared_ptr<const std::atomic_bool> evidence() const noexcept

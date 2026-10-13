@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputBootstrap.h"
+#include <QCoreApplication>
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -87,6 +88,9 @@ void hostArguments()
         "--core-input-fd=03", "--core-input-fd=+3", "-core-input-fd=3", "--core-input-fd=2147483648",
         "--core-input-fd=3junk", "--core-input-probe=yes"})
     denied([&] { Arguments{"host", argument}.host(); });
+  for (const auto &action : {"--help", "--probe", "--init-identity", "--core-input-probe"})
+    denied([&] { Arguments{"host", "--input-evidence-config", "/tmp/evidence.json", action}.host(); });
+  denied([&] { Arguments{"host", "--input-evidence-config=/tmp/evidence.json"}.host(); });
   const auto pair = LocalInputSocketPair::create();
   int fd = ::dup(pair.childDescriptor());
   check(fd >= 3 && !(fcntl(fd, F_GETFD) & FD_CLOEXEC), "Fixture did not inherit an uncloexec descriptor");
@@ -95,6 +99,7 @@ void hostArguments()
     check(host.probe() && host.inherited() && (fcntl(fd, F_GETFD) & FD_CLOEXEC), "Bootstrap did not restore CLOEXEC");
     host.validateOptions({"core-input-fd", "core-input-probe"});
     denied([&] { host.validateOptions({"core-input-fd", "core-input-probe", "help"}); });
+    denied([&] { host.validateOptions({"core-input-fd", "core-input-probe", "share-clipboard-text"}); });
   }
   check(fcntl(fd, F_GETFD) == -1, "Inherited descriptor leaked after bootstrap destruction");
   fd = ::dup(pair.childDescriptor());
@@ -102,6 +107,14 @@ void hostArguments()
     auto host = Arguments{"host", QByteArray("--core-input-fd=") + QByteArray::number(fd)}.host();
     const QStringList valid{"core-input-fd", "enable-seamless", "listen", "identity", "peer-pin", "journal"};
     host.validateOptions(valid);
+    host.validateOptions(valid + QStringList{"capture-fps"});
+    denied([&] { host.validateOptions(valid + QStringList{"input-evidence-config"}); });
+    denied([&] { host.validateOptions(valid + QStringList{"capture-fps", "capture-fps"}); });
+    auto clipboard = valid;
+    clipboard.append("share-clipboard-text");
+    host.validateOptions(clipboard);
+    clipboard.append("share-clipboard-text");
+    denied([&] { host.validateOptions(clipboard); });
     for (const auto &name :
          {"recover", "init-identity", "request-permissions", "probe", "fingerprint", "connect", "help", "version",
           "quit-after", "export-window"}) {
@@ -115,6 +128,9 @@ void hostArguments()
     invalid = valid;
     invalid.append("listen");
     denied([&] { host.validateOptions(invalid); });
+    bool recorderOpened = false;
+    denied([&] { host.adopt([&] { recorderOpened = true; }); });
+    check(!recorderOpened, "untrusted parent opened the diagnostic recorder before adoption");
   }
   fd = ::dup(pair.childDescriptor());
   denied([&] {
@@ -159,6 +175,31 @@ void configurations()
           },
       "Configuration forwarded unexpected host arguments"
   );
+  check(!arguments.contains("--share-clipboard-text"), "default host configuration enabled clipboard access");
+  check(!arguments.contains("--capture-fps"), "absent host capture rate must retain the app default");
+  for (const auto rate : {30, 60}) {
+    auto configured = valid;
+    configured.insert("captureFps", rate);
+    write(QJsonDocument(configured).toJson());
+    check(
+        LocalInputHostConfiguration::load(path).hostArguments() ==
+            arguments + QStringList{"--capture-fps", QString::number(rate)},
+        "host configuration must forward the exact selected capture rate"
+    );
+  }
+  for (const bool enabled : {false, true}) {
+    auto clipboard = valid;
+    clipboard.insert("shareClipboardText", enabled);
+    write(QJsonDocument(clipboard).toJson());
+    const auto configured = LocalInputHostConfiguration::load(path);
+    auto expected = arguments;
+    if (enabled)
+      expected.append("--share-clipboard-text");
+    check(
+        configured.hostArguments() == expected && !configured.peerPolicy().windowSharePeer(unknown),
+        "explicit clipboard policy must only append its one flag and never grant an input peer"
+    );
+  }
   for (auto it = valid.begin(); it != valid.end(); ++it) {
     if (it.key() == "headless")
       continue;
@@ -180,6 +221,17 @@ void configurations()
       {"journal", QString("/tmp/a") + QChar(0) + "b"},
       {"headless", "true"},
       {"holdingDisplay", 1},
+      {"shareClipboardText", 1},
+      {"shareClipboardText", "true"},
+      {"shareClipboardText", QJsonValue{}},
+      {"captureFps", 0},
+      {"captureFps", 29},
+      {"captureFps", 45},
+      {"captureFps", 61},
+      {"captureFps", 30.5},
+      {"captureFps", "60"},
+      {"captureFps", true},
+      {"captureFps", QJsonValue{}},
       {"executable", "/tmp/helper"},
       {"expectedPid", 123},
       {"arguments", "--recover"},
@@ -193,6 +245,14 @@ void configurations()
   }
   auto bytes = QJsonDocument(valid).toJson(QJsonDocument::Compact);
   bytes.insert(1, "\"\\u0076ersion\":1,");
+  write(bytes);
+  denied([&] { LocalInputHostConfiguration::load(path); });
+  bytes = QJsonDocument(valid).toJson(QJsonDocument::Compact);
+  bytes.insert(1, "\"shareClipboardText\":true,\"share\\u0043lipboardText\":false,");
+  write(bytes);
+  denied([&] { LocalInputHostConfiguration::load(path); });
+  bytes = QJsonDocument(valid).toJson(QJsonDocument::Compact);
+  bytes.insert(1, "\"captureFps\":30,\"capture\\u0046ps\":60,");
   write(bytes);
   denied([&] { LocalInputHostConfiguration::load(path); });
   for (const auto &data : {QByteArray("[]"), QByteArray("{broken"), QByteArray(16385, ' ')}) {
@@ -284,6 +344,42 @@ void configuredPeerPolicy()
   auto duplicateOption = names;
   duplicateOption.append("core-input-peer-pairs");
   denied([&] { host.validateOptions(duplicateOption); });
+  check(configuration.inputEvidenceConfig().isEmpty(), "ordinary host unexpectedly enabled evidence");
+  auto evidenceConfig = base;
+  evidenceConfig["inputPeerPairs"] = QJsonArray{peerPair(0xab, 0xcd)};
+  evidenceConfig["inputEvidence"] =
+      QJsonObject{{"core", "/private/core-evidence.json"}, {"host", "/private/host-evidence.json"}};
+  write(QJsonDocument(evidenceConfig).toJson(QJsonDocument::Compact));
+  const auto evidence = LocalInputHostConfiguration::load(path);
+  check(
+      evidence.inputEvidenceConfig() == "/private/core-evidence.json" &&
+          evidence.hostArguments().mid(evidence.hostArguments().size() - 2) ==
+              QStringList{"--input-evidence-config", "/private/host-evidence.json"},
+      "explicit evidence configs did not retain separate roles"
+  );
+  auto evidenceHost = bootstrap(evidence);
+  evidenceHost.validateOptions(names + QStringList{"input-evidence-config"});
+  denied([&] { evidenceHost.validateOptions(names); });
+  denied([&] { evidenceHost.validateOptions(names + QStringList{"input-evidence-config", "input-evidence-config"}); });
+  for (const auto &action : {"help", "probe", "init-identity", "recover"})
+    denied([&] { evidenceHost.validateOptions(names + QStringList{"input-evidence-config", action}); });
+  for (const auto &invalid :
+       {QJsonValue{}, QJsonValue("path"), QJsonValue(QJsonObject{{"core", "/private/a"}}),
+        QJsonValue(QJsonObject{{"core", "relative"}, {"host", "/private/b"}}),
+        QJsonValue(QJsonObject{{"core", "/private/a"}, {"host", "/private/a"}})}) {
+    auto changed = evidenceConfig;
+    changed["inputEvidence"] = invalid;
+    write(QJsonDocument(changed).toJson(QJsonDocument::Compact));
+    denied([&] { LocalInputHostConfiguration::load(path); });
+  }
+  auto noPolicyEvidence = evidenceConfig;
+  noPolicyEvidence.remove("inputPeerPairs");
+  write(QJsonDocument(noPolicyEvidence).toJson(QJsonDocument::Compact));
+  denied([&] { LocalInputHostConfiguration::load(path); });
+  auto duplicateEvidence = QJsonDocument(evidenceConfig).toJson(QJsonDocument::Compact);
+  duplicateEvidence.insert(1, "\"inputEvidence\":{},");
+  write(duplicateEvidence);
+  denied([&] { LocalInputHostConfiguration::load(path); });
   auto movedHost = std::move(host);
   check(movedHost.peerPolicy().windowSharePeer(pin(0xab)) == pin(0xcd), "Moving bootstrap lost its policy");
 
@@ -384,8 +480,9 @@ void configuredPeerPolicy()
   }
 }
 } // namespace
-int main()
+int main(int argc, char **argv)
 {
+  QCoreApplication app(argc, argv);
   try {
     coreArguments();
     hostArguments();

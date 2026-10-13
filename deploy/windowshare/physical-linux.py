@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
 # SPDX-License-Identifier: MIT
-"""Disposable legacy Deskflow -> provider-owned EIS -> real viewer session.
+"""Disposable physical input through actual Core and its provider-owned viewer.
 
-No test EI sender, synthetic input command, original-input controller or
-user desktop is used. Receipt verification belongs to the Mac coordinator.
+Legacy is the default. The explicit production mode uses a separately labeled
+v3 plan for a genuine Mac original-input coordinator. Neither mode creates a
+test EI sender or accepts input commands. Receipt verification belongs to Mac.
 Only the actual core opens the caller-bound provider session.
 """
 import argparse
@@ -32,6 +33,24 @@ sys.dont_write_bytecode = True
 SCREEN = 'gnome-physical-test'
 HERE = Path(__file__).resolve().parent
 PREPARED_SECONDS, STARTUP_SECONDS, RUNNING_SECONDS, RESOURCE_SECONDS = 600, 80, 180, 270
+ORIGINAL_MODE = 'production-original-input'
+
+
+def route_mode(plan):
+    version = plan.get('version')
+    protocol = plan.get('controlProtocol')
+    if version == protocol == 2 and type(version) is int and type(protocol) is int:
+        require('routeMode' not in plan and 'macOriginalInputConfigured' not in plan,
+                'Legacy plan cannot enable production original input')
+        return False
+    require(version == protocol == 3 and type(version) is int and type(protocol) is int and
+            plan.get('routeMode') == ORIGINAL_MODE and plan.get('macOriginalInputConfigured') is True,
+            'Wrong production original-input plan scope')
+    return True
+
+
+def original_metadata(enabled):
+    return {'routeMode': ORIGINAL_MODE, 'macOriginalInputConfigured': True} if enabled else {}
 
 
 def require(value, message):
@@ -187,9 +206,14 @@ def session(args):
     output = args.run / 'results'
     output.mkdir(exist_ok=True)
     require(not (output / 'container-result.json').exists(), 'Container session was already used')
-    report = {'schema': 1, 'status': 'failed', 'scope': 'legacy physical input through actual core and provider-owned viewer',
+    original = getattr(args, 'production_original_input', False)
+    protocol = 3 if original else 2
+    report = {'schema': 1, 'status': 'failed',
+              'scope': ('production original-input backend; Mac coordinator owns per-record authority' if original else
+                        'legacy physical input through actual core and provider-owned viewer'),
               'originalInputAuthorityGranted': False, 'syntheticMeasuredInput': False, 'syntheticStartupInput': False,
-              'linuxScreen': SCREEN, 'windowId': args.window_id, 'commands': [], 'physicalReceipts': 'external-Mac-required'}
+              'linuxScreen': SCREEN, 'windowId': args.window_id, 'commands': [],
+              'physicalReceipts': 'external-Mac-required', **original_metadata(original)}
     public = json.loads((args.run / 'public.json').read_text())
     require(cross.fingerprint(args.run / 'viewer-identity') == canonical_pin(public['viewerPin'])
             and pin(args.run / 'core/tls/cert.pem') == canonical_pin(public['corePin']),
@@ -211,9 +235,9 @@ def session(args):
         with contextlib.ExitStack() as cleanup:
             controls = Controls()
             cleanup.callback(controls.close)
-            emit({'event': 'prepared', 'controlProtocol': 2, 'windowId': args.window_id,
+            emit({'event': 'prepared', 'controlProtocol': protocol, 'windowId': args.window_id,
                   'publicPins': report['publicPins'], 'syntheticStartupInput': False,
-                  'nativeProcessesStarted': False, **clock.state()})
+                  'nativeProcessesStarted': False, **clock.state(), **original_metadata(original)})
             start_id = None
             while start_id is None:
                 clock.check()
@@ -257,6 +281,18 @@ def session(args):
                 relays.append(relay)
                 cleanup.callback(safely_close, 'relay', relay.close)
             shell = qt.start_shell(processes, root, report)
+            if original:
+                observer = common.Provider(processes.env['DBUS_SESSION_BUS_ADDRESS'])
+                try:
+                    _, _, capabilities = observer.call('GetCapabilities')
+                finally:
+                    observer.close()
+                require(capabilities.get('inputPreparation') is True and
+                        capabilities.get('inputDrainSegment') is True and
+                        capabilities.get('routedPointsObservation') is True and
+                        capabilities.get('inputDrainOrderingContract') in qt.SUPPORTED_ORDERING_CONTRACTS,
+                        'Production input requires an audited native GNOME preparation/drain build')
+                report['productionPrerequisites'] = capabilities
             configuration = args.run / 'provider.json'
             configuration.write_text(json.dumps({'version': 1, 'viewerExecutable': str(args.viewer),
                                                  'connect': '127.0.0.1', 'port': relays[1].port,
@@ -327,10 +363,11 @@ def session(args):
             value = common.wait_for(processes, ready, 'actual authenticated core and provider-owned viewer', timeout=35, retry_errors=False)
             report['ready'] = value
             clock.ready()
-            emit({'event': 'ready', 'id': start_id, 'controlProtocol': 2,
+            emit({'event': 'ready', 'id': start_id, 'controlProtocol': protocol,
                   'linuxScreen': SCREEN, 'windowId': args.window_id, 'publicPins': report['publicPins'],
                   'corePid': core.pid, 'compositorPid': shell.pid, 'originalInputAuthorityGranted': False,
-                  'syntheticStartupInput': False, **clock.state(), 'state': value})
+                  'syntheticStartupInput': False, **clock.state(), 'state': value, **original_metadata(original),
+                  **({'productionPrerequisites': report['productionPrerequisites']} if original else {})})
             while True:
                 clock.check()
                 state = status()
@@ -381,7 +418,8 @@ def finish_session(output, report, stop_id, core, processes, relays, stopped, cl
     emit({'event': 'stopped' if completed else 'failed', 'id': stop_id, 'status': report['status'],
           'lifecycleCompleted': completed, 'physicalAcceptance': 'not-assessed',
           'failure': report.get('failure'), 'coreExit': report.get('coreExit'), 'coreStoppedByPrivateIpc': stopped,
-          'relays': report['relays'], 'physicalReceipts': 'external-Mac-required'})
+          'relays': report['relays'], 'physicalReceipts': 'external-Mac-required',
+          **original_metadata(report.get('routeMode') == ORIGINAL_MODE)})
     return 0 if completed else 1
 
 
@@ -504,7 +542,9 @@ def prepare(args):
         directory = args.run / name
         directory.mkdir()
         (directory / 'owner.json').write_text(json.dumps({'schema': 1, 'container': container, 'token': token}) + '\n')
-    plan = {'version': 2, 'controlProtocol': 2, 'container': container, 'token': token,
+    original = getattr(args, 'production_original_input', False)
+    plan = {'version': 3 if original else 2, 'controlProtocol': 3 if original else 2,
+            **original_metadata(original), 'container': container, 'token': token,
             'runDirectory': str(args.run), 'coreExecutable': str(args.core), 'viewerExecutable': str(args.viewer),
             'linuxScreen': SCREEN, 'macCorePin': args.mac_core_pin, 'macViewerPin': args.mac_viewer_pin,
             'remoteSockets': {role: str(args.run / ('forward-' + role) / 'mac.sock') for role in ('core', 'viewer')},
@@ -546,7 +586,9 @@ def load_plan(run):
     require(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077,
             'Run directory must be private and owned')
     plan = read_owned_json(run / 'linux-plan.json')
-    require(plan['version'] == plan['controlProtocol'] == 2 and plan['runDirectory'] == str(run), 'Wrong physical plan')
+    require('version' in plan and 'controlProtocol' in plan, 'Physical plan lacks its route version')
+    route_mode(plan)
+    require(plan['runDirectory'] == str(run), 'Wrong physical plan directory')
     require(re.fullmatch(r'deskflow-cross-[0-9a-f]{16}', plan['container'])
             and re.fullmatch(r'[0-9a-f]{32}', plan['token']), 'Invalid exact-owned container identity')
     for role in ('core', 'viewer'):
@@ -570,6 +612,8 @@ def stop_owned_container(plan):
 def run(args):
     host_only()
     plan = load_plan(args.run)
+    original = route_mode(plan)
+    protocol = 3 if original else 2
     require(type(args.window_id) is int and 1 <= args.window_id <= 2**32 - 1, 'Explicit owned Mac window ID required')
     require(source_hashes() == plan['sourceHashes'], 'Fixture source changed after preparation')
     require({role: sha(Path(plan[role + 'Executable'])) for role in ('core', 'viewer')} == plan['binaryHashes'],
@@ -580,7 +624,8 @@ def run(args):
         json.dump({'pid': os.getpid(), 'monotonic': time.monotonic()}, marker)
     output = args.run / 'results'
     output.mkdir(exist_ok=False)
-    report = {'version': 2, 'status': 'failed', 'physicalAcceptance': 'not-assessed', 'syntheticInputSent': False,
+    report = {'version': protocol, **original_metadata(original),
+              'status': 'failed', 'physicalAcceptance': 'not-assessed', 'syntheticInputSent': False,
               'ordinaryBefore': before, 'planSha256': sha(args.run / 'linux-plan.json'), 'commands': []}
     arguments = container_command(plan)
     arguments.insert(2, '-i')
@@ -591,6 +636,8 @@ def run(args):
                   '--core-socket', '/forward-core/mac.sock', '--viewer-socket', '/forward-viewer/mac.sock',
                   '--mac-core-pin', plan['macCorePin'], '--mac-viewer-pin', plan['macViewerPin'],
                   '--window-id', str(args.window_id)]
+    if original:
+        arguments.append('--production-original-input')
     child = None
     terminal = None
     stop_id = None
@@ -637,7 +684,10 @@ def run(args):
                 require(replies <= 260 and isinstance(value, dict), 'Invalid/excessive container replies')
                 transcript.write(line.decode() + '\n')
                 if value.get('event') == 'prepared':
-                    require(not prepared and value.get('controlProtocol') == 2 and value.get('windowId') == args.window_id,
+                    require(not prepared and value.get('controlProtocol') == protocol and
+                            value.get('windowId') == args.window_id and
+                            (not original or all(value.get(key) == required for key, required in
+                                                 original_metadata(True).items())),
                             'Invalid prepared receipt')
                     prepared = True
                 if value.get('event') in ('stopped', 'failed'):
@@ -698,7 +748,7 @@ def run(args):
     (output / 'result.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     emit({**(terminal or {}), 'event': 'stopped' if completed else 'failed', 'id': stop_id,
           'lifecycleCompleted': completed, 'physicalAcceptance': 'not-assessed', 'cleanup': report['cleanup'],
-          'failure': report.get('failure'), 'cleanupErrors': cleanup_errors})
+          'failure': report.get('failure'), 'cleanupErrors': cleanup_errors, **original_metadata(original)})
     return 0 if completed else 1
 
 
@@ -730,6 +780,8 @@ def main():
     preparation.add_argument('--mac-viewer-port', type=int, default=24861)
     preparation.add_argument('--ordinary-pid', type=int, action='append', required=True)
     preparation.add_argument('--ordinary-config', type=Path, action='append', required=True)
+    preparation.add_argument('--production-original-input', action='store_true',
+                             help='Create a distinct v3 plan for the opt-in production Mac original-input harness')
     running = modes.add_parser('run', help='Linux host: supervise the private container and audit ordinary state')
     running.add_argument('--run', type=Path, required=True)
     running.add_argument('--window-id', type=int, required=True)
@@ -747,6 +799,7 @@ def main():
     native.add_argument('--mac-core-pin', required=True)
     native.add_argument('--mac-viewer-pin', required=True)
     native.add_argument('--window-id', type=int, required=True)
+    native.add_argument('--production-original-input', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     def interrupted(signum, _frame):
         raise KeyboardInterrupt(f'Owned session interrupted by signal {signum}')

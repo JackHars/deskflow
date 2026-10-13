@@ -4,9 +4,71 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
-    unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validViewportHandle,
-    StageUpdateSequence, InputDrainSequence, validInputDrainBinding,
+    unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validRoutedPoints, validViewportHandle,
+    validWindowAssociation, associatedWindowIndices,
+    StageUpdateSequence, InputDrainSequence, PreparationActivationSequence, validInputDrainBinding,
+    validInputPreparationBinding, sameInputPreparationBinding,
+    ORDERING_BUILDS, ORDERING_MAIN, ORDERING_CLUTTER, ORDERING_FILE_MAX, ORDERING_MAPS_MAX,
+    mappedOrderingModules, matchesMappedOrderingFile, orderingContractFor,
 } from '../logic.js';
+
+test('pre-focus binding contains no invented Viewer or All lease and never aliases a capture', () => {
+    const binding = {preparationRequest: '91', coreConnectionGeneration: 3,
+        captureEpoch: '71', captureSequence: '83', capturePart: 2};
+    assert.equal(validInputPreparationBinding(binding), true);
+    assert.equal(validInputDrainBinding(binding), false);
+    assert.equal(sameInputPreparationBinding(binding, {...binding}), true);
+    for (const field of Object.keys(binding)) {
+        const changed = {...binding};
+        changed[field] = typeof changed[field] === 'number' ? changed[field] + 1 : '92';
+        assert.equal(sameInputPreparationBinding(binding, changed), false);
+        const missing = {...binding}; delete missing[field];
+        assert.equal(validInputPreparationBinding(missing), false);
+    }
+    for (const invalid of [{...binding, viewerConnection: '1'}, {...binding, scope: 'all'},
+        {...binding, preparationRequest: '091'}, {...binding, capturePart: 17},
+        {...binding, captureEpoch: '18446744073709551616'}])
+        assert.equal(validInputPreparationBinding(invalid), false);
+});
+
+test('unfocused preparation changes only the focus prerequisite, never modal/grab/hit eligibility', () => {
+    const state = {nativeBackend: true, locked: false, overview: false, grabbed: false,
+        modal: false, buttonsHeld: false, windowCount: 1, normalWindow: true,
+        transient: false, visible: true, focused: false, oneSurface: true};
+    assert.equal(unavailableReason(state), 'viewer-not-focused');
+    assert.equal(unavailableReason(state, true), '');
+    for (const changed of [{locked: true}, {overview: true}, {grabbed: true}, {modal: true},
+        {buttonsHeld: true}, {windowCount: 2}, {normalWindow: false}, {transient: true},
+        {visible: false}, {oneSurface: false}])
+        assert.notEqual(unavailableReason({...state, ...changed}, true), '');
+});
+
+test('per-window tokens select only exact unique owned-client candidates', () => {
+    const token = `org.deskflow.window.${'a'.repeat(64)}`;
+    const other = `org.deskflow.window.${'b'.repeat(64)}`;
+    assert.equal(validWindowAssociation(token), true);
+    for (const invalid of [null, '', token + '\n', 'org.deskflow.window.a', token.toUpperCase()])
+        assert.equal(validWindowAssociation(invalid), false);
+    const windows = [{wmClass: other, instance: other}, {wmClass: token, instance: token},
+        {wmClass: token, instance: other}];
+    assert.deepEqual(associatedWindowIndices(windows, token), [1]);
+    assert.deepEqual(associatedWindowIndices([...windows, windows[1]], token), [1, 3]);
+    assert.deepEqual(associatedWindowIndices(windows, `${token}0`), []);
+    assert.deepEqual(associatedWindowIndices(Array(257).fill(windows[1]), token), []);
+});
+
+test('native point batches are bounded, exact, ordered captures in one epoch', () => {
+    const points = [['12', '31', 1, 400, 300], ['13', '31', 2, 401, 300], ['14', '32', 1, 402, 301]];
+    assert.equal(validRoutedPoints('8', '7', points, 2), true);
+    for (const change of [[], Array(17).fill(points[0]), [points[1], points[0]], [points[0], points[0]],
+        [['012', '31', 1, 400, 300]], [['12', '31', 0, 400, 300]], [['12', '31', 17, 400, 300]],
+        [['12', '31', 1, 400.1, 300]], [['12', '31', 1, Infinity, 300]],
+        [['18446744073709551616', '31', 1, 400, 300]], [['12', '31', 1, 400, 300, 0]]])
+        assert.equal(validRoutedPoints('8', '7', change, 2), false, JSON.stringify(change));
+    for (const epoch of ['', '07', '0', 7, '18446744073709551616'])
+        assert.equal(validRoutedPoints('8', epoch, points, 2), false);
+    assert.equal(validRoutedPoints('8', '7', points, 0), false);
+});
 
 test('only stable Shell 50 is supported', () => {
     for (const version of ['50', '50.0', '50.2'])
@@ -133,6 +195,94 @@ test('stage updates refuse deadline, reentry, view changes, layout drift and unp
     }
     assert.throws(() => new StageUpdateSequence('p', 1, 2, 1, 0, 500));
     assert.throws(() => new StageUpdateSequence('p', 1, 2, 0, 0));
+});
+
+test('activation completion includes one early deferred restack and two completed exact-view frames', () => {
+    const view = {}, other = {};
+    const rect = {x: 0, y: 0, width: 1000, height: 700};
+    const elsewhere = {x: 1000, y: 0, width: 1000, height: 700};
+    for (const restackDuringFrame of [false, true]) {
+        const sequence = new PreparationActivationSequence('activate_1', 100, 200, 8, 100, 80);
+        assert.equal(sequence.before(other, elsewhere, 1, 101), false);
+        assert.equal(sequence.after(other, elsewhere, 1, 102), false);
+        if (restackDuringFrame)
+            assert.equal(sequence.before(view, rect, 1, 103), true);
+        assert.equal(sequence.invalidated('restacked', true, 104), true);
+        if (!restackDuringFrame)
+            assert.equal(sequence.before(view, rect, 1, 105), true);
+        assert.equal(sequence.after(view, rect, 1, 106), false);
+        assert.equal(sequence.count, 1);
+        assert.equal(sequence.complete, false);
+        assert.equal(sequence.before(view, {...rect}, 1, 107), true);
+        assert.equal(sequence.after(view, {...rect}, 1, 108), true);
+        assert.equal(sequence.restacks, 1);
+        assert.equal(sequence.deadline, 180);
+    }
+});
+
+test('activation refuses unrelated, repeated or later invalidation without adopting a new revision', () => {
+    const view = {}, rect = {x: 0, y: 0, width: 1000, height: 700};
+    const fresh = () => new PreparationActivationSequence('activate_2', 100, 200, 8, 100, 80);
+    for (const reason of ['focus-changed', 'window-created', 'window-position', 'window-size',
+        'native-state-changed', 'surface-changed', 'grab-changed', 'layout-changed']) {
+        const invalid = fresh();
+        assert.equal(invalid.invalidated(reason, true, 101), false);
+        assert.equal(invalid.reason, 'activation-state-invalidated');
+        assert.equal(invalid.invalidated('restacked', true, 102), false);
+        assert.equal(invalid.before(view, rect, 1, 103), false);
+        assert.equal(invalid.complete, false);
+        assert.equal(invalid.revision, 8);
+    }
+    const unfocused = fresh();
+    assert.equal(unfocused.invalidated('restacked', false, 101), false);
+    assert.equal(unfocused.reason, 'activation-state-invalidated');
+    const repeated = fresh();
+    assert.equal(repeated.invalidated('restacked', true, 101), true);
+    assert.equal(repeated.invalidated('restacked', true, 102), false);
+    assert.equal(repeated.reason, 'activation-state-invalidated');
+    const later = fresh();
+    later.before(view, rect, 1, 101);
+    later.after(view, rect, 1, 102);
+    assert.equal(later.invalidated('restacked', true, 103), false);
+    assert.equal(later.reason, 'activation-state-invalidated');
+});
+
+test('activation completion preserves its short deadline and refuses nested, changed or late frames', () => {
+    const view = {}, rect = {x: 0, y: 0, width: 1000, height: 700};
+    const fresh = () => new PreparationActivationSequence('activate_3', 100, 200, 8, 100, 20);
+    for (const callback of ['before', 'after']) {
+        const nested = fresh();
+        if (callback === 'before')
+            nested.before(view, rect, 2, 101);
+        else {
+            nested.before(view, rect, 1, 101);
+            nested.after(view, rect, 2, 102);
+        }
+        assert.equal(nested.reason, 'nested-main-dispatch');
+        assert.equal(nested.complete, false);
+    }
+    const late = fresh();
+    late.before(view, rect, 1, 101);
+    late.after(view, rect, 1, 102);
+    late.before(view, rect, 1, 119);
+    assert.equal(late.after(view, rect, 1, 120), false);
+    assert.equal(late.reason, 'stage-update-timeout');
+    const expiredRestack = fresh();
+    assert.equal(expiredRestack.invalidated('restacked', true, 120), false);
+    assert.equal(expiredRestack.reason, 'stage-update-timeout');
+    const moved = fresh();
+    moved.before(view, rect, 1, 101);
+    assert.equal(moved.after(view, {...rect, width: 999}, 1, 102), false);
+    assert.equal(moved.reason, 'stage-layout-changed');
+    const replaced = fresh();
+    replaced.before(view, rect, 1, 101);
+    replaced.after(view, rect, 1, 102);
+    assert.equal(replaced.before({}, rect, 1, 103), false);
+    assert.equal(replaced.reason, 'stage-view-replaced');
+    const reentered = fresh();
+    reentered.before(view, rect, 1, 101);
+    assert.equal(reentered.before(view, rect, 1, 102), false);
+    assert.equal(reentered.reason, 'stage-update-reentered');
 });
 
 test('input drain waits for a nonrecursive empty-queue idle and a genuinely later same-view frame', () => {
@@ -299,4 +449,56 @@ test('generation and revision cannot wrap into retained observations', () => {
     assert.equal(model.invalidate(session), false);
     assert.equal(model.current, null);
     assert.throws(() => model.begin(':1.2', 'wrapped', 2));
+});
+
+test('mapped build contract requires both exact reviewed modules from the same package', () => {
+    for (const build of ORDERING_BUILDS) {
+        const files = [{path: ORDERING_MAIN, size: 2755048, sha256: build.main},
+            {path: ORDERING_CLUTTER, size: 1104608, sha256: build.clutter}];
+        assert.equal(orderingContractFor(files), `sha256:${build.main}`);
+        assert.equal(orderingContractFor([{...files[0], sha256: '0'.repeat(64)}, files[1]]), '');
+        assert.equal(orderingContractFor([{...files[0], size: files[0].size + 1}, files[1]]), '');
+        assert.equal(orderingContractFor([files[1], files[0]]), '');
+        assert.equal(orderingContractFor([...files, files[0]]), '');
+        assert.equal(orderingContractFor([{...files[0], path: '/tmp/libmutter-18.so.0.0.0'}, files[1]]), '');
+    }
+    assert.equal(orderingContractFor([{path: ORDERING_MAIN, size: 2755048, sha256: ORDERING_BUILDS[0].main},
+        {path: ORDERING_CLUTTER, size: 1104608, sha256: ORDERING_BUILDS[1].clutter}]), '');
+    assert.equal(orderingContractFor({package: '50.1-0ubuntu2.4', HAVE_EIS_EVENT_REF: true}), '');
+});
+
+const mappedFiles = (mainPath = ORDERING_MAIN) =>
+    `1000-2000 r--p 00000000 08:01 1001 ${mainPath}\n` +
+    `2000-3000 r-xp 00001000 08:01 1001 ${mainPath}\n` +
+    `3000-4000 rw-p 00002000 08:01 1001 ${mainPath}\n` +
+    `5000-6000 r--p 00000000 08:01 1002 ${ORDERING_CLUTTER}\n` +
+    `6000-7000 r-xp 00001000 08:01 1002 ${ORDERING_CLUTTER}\n`;
+
+test('mapped module identity comes from live proc mappings and the same opened file', () => {
+    const modules = mappedOrderingModules(mappedFiles());
+    const file = {device: 2049, inode: 1001, size: 2755048, mode: 0o100644, uid: 0};
+    assert.equal(modules[0].path, ORDERING_MAIN);
+    assert.equal(modules[0].inode, '1001');
+    assert.equal(matchesMappedOrderingFile(modules[0], file), true);
+    for (const change of [{device: 2050}, {inode: 1002}, {uid: 1000}, {mode: 0o100664},
+        {mode: 0o100646}, {mode: 0o120644}, {size: 0}, {size: ORDERING_FILE_MAX + 1},
+        {inode: Number.MAX_SAFE_INTEGER + 1}, {device: -1}])
+        assert.equal(matchesMappedOrderingFile(modules[0], {...file, ...change}), false);
+});
+
+test('mapping rejects deleted, substituted, writable-executable, missing and ambiguous loaded modules', () => {
+    for (const text of [mappedFiles(`${ORDERING_MAIN} (deleted)`), mappedFiles('/tmp/libmutter-18.so.0.0.0'),
+        mappedFiles().replace('r-xp', 'rwxp'), mappedFiles().replaceAll('r-xp', 'r--p'),
+        mappedFiles().replace('08:01 1001', '08:01 1008'), mappedFiles().replace('08:01 1001', '08:02 1001'),
+        mappedFiles().replace('1000-2000', '2000-1000'), mappedFiles().replace('r--p', 'r--s'),
+        mappedFiles() + `8000-9000 r-xp 00000000 08:01 1009 ${ORDERING_MAIN}.other\n`,
+        mappedFiles() + '\0', 'x'.repeat(ORDERING_MAPS_MAX + 1), '', null])
+        assert.throws(() => mappedOrderingModules(text));
+});
+
+test('mapping layout identity changes for replacement mappings even with the same installed filename', () => {
+    const old = JSON.stringify(mappedOrderingModules(mappedFiles()));
+    for (const text of [mappedFiles().replaceAll('1001', '1009'),
+        mappedFiles().replace('2000-3000', '2000-4000'), mappedFiles().replace('00001000', '00002000')])
+        assert.notEqual(JSON.stringify(mappedOrderingModules(text)), old);
 });

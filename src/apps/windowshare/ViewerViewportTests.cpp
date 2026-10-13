@@ -63,6 +63,7 @@ GnomeViewportState fixtureState()
   s.surfaceIncarnation = 4;
   s.viewportRevision = 8;
   s.peerFingerprint = QString(64, 'a');
+  s.windowAssociation = QStringLiteral("org.deskflow.window.") + QString(64, 'b');
   s.nativeSurface = 19;
   s.clientWidth = 400;
   s.clientHeight = 400;
@@ -151,6 +152,19 @@ void protocol()
     reply.state.logicalScale = std::numeric_limits<double>::quiet_NaN();
     (void)gnomeViewportJson(reply);
   });
+  for (const auto &association :
+       {QString(), QStringLiteral("org.deskflow.window.") + QString(63, 'b'),
+        QStringLiteral("org.deskflow.window.") + QString(64, 'B'),
+        QStringLiteral("org.deskflow.window.") + QString(64, 'g'),
+        QStringLiteral("another.application.") + QString(64, 'b')}) {
+    rejects([&] {
+      auto json = gnomeViewportJson(original);
+      auto state = json.value(QStringLiteral("state")).toObject();
+      state.insert(QStringLiteral("windowAssociation"), association);
+      json.insert(QStringLiteral("state"), state);
+      (void)parseGnomeViewportReply(json);
+    });
+  }
   rejects([&] { (void)gnomeViewportJson(GnomeViewportRequest{GnomeViewportOperation::Map, 1, 1, 2, 3}); });
   rejects([&] {
     auto json = gnomeViewportJson(GnomeViewportRequest{GnomeViewportOperation::Snapshot, 2});
@@ -311,6 +325,313 @@ struct Pair
     throw std::runtime_error("No reply");
   }
 };
+void preparationGatePromotionAndCleanup()
+{
+  Pair pair;
+  const auto paint = fixtureState();
+  const InputPreparationBinding origin{90, 6, {71, 83, 2}};
+  const GnomePreparationTarget target{
+      paint.session,          paint.epoch, paint.geometry, paint.surfaceIncarnation, 3, paint.nativeSurface,
+      paint.windowAssociation
+  };
+  const GnomePreparationInventory inventory{paint.connection, paint.peerFingerprint, {target}};
+  bool gate = false, all = false, consumed = false, cleanupCompleted = false;
+  std::vector<std::function<void(bool)>> completions;
+  pair.endpoint->onSnapshot = [&] { return std::optional(paint); };
+  pair.endpoint->onPreparationInventory = [&](const auto &binding) {
+    check(binding == origin && !gate, "Preparation inventory lost its exact origin");
+    gate = true;
+    return std::optional(inventory);
+  };
+  pair.endpoint->onPreparationCheck = [&](const auto &binding, const auto &candidate) {
+    return gate && binding == origin && candidate == target;
+  };
+  pair.endpoint->onPreparationDrain = [&](const auto &binding, const auto &candidate, QDeadlineTimer deadline,
+                                          auto finished) {
+    check(
+        gate && binding == origin && candidate == target && deadline.remainingTime() <= 250,
+        "Preparation queue witness lacks its own gate or finite deadline"
+    );
+    completions.push_back(std::move(finished));
+    return true;
+  };
+  pair.endpoint->onPreparationFocus = [&](const auto &, const auto &) { return std::optional(paint); };
+  pair.endpoint->onPreparationFinish = [&](const auto &binding, const auto &candidate, const auto &cutoff) {
+    check(gate && binding == origin && candidate == target, "Preparation retirement changed its origin");
+    if (cutoff) {
+      check(all && *cutoff == fixtureCutoff(), "Promotion omitted its genuine All fence");
+      consumed = true;
+    } else {
+      check(cleanupCompleted, "Preparation gate opened before actual queue completion");
+      gate = false;
+    }
+    return true;
+  };
+  const auto request = [&](GnomeViewportOperation operation, std::uint64_t id) {
+    GnomeViewportRequest value;
+    value.operation = operation;
+    value.request = id;
+    value.preparation = origin;
+    value.budgetMs = 500;
+    if (operation != GnomeViewportOperation::PreparationInventory)
+      value.target = target;
+    if (operation == GnomeViewportOperation::PreparationPromote)
+      value.cutoff = fixtureCutoff();
+    return value;
+  };
+  auto inventoryRequest = request(GnomeViewportOperation::PreparationInventory, 1);
+  check(
+      parseGnomeViewportRequest(gnomeViewportJson(inventoryRequest)) == inventoryRequest,
+      "Preparation protocol did not retain the separate pre-All binding"
+  );
+  rejects([&] {
+    auto value = inventoryRequest;
+    value.budgetMs = 501;
+    (void)gnomeViewportJson(value);
+  });
+  rejects([&] {
+    auto json = gnomeViewportJson(inventoryRequest);
+    json.insert("cutoff", QJsonObject{});
+    (void)parseGnomeViewportRequest(json);
+  });
+  pair.send(inventoryRequest);
+  check(pair.reply(1).inventory == inventory && gate, "Private inventory did not install the preparation gate");
+  pair.send(request(GnomeViewportOperation::PreparationDrain, 2));
+  check(waitUntil([&] { return completions.size() == 1; }), "Preparation queue did not start");
+  completions[0](true);
+  check(pair.reply(2).ok && gate, "Preparation drain opened its forwarding gate");
+  pair.send(request(GnomeViewportOperation::PreparationFocus, 3));
+  check(pair.reply(3).state == paint, "Prepared focus lost the actual Viewer connection");
+  all = true;
+  pair.send(request(GnomeViewportOperation::PreparationPromote, 4));
+  check(pair.reply(4).ok && gate && consumed, "Promotion removed the distinct preparation gate");
+  all = false; // Host timeout/revocation is independent of provider cleanup.
+  pair.endpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+  auto wrong = request(GnomeViewportOperation::PreparationCleanup, 5);
+  ++wrong.preparation.request;
+  pair.send(wrong);
+  check(!pair.reply(5).ok && gate, "Stale cleanup reopened a promoted connection");
+  pair.send(request(GnomeViewportOperation::PreparationCleanup, 6));
+  check(
+      waitUntil([&] { return completions.size() == 2; }) && gate && !all,
+      "Cleanup required the already resumed All fence"
+  );
+  completions[0](true); // A duplicate old completion cannot retire this gate.
+  check(gate, "Late preparation drain reply retired a different operation");
+  cleanupCompleted = true;
+  completions[1](true);
+  check(pair.reply(6).ok && !gate, "Exact completed cleanup did not retire the origin gate");
+
+  Pair canceled;
+  bool cancelGate = false;
+  std::vector<std::function<void(bool)>> pending;
+  canceled.endpoint->onPreparationInventory = [&](const auto &) {
+    cancelGate = true;
+    return std::optional(inventory);
+  };
+  canceled.endpoint->onPreparationCheck = [&](const auto &, const auto &) { return cancelGate; };
+  canceled.endpoint->onPreparationDrain = [&](const auto &, const auto &, auto, auto done) {
+    pending.push_back(std::move(done));
+    return true;
+  };
+  canceled.endpoint->onPreparationFinish = [&](const auto &, const auto &, const auto &) {
+    cancelGate = false;
+    return true;
+  };
+  canceled.send(inventoryRequest);
+  check(canceled.reply(1).ok, "Cancel fixture inventory failed");
+  canceled.send(request(GnomeViewportOperation::PreparationDrain, 2));
+  check(waitUntil([&] { return pending.size() == 1; }), "Cancel fixture did not wait on its queue");
+  canceled.send(request(GnomeViewportOperation::PreparationCleanup, 3));
+  check(
+      !canceled.reply(2).ok && waitUntil([&] { return pending.size() == 2; }) && cancelGate,
+      "Cancel did not retain the gate while replacing a pending witness"
+  );
+  pending[0](true);
+  check(cancelGate, "Canceled late witness opened the gate");
+  pending[1](true);
+  check(canceled.reply(3).ok && !cancelGate, "Post-cancel witness did not complete cleanup");
+}
+void prefixSealMaps()
+{
+  Pair pair;
+  const auto state = fixtureState();
+  const auto origin = fixtureCutoff();
+  bool gate = true;
+  unsigned drains = 0, maps = 0;
+  pair.endpoint->onSnapshot = [&] { return std::optional(state); };
+  pair.endpoint->onCheck = [&](const auto &expected) { return expected == state; };
+  pair.endpoint->onInputDrainCheck = [&](const auto &expected, const auto &binding) {
+    return gate && expected == state && sameInputCutoffLifetime(origin, binding);
+  };
+  pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer, auto done) {
+    ++drains;
+    done(true);
+    return true;
+  };
+  pair.endpoint->onMap = [&](const auto &, QPointF point) {
+    ++maps;
+    return std::optional(point / 2);
+  };
+  pair.send({GnomeViewportOperation::Snapshot, 1});
+  check(pair.reply(1).ok, "Seal fixture has no snapshot");
+  auto seal = drainRequest(2, 1);
+  seal.operation = GnomeViewportOperation::InputSeal;
+  check(parseGnomeViewportRequest(gnomeViewportJson(seal)) == seal, "Seal protocol lost exact binding");
+  pair.send(seal);
+  check(pair.reply(2).ok && drains == 1, "Initial prefix seal did not perform exactly one full queue drain");
+  check(
+      waitUntil([&] {
+        pair.drain();
+        return std::any_of(pair.replies.begin(), pair.replies.end(), [](const auto &r) {
+          return r.operation == GnomeViewportOperation::Invalidated && r.reason == "snapshot-expired";
+        });
+      }),
+      "Original finite point snapshot did not expire"
+  );
+  check(
+      std::none_of(
+          pair.replies.begin(), pair.replies.end(),
+          [](const auto &r) { return r.operation == GnomeViewportOperation::SealInvalidated; }
+      ),
+      "Point expiry revoked historical closed-gate prefix seal"
+  );
+  pair.send({GnomeViewportOperation::Snapshot, 3});
+  check(pair.reply(3).ok, "Fresh mapping snapshot refused after old point expiry");
+  auto map = drainRequest(4, 3);
+  map.operation = GnomeViewportOperation::InputMap;
+  map.seal = origin.request;
+  map.x = 40;
+  map.y = 60;
+  ++map.cutoff.request;
+  ++map.cutoff.capture.sequence;
+  check(parseGnomeViewportRequest(gnomeViewportJson(map)) == map, "Fresh sealed-map protocol changed capture/point");
+  rejects([&] {
+    auto bad = gnomeViewportJson(map);
+    bad.insert("seal", "091");
+    (void)parseGnomeViewportRequest(bad);
+  });
+  pair.send(map);
+  auto mapped = pair.reply(4);
+  check(
+      mapped.ok && mapped.cutoff == map.cutoff && mapped.seal == origin.request && mapped.x == 20 && mapped.y == 30 &&
+          drains == 1 && maps == 1,
+      "Fresh sealed map reran queue drain or lost exact point binding"
+  );
+  map.request = 5;
+  pair.send(map);
+  check(!pair.reply(5).ok && maps == 1, "Repeated captured record reused the prefix map");
+  map.request = 6;
+  ++map.cutoff.request;
+  ++map.cutoff.capture.sequence;
+  ++map.cutoff.forwarding.generation;
+  pair.send(map);
+  check(!pair.reply(6).ok && maps == 1, "Different All gate reused a prefix seal");
+  --map.cutoff.forwarding.generation;
+  map.request = 7;
+  pair.endpoint->onMap = [&](const auto &, QPointF point) {
+    gate = false;
+    pair.endpoint->invalidate(QStringLiteral("all-fence-resumed"));
+    return std::optional(point);
+  };
+  pair.send(map);
+  check(!pair.reply(7).ok, "Reentrant forwarding resume escaped fresh map validation");
+  check(
+      std::any_of(
+          pair.replies.begin(), pair.replies.end(),
+          [&](const auto &r) { return r.operation == GnomeViewportOperation::SealInvalidated && r.cutoff == origin; }
+      ),
+      "Forwarding resume did not publish exact seal revocation"
+  );
+  pair.send({GnomeViewportOperation::Snapshot, 8});
+  check(pair.reply(8).ok, "Post-revocation observational snapshot unavailable");
+  map.request = 9;
+  map.snapshot = 8;
+  ++map.cutoff.request;
+  ++map.cutoff.capture.sequence;
+  pair.send(map);
+  check(!pair.reply(9).ok && drains == 1, "Revoked seal was revived by a fresh snapshot");
+}
+void prefixMapBatches()
+{
+  for (unsigned mode = 0; mode < 4; ++mode) {
+    Pair pair;
+    const auto state = fixtureState();
+    const auto origin = fixtureCutoff();
+    bool gate = true;
+    unsigned maps = 0, drains = 0;
+    pair.endpoint->onSnapshot = [state] { return state; };
+    pair.endpoint->onCheck = [state](const auto &s) { return s == state; };
+    pair.endpoint->onInputDrainCheck = [&](const auto &, const auto &binding) {
+      return gate && sameInputCutoffLifetime(origin, binding);
+    };
+    pair.endpoint->onInputDrain = [&](const auto &, const auto &, QDeadlineTimer, auto done) {
+      ++drains;
+      done(true);
+      return true;
+    };
+    pair.endpoint->onMap = [&](const auto &, QPointF point) -> std::optional<QPointF> {
+      ++maps;
+      if (maps == 2) {
+        if (mode == 1)
+          return {};
+        if (mode == 2) {
+          gate = false;
+          pair.endpoint->invalidate(QStringLiteral("batch-gate-resumed"));
+        }
+        if (mode == 3)
+          QThread::msleep(25);
+      }
+      return point / 2;
+    };
+    pair.send({GnomeViewportOperation::Snapshot, 1});
+    check(pair.reply(1).ok, "Batch fixture snapshot failed");
+    auto seal = drainRequest(2, 1);
+    seal.operation = GnomeViewportOperation::InputSeal;
+    pair.send(seal);
+    check(pair.reply(2).ok, "Batch fixture seal failed");
+    auto batch = drainRequest(3, 1, mode == 3 ? 10 : 250);
+    batch.operation = GnomeViewportOperation::InputMapBatch;
+    for (unsigned i = 0; i < 16; ++i) {
+      auto binding = origin;
+      binding.request += i + 1;
+      binding.capture.sequence += i + 1;
+      batch.points.push_back({binding, 20.0 + i, 40.0 + i});
+    }
+    check(parseGnomeViewportRequest(gnomeViewportJson(batch)) == batch, "Batch schema changed a capture or point");
+    rejects([&] {
+      auto bad = batch;
+      bad.points.push_back(bad.points.back());
+      (void)gnomeViewportJson(bad);
+    });
+    rejects([&] {
+      auto bad = batch;
+      bad.points[1].cutoff = bad.points[0].cutoff;
+      (void)gnomeViewportJson(bad);
+    });
+    rejects([&] {
+      auto bad = batch;
+      ++bad.points[1].cutoff.viewerConnection;
+      (void)gnomeViewportJson(bad);
+    });
+    pair.send(batch);
+    const auto reply = pair.reply(3);
+    check(reply.cutoff == origin && drains == 1, "Batch lost seal correlation or repeated drain");
+    if (mode == 0) {
+      check(reply.ok && reply.points.size() == 16 && maps == 16, "Exact batch did not map all points atomically");
+      for (unsigned i = 0; i < 16; ++i)
+        check(
+            reply.points[i].cutoff == batch.points[i].cutoff && reply.points[i].x == batch.points[i].x / 2 &&
+                reply.points[i].y == batch.points[i].y / 2,
+            "Batch reordered or substituted mapped points"
+        );
+      ++batch.request;
+      pair.send(batch);
+      check(!pair.reply(4).ok && maps == 16, "Repeated batch was remapped");
+    } else
+      check(!reply.ok && reply.points.empty(), "Failed batch exposed partial mappings");
+  }
+}
 void endpointLifetime()
 {
   Pair pair;
@@ -813,6 +1134,10 @@ int bootstrapChild(int argc, char **argv)
     );
     const QStringList valid{"gnome-viewport-fd", "enable-seamless", "headless", "connect", "identity", "peer-pin"};
     bootstrap.validateOptions(valid);
+    bootstrap.validateOptions(valid + QStringList{"capture-fps"});
+    rejects([&] { bootstrap.validateOptions(valid + QStringList{"capture-fps", "capture-fps"}); });
+    bootstrap.validateOptions(valid + QStringList{"share-clipboard-text"});
+    rejects([&] { bootstrap.validateOptions(valid + QStringList{"share-clipboard-text", "share-clipboard-text"}); });
     for (const auto &forbidden : {"listen", "help", "init-identity", "core-input-fd", "gnome-viewport-fd"})
       rejects([&] { bootstrap.validateOptions(valid + QStringList{forbidden}); });
     auto incomplete = valid;
@@ -886,6 +1211,9 @@ int main(int argc, char **argv)
   try {
     protocol();
     inputDrainProtocol();
+    preparationGatePromotionAndCleanup();
+    prefixSealMaps();
+    prefixMapBatches();
     endpointLifetime();
     deferredQtQueueCheckpoint();
     fencedInputQueue();

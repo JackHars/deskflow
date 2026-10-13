@@ -14,6 +14,7 @@
 #include "deskflow/OptionTypes.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputCutoff.h"
+#include "windowshare/InputPreparation.h"
 #endif
 
 #include <string>
@@ -180,7 +181,41 @@ public:
   */
   void setOptions(const OptionsList &options);
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &);
+  deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &);
+  std::optional<deskflow::windowshare::PreparedInputFocusResult>
+  preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &);
+  bool promoteInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  );
+  void abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &) noexcept;
+
   bool beginInputCutoff(const windowshare::InputCutoffBinding &, windowshare::InputCutoffClock::time_point);
+  bool beginMappedInputCutoff(
+      const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint, windowshare::InputCutoffClock::time_point
+  );
+  std::optional<windowshare::InputCutoffMappedResult> mappedInputCutoffResult(const windowshare::InputCutoffBinding &);
+  bool beginSealedInputCutoff(
+      const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint, windowshare::InputCutoffClock::time_point
+  );
+  bool refreshMappedInputCutoff(
+      const windowshare::InputCutoffBinding &, const windowshare::InputCutoffBinding &, windowshare::InputCutoffPoint,
+      windowshare::InputCutoffClock::time_point, bool
+  );
+  bool beginMappedInputBatch(
+      const windowshare::InputCutoffBinding &, const std::vector<windowshare::InputCutoffBatchItem> &
+  );
+  bool inputCutoffSealLive(const windowshare::InputCutoffBinding &);
   windowshare::InputCutoffState inputCutoffState(const windowshare::InputCutoffBinding &);
   bool resumeInputCutoff(const windowshare::InputCutoffBinding &);
 #endif

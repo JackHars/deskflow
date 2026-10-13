@@ -200,7 +200,12 @@ class Bundle:
             raise RuntimeError("Bundle executable name is invalid")
         self.main = self.executables / name
         self.helper = self.executables / "deskflow-holding-display-helper"
-        for executable in (self.main, self.helper):
+        self.required_executables = {self.main, self.helper}
+        if name == "deskflow-core":
+            # The opt-in Core launcher resolves this exact sibling. It is not
+            # optional merely because no Mach-O file remains to inventory.
+            self.required_executables.add(self.executables / "deskflow-windowshare")
+        for executable in self.required_executables:
             if not executable.is_file() or not inside(executable, self.path) or not os.access(executable, os.X_OK):
                 raise RuntimeError("Missing or external bundle executable: " + str(executable))
         self.roots = list(dict.fromkeys(Path(root).resolve() for root in search_roots))
@@ -349,7 +354,7 @@ class Bundle:
         return self.verify(signature=False)
 
     def fixed_executables(self):
-        fixed = {self.main, self.helper}
+        fixed = set(self.required_executables)
         for name in ("deskflow-core", "deskflow-windowshare"):
             candidate = self.executables / name
             if candidate.exists() or candidate.is_symlink():
@@ -479,7 +484,11 @@ class Bundle:
         records = [inspect(path) for path in mach_files(self.path)]
         binary_paths = {info.path for info in records}
         errors = []
-        effective = max(info.minimum for info in records)
+        missing = self.fixed_executables() - binary_paths
+        if missing:
+            errors.append("A fixed executable is not a contained Mach-O binary: " +
+                          ", ".join(str(path) for path in sorted(missing)))
+        effective = max([self.main_info.minimum] + [info.minimum for info in records])
         declared = version(str(self.plist.get("LSMinimumSystemVersion", "0.0")))
         main_architectures = self.main_info.architectures
         for info in records:

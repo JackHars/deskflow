@@ -45,10 +45,10 @@ LocalInputIncarnation localInputConnectionIncarnation(std::uint64_t counter);
 
 // Qt-thread coordinator, independently validating each endpoint's local TLS
 // evidence against the same explicit pair. No native capture or delivery is
-// installed here. Production does not construct this controller yet: ordered
-// pointer ownership and authoritative cutover permits are still
-// required. In particular an empty tracker or a viewer-supplied flag is not a
-// valid implementation of Checks.
+// installed here. OriginalInputCoordinator connects the production full-input
+// path and retains its ordered ownership and authoritative cutover permits
+// independently. An empty tracker or a viewer-supplied flag is not a valid
+// implementation of Checks.
 class LocalInputPreflight final
 {
 public:
@@ -70,6 +70,20 @@ public:
   };
   struct Checks
   {
+    Checks(
+        std::function<bool(const LocalInputLease &)> admission = {},
+        std::function<bool(const LocalInputLease &)> delivery = {},
+        std::function<bool(const LocalInputLease &)> neutral = {},
+        std::function<bool(const LocalInputLease &, LocalInputRevocation)> cleanup = {},
+        std::function<bool(const LocalInputLease &)> acquisition = {}
+    )
+        : codeAdmission(std::move(admission)),
+          deliveryReady(std::move(delivery)),
+          neutralBoundary(std::move(neutral)),
+          release(std::move(cleanup)),
+          acquisitionBoundary(std::move(acquisition))
+    {
+    }
     // All three are required. State and evidence are revalidated after each
     // callback; none of these callbacks may supply peer-learned authority.
     // codeAdmission requires the retained exact executable/loader-policy
@@ -84,6 +98,13 @@ public:
     // Disable local delivery and release this exact owner synchronously. False
     // or absence closes the channel; never resume the viewer on failed release.
     std::function<bool(const LocalInputLease &, LocalInputRevocation)> release;
+    // Explicit alternative to complete physical neutrality. A Core provider
+    // must retain opaque evidence for the exact fresh captured transition,
+    // keep unknown/previously held controls at their old owner, and complete
+    // delivered-owner releases before the native cutoff. Host independently
+    // verifies its exact released legacy ledger/All gate. This is not an OS
+    // snapshot or upstream input drain. Supply exactly one boundary provider.
+    std::function<bool(const LocalInputLease &)> acquisitionBoundary;
   };
   struct Host
   {

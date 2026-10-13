@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 from pathlib import Path
+import posixpath
+import re
 import shutil
 import stat
 import tarfile
@@ -59,6 +62,92 @@ class LinuxArchiveTests(unittest.TestCase):
             self.assertFalse(any("/gnome-shell/extensions/" in name for name in names))
             self.assertFalse(any(name.startswith("usr/") for name in names))
             self.assertTrue(all(entry.isfile() for entry in archive))
+
+    def test_mapped_ordering_adapter_is_required_and_integrity_bound(self):
+        files = self.files()
+        adapter = f"{package.PROVIDER}/ordering.js"
+        self.assertEqual(files[adapter][0], (HERE / "gnome-provider/ordering.js").read_bytes())
+        original, mode = files[adapter]
+        files[adapter] = (original + b"\n// changed", mode)
+        changed = self.root / "changed-ordering.tar.gz"
+        package.write_archive(changed, files)
+        with self.assertRaisesRegex(ValueError, "differs from manifest"):
+            package.verify_archive(changed)
+        alternative = self.root / "source" / "deploy" / "windowshare" / "gnome-provider"
+        alternative.parent.mkdir(parents=True)
+        shutil.copytree(HERE / "gnome-provider", alternative)
+        (alternative / "ordering.js").unlink()
+        with self.assertRaisesRegex(ValueError, "Provider file missing"):
+            package.package_files(self.viewer, self.core, self.root / "source", self.source_sha)
+
+    def test_packaged_provider_imports_and_ordering_diagnostics_are_complete(self):
+        files = self.files()
+        prefix = package.PROVIDER + "/"
+        # Follow actual relative imports, including the diagnostic's ../ import,
+        # so a future runtime dependency cannot silently miss the fixed list.
+        for name, (data, _) in files.items():
+            if not name.startswith(prefix) or not name.endswith(".js"):
+                continue
+            for dependency in re.findall(r"(?:from\s+|import\s*)['\"](\.[^'\"]+)['\"]", data.decode()):
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(name), dependency))
+                self.assertTrue(target.startswith(prefix), (name, dependency))
+                self.assertIn(target, files, (name, dependency))
+        for name in ("interface.xml", "ordering-builds.json", "ordering-builds.json.license",
+                     "verify-ordering-build.py", "tests/ordering-native.js", "tests/launcher.gjs.js",
+                     "tests/launcher-native.py"):
+            self.assertEqual(files[prefix + name], ((HERE / "gnome-provider" / name).read_bytes(), 0o644))
+        npm = json.loads(files[prefix + "package.json"][0])
+        self.assertEqual(npm["scripts"]["test"], "node --test tests/*.test.js")
+        cases = list((HERE / "gnome-provider/tests").glob("*.test.js"))
+        self.assertTrue(cases)
+        for case in cases:
+            self.assertEqual(files[prefix + "tests/" + case.name], (case.read_bytes(), 0o644))
+        evidence = json.loads(files[prefix + "ordering-builds.json"][0])
+        self.assertEqual(evidence["schema"], 1)
+        self.assertTrue(evidence["builds"])
+        logic = files[prefix + "logic.js"][0].decode()
+        for build in evidence["builds"]:
+            for module in build["modules"]:
+                self.assertIn(module["sha256"], logic)
+        for name in ("package-linux.md", "app-compatibility.md", "focused-clipboard.md"):
+            self.assertEqual(files[f"{package.SHARE}/{name}"], ((HERE / name).read_bytes(), 0o644))
+
+    def test_self_consistent_manifest_cannot_omit_provider_or_diagnostics(self):
+        original = self.files()
+        required = [f"{package.PROVIDER}/{name}" for name in package.PROVIDER_FILES]
+        required += [f"{package.SHARE}/{name}" for name in package.DOCUMENT_FILES]
+        for index, missing in enumerate(required):
+            with self.subTest(missing=missing):
+                files = dict(original)
+                del files[missing]
+                manifest = json.loads(files["MANIFEST.json"][0])
+                del manifest["files"][missing]
+                files["MANIFEST.json"] = (json.dumps(manifest).encode(), 0o644)
+                archive = self.root / f"missing-{index}.tar.gz"
+                package.write_archive(archive, files)
+                with self.assertRaisesRegex(ValueError, "Package missing"):
+                    package.verify_archive(archive)
+
+    def test_missing_or_linked_ordering_evidence_and_compatibility_are_denied(self):
+        source = self.root / "source"
+        windowshare = source / "deploy/windowshare"
+        windowshare.mkdir(parents=True)
+        shutil.copytree(HERE / "gnome-provider", windowshare / "gnome-provider")
+        for name in package.DOCUMENT_FILES:
+            shutil.copy2(HERE / name, windowshare / name)
+        for name in ("gnome-provider/ordering-builds.json", "gnome-provider/verify-ordering-build.py",
+                     "app-compatibility.md", "focused-clipboard.md"):
+            with self.subTest(missing=name):
+                path = windowshare / name
+                contents = path.read_bytes()
+                path.unlink()
+                with self.assertRaisesRegex(ValueError, "missing or symlinked"):
+                    package.package_files(self.viewer, self.core, source, self.source_sha)
+                path.symlink_to(HERE / name)
+                with self.assertRaisesRegex(ValueError, "missing or symlinked"):
+                    package.package_files(self.viewer, self.core, source, self.source_sha)
+                path.unlink()
+                path.write_bytes(contents)
 
     def test_cannot_overwrite_archive_or_follow_output_symlink(self):
         dest = self.root / "do-not-touch.tar.gz"

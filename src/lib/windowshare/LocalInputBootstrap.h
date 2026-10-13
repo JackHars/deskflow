@@ -6,6 +6,7 @@
 
 #include "LocalInputPreflight.h"
 #include <QStringList>
+#include <functional>
 
 namespace deskflow::windowshare {
 
@@ -18,10 +19,12 @@ public:
   static LocalInputHostConfiguration load(const QString &configPath);
   const QStringList &hostArguments() const;
   const LocalInputPeerPolicy &peerPolicy() const;
+  const QString &inputEvidenceConfig() const;
 
 private:
   LocalInputHostConfiguration() = default;
   QStringList m_arguments;
+  QString m_inputEvidenceConfig;
   LocalInputPeerPolicy m_peerPolicy;
 };
 
@@ -53,12 +56,14 @@ public:
   // Reject diagnostic/configuration actions before they have side effects.
   void validateOptions(const QStringList &names) const;
   // Derives and verifies the direct parent independently using packaged code.
-  std::unique_ptr<LocalInputChannel> adopt();
+  // Optional recorder setup runs after parent/endpoint validation, before
+  // constructing the channel whose initial queues it must observe.
+  std::unique_ptr<LocalInputChannel> adopt(const std::function<void()> &verifiedSetup = {});
 
 private:
   LocalInputHostBootstrap() = default;
   int m_descriptor = -1;
-  bool m_probe = false, m_peerPairsSupplied = false;
+  bool m_probe = false, m_peerPairsSupplied = false, m_evidenceSupplied = false;
   LocalInputPeerPolicy m_peerPolicy;
 };
 

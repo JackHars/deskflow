@@ -68,6 +68,22 @@ class Gates(unittest.TestCase):
             self.clock.mark_baseline()
 
 
+class PlanModes(unittest.TestCase):
+    def test_legacy_and_production_scopes_are_explicit_and_separate(self):
+        self.assertFalse(module.route_mode({'version': 2, 'controlProtocol': 2}))
+        original = {'version': 3, 'controlProtocol': 3, **module.original_metadata(True)}
+        self.assertTrue(module.route_mode(original))
+        for bad in ({}, {'version': 2}, {'controlProtocol': 2},
+                    {'version': 2, 'controlProtocol': 2, **module.original_metadata(True)},
+                    {'version': 3, 'controlProtocol': 3},
+                    {**original, 'version': 2}, {**original, 'controlProtocol': 2},
+                    {**original, 'version': 3.0}, {**original, 'controlProtocol': 3.0},
+                    {**original, 'macOriginalInputConfigured': False},
+                    {**original, 'routeMode': 'legacy'}):
+            with self.subTest(plan=bad), self.assertRaises(RuntimeError):
+                module.route_mode(bad)
+
+
 class Commands(unittest.TestCase):
     @contextlib.contextmanager
     def reader(self, data):
@@ -239,7 +255,9 @@ class OrdinaryAudit(unittest.TestCase):
 
 FAKE_CHILD = r'''
 import json,sys
-print(json.dumps({'event':'prepared','controlProtocol':2,'windowId':42}),flush=True)
+protocol=int(sys.argv[2])
+scope={'routeMode':'production-original-input','macOriginalInputConfigured':True} if protocol==3 else {}
+print(json.dumps({'event':'prepared','controlProtocol':protocol,'windowId':42,**scope}),flush=True)
 for line in sys.stdin:
     value=json.loads(line)
     if value['op']=='start':
@@ -252,7 +270,8 @@ raise SystemExit(9)
 
 
 class Supervisor(unittest.TestCase):
-    def drive(self, *, exit_code=0, changed_at_start=False, changed_at_exit=False, start=True, early_stop=False):
+    def drive(self, *, exit_code=0, changed_at_start=False, changed_at_exit=False, start=True, early_stop=False,
+              original=False, prepared_protocol=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run = Path(temporary.name)
@@ -264,7 +283,9 @@ class Supervisor(unittest.TestCase):
         if start:
             snapshots.append(changed if changed_at_start else before)
         snapshots.append(changed if changed_at_exit else before)
-        plan = {'sourceHashes': {}, 'binaryHashes': {'core': 'hash', 'viewer': 'hash'},
+        protocol = 3 if original else 2
+        plan = {'version': protocol, 'controlProtocol': protocol, **module.original_metadata(original),
+                'sourceHashes': {}, 'binaryHashes': {'core': 'hash', 'viewer': 'hash'},
                 'coreExecutable': '/tmp/deskflow-core', 'viewerExecutable': '/tmp/deskflow-windowshare',
                 'ordinaryPids': [42], 'ordinaryConfigs': ['/tmp/config'], 'ordinaryAtPrepare': before,
                 'container': 'deskflow-cross-' + '1' * 16, 'token': '2' * 32,
@@ -278,7 +299,9 @@ class Supervisor(unittest.TestCase):
         real_popen = subprocess.Popen
 
         def launch(_arguments, **kwargs):
-            child = real_popen([sys.executable, '-c', FAKE_CHILD, str(exit_code)], **kwargs)
+            self.assertEqual('--production-original-input' in _arguments, original)
+            child = real_popen([sys.executable, '-c', FAKE_CHILD, str(exit_code),
+                               str(prepared_protocol or protocol)], **kwargs)
             children.append(child)
             return child
 
@@ -338,6 +361,23 @@ class Supervisor(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(replies[-1]['cleanup']['containerExit'], 7)
         self.assertEqual(report['status'], 'failed')
+
+    def test_production_supervisor_runs_distinct_mode_without_claiming_physical_success(self):
+        result, replies, report = self.drive(original=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(replies[0]['controlProtocol'], 3)
+        for value in (replies[0], replies[-1], report):
+            self.assertEqual(value['routeMode'], 'production-original-input')
+            self.assertTrue(value['macOriginalInputConfigured'])
+        self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+        self.assertFalse(report['syntheticInputSent'])
+
+    def test_production_supervisor_rejects_legacy_prepared_receipt(self):
+        result, replies, report = self.drive(original=True, prepared_protocol=2, start=False, early_stop=True)
+        self.assertEqual(result, 1)
+        self.assertEqual([value['event'] for value in replies], ['failed'])
+        self.assertIn('Invalid prepared receipt', report['failure'])
+        self.assertEqual(report['commands'], [{'id': 1, 'op': 'stop'}])
 
 
 if __name__ == '__main__':

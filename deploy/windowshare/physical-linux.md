@@ -9,6 +9,12 @@ never sends test EIS input. Original-input authorization remains off. An EIS
 connection or a painted-viewport observation is **not physical-input success**;
 the Mac coordinator must verify the human's input and the owned source receipts.
 
+The explicit `prepare --production-original-input` mode creates a distinct v3
+plan for [production H04/H06 verification](original-input-physical.md). It
+requires actual supported provider preparation/drain capabilities and still
+does not grant fixture authority or claim physical acceptance. The v2 default
+and its historical control protocol remain unchanged.
+
 Use an existing Ubuntu 26.04 image containing GNOME 50, libei 1.5+, Qt 6.10 Wayland
 and the dependencies listed in `gnome-provider-container.sh`. Supply its exact
 installed `sha256:` image ID, the actual experimental Linux core and viewer,

@@ -6,15 +6,22 @@ SPDX-License-Identifier: MIT
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
-**Local work resumed on 2026-10-13.** This document retains the cloud assignment
-and roadmap; the newest entries in `WORK_STATE.md` and `TESTING.md` identify the
-current implementation and evidence. The cloud has implemented private protocol
-v4 with explicit full-input scope and asynchronous Server preparation. Neither
-those contracts nor the GNOME/Qt observations enable original-input delivery.
-The local continuation now adds negotiated Core cutoff/PONG/resume components
-and a separate exact-fenced GNOME/Qt input-drain segment. See P2 below and the
-newest `TESTING.md` entry for its final validation. The Core-to-provider
-coordinator and verified Mutter sender-ordering prerequisite remain missing.
+**Local implementation resumed on 2026-10-13.** The production coordinator is
+now wired from Server through private protocol v5, negotiated Core IPC5,
+EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
+sender-ordering prerequisite; a retained prefix supports bounded exact point
+batches without reopening the full forwarding gate. Original input requires
+the explicitly configured peer pair and every live native prerequisite.
+X11 has an actual-connection namespace witness but no proven application-input
+drain, so it cannot authorize original input.
+
+This checklist records implementation, not physical acceptance. The newest
+`WORK_STATE.md` and `TESTING.md` entries identify each tested source and its
+limits. Multiple-window association, focused text clipboard and native
+lifecycle/child-return changes are part of the current working candidate;
+first-click preparation now passes actual Core/GNOME integration at both Qt
+scales. Natural edge dragging and final acceptance remain open. Historical
+results below do not cover later source changes.
 
 ## Assignment and division of work
 
@@ -69,7 +76,7 @@ Do not substitute a success-returning stub for a missing platform capability.
 - Read any applicable `AGENTS.md` in your checkout. Inspect status before edits
   and preserve unrelated changes. Follow existing formatting and REUSE headers.
 
-At handoff the project is approximately **50% complete overall**. This is an
+At the original cloud handoff the project was approximately **50% complete overall**. This is a historical
 engineering estimate, not a count of passing tests. The capture/viewer and many
 input primitives work; the production original-input controller, seamless edge
 drag and broader acceptance are unfinished.
@@ -129,13 +136,13 @@ Use current code and the newest work-state entry to resolve historical wording.
 | Area | Main files | Current state |
 | --- | --- | --- |
 | Server ownership | `src/lib/server/Server.{h,cpp}`, `src/lib/windowshare/InputRouteState.h`, `src/unittests/server/ServerTests.cpp` | Bounded pre-dispatch queue, exact owner ledger and trusted dispatcher interface exist. |
-| Production registration | `src/lib/deskflow/ServerApp.cpp` | Registers routes and capture inbox on Mac; does **not** install `OriginalInputDispatcher`. |
+| Production registration | `src/lib/deskflow/ServerApp.cpp`, `src/lib/windowshare/OriginalInputCoordinator.{h,cpp}` | Installs the configured Mac dispatcher; bounded Qt/Core mailboxes retain exact source, selection, lease and cleanup. |
 | Capture | `src/lib/platform/OriginalInputCaptureSource_mac.mm`, `src/lib/windowshare/OriginalInput.{h,cpp}`, `OriginalInputCapturedInbox.h`, `OriginalInputRoute.{h,cpp}`, `LocalInputSession.cpp` | One raw consumer; separate completed-capture copies reach Server. `onRoutedInput` is historical observation, not a delivery callback. |
-| Private Mac handoff | `src/lib/windowshare/LocalInputChannel.{h,cpp}`, `LocalInputPreflight.{h,cpp}`, `LocalInputSession.{h,cpp}` | Version 4 explicitly retains keyboard or full-input scope; the production coordinator remains absent. |
+| Private Mac handoff | `src/lib/windowshare/LocalInputChannel.{h,cpp}`, `LocalInputPreflight.{h,cpp}`, `LocalInputSession.{h,cpp}` | Version 5 retains explicit scope, mapped point/deadline, exact Viewer target and completed Host release. |
 | Host/viewer | `src/apps/windowshare/main.cpp` (`Bridge`), `NativeHost_mac.mm`, `Viewer.cpp`, `KeyboardRouteProtocol.cpp`; `src/lib/windowshare/KeyboardRoute.h` | Negotiated `input-route-v1` gates key/button/move/scroll forwarding. It is not a native queue drain or permission to post original input. |
 | GNOME | `src/lib/platform/EiComputer.{h,cpp}`, `src/lib/windowshare/GnomeProviderClient.{h,cpp}`, `GnomeViewportProtocol.{h,cpp}`, `deploy/windowshare/gnome-provider/` | Owns an EIS/viewer lifetime and joins native hit observations to last-painted Qt geometry. No original-delivery permit. |
 | Qt native viewport | `src/apps/windowshare/WaylandViewport.{h,cpp}`, `ViewerViewportEndpoint.{h,cpp}` | Actual QtWayland surface and private inherited observation channel. Preserve exact-version/private-API checks. |
-| X11 coordinates | `src/lib/windowshare/X11DisplayObserver.{h,cpp}`, `ViewportLease.{h,cpp}`, `src/lib/platform/XWindowsComputer.cpp` | Observation/geometry foundations exist; cross-connection namespace witness and production authority remain to be connected. |
+| X11 coordinates | `src/lib/windowshare/X11CoordinateEndpoint.{h,cpp}`, `X11DisplayObserver.{h,cpp}`, `src/lib/platform/XWindowsComputer.cpp` | Actual Core and Qt connections exchange a private namespace witness and validate native hits. Original-input authority remains unavailable without a native drain. |
 | Holding/restore/media | `src/apps/windowshare/HoldingDisplay*`, `NativeHost_mac.mm` (capture/encoding), `VideoDecoder*`, `src/lib/windowshare/Core.{h,cpp}` | Holding helper, capture, H.264, journal and normal restoration exist. Full lifecycle/compatibility/performance work remains. |
 | Build/tests | `src/apps/windowshare/CMakeLists.txt`, `src/unittests/windowshare/`, `.github/workflows/windowshare-foundation.yml` | Portable original-input code is in `windowshare-original-input`; Server links it when enabled. Preserve ON and OFF core builds. |
 
@@ -180,12 +187,14 @@ verify the current interfaces instead of relying on old line numbers.
 ### P1 — Full-input private lease and asynchronous preparation
 
 - [x] Carry full input scope through `LocalInputLease`, private framing,
-  preflight, host reservation/activation and release. Protocol v4 has a 192-byte
+  preflight, host reservation/activation and release. Protocol v5 retains a 192-byte
   lease with explicit scope and strict version/capability decoding; old or
   mismatched scope cannot silently become a keyboard lease.
 - [x] Preserve independent code-admission, delivery-ready and neutral-boundary
-  checks. Activation requires physical neutrality; active use may retain that
-  owner's held input. Release must be synchronous at the owner boundary or
+  checks. Production acquisition uses exact release-then-fresh-down source
+  evidence (or the defined fresh scroll transition); capture continuity alone
+  cannot qualify it. The legacy neutral-boundary mode remains separate. Active
+  use may retain that owner's held input. Release must be synchronous or
   remain an explicit unfinished release with forwarding closed.
 - [x] Add bounded asynchronous Server preparation with explicit pending,
   refused, accepted and revoked results, exact nonreused tickets and a separate
@@ -216,24 +225,24 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
   segment with exact correlation, inherited deadline, a nonrecursive empty
   Clutter queue and later completed frame, two default-queue Qt syncs, QPA
   dispatch and exact All-fence checks. Resume revokes pending/retained receipts.
-- [ ] Connect those segments to the **same frozen Server point and retained
+- [x] Connect those segments to the **same frozen Server point and retained
   preparation lease**, verifying Mutter's compiled sender-ordering guarantee.
   The fixture's synthetic Core fields are not a production coordinator.
-- [ ] Fence new legacy key/button/wheel acquisition, explicitly release old
+- [x] Fence new legacy key/button/wheel acquisition, explicitly release old
   owners, and establish backend → compositor → Qt consumption ordering while
   the full forwarding gate remains closed. Keep explicitly permitted cursor
   presentation distinct from input authority.
-- [ ] Complete authoritative validation of the **Server's frozen point and
+- [x] Complete authoritative validation of the **Server's frozen point and
   sequence** against the cutoff and exact binding. The implemented
   `requestRoutedPointObservation()` already accepts a frozen point and sequence
-  and joins native/painted observations; it still supplies no delivery permit.
+  and joins native/painted observations; it alone supplies no delivery permit.
   Retain native ownership, hit/occlusion, geometry, focus and freshness at use.
-- [ ] Add owned first-click activation with fresh focus/paint validation if the
+- [x] Add owned first-click activation with fresh focus/paint validation if the
   Viewer is not focused. Do not inject a duplicate Linux click to activate it.
-- [ ] Complete the X11 namespace witness and hit validation described in the
+- [x] Complete the X11 namespace witness and hit validation described in the
   coordinate plan using the real injection and Qt connections. Preserve their
   event-queue owners; do not open a second display and treat it as equivalent.
-- [ ] Keep unsupported compositor/API/device/layout states unavailable rather
+- [x] Keep unsupported compositor/API/device/layout states unavailable rather
   than using guessed coordinates or a generic Wayland fallback.
 
 **GNOME/Qt implementation boundaries — segments are not delivery authority:**
@@ -251,7 +260,9 @@ fixture-only readiness. See tests C03/C04/C05 and later H03/H04.
    drain detaches its queue before callbacks. Request arrival during reentrant
    dispatch must be refused. The new operation ignores a frame begun before
    the empty-queue checkpoint and checks required APIs at runtime. It still
-   reports `mutter-eis-sync-build-unverified` rather than a total prefix permit.
+   reports `mutter-eis-sync-build-unverified` for builds outside the audited
+   native ELF/source contracts. Known versions must still pass all runtime
+   queue, frame, ownership and lifetime checks.
 3. After the provider boundary, the distinct input-drain operation binds two asynchronous
    `wl_display_sync` callbacks on Qt's **existing default input queue** to the
    exact full forwarding fence. Qt may schedule a deferred-focus sync while
@@ -273,13 +284,14 @@ Primary sources to recheck for supported versions: Mutter 50.1
 `qwaylanddisplay.cpp` in [qtwayland](https://github.com/qt/qtwayland) and
 `qwindowsysteminterface.cpp` in [qtbase](https://github.com/qt/qtbase).
 
-The existing authoritative association is owned `Meta.WaylandClient` → exact
-single `MetaWindow` → sole native surface, plus the inherited private socket to
-that Viewer. There is no provider-returned `wl_surface` resource ID compared
-directly with Qt's `nativeSurface`, and no established public EIS-session-to-
-Clutter-device association. Do not invent either. Retain the enforced single-
-window/single-surface restriction until a real per-window association replaces
-it. A current session close kills the owned Viewer; closing it is not a drain.
+The per-window association now uses a private unpredictable app_id challenge
+written on the actual Qt xdg_toplevel role. Its authenticated private snapshot
+must match exactly one MetaWindow owned by the provider's Meta.WaylandClient;
+the native wm-class/instance echo proves that role write reached Mutter.
+Duplicate tokens, popup/unknown roles, native tree ambiguity and role/surface
+replacement deny. The token stays stable through a retained seal. Do not
+invent a compositor wl_surface resource-ID comparison or a public
+EIS-session-to-Clutter-device association. Closing a session is not a drain.
 
 Acceptance: delayed native/Qt queues, focus sync, reentrancy, same-batch loss,
 stale/wrong cutoff or point, overlapping/shaped windows, letterboxing, expired
@@ -289,17 +301,17 @@ user's desktop. See C04–C07 and H03–H05.
 
 ### P3 — Connect and enable the production original-input route
 
-- [ ] Implement the coordinator across Server, Session/Preflight, private host
+- [x] Implement the coordinator across Server, Session/Preflight, private host
   channel, Linux validator, Bridge and NativeHost using P1/P2's actual permits.
-- [ ] Install `OriginalInputDispatcher` only for an explicitly configured route
+- [x] Install `OriginalInputDispatcher` only for an explicitly configured route
   whose providers can supply all prerequisites. Registering the capture inbox
   alone must continue to preserve ordinary delivery.
-- [ ] Complete key/modifier/repeat, button/drag, pointer, two-axis scroll and
+- [x] Complete key/modifier/repeat, button/drag, pointer, two-axis scroll and
   momentum handling using the original captured record and exact owner.
-- [ ] Recheck current admission/focus/geometry/connection evidence on delivery
+- [x] Recheck current admission/focus/geometry/connection evidence on delivery
   and heartbeat. Release idle held owners on loss, retain physical-up tombstones,
   and preserve the raw emergency chord after continuity failure.
-- [ ] Exercise the real protocol/adapter chain in automated integration tests;
+- [x] Exercise the real protocol/adapter chain in automated integration tests;
   extend the disposable source/receiver harness so local verification can prove
   native receipts, no duplicates and no held input on the exact candidate.
 
@@ -309,20 +321,23 @@ physical correctness remains pending H02–H04. Do not use the historical
 
 ### P4 — Holding display, multiple windows and two monitors
 
-- [ ] Complete first-painted-frame → holding-display relocation → return as one
+- [x] Complete first-painted-frame → holding-display relocation → return as one
   owned transaction; preserve the source if creation/capture/relocation fails.
-- [ ] Replace single-viewer/single-surface assumptions with explicit per-window
+- [x] Replace single-viewer/single-surface assumptions with explicit per-window
   associations before enabling multiple exported windows in GNOME. Preserve
   exact focus, press, video, geometry and restore ownership per session.
-- [ ] Support overlapping exported/local windows and focus transitions without
+- [x] Support overlapping exported/local windows and focus transitions without
   raising or targeting an unrelated application.
-- [ ] Handle monitor selection, negative coordinates, mixed scale, output
+- [x] Handle monitor selection, negative coordinates, mixed scale, output
   removal/layout changes, helper crash and source/host loss. Keep the holding
   display excluded from ordinary Deskflow cursor boundaries.
 
 Acceptance: simulated topology/geometry/lifecycle failures and session isolation
 in cloud; actual hidden-source rendering, two monitors and mixed scale in H05/H06.
 Qt `QT_SCALE_FACTOR` tests alone do not validate compositor monitor scaling.
+The private native matrix covers two overlapping exact Viewer roles and return
+to the original role at both Qt scales. Earlier intermittent invalidation
+failures are retained; a passing matrix does not prove every timing race absent.
 
 ### P5 — Bidirectional edge drag
 
@@ -343,26 +358,30 @@ Do not call ordinary opening/closing of a Viewer "edge-drag support."
 
 - [ ] Associate dialogs/child windows with the correct exported application and
   session; handle creation/destruction and modal focus without identity guesses.
+  Exact attached Sheet/Drawer association now fences and returns its retained
+  parent locally; remote child rendering/input remains unavailable.
 - [ ] Handle popup/context menus and owned transient surfaces under both Linux
   adapters; unsupported surfaces must not be routed to an unrelated window.
-- [ ] Integrate clipboard with the actual exported-window focus and lifetime,
+- [x] Integrate clipboard with the actual exported-window focus and lifetime,
   preserving configured sharing policy and avoiding feedback loops.
-- [ ] Complete modifier/shortcut mapping and key-repeat behavior. Preserve the
+- [x] Complete modifier/shortcut mapping and key-repeat behavior. Preserve the
   fixed Mac mapping: Option = `alt`, Command = `super`; the old reversal is fixed.
-- [ ] Add reproducible browser/Electron and native-app scenarios, including
+- [x] Add reproducible browser/Electron and native-app scenarios, including
   Unicode/composition behavior or clearly documented unsupported input methods.
+  See `deploy/windowshare/app-compatibility.md`; execution of those named native
+  scenarios is separate, pending H08/H09 evidence.
 
 Acceptance: association, clipboard-loop and key mapping regressions in cloud;
 named applications and real shortcuts/dialogs/menus in H08/H09.
 
 ### P7 — Recovery and performance
 
-- [ ] Add crash-watchdog recovery to the existing restore journal, preserving
+- [x] Add crash-watchdog recovery to the existing restore journal, preserving
   unresolved records and kernel process-birth identities across restart.
-- [ ] Make teardown/recovery idempotent for disconnect, host/helper/viewer/core
+- [x] Make teardown/recovery idempotent for disconnect, host/helper/viewer/core
   failure, sleep/wake, session deactivation and emergency return. Bound shutdown
   and retain diagnostics for hung owned children.
-- [ ] Implement fair active-stream scheduling/backpressure and bounded media
+- [x] Implement fair active-stream scheduling/backpressure and bounded media
   queues, including hidden/minimized viewers, resize and slow consumers.
 - [ ] Add reproducible latency/resource/load measurement tools and define
   explicit acceptance targets before measuring. Do not invent performance claims.
@@ -372,11 +391,15 @@ owned-process cases, sleep/wake and actual performance/soak in H10/H11.
 
 ### P8 — Packaging and hand-back
 
-- [ ] Keep the separate experimental Mac bundle and exact dependency/signing
+- [x] Keep the separate experimental Mac bundle and exact dependency/signing
   policy. Update packaging/tests for new runtime components and permissions.
-- [ ] Supply reproducible Linux packaging, dependencies, startup/configuration
+  The current staged exact-library package passes its audit and private
+  Core/Host handshake; installation and physical input remain H12/H04.
+- [x] Supply reproducible Linux packaging, dependencies, startup/configuration
   and GNOME provider compatibility diagnostics. Do not silently enable a desktop
   extension or overwrite the ordinary Deskflow installation.
+  The archive now verifies its complete provider/diagnostic inventory;
+  end-user installation and upgrade acceptance remain H12.
 - [ ] Run available clean builds, ON/OFF compatibility and meaningful regression
   suites. Use existing CI for Mac compilation/packaging if access is available;
   otherwise record exactly what was not compiled.

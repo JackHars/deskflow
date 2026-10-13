@@ -22,11 +22,17 @@ import tarfile
 
 PACKAGE_ROOT = "deskflow-seamless-linux-experimental"
 RUNTIME = "libexec/deskflow-seamless-experimental"
-PROVIDER = "share/deskflow-seamless-experimental/gnome-provider"
+SHARE = "share/deskflow-seamless-experimental"
+PROVIDER = f"{SHARE}/gnome-provider"
 PROVIDER_FILES = (
-    "README.md", "extension.js", "interface.xml", "launcher.js", "logic.js",
+    "README.md", "extension.js", "interface.xml", "launcher.js", "logic.js", "ordering.js",
     "metadata.json", "metadata.json.license", "package.json", "package.json.license",
+    # Offline provenance and explicit diagnostics are inert; the runtime uses
+    # only the closed allowlist in logic.js, never this evidence manifest.
+    "ordering-builds.json", "ordering-builds.json.license", "verify-ordering-build.py",
+    "tests/ordering-native.js", "tests/logic.test.js", "tests/launcher.gjs.js", "tests/launcher-native.py",
 )
+DOCUMENT_FILES = ("package-linux.md", "app-compatibility.md", "focused-clipboard.md")
 MAX_ARCHIVE_MEMBER = 128 * 1024 * 1024
 MAX_ARCHIVE_TOTAL = 256 * 1024 * 1024
 
@@ -82,6 +88,13 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
     metadata = json.loads(files[f"{PROVIDER}/metadata.json"][0])
     if metadata.get("uuid") != "seamless-windows@deskflow.org" or metadata.get("shell-version") != ["50"]:
         raise ValueError("GNOME extension identity or Shell 50 pin was changed")
+    for name in DOCUMENT_FILES:
+        path = source / "deploy/windowshare" / name
+        if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError(f"Compatibility document missing or symlinked: {path}")
+        if path.stat().st_size > MAX_ARCHIVE_MEMBER:
+            raise ValueError(f"Compatibility document too large: {path}")
+        files[f"{SHARE}/{name}"] = (path.read_bytes(), 0o644)
     manifest = {
         "schema": 1,
         "sourceCommit": source_sha.lower(),
@@ -93,8 +106,11 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
             "Linux x86_64 or matching build architecture and ABI",
             "runtime Qt version matching compiled Qt Wayland private APIs",
             "the build's FFmpeg, XCB/Wayland and libei/GIO system dependencies",
-            "stable native GNOME Shell 50 for the optional observation provider",
+            "stable native GNOME Shell 50 for the optional observation provider; original input also requires "
+            "the exact mapped Mutter/Clutter ordering build documented in gnome-provider/README.md",
             "mutually pinned private TLS identities and explicit user opt-in",
+            "focused text clipboard defaults off and requires explicit policy on both peers",
+            "capture-fps defaults to 30; 60 must be selected on the Mac host and is not measured delivery",
         ],
         "files": {
             name: {"sha256": digest(data), "bytes": len(data), "mode": f"{mode:04o}"}
@@ -175,11 +191,14 @@ def verify_archive(path: Path) -> dict:
         if (digest(data) != info.get("sha256") or len(data) != info.get("bytes") or
                 f"{mode:04o}" != info.get("mode")):
             raise ValueError(f"Package member differs from manifest: {name}")
+    # Checking hashes alone accepts an internally consistent but unlaunchable
+    # archive whose manifest omits a runtime import or compatibility contract.
     required = {"bin/deskflow-seamless-viewer", "bin/deskflow-seamless-core",
-                f"{RUNTIME}/deskflow-windowshare", f"{RUNTIME}/deskflow-core",
-                f"{PROVIDER}/metadata.json", f"{PROVIDER}/extension.js"}
+                f"{RUNTIME}/deskflow-windowshare", f"{RUNTIME}/deskflow-core"}
+    required.update(f"{PROVIDER}/{name}" for name in PROVIDER_FILES)
+    required.update(f"{SHARE}/{name}" for name in DOCUMENT_FILES)
     if not required.issubset(contents):
-        raise ValueError("Package missing an experimental runtime or provider")
+        raise ValueError("Package missing an experimental runtime, provider, or compatibility diagnostic")
     return manifest
 
 

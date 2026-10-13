@@ -5,6 +5,7 @@
 #pragma once
 
 #include "KeyboardRoute.h"
+#include "LocalInputMapping.h"
 #include "OriginalInput.h"
 #include <QByteArray>
 #include <QElapsedTimer>
@@ -107,9 +108,12 @@ enum class LocalInputPhase
   Active
 };
 // Wire capabilities describe code support, never provider readiness/authority.
-// Every v4 endpoint supports keyboard leases; full-input leases are optional.
-inline constexpr std::uint64_t localInputKeyboardCapability = 1, localInputFullCapability = 2;
-inline constexpr std::uint64_t localInputKnownCapabilities = localInputKeyboardCapability | localInputFullCapability;
+// Every v5 endpoint supports keyboard leases; full-input and mapped delivery
+// are separately negotiated. Mapped delivery additionally requires full input.
+inline constexpr std::uint64_t localInputKeyboardCapability = 1, localInputFullCapability = 2,
+                               localInputMappedCapability = 4;
+inline constexpr std::uint64_t localInputKnownCapabilities =
+    localInputKeyboardCapability | localInputFullCapability | localInputMappedCapability;
 
 struct LocalInputLimits
 {
@@ -135,9 +139,10 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 4;
-  static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 256, maxQueueBytes = 16 * 1024;
+  static constexpr std::uint16_t version = 5;
+  static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 320, maxQueueBytes = 16 * 1024;
   static constexpr qsizetype offerPayloadBytes = 128, leasePayloadBytes = 192, maxOriginalPayloadBytes = 244;
+  static constexpr qsizetype mappedPointBytes = 40, maxMappedOriginalPayloadBytes = 284;
 
   // Takes ownership even on failure. expectedCore must come from an independently
   // trusted bootstrap, not argv, an environment variable, or peer packet fields.
@@ -148,6 +153,7 @@ public:
   bool authenticated() const;
   // Qt owner thread only. Negotiated code support is not a delivery permit.
   bool supports(ForwardingScope scope) const;
+  bool supportsMappedInput() const;
   // Owner Qt thread only; wrong-thread, stale and unauthenticated queries deny.
   // Does not invoke callbacks or refresh the authenticated-read deadline.
   std::optional<LocalInputAuthenticatedIdentity> authenticatedIdentity() const;
@@ -159,6 +165,12 @@ public:
   bool offer(LocalInputOffer offer);     // Core -> host.
   bool candidate(LocalInputLease lease); // Host -> core.
   bool quiesced(LocalInputLease lease);  // Host -> core.
+  // Ordered before Quiesced by the host coordinator. This is an attestation
+  // under the same exact pending lease, not an independently usable permit.
+  bool sendInputTarget(LocalInputLease lease, LocalInputTarget target);
+  // Host confirms exact native cleanup and the Viewer's ordered resume ack.
+  // This retires authority only; it cannot prepare or activate a lease.
+  bool sendReleased(LocalInputOffer offer);
   // Bidirectional preflight cancellation, distinct from revoke() of a lease.
   bool cancelOffer(LocalInputOffer offer, LocalInputRevocation reason = LocalInputRevocation::Requested);
   bool prepare(LocalInputLease lease);            // Core -> host.
@@ -169,6 +181,7 @@ public:
   // Motion/scroll use signed32, losslessly validated before encoding. Emergency
   // and discontinuity revoke instead of becoming deliverable records.
   bool sendOriginal(LocalInputLease lease, OriginalInputRecord record);
+  bool sendMappedOriginal(LocalInputLease lease, OriginalInputRecord record, LocalInputMappedPoint point);
   // Retired control acknowledgements/revokes cannot affect a newer route.
   // Fully validated in-flight Original frames for retired routes advance
   // capture replay protection and are discarded without native delivery.
@@ -183,9 +196,11 @@ public:
   // and the private-channel peer attestation against an explicit approved
   // dual-pin mapping; neither endpoint independently observes both sockets.
   // Also query authoritative session/focus/geometry and route state.
-  // Prepare/Commit additionally require a neutral physical press boundary,
-  // completed owner releases, and a quiesced viewer. Never derive this decision
-  // from peer-supplied booleans. Deliver permits held presses for this owner.
+  // Prepare/Commit require a proven source acquisition boundary, completed
+  // delivered-owner releases, and a quiesced viewer. This can be a complete
+  // physical-neutral fence or conservative per-control transition ownership;
+  // an empty tracker supplies neither. Never derive it from peer booleans.
+  // Deliver permits held presses for this exact owner.
   std::function<bool(const LocalInputLease &, LocalInputCheck)> authorize;
   // Use the channel on one Qt event-loop thread. Callbacks may synchronously
   // revoke, close, or destroy their owned channel; notifications keep value
@@ -194,9 +209,13 @@ public:
   std::function<void()> onAuthenticated;
   std::function<void(const LocalInputOffer &)> onOffer;
   std::function<void(const LocalInputLease &)> onCandidate, onQuiesced;
+  std::function<void(const LocalInputLease &, const LocalInputTarget &)> onInputTarget;
+  std::function<void(const LocalInputOffer &)> onReleased;
   std::function<void(const LocalInputOffer &, LocalInputRevocation)> onOfferCancelled;
   std::function<void(const LocalInputLease &)> onPrepare, onPrepared, onActivated;
   std::function<void(const LocalInputLease &, const OriginalInputRecord &)> onOriginal;
+  std::function<void(const LocalInputLease &, const OriginalInputRecord &, const LocalInputMappedPoint &)>
+      onMappedOriginal;
   // Release this exact owner's delivered state; do not fabricate capture events.
   std::function<void(const LocalInputLease &, LocalInputRevocation)> onRevoked;
   std::function<void(QString)> onClosed;
@@ -206,9 +225,12 @@ private:
   LocalInputChannel(int descriptor, LocalInputRole role, LocalInputProcess peer, LocalInputLimits limits);
   bool send(Type type, const QByteArray &payload = {});
   void read();
+  void observeBufferedInput();
   void receive(Type type, const QByteArray &payload);
   void bootstrap(Type type, const QByteArray &payload);
   bool permits(const LocalInputLease &lease, LocalInputCheck check);
+  bool
+  sendOriginalRecord(LocalInputLease lease, OriginalInputRecord record, std::optional<LocalInputMappedPoint> point);
   bool fresh();
   bool peerAlive() const;
   void revoked(LocalInputRevocation reason);
@@ -224,6 +246,8 @@ private:
   std::uint64_t m_peerCapabilities = 0, m_capabilities = 0;
   std::uint64_t m_sent = 0, m_received = 0, m_originalSequence = 0, m_originalTimestamp = 0, m_routeGeneration = 0,
                 m_captureEpoch = 0;
+  std::uint64_t m_evidencePendingBytes = 0;  // Accepted bytes not yet reported by bytesWritten.
+  std::uint64_t m_evidenceBufferedBytes = 0; // Actual Qt receive buffer, before queued read().
   int m_handshake = 0;
   bool m_authenticated = false, m_closed = false, m_readScheduled = false;
   bool m_authorizing = false, m_authorityInvalidated = false;

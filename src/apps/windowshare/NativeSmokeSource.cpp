@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEvent.h>
@@ -40,6 +41,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+using namespace deskflow::windowshare;
+
 namespace {
 constexpr qsizetype receiptHistoryLimit = 128;
 constexpr qint64 receiptSequenceLimit = 9007199254740991;
@@ -62,6 +65,41 @@ template <typename Result, typename... Args> Result nativeMessage(id receiver, c
 id nativeApplication()
 {
   return nativeMessage<id>(reinterpret_cast<id>(objc_getClass("NSApplication")), "sharedApplication");
+}
+
+struct OwnedWindowObservation
+{
+  QJsonObject frame;
+  bool onScreen = false;
+};
+OwnedWindowObservation observeOwnedWindow(long number)
+{
+  OwnedWindowObservation result;
+  if (number <= 0)
+    return result;
+  const auto windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, CGWindowID(number));
+  if (!windows)
+    return result;
+  for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
+    const auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windows, i));
+    const auto ownerValue = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
+    const auto numberValue = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber));
+    int owner = 0, observed = 0;
+    CGRect bounds{};
+    if (!ownerValue || !numberValue || !CFNumberGetValue(ownerValue, kCFNumberIntType, &owner) || owner != getpid() ||
+        !CFNumberGetValue(numberValue, kCFNumberIntType, &observed) || observed != number ||
+        !CGRectMakeWithDictionaryRepresentation(
+            static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds)), &bounds
+        ))
+      continue;
+    result.frame = {
+        {"x", bounds.origin.x}, {"y", bounds.origin.y}, {"width", bounds.size.width}, {"height", bounds.size.height}
+    };
+    const auto visible = static_cast<CFBooleanRef>(CFDictionaryGetValue(info, kCGWindowIsOnscreen));
+    result.onScreen = visible && CFGetTypeID(visible) == CFBooleanGetTypeID() && CFBooleanGetValue(visible);
+  }
+  CFRelease(windows);
+  return result;
 }
 
 bool sameStatusFile(const struct stat &a, const struct stat &b)
@@ -148,6 +186,15 @@ public:
     m_window = window;
     save();
   }
+  void watchControlWindow(QWidget *window)
+  {
+    m_controlWindow = window;
+    save();
+  }
+  void flush()
+  {
+    save();
+  }
   void setManualMetadata(QJsonObject metadata)
   {
     m_manual = std::move(metadata);
@@ -165,28 +212,64 @@ public:
     const auto position = nativeMessage<CGPoint>(event, "locationInWindow");
     const auto window = nativeMessage<id>(event, "window");
     const auto quartz = nativeMessage<CGEventRef>(event, "CGEvent");
-    const auto tag = CGEventGetIntegerValueField(quartz, kCGEventSourceUserData);
-    QJsonObject observed{
-        {"type", qint64(type)},
-        {"elapsedMs", m_clock.elapsed()},
-        {"windowNumber", qint64(nativeMessage<long>(event, "windowNumber"))},
-        {"windowResolved", window != nullptr},
-        {"x", position.x},
-        {"y", position.y},
-        {"modifiers", qint64(nativeMessage<unsigned long>(event, "modifierFlags"))},
-        {"tag", QString::number(tag, 16)},
-        {"synthetic", deskflow::windowshare::isWindowshareSyntheticEvent(tag)},
-        {"sourcePid", qint64(CGEventGetIntegerValueField(quartz, kCGEventSourceUnixProcessID))}
-    };
-    if (type == 10 || type == 11 || type == 12)
-      observed["keyCode"] = int(nativeMessage<unsigned short>(event, "keyCode"));
-    if (type == 22) {
-      observed["dx"] = nativeMessage<double>(event, "scrollingDeltaX");
-      observed["dy"] = nativeMessage<double>(event, "scrollingDeltaY");
-      observed["precise"] = bool(nativeMessage<BOOL>(event, "hasPreciseScrollingDeltas"));
+    if (!quartz) {
+      if (window && window == m_nativeWindow)
+        inputEvidenceInvalidate(InputEvidenceLoss::Malformed);
+      return false;
     }
-    appendReceipt(m_nativeObserved, m_nativeEventCount, std::move(observed));
-    save();
+    const auto tag = CGEventGetIntegerValueField(quartz, kCGEventSourceUserData);
+    InputEvidenceRaw raw;
+    raw.timestamp = CGEventGetTimestamp(quartz);
+    raw.flags = CGEventGetFlags(quartz);
+    auto &fields = raw.fields;
+    fields[0] = CGEventGetType(quartz);
+    const auto integer = [quartz](CGEventField field) { return CGEventGetIntegerValueField(quartz, field); };
+    if (fields[0] == 10 || fields[0] == 11 || fields[0] == 12) {
+      fields[1] = integer(kCGKeyboardEventKeycode);
+      fields[2] = integer(kCGKeyboardEventKeyboardType);
+      fields[3] = integer(kCGKeyboardEventAutorepeat);
+    } else if (fields[0] == 5 || fields[0] == 6 || fields[0] == 7 || fields[0] == 27) {
+      fields[4] = integer(kCGMouseEventDeltaX);
+      fields[5] = integer(kCGMouseEventDeltaY);
+      fields[6] = integer(kCGMouseEventButtonNumber);
+    } else if (fields[0] == 1 || fields[0] == 2 || fields[0] == 3 || fields[0] == 4 || fields[0] == 25 ||
+               fields[0] == 26) {
+      fields[6] = integer(kCGMouseEventButtonNumber);
+      fields[7] = integer(kCGMouseEventClickState);
+    } else if (fields[0] == 22) {
+      fields[8] = integer(kCGScrollWheelEventDeltaAxis2);
+      fields[9] = integer(kCGScrollWheelEventDeltaAxis1);
+      fields[10] = integer(kCGScrollWheelEventPointDeltaAxis2);
+      fields[11] = integer(kCGScrollWheelEventPointDeltaAxis1);
+      fields[12] = integer(kCGScrollWheelEventFixedPtDeltaAxis2);
+      fields[13] = integer(kCGScrollWheelEventFixedPtDeltaAxis1);
+      fields[14] = integer(kCGScrollWheelEventScrollPhase);
+      fields[15] = integer(kCGScrollWheelEventMomentumPhase);
+      fields[16] = integer(kCGScrollWheelEventIsContinuous);
+    }
+    const auto sourcePid = integer(kCGEventSourceUnixProcessID);
+    const auto windowNumber = nativeMessage<long>(event, "windowNumber");
+    // The timestamp/raw effect is observed as received. AppKit may transform
+    // it; the offline join must reject mismatches, never repair these fields.
+    if (auto *evidence = inputEvidence();
+        evidence && m_nativeWindow && window == m_nativeWindow && windowNumber == m_nativeWindowId)
+      evidence->native(raw, windowNumber, sourcePid, tag);
+    if (m_nativePendingWritten - m_nativePendingRead >= m_nativePending.size()) {
+      ++m_nativePendingDropped;
+      inputEvidenceInvalidate(InputEvidenceLoss::BufferFull);
+      return false;
+    }
+    auto &observed = m_nativePending[m_nativePendingWritten++ % m_nativePending.size()];
+    observed = {type,         m_clock.elapsed(),
+                windowNumber, window != nullptr,
+                position,     nativeMessage<unsigned long>(event, "modifierFlags"),
+                tag,          sourcePid,
+                raw};
+    if (type == 22) {
+      observed.dx = nativeMessage<double>(event, "scrollingDeltaX");
+      observed.dy = nativeMessage<double>(event, "scrollingDeltaY");
+      observed.precise = bool(nativeMessage<BOOL>(event, "hasPreciseScrollingDeltas"));
+    }
     return false;
   }
   bool eventFilter(QObject *receiver, QEvent *event) override
@@ -244,6 +327,7 @@ public:
 private:
   void save()
   {
+    drainNative();
     QSaveFile file(m_path);
     if (!file.open(QIODevice::WriteOnly))
       return;
@@ -255,6 +339,34 @@ private:
     // global focused window, then corroborate ID/PID against WindowServer.
     const auto ownWindow = m_window ? nativeMessage<id>(reinterpret_cast<id>(m_window->winId()), "window") : nullptr;
     const auto ownId = ownWindow ? nativeMessage<long>(ownWindow, "windowNumber") : 0;
+    if (m_nativeWindow && (m_nativeWindow != ownWindow || m_nativeWindowId != ownId))
+      if (auto *evidence = inputEvidence())
+        evidence->revokeOwner();
+    m_nativeWindow = ownWindow;
+    m_nativeWindowId = ownId;
+    if (!m_evidenceBound && ownWindow && ownId > 0) {
+      if (auto *evidence = inputEvidence()) {
+        InputEvidenceOwner owner;
+        owner.values[0] = getpid();
+        owner.values[1] = ownId;
+        evidence->bindOwner(owner);
+        m_evidenceBound = true;
+      }
+    }
+    const auto controlWindow =
+        m_controlWindow ? nativeMessage<id>(reinterpret_cast<id>(m_controlWindow->winId()), "window") : nullptr;
+    const auto controlId = controlWindow ? nativeMessage<long>(controlWindow, "windowNumber") : 0;
+    const auto control = observeOwnedWindow(controlId);
+    const auto controlExpected = m_controlWindow ? m_controlWindow->frameGeometry() : QRect();
+    const bool controlSettled = !control.frame.isEmpty() && control.frame["x"].toDouble() == controlExpected.x() &&
+                                control.frame["y"].toDouble() == controlExpected.y() &&
+                                control.frame["width"].toDouble() == controlExpected.width() &&
+                                control.frame["height"].toDouble() == controlExpected.height();
+    if (m_originalControlFrame.isEmpty() && controlSettled)
+      m_originalControlFrame = control.frame;
+    const bool controlVisible = controlSettled && control.onScreen && m_controlWindow->isVisible() &&
+                                nativeMessage<BOOL>(controlWindow, "isVisible") &&
+                                !nativeMessage<BOOL>(controlWindow, "isMiniaturized");
     QJsonObject frame;
     if (ownId > 0) {
       const auto windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, CGWindowID(ownId));
@@ -298,6 +410,12 @@ private:
         {"heldButtons", m_buttons.size()},
         {"pid", qint64(getpid())},
         {"windowId", frame.isEmpty() ? 0 : qint64(ownId)},
+        {"sourceWindowId", frame.isEmpty() ? 0 : qint64(ownId)},
+        {"controlWindowId", qint64(controlId)},
+        {"controlFrame", control.frame},
+        {"controlOriginalFrame", m_originalControlFrame},
+        {"controlVisible", controlVisible},
+        {"nativePendingDropped", QString::number(m_nativePendingDropped)},
         {"ready", !m_originalFrame.isEmpty() && settled},
         {"title", m_window ? m_window->windowTitle() : QString()},
         {"originalFrame", m_originalFrame},
@@ -319,9 +437,60 @@ private:
     file.write(QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     file.commit();
   }
+  struct NativeObserved
+  {
+    unsigned long type = 0;
+    qint64 elapsed = 0;
+    long window = 0;
+    bool resolved = false;
+    CGPoint position{};
+    unsigned long modifiers = 0;
+    std::int64_t tag = 0, sourcePid = 0;
+    InputEvidenceRaw raw;
+    double dx = 0, dy = 0;
+    bool precise = false;
+  };
+  void drainNative()
+  {
+    while (m_nativePendingRead != m_nativePendingWritten) {
+      const auto &row = m_nativePending[m_nativePendingRead++ % m_nativePending.size()];
+      QJsonArray fields;
+      for (auto field : row.raw.fields)
+        fields.append(QString::number(field));
+      QJsonObject observed{
+          {"type", qint64(row.type)},
+          {"elapsedMs", row.elapsed},
+          {"windowNumber", qint64(row.window)},
+          {"windowResolved", row.resolved},
+          {"x", row.position.x},
+          {"y", row.position.y},
+          {"modifiers", qint64(row.modifiers)},
+          {"tag", QString::number(row.tag, 16)},
+          {"synthetic", isWindowshareSyntheticEvent(row.tag)},
+          {"sourcePid", qint64(row.sourcePid)},
+          {"cgTimestampNs", QString::number(row.raw.timestamp)},
+          {"cgFlags", QString::number(row.raw.flags)},
+          {"cgRaw", fields}
+      };
+      if (row.type == 10 || row.type == 11 || row.type == 12)
+        observed["keyCode"] = int(row.raw.fields[1]);
+      if (row.type == 22) {
+        observed["dx"] = row.dx;
+        observed["dy"] = row.dy;
+        observed["precise"] = row.precise;
+      }
+      appendReceipt(m_nativeObserved, m_nativeEventCount, std::move(observed));
+    }
+  }
+  std::array<NativeObserved, 512> m_nativePending;
+  std::uint64_t m_nativePendingRead = 0, m_nativePendingWritten = 0, m_nativePendingDropped = 0;
+  id m_nativeWindow = nullptr;
+  long m_nativeWindowId = 0;
+  bool m_evidenceBound = false;
   QString m_path;
-  QPointer<QWidget> m_window;
+  QPointer<QWidget> m_window, m_controlWindow;
   QJsonObject m_originalFrame;
+  QJsonObject m_originalControlFrame;
   QJsonObject m_manual;
   QSet<int> m_keys;
   QSet<int> m_buttons;
@@ -410,6 +579,10 @@ public:
       return true;
     requestStop();
     return false;
+  }
+  bool activeForEvidence() const
+  {
+    return m_valid && !m_ended && m_state == "active" && m_request == "start";
   }
 
 private:
@@ -522,13 +695,100 @@ private:
   bool m_seenFile = false, m_heartbeat = false, m_valid = false, m_ended = false;
 };
 
+class EvidenceControls final : public QObject
+{
+public:
+  EvidenceControls(InputEvidenceRuntime &runtime, ManualAcceptance &manual, QString request, QVBoxLayout &layout)
+      : m_runtime(runtime),
+        m_manual(manual),
+        m_request(std::move(request))
+  {
+    m_label = new QLabel;
+    m_label->setTextFormat(Qt::PlainText);
+    m_label->setWordWrap(true);
+    m_record = new QPushButton("Record");
+    m_record->setFocusPolicy(Qt::NoFocus);
+    layout.addWidget(m_label);
+    layout.addWidget(m_record);
+    connect(m_record, &QPushButton::clicked, this, [this] {
+      if (!m_requested && m_manual.activeForEvidence() && m_runtime.recorder().state() == InputEvidenceState::Waiting) {
+        m_requested = true;
+        m_requestOkay = m_runtime.requestRecord(m_request);
+        update();
+      }
+    });
+    connect(&m_timer, &QTimer::timeout, this, [this] { update(); });
+    m_timer.start(100);
+    update();
+  }
+
+private:
+  void update()
+  {
+    const auto state = m_runtime.recorder().state();
+    const bool lost = m_runtime.recorder().loss() != InputEvidenceLoss::None || (m_requested && !m_requestOkay);
+    m_record->setEnabled(!m_requested && !lost && m_manual.activeForEvidence() && state == InputEvidenceState::Waiting);
+    if (lost || state == InputEvidenceState::Denied)
+      m_label->setText("Recording declined. Return to Mac and Stop; retain diagnostics.");
+    else if (state == InputEvidenceState::Stopped)
+      m_label->setText("Recording complete. Return to Mac, then Stop.");
+    else if (state == InputEvidenceState::Draining)
+      m_label->setText("Completing the bounded recording. Release controls and wait.");
+    else if (state == InputEvidenceState::Recording)
+      m_label->setText("Recording. Perform the planned input sequence here; stay in this session.");
+    else if (m_requested)
+      m_label->setText("Record requested. Waiting for the exact live route and empty queues.");
+    else
+      m_label->setText(
+          "Prime the planned key/button/scroll controls, release them, then click Record here in the Viewer."
+      );
+  }
+  InputEvidenceRuntime &m_runtime;
+  ManualAcceptance &m_manual;
+  QString m_request;
+  QLabel *m_label = nullptr;
+  QPushButton *m_record = nullptr;
+  QTimer m_timer;
+  bool m_requested = false, m_requestOkay = false;
+};
+
 int main(int argc, char **argv)
 {
   QApplication app(argc, argv);
   const auto arguments = app.arguments();
-  const bool manualMode = arguments.size() == 5 && arguments.at(3) == "--manual-status";
-  if (arguments.size() != 3 && !manualMode)
+  QString manualPath, evidencePath, recordRequestPath;
+  bool separateControls = false;
+  if (arguments.size() < 3)
     return 2;
+  for (int index = 3; index < arguments.size(); ++index) {
+    const auto option = arguments.at(index);
+    if (option == "--separate-controls" && !separateControls)
+      separateControls = true;
+    else if ((option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
+             index + 1 < arguments.size()) {
+      auto &value = option == "--manual-status"    ? manualPath
+                    : option == "--record-request" ? recordRequestPath
+                                                   : evidencePath;
+      if (!value.isEmpty())
+        return 2;
+      value = arguments.at(++index);
+      if (value.isEmpty() || value.startsWith("--"))
+        return 2;
+    } else
+      return 2;
+  }
+  const bool manualMode = !manualPath.isEmpty();
+  if ((separateControls || !evidencePath.isEmpty()) && !manualMode)
+    return 2;
+  if (!recordRequestPath.isEmpty() && evidencePath.isEmpty())
+    return 2;
+  std::unique_ptr<InputEvidenceRuntime> evidence;
+  try {
+    if (!evidencePath.isEmpty())
+      evidence = InputEvidenceRuntime::open(evidencePath, InputEvidenceRole::Native);
+  } catch (...) {
+    return 2;
+  }
   Recorder recorder(arguments.at(2));
   AcceptanceWindow window;
   window.setWindowTitle(arguments.at(1));
@@ -540,17 +800,40 @@ int main(int argc, char **argv)
     );
   auto *field = new QLineEdit(&window);
   layout->addWidget(field);
+  std::unique_ptr<AcceptanceWindow> controls;
+  QVBoxLayout *controlsLayout = layout;
+  if (separateControls) {
+    controls = std::make_unique<AcceptanceWindow>();
+    controls->setWindowTitle("Deskflow input test controls");
+    controls->resize(480, 240);
+    controlsLayout = new QVBoxLayout(controls.get());
+  }
   std::unique_ptr<ManualAcceptance> manual;
   if (manualMode) {
-    manual = std::make_unique<ManualAcceptance>(arguments.at(4), recorder, *layout, *field);
+    manual = std::make_unique<ManualAcceptance>(manualPath, recorder, *controlsLayout, *field);
     window.onManualClose = [guard = QPointer<ManualAcceptance>(manual.get())] {
       return !guard || guard->requestClose();
     };
   }
+  // Record stays in the exported source, including separate-controls mode:
+  // returning to the Mac to arm would replace the route being measured.
+  std::unique_ptr<EvidenceControls> evidenceControls;
+  if (!recordRequestPath.isEmpty())
+    evidenceControls = std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout);
+  if (controls)
+    controls->onManualClose = window.onManualClose;
   app.installEventFilter(&recorder);
   app.installNativeEventFilter(&recorder);
   window.show();
   recorder.watchWindow(&window);
+  if (controls) {
+    controls->show();
+    recorder.watchControlWindow(controls.get());
+  }
   field->setFocus();
-  return app.exec();
+  const int result = app.exec();
+  app.removeNativeEventFilter(&recorder);
+  app.removeEventFilter(&recorder);
+  recorder.flush();
+  return result;
 }

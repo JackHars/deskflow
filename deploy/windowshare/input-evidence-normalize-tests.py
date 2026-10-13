@@ -1,0 +1,283 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
+"""Small synthetic parser fixtures only; never measurement/acceptance evidence."""
+import copy
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+
+HERE = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('input_normalizer', HERE / 'input-evidence-normalize.py')
+normalizer = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(normalizer)
+
+
+class Fixture:
+    def __init__(self, directory):
+        self.directory = Path(directory)
+        self.values = {}
+        binding = ['1'] * 11
+        binding[4] = '9'
+        for role, pid, start in [('core', 101, 1_000_000_000), ('host', 202, 3_000_000_000), ('native', 303, 7_000_000_000)]:
+            names = list(normalizer.QUEUES) if role == 'core' else list(normalizer.QUEUES[-4:]) if role == 'host' else []
+            native_owner = ['303', '44'] + ['0']*9
+            rows = [{'type': 'header', 'schema': 'deskflow-input-evidence-v1', 'runId': 'synthetic-parser-fixture',
+                     'role': role, 'pid': str(pid), 'clockId': 'fixture-' + role, 'queues': names,
+                     'nativeFieldPreservation': 'NOT_RUN', 'observerProvenance': 'NOT_RUN'},
+                    {'type': 'arm', 'accepted': True, 'timeNs': str(start),
+                     'owner': native_owner if role == 'native' else binding.copy(),
+                     'identity': '00'*96 if role == 'native' else 'ab'*96}]
+            for name in names:
+                for at, enqueued, retired in [(start, 0, 0), (start+1, 1, 0), (start+2, 1, 1), (start+100_000_000, 1, 1)]:
+                    rows.append({'type': 'queue', 'timeNs': str(at), 'queue': name,
+                                 'enqueued': str(enqueued), 'retired': str(retired),
+                                 'depth': str(enqueued-retired), 'capacity': str(normalizer.CAPACITIES[name])})
+            for index, event_type in enumerate((10, 11)):
+                if role == 'host':
+                    continue
+                raw = ['0']*17
+                raw[0], raw[2] = str(event_type), '42'
+                row = {'type': 'source' if role == 'core' else 'native', 'timeNs': str(start+(index+1)*10_000_000),
+                       'cgTimestampNs': str(2**53+index+11), 'flags': '0', 'raw': raw}
+                if role == 'core':
+                    row.update(epoch='9', sequence=str(500+index), effect='key_down' if index == 0 else 'key_up')
+                else:
+                    row.update(window='44', sourcePid='202', tag=str(normalizer.TAG))
+                rows.append(row)
+            rows.append({'type': 'end', 'timeNs': str(start+100_000_000), 'sourceEndNs': str(start+80_000_000),
+                         'state': 3, 'loss': 0, 'rows': str(len(rows)-2), 'drained': True})
+            self.values[role] = rows
+
+    def save(self, role):
+        path = self.directory / (role + '.jsonl')
+        path.write_bytes(b''.join(normalizer.encoded(row)+b'\n' for row in self.values[role]))
+        path.chmod(0o600)
+        return path
+
+    def journals(self):
+        return tuple(normalizer.Journal(self.save(role), role) for role in ('core', 'host', 'native'))
+
+    def normalize(self):
+        return normalizer.normalize(*self.journals())
+
+    def row(self, role, kind, index=0):
+        return [row for row in self.values[role] if row['type'] == kind][index]
+
+    def recount(self, role):
+        self.values[role][-1]['rows'] = str(sum(row['type'] in ('source', 'native', 'hover', 'queue') for row in self.values[role]))
+
+
+class NormalizeTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.fixture = Fixture(self.temporary.name)
+
+    def rejected(self):
+        with self.assertRaises(normalizer.EvidenceError):
+            self.fixture.normalize()
+
+    def test_unique_exact_raw_matching_and_original_identity_retained(self):
+        result = self.fixture.normalize()
+        self.assertEqual([row['id'] for row in result['receipts']], [1, 2])
+        self.assertEqual(result['identities'][0]['capture_sequence'], '500')
+        self.assertEqual(result['identities'][0]['cg_timestamp_ns'], str(2**53+11))
+        self.assertEqual(len(result['queues']), len(normalizer.QUEUES)+4)
+
+    def test_output_is_unverified_and_never_claims_h11_or_latency(self):
+        journals = self.fixture.journals()
+        output = Path(self.temporary.name) / 'normalized'
+        result = normalizer.write_normalized(output, journals, normalizer.normalize(*journals))
+        self.assertEqual(result['status'], 'NORMALIZED_UNVERIFIED')
+        self.assertFalse(result['h11_complete'])
+        self.assertIsNone(result['latency'])
+        self.assertEqual(result['native_field_preservation'], 'NOT_RUN')
+        self.assertEqual(result['pending_queue_coverage']['status'], 'INCOMPLETE')
+        self.assertFalse(result['pending_queue_coverage']['full_component_eligible'])
+        self.assertNotEqual(result['input']['source_clock'], result['input']['receipt_clock'])
+        source = [json.loads(line) for line in (output / 'source.jsonl').read_text().splitlines()]
+        self.assertEqual(source[-1]['t_ns'], int(self.fixture.row('core', 'end')['sourceEndNs']))
+        self.assertTrue(all(path.stat().st_mode & 0o077 == 0 for path in output.iterdir()))
+        with self.assertRaises(normalizer.EvidenceError):
+            normalizer.write_normalized(output, journals, normalizer.normalize(*journals))
+
+    def test_native_timestamp_rewrite_is_not_repaired(self):
+        self.fixture.row('native', 'native')['cgTimestampNs'] = '123'
+        self.rejected()
+
+    def test_native_raw_rewrite_is_not_repaired(self):
+        self.fixture.row('native', 'native')['raw'][2] = '41'
+        self.rejected()
+
+    def test_native_order_is_not_used_as_correlation(self):
+        rows = self.fixture.values['native']
+        rows[-3], rows[-2] = rows[-2], rows[-3]
+        rows[-3]['timeNs'], rows[-2]['timeNs'] = rows[-2]['timeNs'], rows[-3]['timeNs']
+        self.rejected()
+
+    def test_duplicate_native_receipt(self):
+        row = copy.deepcopy(self.fixture.row('native', 'native', 1))
+        self.fixture.values['native'].insert(-1, row)
+        self.fixture.recount('native')
+        self.rejected()
+
+    def test_missing_native_receipt(self):
+        self.fixture.values['native'].remove(self.fixture.row('native', 'native', 1))
+        self.fixture.recount('native')
+        self.rejected()
+
+    def test_ambiguous_source_tuple(self):
+        first = self.fixture.row('core', 'source')
+        second = self.fixture.row('core', 'source', 1)
+        for key in ('cgTimestampNs', 'flags', 'raw', 'effect'):
+            second[key] = copy.deepcopy(first[key])
+        self.rejected()
+
+    def test_source_gap(self):
+        self.fixture.row('core', 'source', 1)['sequence'] = '502'
+        self.rejected()
+
+    def test_source_epoch_substitution(self):
+        self.fixture.row('core', 'source')['epoch'] = '10'
+        self.rejected()
+
+    def test_owner_focus_revision_substitution(self):
+        self.fixture.row('host', 'arm')['owner'][8] = '2'
+        self.rejected()
+
+    def test_peer_identity_substitution(self):
+        self.fixture.row('host', 'arm')['identity'] = 'cd'*96
+        self.rejected()
+
+    def test_run_substitution(self):
+        self.fixture.row('host', 'header')['runId'] = 'different-run'
+        self.rejected()
+
+    def test_clock_alias(self):
+        self.fixture.row('native', 'header')['clockId'] = self.fixture.row('core', 'header')['clockId']
+        self.rejected()
+
+    def test_native_destination_substitution(self):
+        self.fixture.row('native', 'native')['window'] = '45'
+        self.rejected()
+
+    def test_native_cannot_claim_private_lease_identity(self):
+        self.fixture.row('native', 'arm')['identity'] = 'ab'*96
+        self.rejected()
+
+    def test_observer_process_substitution(self):
+        self.fixture.row('core', 'header')['pid'] = '202'
+        self.rejected()
+
+    def test_unrelated_native_origin(self):
+        for field, value in [('sourcePid', '999'), ('tag', '0')]:
+            with self.subTest(field=field):
+                fixture = copy.deepcopy(self.fixture.values)
+                self.fixture.row('native', 'native')[field] = value
+                self.rejected()
+                self.fixture.values = fixture
+
+    def test_queue_inventory_omission(self):
+        self.fixture.row('core', 'header')['queues'].remove('translation')
+        self.rejected()
+
+    def test_queue_peak_cannot_be_aggregated_away(self):
+        row = self.fixture.row('core', 'queue', 1)
+        row.update(enqueued='50', retired='50', depth='0')
+        self.rejected()
+
+    def test_queue_nonempty_terminal(self):
+        row = self.fixture.row('core', 'queue', 3)
+        row.update(enqueued='2', retired='1', depth='1')
+        self.rejected()
+
+    def test_queue_capacity_change(self):
+        self.fixture.row('core', 'queue', 1)['capacity'] = '999'
+        self.rejected()
+
+    def test_consistent_capacity_substitution(self):
+        for row in self.fixture.values['core']:
+            if row['type'] == 'queue' and row['queue'] == 'capture':
+                row['capacity'] = '512'
+        self.rejected()
+
+    def test_queue_missing_mutation_underflow(self):
+        row = self.fixture.row('core', 'queue', 1)
+        row.update(enqueued='0', retired='1', depth='0')
+        self.rejected()
+
+    def test_sticky_loss(self):
+        self.fixture.row('core', 'end')['loss'] = 1
+        self.rejected()
+
+    def test_failed_arm(self):
+        self.fixture.row('core', 'arm')['accepted'] = False
+        self.rejected()
+
+    def test_source_after_explicit_stop(self):
+        self.fixture.row('core', 'source', 1)['timeNs'] = str(int(self.fixture.row('core', 'end')['sourceEndNs'])+1)
+        self.rejected()
+
+    def test_unbounded_tail(self):
+        self.fixture.row('native', 'end')['timeNs'] = str(int(self.fixture.row('native', 'end')['sourceEndNs'])+1_000_000_000)
+        self.rejected()
+
+    def test_unsupported_ambiguous_modifier(self):
+        self.fixture.row('core', 'source')['effect'] = 'unsupported'
+        self.rejected()
+
+    def test_explicit_hover_replacement(self):
+        for index in range(2):
+            source = self.fixture.row('core', 'source', index)
+            native = self.fixture.row('native', 'native', index)
+            source['effect'] = 'hover'
+            for row in (source, native):
+                row['raw'] = ['5'] + ['0']*16
+                row['raw'][4] = str(index+1)
+        self.fixture.values['native'].remove(self.fixture.row('native', 'native'))
+        self.fixture.recount('native')
+        # A pre-stop capture may be coalesced during the bounded terminal drain.
+        self.fixture.values['core'].insert(-1, {'type': 'hover', 'timeNs': '1085000000', 'epoch': '9', 'sequence': '500', 'retainedSequence': '501'})
+        self.fixture.recount('core')
+        result = self.fixture.normalize()
+        self.assertEqual([row['id'] for row in result['receipts']], [2])
+        self.assertEqual(result['compressions'][0]['replacement'], 2)
+
+    def test_false_hover_compression_cannot_hide_key(self):
+        self.fixture.values['core'].insert(-1, {'type': 'hover', 'timeNs': '1030000000', 'epoch': '9', 'sequence': '500', 'retainedSequence': '501'})
+        self.fixture.recount('core')
+        self.rejected()
+
+    def test_noncanonical_or_lossy_numbers(self):
+        for value in (2**53+11, '01', '+1', '-0', '1.0', str(2**64)):
+            with self.subTest(value=value):
+                self.fixture.row('core', 'source')['cgTimestampNs'] = value
+                self.rejected()
+
+    def test_truncation_duplicate_json_and_world_readable(self):
+        path = self.fixture.save('core')
+        original = path.read_bytes()
+        for data in (original[:-1], original.replace(b'"type":"header"', b'"type":"header","type":"header"', 1)):
+            path.write_bytes(data)
+            with self.assertRaises(normalizer.EvidenceError):
+                normalizer.Journal(path, 'core')
+        path.write_bytes(original)
+        path.chmod(0o644)
+        with self.assertRaises(normalizer.EvidenceError):
+            normalizer.Journal(path, 'core')
+
+    def test_symlink_rejected(self):
+        path = self.fixture.save('core')
+        link = Path(self.temporary.name) / 'link'
+        link.symlink_to(path)
+        with self.assertRaises(OSError):
+            normalizer.Journal(link, 'core')
+
+
+if __name__ == '__main__':
+    unittest.main()

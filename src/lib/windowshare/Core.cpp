@@ -33,7 +33,7 @@ std::uint64_t get(std::span<const std::uint8_t> in, unsigned offset, unsigned by
 }
 bool validType(std::uint64_t type)
 {
-  return type >= static_cast<unsigned>(MessageType::Hello) && type <= static_cast<unsigned>(MessageType::InputRoute);
+  return type >= static_cast<unsigned>(MessageType::Hello) && type <= static_cast<unsigned>(MessageType::ClipboardText);
 }
 std::uint32_t limit(MessageType type)
 {
@@ -86,10 +86,10 @@ std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDi
     const double right = std::min(original.x + original.width, display.x + display.width);
     const double bottom = std::min(original.y + original.height, display.y + display.height);
     const double overlap = std::max(0.0, right - left) * std::max(0.0, bottom - top);
-    const double dx = std::max({0.0, original.x - (display.x + display.width),
-                                display.x - (original.x + original.width)});
-    const double dy = std::max({0.0, original.y - (display.y + display.height),
-                                display.y - (original.y + original.height)});
+    const double dx =
+        std::max({0.0, original.x - (display.x + display.width), display.x - (original.x + original.width)});
+    const double dy =
+        std::max({0.0, original.y - (display.y + display.height), display.y - (original.y + original.height)});
     const double gap = dx * dx + dy * dy;
     const double centerX = (original.x + original.width / 2) - (display.x + display.width / 2);
     const double centerY = (original.y + original.height / 2) - (display.y + display.height / 2);
@@ -98,12 +98,11 @@ std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDi
     // when a hotplug reverses CGGetActiveDisplayList's ordering.
     if (!chosen || overlap > bestOverlap ||
         (overlap == bestOverlap &&
-         (gap < bestGap ||
-          (gap == bestGap &&
-           (centerDistance < bestCenterDistance ||
-            (centerDistance == bestCenterDistance &&
-             std::tie(display.x, display.y, display.width, display.height) <
-                 std::tie(chosen->x, chosen->y, chosen->width, chosen->height))))))) {
+         (gap < bestGap || (gap == bestGap && (centerDistance < bestCenterDistance ||
+                                               (centerDistance == bestCenterDistance &&
+                                                std::tie(display.x, display.y, display.width, display.height) <
+                                                    std::tie(chosen->x, chosen->y, chosen->width, chosen->height)))))
+        )) {
       chosen = display;
       bestOverlap = overlap;
       bestGap = gap;
@@ -121,8 +120,8 @@ bool samePhysicalOutputLayout(
   const auto valid = [](const PhysicalOutputSignature &output) {
     return output.displayId && output.bounds.valid() && output.pixelWidth && output.pixelHeight &&
            output.pixelWidth <= 32768 && output.pixelHeight <= 32768 &&
-           (output.rotationDegrees == 0 || output.rotationDegrees == 90 ||
-            output.rotationDegrees == 180 || output.rotationDegrees == 270);
+           (output.rotationDegrees == 0 || output.rotationDegrees == 90 || output.rotationDegrees == 180 ||
+            output.rotationDegrees == 270);
   };
   // A maximum of 32 locally enumerated outputs makes an O(n^2) identity
   // comparison simpler and safer than sorting borrowed native state.

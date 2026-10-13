@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "ClipboardText.h"
 #include "Core.h"
 #include "GnomeViewportProtocol.h"
 #include "KeyboardRoute.h"
@@ -23,7 +24,7 @@
 #include <functional>
 #include <memory>
 #ifdef WINDOWSHARE_X11
-#include "X11DisplayObserver.h"
+#include "X11CoordinateEndpoint.h"
 #endif
 
 namespace deskflow::windowshare {
@@ -57,6 +58,14 @@ private:
   std::shared_ptr<const ViewerViewportSnapshot> m_snapshot;
   std::shared_ptr<const std::atomic_bool> m_revoked;
 };
+struct ViewerCoordinateUpdate
+{
+  X11CoordinateEndpoint::Update native;
+  std::optional<ViewerViewportObservation> viewport;
+  // Present only for a point inside the last-painted video rectangle. Native
+  // point and painted receipts remain independently revocable and bounded.
+  std::optional<QPointF> source;
+};
 #endif
 
 class Viewer final : public QWidget
@@ -85,12 +94,24 @@ public:
   void keyboardRoute(const KeyboardRouteControl &control);
   bool allForwardingFenced(const KeyboardRouteBinding &binding) const;
   void disconnected();
+  std::optional<ClipboardFocusObservation> clipboardFocus() const;
   bool placeOnScreen(int screenIndex);
   // Unsupported platforms/plugins report unavailable. No Qt global-position
   // fallback is used to manufacture a native desktop coordinate space.
   QString viewportUnavailableReason() const;
   std::optional<GnomeViewportState> waylandViewportState() const;
   std::optional<QPointF> mapWaylandSurface(const GnomeViewportState &expected, QPointF point) const;
+  std::optional<GnomePreparationTarget> waylandPreparationTarget() const;
+  std::optional<QPointF> mapPreparationTarget(const GnomePreparationTarget &expected, QPointF point) const;
+  bool beginInputPreparation(const InputPreparationBinding &binding);
+  bool inputPreparationFenced(const InputPreparationBinding &binding) const;
+  // Focus-control intent under an already closed preparation gate. The owned
+  // provider must select/activate the native target before calling this; this
+  // method never delivers a captured key or button.
+  bool requestInputPreparationFocus(const InputPreparationBinding &binding);
+  bool finishInputPreparation(const InputPreparationBinding &binding, const std::optional<KeyboardRouteBinding> &all);
+  std::optional<GnomeViewportState>
+  requestPreparedFocus(const InputPreparationBinding &binding, const GnomePreparationTarget &target);
   // Coalesced owner-thread notification, after the invalidating event unwinds.
   // A snapshot/map query still rechecks all state synchronously at use.
   std::function<void()> onViewportInvalidated;
@@ -99,6 +120,10 @@ public:
   std::function<void()> onForwardingFenceChanged;
 #ifdef WINDOWSHARE_X11
   std::optional<ViewerViewportObservation> viewportObservation() const;
+  bool readX11Witness(X11WitnessLocator locator, X11CoordinateClock::time_point deadline);
+  bool validateX11Point(X11PointRequest request, const KeyboardRouteBinding &fence);
+  std::optional<ViewerCoordinateUpdate> takeX11CoordinateUpdate();
+  bool cancelX11Coordinate(std::uint64_t request);
 #endif
 
   std::function<bool(MessageType, const QJsonObject &, std::uint64_t, std::uint64_t)> onSend;
@@ -136,13 +161,17 @@ protected:
 
 private:
   void invalidateViewport();
+  void forwardingFenceChanged();
   std::shared_ptr<std::atomic_bool> m_viewportRevoked = std::make_shared<std::atomic_bool>(false);
-  std::uint64_t m_viewportRevision = 1, m_waylandSurfaceIncarnation = 1;
+  std::uint64_t m_viewportRevision = 1, m_waylandSurfaceIncarnation = 1, m_waylandPaintRevision = 1;
+  std::optional<InputPreparationBinding> m_inputPreparation;
+  std::uint64_t m_preparationSerial = 0;
   QSize m_paintedClient, m_paintedImage;
   QRectF m_paintedVideo;
   double m_paintedDpr = 0;
   bool m_viewportClosed = false;
   std::optional<WaylandViewportGeometry> m_paintedWayland;
+  std::optional<WaylandWindowAssociation> m_waylandAssociation;
   QTimer m_viewportNotification;
 #ifdef WINDOWSHARE_X11
   friend class ViewerX11Observer;

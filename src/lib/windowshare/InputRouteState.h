@@ -200,8 +200,16 @@ public:
 
   Detached detach(Recipient recipient)
   {
-    Detached result;
     m_live.erase(recipient);
+    return releaseRecipient(recipient);
+  }
+
+  // Retire only delivered ownership, retaining the connection incarnation.
+  // Physical holds remain tombstones until up and cannot acquire the new
+  // original-input destination after a full-input handoff.
+  Detached releaseRecipient(Recipient recipient)
+  {
+    Detached result;
     const auto modifiers = m_observedModifiers.find(recipient);
     if (modifiers != m_observedModifiers.end()) {
       result.modifiers = modifiers->second;

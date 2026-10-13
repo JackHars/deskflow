@@ -13,10 +13,13 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
-    validRequest, validRoutedPointRequest, StageUpdateSequence, InputDrainSequence,
-    INPUT_DRAIN_BINDING_TYPES, validInputDrainBinding,
+    validRequest, validRoutedPointRequest, validRoutedPoints, validWindowAssociation, associatedWindowIndices,
+    StageUpdateSequence, InputDrainSequence, PreparationActivationSequence,
+    INPUT_DRAIN_BINDING_TYPES, validInputDrainBinding, ORDERING_LIMIT,
+    INPUT_PREPARATION_BINDING_TYPES, validInputPreparationBinding, sameInputPreparationBinding,
 } from './logic.js';
 import {closeDescriptorList, withViewerLauncher} from './launcher.js';
+import {orderingStillMapped, verifyMappedOrdering} from './ordering.js';
 
 const REMOTE_NAME = 'org.gnome.Mutter.RemoteDesktop';
 const REMOTE_PATH = '/org/gnome/Mutter/RemoteDesktop';
@@ -32,11 +35,12 @@ function removeSource(id) {
         GLib.source_remove(id);
 }
 
-function inputDrainBinding(invocation) {
+function inputDrainBinding(invocation, preparation = false) {
     // Read the original dictionary, not deep_unpack's object: duplicate D-Bus
     // keys must not disappear before the closed schema is checked.
     const raw = invocation.get_parameters().get_child_value(7);
-    const keys = Object.keys(INPUT_DRAIN_BINDING_TYPES);
+    const types = preparation ? INPUT_PREPARATION_BINDING_TYPES : INPUT_DRAIN_BINDING_TYPES;
+    const keys = Object.keys(types);
     if (raw.get_type_string() !== 'a{sv}' || raw.n_children() !== keys.length)
         throw new Error('Malformed input-drain correlation');
     const binding = {};
@@ -44,12 +48,12 @@ function inputDrainBinding(invocation) {
         const entry = raw.get_child_value(i);
         const key = entry.get_child_value(0).deep_unpack();
         const value = entry.get_child_value(1).get_variant();
-        if (!Object.hasOwn(INPUT_DRAIN_BINDING_TYPES, key) || Object.hasOwn(binding, key) ||
-            value.get_type_string() !== INPUT_DRAIN_BINDING_TYPES[key])
+        if (!Object.hasOwn(types, key) || Object.hasOwn(binding, key) ||
+            value.get_type_string() !== types[key])
             throw new Error('Malformed input-drain correlation');
         binding[key] = value.deep_unpack();
     }
-    if (!validInputDrainBinding(binding))
+    if (!(preparation ? validInputPreparationBinding(binding) : validInputDrainBinding(binding)))
         throw new Error('Invalid input-drain correlation');
     return Object.freeze(binding);
 }
@@ -131,6 +135,7 @@ class Provider {
         this._native = false;
         this._stageCapable = false;
         this._drainCapable = false;
+        this._ordering = null;
     }
 
     async start() {
@@ -151,6 +156,9 @@ class Provider {
             typeof Clutter.StageView?.prototype?.get_layout === 'function';
         this._drainCapable = this._stageCapable && typeof Clutter.events_pending === 'function' &&
             typeof GLib.main_depth === 'function';
+        this._ordering = await verifyMappedOrdering();
+        if (this._state.closed)
+            return;
         this._address = GLib.getenv('DBUS_SESSION_BUS_ADDRESS');
         if (!this._address)
             throw new Error('An explicit session bus address is required');
@@ -209,6 +217,12 @@ class Provider {
             this._close(session, 'revision-exhausted');
             return;
         }
+        const activation = session.preparationActivation;
+        if (activation)
+            activation.lastInvalidation = reason;
+        if (activation && !activation.sequence.invalidated(reason,
+            global.display.focus_window === activation.window, nowMs()))
+            this._finishPreparationActivation(session, activation, activation.sequence.reason || 'activation-invalidated');
         this._finishStageCheck(session, session.stageCheck, 'native-state-invalidated');
         this._finishInputDrain(session, session.inputDrain, 'native-state-invalidated');
         this._object?.emit_signal('Invalidated',
@@ -221,9 +235,15 @@ class Provider {
             nativeHitTesting: ['b', this._native], exactWaylandClientBinding: ['b', true],
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
             viewportChannel: ['b', true], routedPointObservation: ['b', true],
+            routedPointsObservation: ['b', true],
+            perWindowAssociation: ['b', true],
+            inputPreparation: ['b', this._drainCapable && Boolean(this._ordering) &&
+                typeof Meta.Window.prototype.activate === 'function' &&
+                typeof global.display.get_current_time_roundtrip === 'function'],
             stageUpdateSequence: ['b', this._stageCapable],
             inputDrainSegment: ['b', this._drainCapable],
-            inputDrainOrderingLimit: ['s', 'mutter-eis-sync-build-unverified'],
+            inputDrainOrderingLimit: ['s', this._ordering ? '' : ORDERING_LIMIT],
+            inputDrainOrderingContract: ['s', this._ordering?.contract ?? ''],
             viewportSocketValidated: ['b', false],
             syncFenceVerified: ['b', false], pointerDeviceAttribution: ['b', false],
             qtViewportMapping: ['b', false], deliveryReady: ['b', false],
@@ -235,7 +255,7 @@ class Provider {
         try {
             session = this._state.begin(invocation.get_sender(), uuid(), nowMs());
             Object.assign(session, {
-                cancel: new Gio.Cancellable(), invocation, signals: [], connection: null,
+                cancel: new Gio.Cancellable(), invocation, signals: [], windowSignals: [], connection: null,
                 viewer: null, window: null, surface: null, signature: '', stageCheck: null, inputDrain: null,
             });
             session.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, STARTUP_MS, () => {
@@ -363,11 +383,12 @@ class Provider {
             observationOnly: ['b', true], deliveryReady: ['b', false],
             session: ['s', session.id], generation: ['u', session.generation],
             revision: ['u', session.revision], viewer: ['s', token],
+            windowAssociation: ['s', session.association ?? ''],
             sampledAtUsec: ['s', String(GLib.get_monotonic_time())],
         };
     }
 
-    _observe(session, token) {
+    _observe(session, token, allowUnfocused = false) {
         const viewer = this._viewer(session, token);
         const actors = global.get_window_actors();
         if (actors.length > MAX_WINDOWS)
@@ -377,7 +398,11 @@ class Provider {
             return !actor.is_destroyed() && window.get_client_type() === Meta.WindowClientType.WAYLAND &&
                 viewer.client.owns_window(window);
         });
-        const windowActor = owned.length === 1 ? owned[0] : null;
+        const selected = session.association ? associatedWindowIndices(owned.map(actor => {
+            const window = actor.get_meta_window();
+            return {wmClass: window.get_wm_class(), instance: window.get_wm_class_instance()};
+        }), session.association).map(index => owned[index]) : owned;
+        const windowActor = selected.length === 1 ? selected[0] : null;
         const window = windowActor?.get_meta_window();
         if (window && session.window && session.window !== window) {
             this._close(session, 'viewer-window-replaced');
@@ -386,11 +411,33 @@ class Provider {
         if (window && !session.window) {
             session.window = window;
             session.windowToken = uuid();
-            this._watch(window, 'position-changed', 'window-position', session.signals, session);
-            this._watch(window, 'size-changed', 'window-size', session.signals, session);
-            this._watch(window, 'notify::minimized', 'window-minimized', session.signals, session);
-            session.signals.push([window, window.connect('unmanaged', () =>
-                this._close(session, 'viewer-window-unmanaged'))]);
+            this._watch(window, 'position-changed', 'window-position', session.windowSignals, session);
+            this._watch(window, 'size-changed', 'window-size', session.windowSignals, session);
+            this._watch(window, 'notify::minimized', 'window-minimized', session.windowSignals, session);
+            const association = () => [window.get_wm_class(), window.get_wm_class_instance()]
+                .map(value => String(value ?? '').slice(0, 128));
+            let previousAssociation = association();
+            session.windowSignals.push([window, window.connect('notify::wm-class', () => {
+                try {
+                    const currentAssociation = association();
+                    console.log(`Deskflow native association notification ${JSON.stringify({
+                        nativeWindow: window.get_stable_sequence(), window: session.windowToken,
+                        selected: session.window === window, revision: session.revision,
+                        old: previousAssociation, current: currentAssociation,
+                    })}`);
+                    previousAssociation = currentAssociation;
+                } catch (_) {
+                    // Diagnostics cannot turn a native invalidation into success.
+                }
+                this._invalidate(session, 'window-association-changed');
+            })]);
+            session.windowSignals.push([window, window.connect('unmanaged', () => {
+                this._invalidate(session, 'viewer-window-unmanaged');
+                session.window = null;
+                session.surface = null;
+                session.windowToken = '';
+                session.surfaceToken = '';
+            })]);
             this._invalidate(session, 'viewer-window-bound');
         }
         // Only one native surface is supported. Do not treat a popup,
@@ -427,7 +474,7 @@ class Provider {
             buttonsHeld: Boolean(modifiers & (Clutter.ModifierType.BUTTON1_MASK |
                 Clutter.ModifierType.BUTTON2_MASK | Clutter.ModifierType.BUTTON3_MASK |
                 Clutter.ModifierType.BUTTON4_MASK | Clutter.ModifierType.BUTTON5_MASK)),
-            windowCount: owned.length,
+            windowCount: selected.length,
             normalWindow: window?.get_window_type() === Meta.WindowType.NORMAL,
             transient: Boolean(window?.get_transient_for()),
             visible: Boolean(window && !window.minimized && !window.is_hidden() &&
@@ -435,7 +482,7 @@ class Provider {
             focused: Boolean(window && global.display.focus_window === window),
             oneSurface: Boolean(surface),
         };
-        let reason = unavailableReason(state);
+        let reason = unavailableReason(state, allowUnfocused);
         if (![pointerX, pointerY].every(Number.isFinite))
             reason = 'unsupported-pointer-state';
         let frame;
@@ -591,8 +638,12 @@ class Provider {
         disconnect(check.signals);
         const valid = !reason && check.sequence.complete && this._state.matches(session) &&
             session.revision === check.revision && nowMs() < check.sequence.deadline;
+        const ordering = check.ordering && orderingStillMapped(check.ordering) ? check.ordering.contract : '';
         const binding = Object.fromEntries(Object.entries(check.binding).map(([key, value]) =>
-            [key, [INPUT_DRAIN_BINDING_TYPES[key], value]]));
+            [key, [(check.preparation ? INPUT_PREPARATION_BINDING_TYPES : INPUT_DRAIN_BINDING_TYPES)[key], value]]));
+        if (valid && check.preparation && !check.cleanup && session.preparation &&
+            sameInputPreparationBinding(session.preparation.binding, check.binding))
+            session.preparation.drained = true;
         try {
             check.invocation.return_value(new GLib.Variant('(a{sv})', [variants({
                 available: ['b', valid], reason: ['s', valid ? '' : (reason || 'input-drain-incomplete')],
@@ -600,7 +651,8 @@ class Provider {
                 viewer: ['s', check.viewer], request: ['s', check.request], revision: ['u', check.revision],
                 stageX: ['d', check.x], stageY: ['d', check.y], binding: ['a{sv}', variants(binding)],
                 segment: ['s', 'clutter-queue-and-stage'],
-                orderingLimit: ['s', 'mutter-eis-sync-build-unverified'],
+                orderingLimit: ['s', ordering ? '' : ORDERING_LIMIT],
+                orderingContract: ['s', ordering],
             })]));
         } catch (_) {
             // Retired before replying. A vanished caller cannot retain a result.
@@ -608,38 +660,54 @@ class Provider {
     }
 
     // The caller orders this operation after its exact owned sender PONG. GI
-    // provides no runtime HAVE_EIS_EVENT_REF feature proof, so this operation
-    // certifies only the compositor segment and reports that boundary. It does
+    // itself has no HAVE_EIS_EVENT_REF introspection. The separately verified
+    // mapped-build contract proves that prerequisite on two supported builds;
+    // unknown builds retain a compositor segment without sender ordering. It does
     // not validate the caller's All fence; the subsequent private Qt operation
     // must verify the same binding before the caller may use this segment.
     DrainInputPrefixAsync([id, generation, token, request, x, y, revision, _binding, budgetMs], invocation) {
+        this._beginInputDrain([id, generation, token, request, x, y, revision, _binding, budgetMs], invocation, false);
+    }
+
+    DrainInputPreparationAsync(args, invocation) {
+        this._beginInputDrain(args, invocation, true);
+    }
+
+    _beginInputDrain([id, generation, token, request, x, y, revision, _binding, budgetMs, cleanup = false], invocation, preparation) {
         let session, check;
         try {
             session = this._lookup(invocation, id, generation);
-            const binding = inputDrainBinding(invocation);
-            if (!this._drainCapable || session.stageCheck || session.inputDrain ||
+            const binding = inputDrainBinding(invocation, preparation);
+            if (!this._drainCapable || session.stageCheck || session.inputDrain || session.preparationActivation ||
                 !validRoutedPointRequest(request, x, y, revision) || !Number.isInteger(budgetMs) ||
                 budgetMs <= 0 || budgetMs > 120)
                 throw new Error('Input drain unsupported, malformed or busy');
-            const previous = session.lastDrainCutoff;
+            if (preparation && (!session.preparation ||
+                !sameInputPreparationBinding(session.preparation.binding, binding) ||
+                session.preparation.x !== x || session.preparation.y !== y ||
+                (!cleanup && nowMs() >= session.preparation.deadline)))
+                throw new Error('Input preparation changed or expired');
+            const previous = preparation ? null : session.lastDrainCutoff;
             if (previous && (binding.cutoffRequest.length < previous.length ||
                 (binding.cutoffRequest.length === previous.length && binding.cutoffRequest <= previous)))
                 throw new Error('Input cutoff request was already retired');
-            const initial = this._observe(session, token);
+            const initial = this._observe(session, token, preparation);
             if (initial.values.reason[1] || initial.values.revision[1] !== revision || !initial.surface ||
-                global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== initial.surface)
+                (!cleanup && global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== initial.surface))
                 throw new Error('Frozen point is not on the current owned Viewer');
             const sequence = new InputDrainSequence(request, x, y, revision, nowMs(), budgetMs);
-            check = {request, revision, viewer: token, invocation, binding, sequence, x, y,
-                surface: initial.surface, signals: [], timeout: 0, idle: 0};
-            session.lastDrainCutoff = binding.cutoffRequest;
+            check = {request, revision, viewer: token, invocation, binding, sequence, x, y, preparation, cleanup,
+                surface: initial.surface, signals: [], timeout: 0, idle: 0,
+                ordering: orderingStillMapped(this._ordering) ? this._ordering : null};
+            if (!preparation)
+                session.lastDrainCutoff = binding.cutoffRequest;
             session.inputDrain = check;
             const terminate = reason => this._finishInputDrain(session, check, reason);
             const current = () => {
-                const observed = this._observe(session, token);
+                const observed = this._observe(session, token, preparation);
                 return session.inputDrain === check && !observed.values.reason[1] &&
                     observed.values.revision[1] === revision && observed.surface === check.surface &&
-                    global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) === check.surface;
+                    (cleanup || global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) === check.surface);
             };
             check.signals.push([global.stage, global.stage.connect('before-update', (_stage, view) => {
                 if (session.inputDrain !== check)
@@ -721,12 +789,312 @@ class Provider {
         }
     }
 
+    GetViewerWithAssociationAsync([id, generation, token, association], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            this._viewer(session, token);
+            if (!validWindowAssociation(association) ||
+                (session.preparation && session.preparation.association !== association))
+                throw new Error('Malformed or preparation-owned per-window association');
+            this._selectAssociation(session, association);
+            const {values} = this._observe(session, token);
+            invocation.return_value(new GLib.Variant('(a{sv})', [variants(values)]));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
+    _selectAssociation(session, association) {
+        if (session.association === association)
+            return;
+        disconnect(session.windowSignals);
+        session.windowSignals = [];
+        session.window = null;
+        session.surface = null;
+        session.windowToken = '';
+        session.surfaceToken = '';
+        session.signature = '';
+        session.association = association;
+        this._invalidate(session, 'viewer-association-selected');
+    }
+
+    _preparationReply(session, token, request, binding, x, y, observed, reason = '') {
+        const surface = observed?.surface;
+        let localX = 0, localY = 0;
+        if (surface) {
+            const [ok, lx, ly] = surface.transform_stage_point(x, y);
+            if (ok && Number.isFinite(lx) && Number.isFinite(ly)) {
+                localX = lx;
+                localY = ly;
+            } else {
+                reason ||= 'unsupported-surface-transform';
+            }
+        }
+        const fields = Object.fromEntries(Object.entries(binding).map(([key, value]) =>
+            [key, [INPUT_PREPARATION_BINDING_TYPES[key], value]]));
+        return new GLib.Variant('(a{sv})', [variants({
+            available: ['b', !reason], reason: ['s', reason], session: ['s', session.id],
+            generation: ['u', session.generation], viewer: ['s', token], request: ['s', request],
+            binding: ['a{sv}', variants(fields)], association: ['s', session.association ?? ''],
+            window: ['s', session.windowToken ?? ''], surface: ['s', session.surfaceToken ?? ''],
+            revision: ['u', session.revision], stageX: ['d', x], stageY: ['d', y],
+            localX: ['d', localX], localY: ['d', localY], focused: ['b', Boolean(observed?.values.focused?.[1])],
+            orderingContract: ['s', orderingStillMapped(this._ordering) ? this._ordering.contract : ''],
+        })]);
+    }
+
+    SelectInputPreparationAsync([id, generation, token, request, x, y, associations, _binding, budgetMs], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            const binding = inputDrainBinding(invocation, true);
+            this._viewer(session, token);
+            if (!this._drainCapable || !orderingStillMapped(this._ordering) || session.preparation ||
+                !validRoutedPointRequest(request, x, y, 1) || !Number.isInteger(budgetMs) || budgetMs < 1 || budgetMs > 500 ||
+                !Array.isArray(associations) || !associations.length || associations.length > 16 ||
+                associations.some(value => !validWindowAssociation(value)) || new Set(associations).size !== associations.length)
+                throw new Error('Input preparation unsupported, malformed or busy');
+            const deadline = nowMs() + budgetMs;
+            let selected = '', anchor = '';
+            for (const association of associations) {
+                if (nowMs() >= deadline)
+                    throw new Error('Input preparation selection expired');
+                this._selectAssociation(session, association);
+                const observed = this._observe(session, token, true);
+                if (observed.values.reason[1] || !observed.surface)
+                    continue;
+                anchor ||= association;
+                if (global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) === observed.surface) {
+                    if (selected)
+                        throw new Error('Ambiguous input preparation hit');
+                    selected = association;
+                }
+            }
+            const association = selected || anchor;
+            if (!association)
+                throw new Error('No native cleanup anchor for input preparation');
+            this._selectAssociation(session, association);
+            const observed = this._observe(session, token, true);
+            if (observed.values.reason[1] || !observed.surface || nowMs() >= deadline)
+                throw new Error('Input preparation target changed');
+            session.preparation = {binding, x, y, deadline, association, surface: observed.surface,
+                window: session.window, drained: false, activated: false};
+            invocation.return_value(this._preparationReply(session, token, request, binding, x, y, observed,
+                selected ? '' : 'preparation-no-target'));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
+    _preparationCurrent(session, token, binding, x, y, cleanup) {
+        const preparation = session.preparation;
+        if (!preparation || !sameInputPreparationBinding(preparation.binding, binding) ||
+            preparation.x !== x || preparation.y !== y || session.association !== preparation.association ||
+            (!cleanup && nowMs() >= preparation.deadline))
+            throw new Error('Input preparation changed or expired');
+        const observed = this._observe(session, token, cleanup || !preparation.activated);
+        if (observed.values.reason[1] || observed.surface !== preparation.surface || session.window !== preparation.window ||
+            (!cleanup && global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== observed.surface))
+            throw new Error('Input preparation native target changed');
+        return observed;
+    }
+
+    QueryInputPreparationAsync([id, generation, token, request, x, y, _revision, _binding, cleanup], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            const binding = inputDrainBinding(invocation, true);
+            if (!validRoutedPointRequest(request, x, y, 1) || session.preparationActivation)
+                throw new Error('Malformed input preparation point');
+            const observed = this._preparationCurrent(session, token, binding, x, y, cleanup);
+            invocation.return_value(this._preparationReply(session, token, request, binding, x, y, observed));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
+    _finishPreparationActivation(session, check, reason = '') {
+        if (!check || session.preparationActivation !== check)
+            return;
+        session.preparationActivation = null;
+        removeSource(check.timeout);
+        removeSource(check.nextUpdate);
+        disconnect(check.signals);
+        try {
+            if (reason || !check.sequence.complete || nowMs() >= check.sequence.deadline ||
+                !this._state.matches(session) || !orderingStillMapped(this._ordering))
+                throw new Error(reason || 'activation-completion-unavailable');
+            const observed = this._preparationCurrent(session, check.viewer, check.binding, check.x, check.y, false);
+            if (observed.surface !== check.surface || session.window !== check.window || session.signature !== check.signature ||
+                session.revision !== check.revision + check.sequence.restacks)
+                throw new Error('activation-target-or-geometry-changed');
+            console.log(`Deskflow preparation activation completed request=${check.request} ` +
+                `revision=${check.revision}->${session.revision} restacks=${check.sequence.restacks}`);
+            check.invocation.return_value(this._preparationReply(session, check.viewer, check.request,
+                check.binding, check.x, check.y, observed));
+        } catch (error) {
+            console.log(`Deskflow preparation activation refused request=${check.request} ` +
+                `revision=${check.revision}->${session.revision} restacks=${check.sequence.restacks} ` +
+                `reason=${String(error.message).slice(0, 96)} signal=${check.lastInvalidation}`);
+            errorReply(check.invocation, error);
+        }
+    }
+
+    ActivateInputPreparationAsync([id, generation, token, request, x, y, revision, _binding, budgetMs], invocation) {
+        let session, check;
+        try {
+            session = this._lookup(invocation, id, generation);
+            const binding = inputDrainBinding(invocation, true);
+            let observed = this._preparationCurrent(session, token, binding, x, y, false);
+            const preparation = session.preparation;
+            if (!preparation.drained || preparation.activated || session.preparationActivation ||
+                revision !== session.revision || !Number.isInteger(budgetMs) || budgetMs < 1 || budgetMs > 500 ||
+                GLib.main_depth() !== 1 || Clutter.events_pending() || !orderingStillMapped(this._ordering))
+                throw new Error('Input preparation prefix is not ready for activation');
+            // Exact retained MetaWindow, never a title/PID/rectangle lookup.
+            // activate() focuses synchronously but its raise queues a later
+            // META_LATER_SYNC_STACK. A reply here would retain the pre-restack
+            // revision while the next frame may still change it.
+            const timestamp = global.display.get_current_time_roundtrip();
+            this._preparationCurrent(session, token, binding, x, y, false);
+            preparation.window.activate(timestamp);
+            preparation.activated = true;
+            observed = this._preparationCurrent(session, token, binding, x, y, false);
+            const started = nowMs();
+            const budget = Math.min(120, budgetMs, preparation.deadline - started);
+            const sequence = new PreparationActivationSequence(request, x, y, session.revision, started, budget);
+            check = {request, revision: session.revision, viewer: token, invocation, binding, x, y, sequence,
+                window: session.window, surface: observed.surface, signature: session.signature,
+                signals: [], timeout: 0, nextUpdate: 0, lastInvalidation: ''};
+            session.preparationActivation = check;
+            const terminate = reason => this._finishPreparationActivation(session, check, reason);
+            const current = () => {
+                const actual = this._preparationCurrent(session, token, binding, x, y, false);
+                return session.preparationActivation === check && actual.surface === check.surface &&
+                    session.window === check.window && session.signature === check.signature;
+            };
+            check.signals.push([global.stage, global.stage.connect('before-update', (_stage, view) => {
+                if (session.preparationActivation !== check)
+                    return;
+                try {
+                    sequence.before(view, view?.layout, GLib.main_depth(), nowMs());
+                    if (sequence.reason)
+                        terminate(sequence.reason);
+                    else if (sequence.view === view && !current())
+                        terminate('activation-target-or-geometry-changed');
+                } catch (_) {
+                    terminate('activation-stage-unavailable');
+                }
+            })]);
+            check.signals.push([global.stage, global.stage.connect('after-update', (_stage, view) => {
+                if (session.preparationActivation !== check)
+                    return;
+                try {
+                    const completed = sequence.after(view, view?.layout, GLib.main_depth(), nowMs());
+                    if (sequence.reason)
+                        terminate(sequence.reason);
+                    else if (sequence.view === view) {
+                        if (!current())
+                            terminate('activation-target-or-geometry-changed');
+                        else if (completed)
+                            this._finishPreparationActivation(session, check);
+                        else if (!check.nextUpdate)
+                            check.nextUpdate = GLib.idle_add(GLib.PRIORITY_DEFAULT, () => {
+                                check.nextUpdate = 0;
+                                if (session.preparationActivation === check)
+                                    global.stage.schedule_update();
+                                return GLib.SOURCE_REMOVE;
+                            });
+                    }
+                } catch (_) {
+                    terminate('activation-stage-unavailable');
+                }
+            })]);
+            check.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, Math.max(1, Math.ceil(budget)), () => {
+                check.timeout = 0;
+                terminate('activation-completion-deadline');
+                return GLib.SOURCE_REMOVE;
+            });
+            global.stage.schedule_update();
+        } catch (error) {
+            if (check && session?.preparationActivation === check)
+                this._finishPreparationActivation(session, check, 'activation-start-failed');
+            else
+                errorReply(invocation, error);
+        }
+    }
+
+    FinishInputPreparationAsync([id, generation, token, _request, _x, _y, _revision, _binding, _budgetMs], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            this._viewer(session, token);
+            const binding = inputDrainBinding(invocation, true);
+            if (!session.preparation || !sameInputPreparationBinding(session.preparation.binding, binding) ||
+                session.inputDrain || session.preparationActivation)
+                throw new Error('Input preparation retirement changed its binding');
+            session.preparation = null;
+            invocation.return_value(new GLib.Variant('()', []));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
     ValidateCurrentHitAsync(args, invocation) {
         this._validateHit(args, invocation, true);
     }
 
     ValidateRoutedPointAsync(args, invocation) {
         this._validateHit(args, invocation, false);
+    }
+
+    ValidateRoutedPointsAsync([id, generation, token, request, epoch, points, revision], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            if (!validRoutedPoints(request, epoch, points, revision))
+                throw new Error('Malformed native-hit batch');
+            const observed = this._observe(session, token);
+            const {values, surface} = observed;
+            let reason = values.reason[1];
+            if (revision !== session.revision)
+                reason ||= 'stale-revision';
+            const mapped = [];
+            if (!reason) {
+                for (const [cutoff, sequence, part, x, y] of points) {
+                    if (global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== surface) {
+                        reason = 'not-viewer-surface';
+                        break;
+                    }
+                    const [ok, localX, localY] = surface.transform_stage_point(x, y);
+                    if (!ok || !Number.isFinite(localX) || !Number.isFinite(localY)) {
+                        reason = 'unsupported-surface-transform';
+                        break;
+                    }
+                    mapped.push([cutoff, sequence, part, x, y, localX, localY]);
+                }
+            }
+            const fresh = this._observe(session, token);
+            if (session.revision !== revision || fresh.surface !== surface || fresh.values.reason[1])
+                reason ||= 'state-changed-during-query';
+            if (!reason) {
+                for (const [, , , x, y, localX, localY] of mapped) {
+                    const [ok, freshX, freshY] = surface.transform_stage_point(x, y);
+                    if (!ok || freshX !== localX || freshY !== localY ||
+                        global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== surface) {
+                        reason = 'state-changed-during-query';
+                        break;
+                    }
+                }
+            }
+            if (session.revision !== revision || !this._state.matches(session))
+                reason ||= 'state-changed-during-query';
+            invocation.return_value(new GLib.Variant('(a{sv})', [variants({
+                session: ['s', session.id], generation: ['u', session.generation], viewer: ['s', token],
+                revision: ['u', session.revision], request: ['s', request], captureEpoch: ['s', epoch],
+                window: ['s', session.windowToken ?? ''], surface: ['s', session.surfaceToken ?? ''],
+                available: ['b', !reason], reason: ['s', reason],
+                points: ['a(ssudddd)', reason ? [] : mapped],
+            })]));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
     }
 
     // Both operations are read-only. A routed point is a requested stage
@@ -789,6 +1157,7 @@ class Provider {
         if (!session || session.cleaned)
             return;
         session.cleaned = true;
+        this._finishPreparationActivation(session, session.preparationActivation, 'viewer-or-provider-closed');
         this._finishStageCheck(session, session.stageCheck, 'viewer-or-provider-closed');
         this._finishInputDrain(session, session.inputDrain, 'viewer-or-provider-closed');
         this._state.detach(session);
@@ -796,6 +1165,7 @@ class Provider {
         removeSource(session.timeout);
         session.timeout = 0;
         disconnect(session.signals ?? []);
+        disconnect(session.windowSignals ?? []);
         if (session.closedSignal && session.connection)
             session.connection.signal_unsubscribe(session.closedSignal);
         closeConnection(session.connection);

@@ -7,6 +7,7 @@
 #include "GnomeProviderConfig.h"
 #include "GnomeViewportProtocol.h"
 #include "InputCutoff.h"
+#include "InputPreparation.h"
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -14,6 +15,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace deskflow::windowshare {
 
@@ -73,32 +75,115 @@ public:
     InputCutoffBinding cutoff;
     RoutedPoint point;
     InputCutoffClock::time_point deadline;
+    bool retainPrefix = false;
   };
-  // A finite compositor/Qt queue segment requested after the caller's matched
-  // sender PONG. Correlation is retained; the provider cannot inspect Mutter's
-  // compiled native-thread EIS SYNC support. Neither this receipt nor its Qt
-  // fence establishes that missing sender-ordering prerequisite or delivery.
+  struct InputPreparationRequest
+  {
+    InputPreparationBinding binding;
+    RoutedPoint point;
+    InputCutoffClock::time_point deadline;
+  };
+  // A fresh focus acknowledgement under a separate closed preparation gate.
+  // It has no All lease and cannot authorize input delivery or point reuse.
+  class PreparedInputFocus
+  {
+  public:
+    bool live() const noexcept;
+    const InputPreparationBinding &binding() const noexcept;
+    const ViewportSnapshot &snapshot() const noexcept;
+    const std::string &contract() const noexcept;
+
+  private:
+    friend struct Impl;
+    friend class GnomeProviderClient;
+    InputPreparationBinding m_binding;
+    std::shared_ptr<const ViewportSnapshot> m_snapshot;
+    std::shared_ptr<std::atomic<InputPreparationState>> m_state;
+    InputCutoffClock::time_point m_deadline;
+    std::string m_contract;
+    const void *m_provider = nullptr;
+    std::uint64_t m_request = 0;
+  };
+  struct InputPreparationUpdate
+  {
+    std::uint64_t request = 0;
+    std::string error;
+    std::optional<PreparedInputFocus> focus;
+    InputPreparationOutcome outcome = InputPreparationOutcome::Failed;
+  };
+  struct InputPreparationCleanupUpdate
+  {
+    std::uint64_t request = 0;
+    std::string error;
+    bool released = false;
+  };
+  // Historical old-prefix completion under one continuously closed backend
+  // and exact Viewer All fence. This is not a reusable point validation. Each
+  // later input still needs a fresh stamped native hit and painted mapping.
+  class InputDrainSeal
+  {
+  public:
+    bool live() const noexcept;
+    const InputCutoffBinding &binding() const noexcept;
+    const std::string &contract() const noexcept;
+
+  private:
+    friend struct Impl;
+    friend class GnomeProviderClient;
+    std::shared_ptr<std::atomic_bool> m_revoked;
+    std::shared_ptr<const ViewportSnapshot> m_origin;
+    InputCutoffBinding m_binding;
+    std::string m_contract;
+    const void *m_provider = nullptr;
+    std::uint64_t m_request = 0;
+  };
+  // Source/build-backed prerequisite from the exact mapped native Mutter and
+  // Clutter modules in the retained trusted Shell. It is independently live
+  // only while the same segment/provider lifetime and caller deadline remain.
+  // The caller must still prove its own requested sender PONG and batch order.
+  class SenderOrderingEvidence
+  {
+  public:
+    bool live() const noexcept;
+    const std::string &contract() const noexcept;
+
+  private:
+    friend struct Impl;
+    ViewportObservation m_viewport;
+    std::string m_contract;
+    std::shared_ptr<std::atomic_bool> m_sealRevoked;
+  };
+  // A finite compositor/Qt queue segment after the caller's matched PONG.
+  // Unknown mapped builds retain useful segments with no senderOrdering proof.
+  // Neither a segment nor its optional prerequisite alone grants delivery.
   class InputDrainSegment
   {
   public:
     bool live() const noexcept;
     const ViewportSnapshot &snapshot() const noexcept;
     const InputCutoffBinding &binding() const noexcept;
-    static constexpr const char *orderingLimitation() noexcept
-    {
-      return "mutter-eis-sync-build-unverified";
-    }
+    const char *orderingLimitation() const noexcept;
+    const std::optional<SenderOrderingEvidence> &senderOrdering() const noexcept;
+    const std::optional<InputDrainSeal> &seal() const noexcept;
 
   private:
     friend struct Impl;
     ViewportObservation m_viewport;
     InputCutoffBinding m_cutoff;
+    std::optional<SenderOrderingEvidence> m_senderOrdering;
+    std::optional<InputDrainSeal> m_seal;
   };
   struct InputDrainUpdate
   {
     std::uint64_t request = 0;
     std::string error;
     std::optional<InputDrainSegment> segment;
+  };
+  struct InputMapBatchUpdate
+  {
+    std::uint64_t request = 0;
+    std::string error;
+    std::vector<InputDrainSegment> segments;
   };
   struct Update
   {
@@ -131,6 +216,21 @@ public:
   // Same single outstanding slot as viewport observations. The caller's
   // absolute deadline is never renewed; at most 250ms remains at admission.
   std::uint64_t requestInputDrain(InputDrainRequest request);
+  std::uint64_t requestInputPreparation(InputPreparationRequest request);
+  std::optional<InputPreparationUpdate> takeInputPreparationUpdate();
+  std::uint64_t promoteInputPreparation(const PreparedInputFocus &prepared, InputDrainRequest request);
+  bool cancelInputPreparation(std::uint64_t request, InputCutoffClock::time_point cleanupDeadline);
+  std::optional<InputPreparationCleanupUpdate> takeInputPreparationCleanupUpdate();
+  std::uint64_t requestInputMap(const InputDrainSeal &seal, InputDrainRequest request);
+  std::optional<InputDrainUpdate> takeInputMapUpdate();
+  // One atomic result for 1..16 fresh points under the same historical seal.
+  // Every item retains its own original deadline; none survive a batch revoke.
+  std::uint64_t requestInputMapBatch(const InputDrainSeal &seal, std::vector<InputDrainRequest> requests);
+  std::optional<InputMapBatchUpdate> takeInputMapBatchUpdate();
+  // Exact local request ID returned above, not cutoff.request. Revokes pending
+  // and copied completed evidence immediately and removes an unread result.
+  // An in-flight bounded call settles before the shared slot is reusable.
+  bool cancelInputDrain(std::uint64_t request);
   std::optional<InputDrainUpdate> takeInputDrainUpdate();
   // Consume lifecycle, viewport and input-drain updates after a wake. No
   // borrowed Qt object is stored in the cross-thread notification.

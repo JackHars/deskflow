@@ -24,6 +24,7 @@
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputCutoffProtocol.h"
+#include "deskflow/InputPreparationProtocol.h"
 #include "deskflow/InputSequence.h"
 #include "windowshare/EiPrefixProbe.h"
 #endif
@@ -287,6 +288,109 @@ public:
   {
   }
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool beginInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    ++preparationBegins;
+    if (!preparationSupported || preparationBinding)
+      return false;
+    preparationBinding = binding;
+    preparationPoint = point;
+    preparationDeadline = deadline;
+    preparationState = deskflow::windowshare::InputPreparationState::Preparing;
+    const auto callback = onPreparationBegin;
+    if (callback)
+      callback();
+    return true;
+  }
+  deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &binding) override
+  {
+    const auto callback = onPreparationObserve;
+    if (callback)
+      callback();
+    return preparationBinding == binding ? preparationState : deskflow::windowshare::InputPreparationState::Failed;
+  }
+  deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &) override
+  {
+    return preparationOutcome;
+  }
+  std::optional<deskflow::windowshare::PreparedInputFocusResult>
+  preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &binding) override
+  {
+    return preparationBinding == binding ? prepared : std::nullopt;
+  }
+  bool promoteInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &preparation,
+      const deskflow::windowshare::InputCutoffBinding &binding,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    if (preparationBinding != preparation || preparationState != deskflow::windowshare::InputPreparationState::Prepared)
+      return false;
+    ++preparationPromotions;
+    preparationState = deskflow::windowshare::InputPreparationState::Promoting;
+    cutoffBinding = binding;
+    cutoffPoint = preparationPoint;
+    cutoffDeadline = deadline;
+    sealOrigin = binding;
+    cutoffProbe.begin(binding.request, binding.request, deskflow::windowshare::InputCutoffClock::now(), deadline, true);
+    const auto callback = onPreparationPromote;
+    if (callback)
+      callback();
+    return true;
+  }
+  bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &binding,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    if (preparationBinding != binding)
+      return false;
+    ++preparationCancels;
+    if (preparationState != deskflow::windowshare::InputPreparationState::Canceling)
+      preparationCleanupDeadline = deadline;
+    preparationState = deskflow::windowshare::InputPreparationState::Canceling;
+    const auto callback = onPreparationCancel;
+    if (callback)
+      callback();
+    return true;
+  }
+  void abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &binding) noexcept override
+  {
+    if (preparationBinding != binding)
+      return;
+    ++preparationAborts;
+    preparationBinding.reset();
+    prepared.reset();
+    cutoffBinding.reset();
+    sealOrigin.reset();
+    sealValid = false;
+    preparationState = deskflow::windowshare::InputPreparationState::Failed;
+  }
+  void finishPreparationCleanup()
+  {
+    preparationState = deskflow::windowshare::InputPreparationState::Released;
+    prepared.reset();
+    cutoffBinding.reset();
+    sealOrigin.reset();
+    mappedResult.reset();
+    sealValid = false;
+  }
+  bool preparationSupported = false;
+  unsigned preparationBegins = 0, preparationPromotions = 0, preparationCancels = 0, preparationAborts = 0;
+  std::optional<deskflow::windowshare::InputPreparationBinding> preparationBinding;
+  deskflow::windowshare::InputCutoffPoint preparationPoint;
+  deskflow::windowshare::InputCutoffClock::time_point preparationDeadline, preparationCleanupDeadline;
+  deskflow::windowshare::InputPreparationState preparationState =
+      deskflow::windowshare::InputPreparationState::Preparing;
+  deskflow::windowshare::InputPreparationOutcome preparationOutcome =
+      deskflow::windowshare::InputPreparationOutcome::None;
+  std::optional<deskflow::windowshare::PreparedInputFocusResult> prepared;
+  std::function<void()> onPreparationBegin, onPreparationObserve, onPreparationPromote, onPreparationCancel;
   bool beginInputCutoff(
       const deskflow::windowshare::InputCutoffBinding &binding,
       deskflow::windowshare::InputCutoffClock::time_point deadline
@@ -309,18 +413,44 @@ public:
   inputCutoffState(const deskflow::windowshare::InputCutoffBinding &binding) override
   {
     using namespace deskflow::windowshare;
-    if (cutoffBinding != binding)
+    if (cutoffBinding != binding &&
+        std::none_of(batchItems.begin(), batchItems.end(), [&](const auto &item) { return item.binding == binding; }))
       return InputCutoffState::Denied;
+    if (!batchItems.empty()) {
+      if (!sealValid || sealFault)
+        return InputCutoffState::Denied;
+      if (InputCutoffClock::now() >= cutoffDeadline)
+        return InputCutoffState::Sealed;
+      return batchResults.size() == batchItems.size() ? InputCutoffState::DrainObserved : InputCutoffState::Pending;
+    }
+    if (sealOrigin) {
+      if (sealFault)
+        return InputCutoffState::Denied;
+      if (!sealValid && mappedResult && cutoffProbe.observed(InputCutoffClock::now()))
+        sealValid = true;
+      if (sealValid) {
+        if (InputCutoffClock::now() >= cutoffDeadline)
+          return InputCutoffState::Sealed;
+        return mappedResult ? InputCutoffState::DrainObserved : InputCutoffState::Pending;
+      }
+    }
     if (cutoffProbe.observed(InputCutoffClock::now()))
-      return InputCutoffState::BackendObserved;
+      return cutoffPoint ? (mappedResult ? InputCutoffState::DrainObserved : InputCutoffState::Pending)
+                         : InputCutoffState::BackendObserved;
     return cutoffProbe.state() == EiPrefixProbe::State::Denied ? InputCutoffState::Denied : InputCutoffState::Pending;
   }
   bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &binding) override
   {
-    if (cutoffBinding != binding)
+    if ((sealOrigin ? sealOrigin : cutoffBinding) != binding)
       return false;
     ++cutoffResumes;
     cutoffBinding.reset();
+    cutoffPoint.reset();
+    mappedResult.reset();
+    sealOrigin.reset();
+    sealValid = false;
+    batchItems.clear();
+    batchResults.clear();
     const bool retired = cutoffProbe.retire(binding.request);
     const auto callback = onCutoffResume;
     if (callback)
@@ -333,6 +463,106 @@ public:
   deskflow::windowshare::EiPrefixProbe cutoffProbe;
   std::function<void()> onCutoffBegin;
   std::function<void()> onCutoffResume;
+  bool beginMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    cutoffPoint = point;
+    cutoffDeadline = deadline;
+    mappedResult.reset();
+    if (beginInputCutoff(binding, deadline))
+      return true;
+    cutoffPoint.reset();
+    return false;
+  }
+  std::optional<deskflow::windowshare::InputCutoffMappedResult>
+  mappedInputCutoffResult(const deskflow::windowshare::InputCutoffBinding &binding) override
+  {
+    auto result = mappedResult;
+    if (!batchItems.empty()) {
+      const auto found = std::find_if(batchResults.begin(), batchResults.end(), [&](const auto &item) {
+        return item.binding == binding;
+      });
+      result = found == batchResults.end() ? std::nullopt : std::optional(*found);
+    }
+    const auto callback = onMappedQuery;
+    if (callback)
+      callback();
+    return result;
+  }
+  std::optional<deskflow::windowshare::InputCutoffPoint> cutoffPoint;
+  deskflow::windowshare::InputCutoffClock::time_point cutoffDeadline;
+  std::optional<deskflow::windowshare::InputCutoffMappedResult> mappedResult;
+  std::function<void()> onMappedQuery;
+  bool beginSealedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+      deskflow::windowshare::InputCutoffClock::time_point deadline
+  ) override
+  {
+    if (!beginMappedInputCutoff(binding, point, deadline))
+      return false;
+    sealOrigin = binding;
+    return true;
+  }
+  bool inputCutoffSealLive(const deskflow::windowshare::InputCutoffBinding &binding) override
+  {
+    return sealOrigin == binding && sealValid && !sealFault;
+  }
+  bool refreshMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &seal, const deskflow::windowshare::InputCutoffBinding &binding,
+      deskflow::windowshare::InputCutoffPoint point, deskflow::windowshare::InputCutoffClock::time_point deadline,
+      bool present
+  ) override
+  {
+    if (!inputCutoffSealLive(seal) || !cutoffBinding ||
+        !deskflow::windowshare::continuesInputCutoffSeal(*cutoffBinding, binding))
+      return false;
+    ++mapRequests;
+    cutoffBinding = binding;
+    cutoffPoint = point;
+    cutoffDeadline = deadline;
+    mappedResult.reset();
+    if (present)
+      presented.push_back(point);
+    const auto callback = onMapBegin;
+    if (callback)
+      callback();
+    return !sealFault;
+  }
+  bool beginMappedInputBatch(
+      const deskflow::windowshare::InputCutoffBinding &seal,
+      const std::vector<deskflow::windowshare::InputCutoffBatchItem> &items
+  ) override
+  {
+    if (!inputCutoffSealLive(seal) || !cutoffBinding ||
+        !deskflow::windowshare::validInputCutoffBatch(*cutoffBinding, items))
+      return false;
+    ++batchRequests;
+    batchItems = items;
+    batchResults.clear();
+    cutoffBinding = items.back().binding;
+    cutoffPoint.reset();
+    cutoffDeadline = std::min_element(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                       return a.deadline < b.deadline;
+                     })->deadline;
+    mappedResult.reset();
+    for (const auto &item : items)
+      if (item.presentCursor)
+        presented.push_back(item.point);
+    const auto callback = onMapBegin;
+    if (callback)
+      callback();
+    return !sealFault;
+  }
+  std::vector<deskflow::windowshare::InputCutoffBatchItem> batchItems;
+  std::vector<deskflow::windowshare::InputCutoffMappedResult> batchResults;
+  unsigned batchRequests = 0;
+  std::optional<deskflow::windowshare::InputCutoffBinding> sealOrigin;
+  bool sealValid = false, sealFault = false;
+  unsigned mapRequests = 0;
+  std::vector<deskflow::windowshare::InputCutoffPoint> presented;
+  std::function<void()> onMapBegin;
 #endif
 
   void *getEventTarget() const override
@@ -649,12 +879,36 @@ InputCutoffBinding cutoffBinding(std::uint64_t request = 1)
 {
   return {request, 9, {31, 400, 1}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17};
 }
-void negotiateCutoff(InputFixture &fixture)
+void negotiateCutoff(InputFixture &fixture, bool mapped = false, bool sealed = false, bool batched = false)
 {
   fixture.stream.authenticate();
-  fixture.handshake({kOptionInputCutoff, 9});
+  fixture.handshake(
+      {batched  ? kOptionBatchedInputCutoff
+       : sealed ? kOptionSealedInputCutoff
+       : mapped ? kOptionMappedInputCutoff
+                : kOptionInputCutoff,
+       9}
+  );
   fixture.stream.writes.clear();
   fixture.platform->cutoffSupported = true;
+}
+InputCutoffMappedResult mappedCutoffResult(const InputCutoffBinding &binding, InputCutoffPoint point)
+{
+  InputCutoffMappedResult result;
+  result.binding = binding;
+  result.point = point;
+  result.sourceX = 10.25;
+  result.sourceY = 20.5;
+  result.sourceWidth = 1920;
+  result.sourceHeight = 1080;
+  result.surfaceIncarnation = 18;
+  result.viewportRevision = 19;
+  result.nativeSurface = 20;
+  result.providerGeneration = 21;
+  result.nativeRevision = 22;
+  result.viewerPeerFingerprint.fill(0x7a);
+  result.orderingContract = "test-reviewed-build:123";
+  return result;
 }
 std::vector<InputCutoffReceipt> cutoffReceipts(const FakeStream &stream)
 {
@@ -1419,6 +1673,521 @@ void ServerProxyTests::inputCutoff_deadlineInvalidationAndDestruction()
     QVERIFY(!f.platform->cutoffBinding);
   }
 }
+void ServerProxyTests::mappedCutoff_delegatesExactPointAndWaitsForDrain()
+{
+  InputFixture f;
+  negotiateCutoff(f, true);
+  const auto binding = cutoffBinding();
+  const InputCutoffPoint point{-321, 456};
+  bool flushed = false;
+  f.platform->onCutoffBegin = [&] {
+    flushed = f.client.calls.size() == 1 && f.client.calls.front().x == 30 && f.client.calls.front().y == 40;
+  };
+  const auto before = InputCutoffClock::now();
+  f.stream.push(wire(kMsgDMouseMove, 30, 40));
+  f.stream.push(encodeInputCutoffMappedRequest({{binding, 200}, point}));
+  f.dispatch();
+  QVERIFY(flushed);
+  QCOMPARE(f.platform->cutoffPoint, std::optional(point));
+  const auto deadline = f.platform->cutoffDeadline;
+  QVERIFY(deadline > before && deadline <= InputCutoffClock::now() + std::chrono::milliseconds(200));
+  f.platform->cutoffProbe.pong(binding.request, InputCutoffClock::now());
+  pollCutoff(f);
+  f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+  pollCutoff(f);
+  QVERIFY(cutoffReceipts(f.stream).empty()); // No mapped receipt from PONG or batch completion alone.
+  auto result = mappedCutoffResult(binding, point);
+  f.platform->mappedResult = result;
+  pollCutoff(f);
+  const auto count = std::count(f.stream.writes.begin(), f.stream.writes.end(), encodeInputCutoffMappedResult(result));
+  QCOMPARE(count, 1);
+  pollCutoff(f);
+  QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), encodeInputCutoffMappedResult(result)), 1);
+  QCOMPARE(f.platform->cutoffDeadline, deadline); // Progress cannot renew the original deadline.
+  f.platform->mappedResult.reset();               // Exact native/provider/Qt receipt invalidated after publication.
+  pollCutoff(f);
+  QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{binding, InputCutoffState::Denied}));
+  f.send(encodeInputCutoffResume(binding));
+  QCOMPARE(f.platform->cutoffResumes, 1u);
+  f.send(wire(kMsgDKeyUp, 'a', 0, 7));
+  QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+  f.platform->mappedResult = result; // A late provider result has no retained transaction to publish into.
+  const auto writes = f.stream.writes.size();
+  f.send(wire(kMsgCNoop));
+  QVERIFY(!disconnectRequest(f.events));
+  QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), encodeInputCutoffMappedResult(result)), 1);
+  QVERIFY(f.stream.writes.size() >= writes);
+}
+
+void ServerProxyTests::mappedCutoff_rejectsMissingProofAndStaleCompletion()
+{
+  for (int invalid = 0; invalid < 5; ++invalid) {
+    InputFixture f;
+    negotiateCutoff(f, invalid != 0);
+    const auto binding = cutoffBinding();
+    const InputCutoffPoint point{-10, 27};
+    f.send(encodeInputCutoffMappedRequest({{binding, 250}, point}));
+    if (invalid == 0) {
+      QCOMPARE(f.platform->cutoffBegins, 0u);
+      QVERIFY(disconnectRequest(f.events));
+      continue;
+    }
+    f.platform->cutoffProbe.pong(binding.request, InputCutoffClock::now());
+    f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+    auto result = mappedCutoffResult(binding, point);
+    if (invalid == 1)
+      result.orderingContract.clear();
+    if (invalid == 2)
+      ++result.point.x;
+    if (invalid == 3)
+      ++result.binding.capture.part;
+    if (invalid == 4)
+      f.platform->onMappedQuery = [&] { f.proxy.reset(); };
+    f.platform->mappedResult = result;
+    pollCutoff(f);
+    QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &bytes) {
+      return bytes.starts_with("CIMR");
+    }));
+    if (invalid == 4) {
+      QVERIFY(!f.proxy);
+      QCOMPARE(f.platform->cutoffResumes, 1u);
+      QVERIFY(!f.platform->cutoffBinding);
+    } else {
+      QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{binding, InputCutoffState::Denied}));
+      f.send(encodeInputCutoffResume(binding));
+      QCOMPARE(f.platform->cutoffResumes, 1u);
+    }
+  }
+}
+void ServerProxyTests::sealedCutoff_refreshesWithoutReopeningLegacy()
+{
+  InputFixture f;
+  negotiateCutoff(f, true, true);
+  const auto origin = cutoffBinding();
+  f.stream.push(wire(kMsgDMouseMove, 30, 40));
+  f.stream.push(encodeInputCutoffSealedRequest({{origin, 250}, {30, 40}}));
+  f.dispatch();
+  QCOMPARE(f.client.calls.size(), 1u); // Initial compressed prefix is submitted before its ping.
+  QCOMPARE(f.platform->cutoffBegins, 1u);
+  QVERIFY(!f.platform->sealValid);
+  f.platform->cutoffProbe.pong(origin.request, InputCutoffClock::now());
+  f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+  pollCutoff(f);
+  QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+    return v.starts_with("CIMS");
+  }));
+  f.platform->mappedResult = mappedCutoffResult(origin, {30, 40});
+  pollCutoff(f);
+  QVERIFY(f.platform->sealValid);
+  QCOMPARE(
+      std::count(
+          f.stream.writes.begin(), f.stream.writes.end(),
+          encodeInputCutoffSealedResult({*f.platform->mappedResult, origin.request})
+      ),
+      1
+  );
+  // The prior point can expire while the exact prefix stays closed. No new
+  // point or permission is published merely because the seal is retained.
+  f.platform->cutoffDeadline = InputCutoffClock::now();
+  pollCutoff(f);
+  QVERIFY(cutoffReceipts(f.stream).empty());
+  auto latest = origin;
+  for (std::uint64_t index = 0; index != 32; ++index) {
+    auto next = latest;
+    ++next.request;
+    ++next.capture.sequence;
+    const InputCutoffPoint point{int(40 + index), int(50 + index)};
+    const auto before = InputCutoffClock::now();
+    f.send(encodeInputCutoffMapRequest({{{next, 200}, point}, origin.request, index % 2 == 0}));
+    QVERIFY(!disconnectRequest(f.events));
+    QCOMPARE(f.platform->cutoffBinding, std::optional(next));
+    QCOMPARE(f.platform->cutoffPoint, std::optional(point));
+    QVERIFY(
+        f.platform->cutoffDeadline > before &&
+        f.platform->cutoffDeadline <= InputCutoffClock::now() + std::chrono::milliseconds(200)
+    );
+    QCOMPARE(f.platform->cutoffBegins, 1u);
+    QCOMPARE(f.platform->cutoffResumes, 0u);
+    f.platform->mappedResult = mappedCutoffResult(next, point);
+    pollCutoff(f);
+    QCOMPARE(
+        std::count(
+            f.stream.writes.begin(), f.stream.writes.end(),
+            encodeInputCutoffSealedResult({*f.platform->mappedResult, origin.request})
+        ),
+        1
+    );
+    latest = next;
+  }
+  QCOMPARE(f.platform->mapRequests, 32u);
+  QCOMPARE(f.platform->presented.size(), 16u);
+  QCOMPARE(f.client.calls.size(), 1u); // Explicit presentation did not enter an ordinary key/button/wheel path.
+  f.send(encodeInputCutoffResume(origin));
+  QCOMPARE(f.platform->cutoffResumes, 1u);
+  QVERIFY(!f.platform->sealOrigin);
+  QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{origin, InputCutoffState::Resumed}));
+  f.send(wire(kMsgDKeyUp, 'a', 0, 7));
+  QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+}
+
+void ServerProxyTests::sealedCutoff_rejectsStaleOverlappingAndInvalidatedMaps()
+{
+  for (int invalid = 0; invalid != 9; ++invalid) {
+    InputFixture f;
+    negotiateCutoff(f, true, true);
+    const auto origin = cutoffBinding();
+    f.send(encodeInputCutoffSealedRequest({{origin, 250}, {30, 40}}));
+    f.platform->cutoffProbe.pong(origin.request, InputCutoffClock::now());
+    f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+    f.platform->mappedResult = mappedCutoffResult(origin, {30, 40});
+    pollCutoff(f);
+    auto next = origin;
+    ++next.request;
+    ++next.capture.sequence;
+    auto sealRequest = origin.request;
+    if (invalid == 0)
+      next.capture = origin.capture;
+    if (invalid == 1)
+      ++next.forwarding.geometry;
+    if (invalid == 2)
+      ++next.viewerConnection;
+    if (invalid == 3)
+      ++next.coreConnectionGeneration;
+    if (invalid == 4) {
+      ++next.request;
+      ++sealRequest;
+    }
+    if (invalid == 5)
+      f.platform->sealFault = true;
+    if (invalid == 7)
+      f.platform->onMapBegin = [&] { f.proxy.reset(); };
+    if (invalid == 8)
+      f.platform->onMapBegin = [&] { f.stream.revoke(); };
+    f.stream.writes.clear();
+    f.send(encodeInputCutoffMapRequest({{{next, 200}, {50, 60}}, sealRequest, true}));
+    if (invalid == 6) { // A second request cannot replace an unresolved point.
+      ++next.request;
+      ++next.capture.sequence;
+      f.send(encodeInputCutoffMapRequest({{{next, 200}, {70, 80}}, sealRequest, true}));
+    }
+    QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+      return v.starts_with("CIMS");
+    }));
+    if (invalid == 5) {
+      QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{next, InputCutoffState::Denied}));
+      f.send(encodeInputCutoffResume(origin));
+    } else if (invalid != 7)
+      QVERIFY(disconnectRequest(f.events));
+    else
+      QVERIFY(!f.proxy);
+    QVERIFY(!f.platform->sealOrigin);
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+  }
+  InputFixture legacy;
+  negotiateCutoff(legacy, true);
+  legacy.send(encodeInputCutoffSealedRequest({{cutoffBinding(), 200}, {30, 40}}));
+  QCOMPARE(legacy.platform->cutoffBegins, 0u);
+  QVERIFY(disconnectRequest(legacy.events));
+}
+void ServerProxyTests::batchedCutoff_delegatesAtomicallyWithoutNewPrefix()
+{
+  InputFixture f;
+  negotiateCutoff(f, true, true, true);
+  const auto origin = cutoffBinding();
+  f.stream.push(wire(kMsgDMouseMove, 30, 40));
+  f.stream.push(encodeInputCutoffSealedRequest({{origin, 250}, {30, 40}}));
+  f.dispatch();
+  f.platform->cutoffProbe.pong(origin.request, InputCutoffClock::now());
+  f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+  f.platform->mappedResult = mappedCutoffResult(origin, {30, 40});
+  pollCutoff(f);
+  QVERIFY(f.platform->sealValid);
+  auto latest = origin;
+  for (unsigned group = 0; group < 4; ++group) {
+    InputCutoffBatchRequest request{origin.request};
+    for (unsigned index = 0; index < inputCutoffMaximumBatch; ++index) {
+      ++latest.request;
+      ++latest.capture.sequence;
+      latest.capture.part = 1 + index % 3;
+      request.items.push_back(
+          {{{latest, static_cast<std::uint16_t>(200 + index)}, {int(index * 3), int(index * 7)}},
+           origin.request,
+           index % 2 == 0}
+      );
+    }
+    f.stream.writes.clear();
+    const auto before = InputCutoffClock::now();
+    f.send(encodeInputCutoffBatchRequest(request));
+    QVERIFY(!disconnectRequest(f.events));
+    QCOMPARE(f.platform->batchItems.size(), inputCutoffMaximumBatch);
+    QCOMPARE(f.platform->cutoffBegins, 1u);
+    QCOMPARE(f.platform->cutoffResumes, 0u);
+    for (std::size_t index = 0; index < inputCutoffMaximumBatch; ++index) {
+      const auto &item = f.platform->batchItems[index];
+      QCOMPARE(item.binding, request.items[index].mapping.cutoff.binding);
+      QCOMPARE(item.point, request.items[index].mapping.point);
+      QVERIFY(
+          item.deadline > before && item.deadline <= InputCutoffClock::now() + std::chrono::milliseconds(200 + index)
+      );
+      f.platform->batchResults.push_back(mappedCutoffResult(item.binding, item.point));
+      if (index + 1 < inputCutoffMaximumBatch) {
+        pollCutoff(f);
+        QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+          return v.starts_with("CIMB");
+        }));
+      }
+    }
+    pollCutoff(f);
+    const auto expected = encodeInputCutoffBatchResult({origin.request, f.platform->batchResults});
+    QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), expected), 1);
+    pollCutoff(f);
+    QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), expected), 1);
+  }
+  QCOMPARE(f.platform->batchRequests, 4u);
+  QCOMPARE(f.platform->presented.size(), 32u);
+  QCOMPARE(f.client.calls.size(), 1u);
+  f.send(encodeInputCutoffResume(origin));
+  QCOMPARE(f.platform->cutoffResumes, 1u);
+  f.send(wire(kMsgDKeyUp, 'a', 0, 7));
+  QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+}
+
+void ServerProxyTests::batchedCutoff_rejectsOverlapLossAndSubstitution()
+{
+  for (int invalid = 0; invalid < 10; ++invalid) {
+    InputFixture f;
+    negotiateCutoff(f, true, true, invalid != 0);
+    const auto origin = cutoffBinding();
+    f.send(encodeInputCutoffSealedRequest({{origin, 250}, {30, 40}}));
+    f.platform->cutoffProbe.pong(origin.request, InputCutoffClock::now());
+    f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+    f.platform->mappedResult = mappedCutoffResult(origin, {30, 40});
+    pollCutoff(f);
+    InputCutoffBatchRequest request{origin.request};
+    auto next = origin;
+    for (unsigned index = 0; index < 2; ++index) {
+      ++next.request;
+      ++next.capture.sequence;
+      request.items.push_back({{{next, 200}, {int(50 + index), 60}}, origin.request, true});
+    }
+    if (invalid == 1)
+      for (auto &item : request.items)
+        ++item.mapping.cutoff.binding.forwarding.geometry;
+    if (invalid == 2)
+      for (auto &item : request.items)
+        --item.mapping.cutoff.binding.capture.sequence;
+    if (invalid == 3)
+      f.platform->sealFault = true;
+    if (invalid == 4)
+      f.platform->onMapBegin = [&] { f.proxy.reset(); };
+    if (invalid == 5)
+      f.platform->onMapBegin = [&] { f.stream.revoke(); };
+    f.stream.writes.clear();
+    f.send(encodeInputCutoffBatchRequest(request));
+    if (invalid == 6)
+      f.send(encodeInputCutoffBatchRequest(request));
+    if (invalid >= 7) {
+      for (const auto &item : f.platform->batchItems)
+        f.platform->batchResults.push_back(mappedCutoffResult(item.binding, item.point));
+      if (invalid == 7)
+        ++f.platform->batchResults.back().point.x;
+      if (invalid == 8)
+        ++f.platform->batchResults.back().viewportRevision;
+      if (invalid == 9)
+        f.platform->onMappedQuery = [&] { f.proxy.reset(); };
+      pollCutoff(f);
+    }
+    QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+      return v.starts_with("CIMB");
+    }));
+    if (invalid == 3 || invalid == 7 || invalid == 8) {
+      QCOMPARE(cutoffReceipts(f.stream).back().state, InputCutoffState::Denied);
+      f.send(encodeInputCutoffResume(origin));
+    } else if (invalid != 4 && invalid != 9)
+      QVERIFY(disconnectRequest(f.events));
+    else
+      QVERIFY(!f.proxy);
+    QVERIFY(!f.platform->sealOrigin);
+    QCOMPARE(f.platform->cutoffResumes, 1u);
+  }
+}
+
+void ServerProxyTests::preparation_ordersFocusPromotionAndLinkedCleanup()
+{
+  InputFixture f;
+  f.stream.authenticate();
+  f.handshake({kOptionBatchedInputCutoff, 9, kOptionInputPreparation, 9});
+  QVERIFY(std::any_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+    return v.starts_with("CIPA");
+  }));
+  f.stream.writes.clear();
+  f.platform->preparationSupported = true;
+  const InputPreparationBinding preparation{1, 9, {31, 400, 1}};
+  const InputCutoffPoint point{30, 40};
+  f.platform->onPreparationBegin = [&] {
+    QCOMPARE(f.client.calls.size(), 1u);
+    QCOMPARE(f.client.calls.front().kind, std::string("mouseMove"));
+  };
+  f.stream.push(wire(kMsgDMouseMove, 30, 40));
+  f.stream.push(encodeInputPreparationRequest({preparation, point, 450}));
+  f.dispatch();
+  QCOMPARE(f.platform->preparationBegins, 1u);
+  QCOMPARE(f.platform->preparationBinding, std::optional(preparation));
+  QVERIFY(f.platform->preparationDeadline > InputCutoffClock::now() + std::chrono::milliseconds(250));
+  QVERIFY(f.stream.writes.empty() || f.stream.writes.back() == "CNOP");
+  PreparedInputFocusResult focus{preparation, point, 17, {11, 12}, 16, 14, 15};
+  focus.viewerPeerFingerprint.fill(0x7a);
+  f.platform->prepared = focus;
+  f.platform->preparationState = InputPreparationState::Prepared;
+  pollCutoff(f);
+  QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), encodePreparedInputFocusResult(focus)), 1);
+  pollCutoff(f);
+  QCOMPARE(std::count(f.stream.writes.begin(), f.stream.writes.end(), encodePreparedInputFocusResult(focus)), 1);
+  const auto promoted = cutoffBinding(2);
+  f.send(encodeInputPreparationPromotion({preparation, promoted, 200}));
+  QCOMPARE(f.platform->preparationPromotions, 1u);
+  QCOMPARE(f.platform->cutoffBegins, 0u);
+  QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+    return v.starts_with("CIMS");
+  }));
+  f.platform->cutoffProbe.pong(promoted.request, InputCutoffClock::now());
+  f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+  f.platform->mappedResult = mappedCutoffResult(promoted, point);
+  pollCutoff(f);
+  QCOMPARE(
+      std::count(
+          f.stream.writes.begin(), f.stream.writes.end(),
+          encodeInputCutoffSealedResult({*f.platform->mappedResult, promoted.request})
+      ),
+      1
+  );
+  f.stream.writes.clear();
+  f.send(encodeInputCutoffResume(promoted));
+  QCOMPARE(f.platform->preparationCancels, 1u);
+  QCOMPARE(f.platform->cutoffResumes, 0u);
+  QVERIFY(cutoffReceipts(f.stream).empty());
+  const auto cleanupDeadline = f.platform->preparationCleanupDeadline;
+  f.send(encodeInputCutoffResume(promoted));
+  QCOMPARE(f.platform->preparationCancels, 1u);
+  QCOMPARE(f.platform->preparationCleanupDeadline, cleanupDeadline);
+  QVERIFY(cutoffReceipts(f.stream).empty());
+  f.platform->finishPreparationCleanup();
+  pollCutoff(f);
+  QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{promoted, InputCutoffState::Resumed}));
+  QCOMPARE(f.platform->cutoffResumes, 0u);
+  f.send(wire(kMsgDKeyUp, 'a', 0, 7));
+  QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+  QVERIFY(!disconnectRequest(f.events));
+}
+
+void ServerProxyTests::preparation_rejectsSubstitutionAndNeverInfersRelease()
+{
+  for (int test = 0; test < 11; ++test) {
+    InputFixture f;
+    f.stream.authenticate();
+    f.handshake(
+        test == 0 ? OptionsList{kOptionBatchedInputCutoff, 9}
+                  : OptionsList{kOptionBatchedInputCutoff, 9, kOptionInputPreparation, 9}
+    );
+    f.stream.writes.clear();
+    f.platform->preparationSupported = test != 1;
+    const InputPreparationBinding binding{1, 9, {31, 400, 1}};
+    if (test == 7)
+      f.platform->onPreparationBegin = [&] { f.proxy.reset(); };
+    if (test == 8)
+      f.platform->onPreparationObserve = [&] { f.proxy.reset(); };
+    f.send(encodeInputPreparationRequest({binding, {30, 40}, 450}));
+    if (test == 0) {
+      QCOMPARE(f.platform->preparationBegins, 0u);
+      QVERIFY(disconnectRequest(f.events));
+      continue;
+    }
+    if (test == 1) {
+      QVERIFY(
+          std::find(
+              f.stream.writes.begin(), f.stream.writes.end(),
+              encodeInputPreparationReceipt(
+                  {binding, InputPreparationState::Released, InputPreparationOutcome::Unsupported}
+              )
+          ) != f.stream.writes.end()
+      );
+      QCOMPARE(f.platform->preparationCancels, 0u);
+      continue;
+    }
+    if (test == 7 || test == 8) {
+      QVERIFY(!f.proxy);
+      QVERIFY(f.platform->preparationAborts >= 1);
+      continue;
+    }
+    if (test == 2) {
+      f.platform->preparationState = InputPreparationState::Failed;
+      f.platform->preparationOutcome = InputPreparationOutcome::NoTarget;
+      pollCutoff(f);
+      QCOMPARE(f.platform->preparationCancels, 1u);
+      QVERIFY(
+          std::find(
+              f.stream.writes.begin(), f.stream.writes.end(),
+              encodeInputPreparationReceipt({binding, InputPreparationState::Failed, InputPreparationOutcome::NoTarget})
+          ) != f.stream.writes.end()
+      );
+    } else if (test == 3) {
+      auto wrong = binding;
+      ++wrong.capture.part;
+      f.send(encodeInputPreparationCancellation({wrong, 200}));
+      QVERIFY(disconnectRequest(f.events));
+      QCOMPARE(f.platform->preparationAborts, 1u);
+      continue;
+    } else if (test == 4) {
+      f.send(wire(kMsgDMouseDown, 1));
+      QVERIFY(disconnectRequest(f.events));
+      QCOMPARE(f.platform->preparationAborts, 1u);
+      continue;
+    } else if (test == 5) {
+      f.stream.revoke();
+      pollCutoff(f);
+      QVERIFY(disconnectRequest(f.events));
+      QVERIFY(f.platform->preparationAborts >= 1);
+      continue;
+    } else if (test == 6) {
+      PreparedInputFocusResult focus{binding, {31, 40}, 17, {11, 12}, 16, 14, 15};
+      focus.viewerPeerFingerprint.fill(0x7a);
+      f.platform->prepared = focus;
+      f.platform->preparationState = InputPreparationState::Prepared;
+      pollCutoff(f);
+      QCOMPARE(f.platform->preparationCancels, 1u);
+    } else {
+      if (test == 9)
+        f.platform->onPreparationCancel = [&] { f.proxy.reset(); };
+      f.send(encodeInputPreparationCancellation({binding, 200}));
+      if (test == 9) {
+        QVERIFY(!f.proxy);
+        QVERIFY(f.platform->preparationAborts >= 1);
+        continue;
+      }
+      f.platform->preparationState = InputPreparationState::Failed;
+      pollCutoff(f);
+      QVERIFY(disconnectRequest(f.events));
+      QVERIFY(f.platform->preparationAborts >= 1);
+      continue;
+    }
+    QVERIFY(std::none_of(f.stream.writes.begin(), f.stream.writes.end(), [](const auto &v) {
+      if (!v.starts_with("CIPR"))
+        return false;
+      const auto receipt = decodeInputPreparationReceipt(std::string_view(v).substr(4));
+      return receipt && receipt->state == InputPreparationState::Released;
+    }));
+    f.platform->finishPreparationCleanup();
+    pollCutoff(f);
+    const auto expected = test == 2 ? InputPreparationOutcome::NoTarget : InputPreparationOutcome::Failed;
+    QVERIFY(
+        std::find(
+            f.stream.writes.begin(), f.stream.writes.end(),
+            encodeInputPreparationReceipt({binding, InputPreparationState::Released, expected})
+        ) != f.stream.writes.end()
+    );
+  }
+}
+
 #endif
 
 QTEST_MAIN(ServerProxyTests)

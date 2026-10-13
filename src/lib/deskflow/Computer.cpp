@@ -362,6 +362,51 @@ void Computer::setOptions(const OptionsList &options)
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool Computer::beginInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return !m_isPrimary && deskflow::windowshare::validInputPreparationBinding(binding) &&
+         deskflow::windowshare::validInputCutoffPoint(point) &&
+         deskflow::windowshare::InputCutoffClock::now() < deadline &&
+         m_computer->beginInputPreparation(binding, point, deadline);
+}
+deskflow::windowshare::InputPreparationState
+Computer::inputPreparationState(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->inputPreparationState(binding);
+}
+deskflow::windowshare::InputPreparationOutcome
+Computer::inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->inputPreparationOutcome(binding);
+}
+std::optional<deskflow::windowshare::PreparedInputFocusResult>
+Computer::preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->preparedInputFocusResult(binding);
+}
+bool Computer::promoteInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding,
+    const deskflow::windowshare::InputCutoffBinding &cutoff,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->promoteInputPreparation(binding, cutoff, deadline);
+}
+bool Computer::cancelInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->cancelInputPreparation(binding, deadline);
+}
+void Computer::abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &binding) noexcept
+{
+  m_computer->abortInputPreparation(binding);
+}
+
 bool Computer::beginInputCutoff(
     const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
 )
@@ -373,9 +418,52 @@ windowshare::InputCutoffState Computer::inputCutoffState(const windowshare::Inpu
 {
   return m_computer->inputCutoffState(binding);
 }
+bool Computer::beginMappedInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffPoint point,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return !m_isPrimary && windowshare::validInputCutoffBinding(binding) && windowshare::validInputCutoffPoint(point) &&
+         windowshare::InputCutoffClock::now() < deadline &&
+         m_computer->beginMappedInputCutoff(binding, point, deadline);
+}
+std::optional<windowshare::InputCutoffMappedResult>
+Computer::mappedInputCutoffResult(const windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->mappedInputCutoffResult(binding);
+}
 bool Computer::resumeInputCutoff(const windowshare::InputCutoffBinding &binding)
 {
   return m_computer->resumeInputCutoff(binding);
+}
+bool Computer::beginSealedInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffPoint point,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return !m_isPrimary && windowshare::validInputCutoffBinding(binding) && windowshare::validInputCutoffPoint(point) &&
+         windowshare::InputCutoffClock::now() < deadline &&
+         m_computer->beginSealedInputCutoff(binding, point, deadline);
+}
+bool Computer::refreshMappedInputCutoff(
+    const windowshare::InputCutoffBinding &seal, const windowshare::InputCutoffBinding &binding,
+    windowshare::InputCutoffPoint point, windowshare::InputCutoffClock::time_point deadline, bool presentCursor
+)
+{
+  return !m_isPrimary && windowshare::continuesInputCutoffSeal(seal, binding) &&
+         windowshare::validInputCutoffPoint(point) && windowshare::InputCutoffClock::now() < deadline &&
+         m_computer->refreshMappedInputCutoff(seal, binding, point, deadline, presentCursor);
+}
+bool Computer::beginMappedInputBatch(
+    const windowshare::InputCutoffBinding &seal, const std::vector<windowshare::InputCutoffBatchItem> &items
+)
+{
+  return !m_isPrimary && windowshare::validInputCutoffBatch(seal, items) &&
+         m_computer->beginMappedInputBatch(seal, items);
+}
+bool Computer::inputCutoffSealLive(const windowshare::InputCutoffBinding &binding)
+{
+  return !m_isPrimary && m_computer->inputCutoffSealLive(binding);
 }
 #endif
 

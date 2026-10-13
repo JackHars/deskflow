@@ -47,6 +47,33 @@ struct ScrollRemainder
 
 namespace deskflow {
 
+#ifdef DESKFLOW_GNOME_EI_PING
+struct EiComputer::GnomePreparation
+{
+  windowshare::InputPreparationBinding binding;
+  windowshare::InputCutoffPoint point;
+  windowshare::InputCutoffClock::time_point deadline, cleanupDeadline{};
+  windowshare::InputPreparationState state = windowshare::InputPreparationState::Preparing;
+  windowshare::InputPreparationOutcome outcome = windowshare::InputPreparationOutcome::None;
+  std::uint64_t providerRequest = 0;
+  bool prefixObserved = false;
+  std::optional<windowshare::GnomeProviderClient::PreparedInputFocus> focus;
+  std::optional<windowshare::InputCutoffBinding> promotion;
+};
+struct EiComputer::GnomeMappedCutoff
+{
+  windowshare::InputCutoffPoint point;
+  windowshare::InputCutoffClock::time_point deadline;
+  std::uint64_t providerRequest = 0;
+  std::optional<windowshare::GnomeProviderClient::InputDrainSegment> segment;
+  std::optional<windowshare::GnomeProviderClient::InputDrainSeal> seal;
+  windowshare::InputCutoffBinding binding;
+  bool retainPrefix = false, refreshing = false;
+  std::vector<windowshare::InputCutoffBatchItem> batch;
+  std::vector<windowshare::GnomeProviderClient::InputDrainSegment> batchSegments;
+};
+#endif
+
 EiComputer::EiComputer(bool isPrimary, IEventQueue *events, bool usePortal)
 #ifdef BUILD_WINDOWSHARE
     : EiComputer(isPrimary, events, usePortal, nullptr)
@@ -223,7 +250,13 @@ void EiComputer::cleanupEi()
   // A new EI context has a different native lifetime. Retained proof from
   // a prior connection must not become eligible on a new context incarnation.
   m_gnomePrefixProbe.resetAfterConnectionTeardown();
+  m_gnomePrefixRequest = 0;
+  if (m_gnomePreparation && m_gnomePreparation->state != windowshare::InputPreparationState::Released) {
+    m_gnomePreparation->state = windowshare::InputPreparationState::Failed;
+    m_gnomePreparation->outcome = windowshare::InputPreparationOutcome::Failed;
+  }
   m_gnomePrefixBinding.reset();
+  m_gnomeMappedCutoff.reset();
   m_gnomeSubmittedKeys.reset();
   m_gnomeSubmittedButtons.reset();
   m_gnomeUntrackedInput = false;
@@ -544,10 +577,11 @@ bool EiComputer::inputSessionLive() const noexcept
 bool EiComputer::allowLegacyInput() const noexcept
 {
 #ifdef DESKFLOW_GNOME_EI_PING
-  if (m_gnomePrefixBinding) {
+  if (m_gnomePrefixBinding ||
+      (m_gnomePreparation && m_gnomePreparation->state != windowshare::InputPreparationState::Released)) {
     // Transport normally rejects this before key translation or compression.
     // A direct backend caller still cannot submit across the retained cutoff.
-    m_gnomePrefixProbe.invalidate();
+    invalidateGnomeInputCutoff();
     windowshare::InputSequenceSubmissionScope::fail();
     return false;
   }
@@ -576,13 +610,19 @@ void EiComputer::ensureEmulating() const
     return;
 
   m_idleEmulationTimer = m_events->newOneShotTimer(s_idleEmulationTimeout, nullptr);
-  m_events->addHandler(EventTypes::Timer, m_idleEmulationTimer, [this](const auto &) { stopEmulating(); });
+  m_events->addHandler(EventTypes::Timer, m_idleEmulationTimer, [this](const auto &) {
+#ifdef DESKFLOW_GNOME_EI_PING
+    if (m_gnomeProviderEnabled && m_isEmulating)
+      LOG_DEBUG("GNOME EI idle stop generation=%u", m_sequenceNumber);
+#endif
+    stopEmulating();
+  });
 }
 
 void EiComputer::stopEmulating() const
 {
 #ifdef DESKFLOW_GNOME_EI_PING
-  m_gnomePrefixProbe.invalidate();
+  invalidateGnomeInputCutoff();
 #endif
   cancelIdleEmulationTimer();
   if (!m_isEmulating)
@@ -1165,32 +1205,81 @@ void EiComputer::retireGnomeEiPing()
 
 void EiComputer::cancelGnomeEiPrefixObservation()
 {
-  m_gnomePrefixProbe.invalidate();
+  invalidateGnomeInputCutoff();
+  if (m_gnomeMappedCutoff) {
+    if (m_gnomeProvider && m_gnomeMappedCutoff->providerRequest)
+      m_gnomeProvider->cancelInputDrain(m_gnomeMappedCutoff->providerRequest);
+    m_gnomeMappedCutoff->segment.reset();
+    m_gnomeMappedCutoff->seal.reset();
+    m_gnomeMappedCutoff->batchSegments.clear();
+  }
   retireGnomeEiPing();
+}
+
+void EiComputer::invalidateGnomeInputCutoff() const noexcept
+{
+  m_gnomePrefixProbe.invalidate();
+  m_gnomeCutoffInvalidated = true;
 }
 
 bool EiComputer::beginGnomeEiPrefixObservation(
     const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
 )
 {
+  if (!windowshare::validInputCutoffBinding(binding) || !beginGnomeEiPrefixObservation(binding.request, deadline))
+    return false;
+  m_gnomePrefixBinding = binding;
+  return true;
+}
+
+bool EiComputer::beginGnomeEiPrefixObservation(
+    std::uint64_t request, windowshare::InputCutoffClock::time_point deadline
+)
+{
   // Only the explicitly owned GNOME provider's actual libei sender. No
   // borrowed device or dispatch pointer escapes the core event queue.
+  if (m_gnomePreparation && m_gnomePreparation->state == windowshare::InputPreparationState::Released)
+    m_gnomePreparation.reset();
   if (!m_gnomeProviderEnabled || m_gnomeProviderStopped || !m_gnomeProvider || !m_gnomeProvider->live() ||
-      m_isPrimary || !m_activated || !m_isOnComputer || !m_isEmulating || !m_ei || !m_eiPointer || !m_eiKeyboard ||
-      !m_eiAbs || m_gnomeSubmittedKeys.any() || m_gnomeSubmittedButtons.any() || m_gnomeUntrackedInput ||
-      std::this_thread::get_id() != m_gnomePrefixThread || !windowshare::validInputCutoffBinding(binding) ||
-      !ei_is_sender(m_ei) || m_gnomePrefixBinding)
+      m_isPrimary || !m_activated || !m_isOnComputer || !m_ei || !m_eiPointer || !m_eiKeyboard || !m_eiAbs ||
+      m_gnomeSubmittedKeys.any() || m_gnomeSubmittedButtons.any() || m_gnomeUntrackedInput ||
+      std::this_thread::get_id() != m_gnomePrefixThread || !request || !ei_is_sender(m_ei) || m_gnomePrefixBinding ||
+      m_gnomePreparation)
     return false;
+  auto *const provider = m_gnomeProvider.get();
+  auto *const context = m_ei;
+  auto *const pointer = m_eiPointer;
+  auto *const keyboard = m_eiKeyboard;
+  auto *const absolute = m_eiAbs;
+  const auto previousGeneration = m_sequenceNumber;
+  const bool restart = !m_isEmulating;
+  if (restart) {
+    if (previousGeneration == std::numeric_limits<std::uint32_t>::max())
+      return false;
+    // A fresh transaction may start the idle sender before its requested
+    // ping. This path is unavailable to retained seals/maps, and its PONG
+    // must still finish the entire libei batch and the native/Qt drain.
+    ensureEmulating();
+  }
+  if (m_gnomeProvider.get() != provider || !inputSessionLive() || m_ei != context || m_eiPointer != pointer ||
+      m_eiKeyboard != keyboard || m_eiAbs != absolute || !m_isEmulating || !m_activated || !m_isOnComputer ||
+      m_sequenceNumber != previousGeneration + std::uint32_t(restart) || m_gnomeSubmittedKeys.any() ||
+      m_gnomeSubmittedButtons.any() || m_gnomeUntrackedInput || m_gnomePrefixBinding || m_gnomePreparation)
+    return false;
+  if (restart)
+    LOG_DEBUG("GNOME EI cutoff idle restart generation=%u", m_sequenceNumber);
   struct ei_ping *ping = ei_new_ping(m_ei);
   if (!ping)
     return false;
   const auto id = ei_ping_get_id(ping);
   const auto now = windowshare::EiPrefixProbe::Clock::now();
-  if (!m_gnomePrefixProbe.begin(binding.request, id, now, deadline, true)) {
+  if (!m_gnomePrefixProbe.begin(request, id, now, deadline, true)) {
     ei_ping_unref(ping);
     return false;
   }
-  m_gnomePrefixBinding = binding;
+  m_gnomePrefixRequest = request;
+  m_gnomePrefixEmulationGeneration = m_sequenceNumber;
+  m_gnomeCutoffInvalidated = false;
   m_gnomePrefixPing = ping;
   try {
     // The 250ms absolute timer retires the ping even if no further native
@@ -1207,7 +1296,8 @@ bool EiComputer::beginGnomeEiPrefixObservation(
     ei_ping(ping);
   } catch (...) {
     cancelGnomeEiPrefixObservation();
-    m_gnomePrefixProbe.retire(binding.request);
+    m_gnomePrefixProbe.retire(request);
+    m_gnomePrefixRequest = 0;
     m_gnomePrefixBinding.reset();
     return false;
   }
@@ -1216,6 +1306,268 @@ bool EiComputer::beginGnomeEiPrefixObservation(
 #endif
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool EiComputer::beginInputPreparation(
+    const windowshare::InputPreparationBinding &binding, windowshare::InputCutoffPoint point,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  const auto now = InputCutoffClock::now();
+  if (!validInputPreparationBinding(binding) || !validInputCutoffPoint(point) || deadline <= now ||
+      deadline > now + inputPreparationMaximumLifetime)
+    return false;
+  if (m_gnomePreparation && m_gnomePreparation->state == InputPreparationState::Released)
+    m_gnomePreparation.reset();
+  if (!beginGnomeEiPrefixObservation(binding.request, std::min(deadline, now + inputCutoffMaximumLifetime)))
+    return false;
+  m_gnomePreparation = std::make_unique<GnomePreparation>();
+  m_gnomePreparation->binding = binding;
+  m_gnomePreparation->point = point;
+  m_gnomePreparation->deadline = deadline;
+  cancelIdleEmulationTimer();
+  return true;
+#else
+  return false;
+#endif
+}
+
+windowshare::InputPreparationState
+EiComputer::inputPreparationState(const windowshare::InputPreparationBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  if (std::this_thread::get_id() != m_gnomePrefixThread || !m_gnomePreparation ||
+      m_gnomePreparation->binding != binding)
+    return InputPreparationState::Failed;
+  auto &preparation = *m_gnomePreparation;
+  if (preparation.state == InputPreparationState::Released || preparation.state == InputPreparationState::Failed)
+    return preparation.state;
+  const auto now = InputCutoffClock::now();
+  if (preparation.state == InputPreparationState::Canceling) {
+    if (now >= preparation.cleanupDeadline || !m_gnomeProvider || !m_gnomeProvider->live()) {
+      abortInputPreparation(binding);
+      return InputPreparationState::Failed;
+    }
+    if (const auto update = m_gnomeProvider->takeInputPreparationCleanupUpdate()) {
+      if (update->request != preparation.providerRequest || !update->released || !update->error.empty()) {
+        abortInputPreparation(binding);
+        return InputPreparationState::Failed;
+      }
+      // Only the provider's exact native+Qt drain and preparation gate ACK
+      // permits legacy submissions. A TLS loss or timeout never reaches here.
+      retireGnomeEiPing();
+      m_gnomePrefixProbe.retire(m_gnomePrefixRequest);
+      m_gnomePrefixRequest = 0;
+      m_gnomePrefixBinding.reset();
+      m_gnomeMappedCutoff.reset();
+      preparation.state = InputPreparationState::Released;
+      preparation.focus.reset();
+      if (m_isEmulating && inputSessionLive())
+        ensureEmulating();
+    }
+    return preparation.state;
+  }
+  if (!inputSessionLive() || !m_activated || !m_isOnComputer || !m_isEmulating || !m_eiPointer || !m_eiKeyboard ||
+      !m_eiAbs || m_sequenceNumber != m_gnomePrefixEmulationGeneration || m_gnomeCutoffInvalidated ||
+      (preparation.state != InputPreparationState::Sealed && now >= preparation.deadline)) {
+    preparation.state = InputPreparationState::Failed;
+    preparation.outcome = InputPreparationOutcome::Failed;
+    return preparation.state;
+  }
+  if (preparation.state == InputPreparationState::Sealed) {
+    if (!preparation.promotion || !inputCutoffSealLive(*preparation.promotion)) {
+      preparation.state = InputPreparationState::Failed;
+      preparation.outcome = InputPreparationOutcome::Failed;
+    }
+    return preparation.state;
+  }
+  if (preparation.state == InputPreparationState::Promoting)
+    return preparation.state;
+  if (preparation.state == InputPreparationState::Prepared) {
+    if (!preparation.focus || !preparation.focus->live()) {
+      preparation.state = InputPreparationState::Failed;
+      preparation.outcome = InputPreparationOutcome::Failed;
+    }
+    return preparation.state;
+  }
+  if (!preparation.prefixObserved) {
+    if (!m_gnomePrefixProbe.observed(now)) {
+      if (m_gnomePrefixProbe.state() == EiPrefixProbe::State::Denied) {
+        preparation.state = InputPreparationState::Failed;
+        preparation.outcome = InputPreparationOutcome::Failed;
+      }
+      return preparation.state;
+    }
+    // Historical prefix completion is retained only under this continuously
+    // paused sender. It is never a point receipt or native input permission.
+    preparation.prefixObserved = true;
+    retireGnomeEiPing();
+    preparation.providerRequest = m_gnomeProvider->requestInputPreparation(
+        {binding,
+         {binding.capture.epoch, binding.capture.sequence, double(preparation.point.x), double(preparation.point.y)},
+         preparation.deadline}
+    );
+    if (!preparation.providerRequest) {
+      preparation.state = InputPreparationState::Failed;
+      preparation.outcome = InputPreparationOutcome::Unsupported;
+      return preparation.state;
+    }
+  }
+  if (const auto update = m_gnomeProvider->takeInputPreparationUpdate()) {
+    if (update->request != preparation.providerRequest || !update->focus || !update->focus->live() ||
+        update->focus->binding() != binding || update->focus->contract().empty() || !update->error.empty()) {
+      preparation.state = InputPreparationState::Failed;
+      preparation.outcome =
+          update->outcome == InputPreparationOutcome::None ? InputPreparationOutcome::Failed : update->outcome;
+    } else {
+      const auto &snapshot = update->focus->snapshot();
+      if (!snapshot.routedPoint || snapshot.routedPoint->captureEpoch != binding.capture.epoch ||
+          snapshot.routedPoint->sequence != binding.capture.sequence ||
+          snapshot.routedPoint->desktopX != preparation.point.x ||
+          snapshot.routedPoint->desktopY != preparation.point.y) {
+        preparation.state = InputPreparationState::Failed;
+        preparation.outcome = InputPreparationOutcome::Failed;
+      } else {
+        preparation.focus = update->focus;
+        preparation.state = InputPreparationState::Prepared;
+      }
+    }
+  }
+  return preparation.state;
+#else
+  return windowshare::InputPreparationState::Failed;
+#endif
+}
+
+windowshare::InputPreparationOutcome
+EiComputer::inputPreparationOutcome(const windowshare::InputPreparationBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  return m_gnomePreparation && m_gnomePreparation->binding == binding ? m_gnomePreparation->outcome
+                                                                      : windowshare::InputPreparationOutcome::Failed;
+#else
+  return windowshare::InputPreparationOutcome::Unsupported;
+#endif
+}
+
+std::optional<windowshare::PreparedInputFocusResult>
+EiComputer::preparedInputFocusResult(const windowshare::InputPreparationBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  if (inputPreparationState(binding) != InputPreparationState::Prepared || !m_gnomePreparation->focus)
+    return std::nullopt;
+  const auto &paint = m_gnomePreparation->focus->snapshot().paint;
+  PreparedInputFocusResult result{
+      binding,        m_gnomePreparation->point, paint.connection,   {paint.session, paint.epoch},
+      paint.geometry, paint.focusRequest,        paint.focusRevision
+  };
+  const auto fingerprint = QByteArray::fromHex(paint.peerFingerprint.toLatin1());
+  if (fingerprint.size() != result.viewerPeerFingerprint.size())
+    return std::nullopt;
+  std::copy(fingerprint.begin(), fingerprint.end(), result.viewerPeerFingerprint.begin());
+  return validPreparedInputFocusResult(result) ? std::optional(result) : std::nullopt;
+#else
+  return std::nullopt;
+#endif
+}
+
+bool EiComputer::promoteInputPreparation(
+    const windowshare::InputPreparationBinding &preparation, const windowshare::InputCutoffBinding &binding,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  const auto prepared = preparedInputFocusResult(preparation);
+  const auto now = InputCutoffClock::now();
+  if (!prepared || !matchesInputPreparationPromotion(*prepared, binding) || deadline <= now ||
+      deadline > now + inputCutoffMaximumLifetime || deadline > m_gnomePreparation->deadline || m_gnomeMappedCutoff ||
+      m_gnomePrefixBinding)
+    return false;
+  const auto request = m_gnomeProvider->promoteInputPreparation(
+      *m_gnomePreparation->focus,
+      {binding,
+       {binding.capture.epoch, binding.capture.sequence, double(prepared->point.x), double(prepared->point.y)},
+       deadline,
+       true}
+  );
+  if (!request)
+    return false;
+  m_gnomePreparation->state = InputPreparationState::Promoting;
+  m_gnomePreparation->promotion = binding;
+  m_gnomePrefixBinding = binding;
+  m_gnomeMappedCutoff = std::make_unique<GnomeMappedCutoff>();
+  m_gnomeMappedCutoff->point = prepared->point;
+  m_gnomeMappedCutoff->binding = binding;
+  m_gnomeMappedCutoff->deadline = deadline;
+  m_gnomeMappedCutoff->providerRequest = request;
+  m_gnomeMappedCutoff->retainPrefix = true;
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool EiComputer::cancelInputPreparation(
+    const windowshare::InputPreparationBinding &binding, windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  if (std::this_thread::get_id() != m_gnomePrefixThread || !m_gnomePreparation ||
+      m_gnomePreparation->binding != binding)
+    return false;
+  auto &preparation = *m_gnomePreparation;
+  if (preparation.state == InputPreparationState::Released)
+    return true;
+  if (preparation.state == InputPreparationState::Canceling)
+    return InputCutoffClock::now() < preparation.cleanupDeadline;
+  const auto now = InputCutoffClock::now();
+  if (deadline <= now || deadline > now + inputCutoffMaximumLifetime)
+    return false;
+  preparation.state = InputPreparationState::Canceling;
+  preparation.cleanupDeadline = deadline;
+  preparation.focus.reset();
+  invalidateGnomeInputCutoff();
+  retireGnomeEiPing();
+  if (preparation.providerRequest) {
+    if (!m_gnomeProvider || !m_gnomeProvider->cancelInputPreparation(preparation.providerRequest, deadline))
+      return false;
+    return true;
+  }
+  // No provider gate was created. The only backend action was the bounded
+  // ping, so there is no native authority or forwarded input to retire.
+  m_gnomePrefixProbe.retire(m_gnomePrefixRequest);
+  m_gnomePrefixRequest = 0;
+  m_gnomePrefixBinding.reset();
+  m_gnomeMappedCutoff.reset();
+  preparation.state = InputPreparationState::Released;
+  if (m_isEmulating && inputSessionLive())
+    ensureEmulating();
+  return true;
+#else
+  return false;
+#endif
+}
+
+void EiComputer::abortInputPreparation(const windowshare::InputPreparationBinding &binding) noexcept
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (!m_gnomePreparation || m_gnomePreparation->binding != binding ||
+      m_gnomePreparation->state == windowshare::InputPreparationState::Released)
+    return;
+  m_gnomePreparation->state = windowshare::InputPreparationState::Failed;
+  m_gnomePreparation->outcome = windowshare::InputPreparationOutcome::Failed;
+  m_gnomePreparation->focus.reset();
+  try {
+    stopGnomeProvider("Input preparation abandoned before exact cleanup");
+  } catch (...) {
+  }
+#endif
+}
+
 bool EiComputer::beginInputCutoff(
     const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffClock::time_point deadline
 )
@@ -1226,16 +1578,277 @@ bool EiComputer::beginInputCutoff(
   return false;
 #endif
 }
+bool EiComputer::beginMappedInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffPoint point,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (!windowshare::validInputCutoffPoint(point) || !beginGnomeEiPrefixObservation(binding, deadline))
+    return false;
+  m_gnomeMappedCutoff = std::make_unique<GnomeMappedCutoff>();
+  m_gnomeMappedCutoff->point = point;
+  m_gnomeMappedCutoff->binding = binding;
+  m_gnomeMappedCutoff->deadline = deadline;
+  return true;
+#else
+  return false;
+#endif
+}
+bool EiComputer::beginSealedInputCutoff(
+    const windowshare::InputCutoffBinding &binding, windowshare::InputCutoffPoint point,
+    windowshare::InputCutoffClock::time_point deadline
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  if (!beginMappedInputCutoff(binding, point, deadline))
+    return false;
+  m_gnomeMappedCutoff->retainPrefix = true;
+  return true;
+#else
+  return false;
+#endif
+}
+bool EiComputer::inputCutoffSealLive(const windowshare::InputCutoffBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  return std::this_thread::get_id() == m_gnomePrefixThread && m_gnomePrefixBinding == binding &&
+         !m_gnomeCutoffInvalidated && m_sequenceNumber == m_gnomePrefixEmulationGeneration && inputSessionLive() &&
+         m_activated && m_isOnComputer && m_isEmulating && m_eiPointer && m_eiKeyboard && m_eiAbs &&
+         m_gnomeMappedCutoff && m_gnomeMappedCutoff->seal && m_gnomeMappedCutoff->seal->binding() == binding &&
+         m_gnomeMappedCutoff->seal->live();
+#else
+  return false;
+#endif
+}
+bool EiComputer::refreshMappedInputCutoff(
+    const windowshare::InputCutoffBinding &seal, const windowshare::InputCutoffBinding &binding,
+    windowshare::InputCutoffPoint point, windowshare::InputCutoffClock::time_point deadline, bool presentCursor
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  const auto now = InputCutoffClock::now();
+  if (!inputCutoffSealLive(seal) || !continuesInputCutoffSeal(m_gnomeMappedCutoff->binding, binding) ||
+      !validInputCutoffPoint(point) || deadline <= now || deadline > now + inputCutoffMaximumLifetime ||
+      m_gnomeMappedCutoff->refreshing)
+    return false;
+  auto &mapped = *m_gnomeMappedCutoff;
+  const auto request = m_gnomeProvider->requestInputMap(
+      *mapped.seal,
+      {binding, {binding.capture.epoch, binding.capture.sequence, double(point.x), double(point.y)}, deadline, false}
+  );
+  if (!request)
+    return false;
+  mapped.binding = binding;
+  mapped.point = point;
+  mapped.deadline = deadline;
+  mapped.providerRequest = request;
+  mapped.segment.reset();
+  mapped.batch.clear();
+  mapped.batchSegments.clear();
+  mapped.refreshing = true;
+  // A retained owner may hold a stationary physical control. Ordinary idle
+  // timeout must not release its backend session; exact resume restores it.
+  cancelIdleEmulationTimer();
+  if (presentCursor) {
+    // Only cursor presentation is permitted across this continuously closed
+    // All gate. No key/button/scroll or emulation restart can use this path.
+    // Native hit testing names the frozen point, not the sampled cursor.
+    ei_device_pointer_motion_absolute(m_eiAbs, point.x, point.y);
+    ei_device_frame(m_eiAbs, ei_now(m_ei));
+  }
+  return inputCutoffSealLive(seal);
+#else
+  return false;
+#endif
+}
+bool EiComputer::beginMappedInputBatch(
+    const windowshare::InputCutoffBinding &seal, const std::vector<windowshare::InputCutoffBatchItem> &items
+)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  if (!inputCutoffSealLive(seal) || m_gnomeMappedCutoff->refreshing ||
+      !validInputCutoffBatch(m_gnomeMappedCutoff->binding, items))
+    return false;
+  auto &mapped = *m_gnomeMappedCutoff;
+  std::vector<GnomeProviderClient::InputDrainRequest> requests;
+  for (const auto &item : items)
+    requests.push_back(
+        {item.binding,
+         {item.binding.capture.epoch, item.binding.capture.sequence, double(item.point.x), double(item.point.y)},
+         item.deadline,
+         false}
+    );
+  const auto request = m_gnomeProvider->requestInputMapBatch(*mapped.seal, std::move(requests));
+  if (!request)
+    return false;
+  mapped.binding = items.back().binding;
+  mapped.deadline = std::min_element(items.begin(), items.end(), [](const auto &a, const auto &b) {
+                      return a.deadline < b.deadline;
+                    })->deadline;
+  mapped.providerRequest = request;
+  mapped.segment.reset();
+  mapped.batch = items;
+  mapped.batchSegments.clear();
+  mapped.refreshing = true;
+  cancelIdleEmulationTimer(); // Retained ownership survives stationary holds.
+  for (const auto &item : items) {
+    if (item.presentCursor) {
+      // Ordered cursor presentation under the retained All gate only. No
+      // application key/button/scroll path is opened by a batch.
+      ei_device_pointer_motion_absolute(m_eiAbs, item.point.x, item.point.y);
+      ei_device_frame(m_eiAbs, ei_now(m_ei));
+    }
+  }
+  return inputCutoffSealLive(seal);
+#else
+  return false;
+#endif
+}
 windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::InputCutoffBinding &binding)
 {
 #ifdef DESKFLOW_GNOME_EI_PING
-  if (std::this_thread::get_id() != m_gnomePrefixThread || m_gnomePrefixBinding != binding)
+  if (std::this_thread::get_id() != m_gnomePrefixThread || !m_gnomePrefixBinding ||
+      (m_gnomeMappedCutoff ? (m_gnomeMappedCutoff->binding != binding &&
+                              std::none_of(
+                                  m_gnomeMappedCutoff->batch.begin(), m_gnomeMappedCutoff->batch.end(),
+                                  [&](const auto &item) { return item.binding == binding; }
+                              ))
+                           : m_gnomePrefixBinding != binding))
     return windowshare::InputCutoffState::Denied;
   if (!inputSessionLive() || !m_activated || !m_isOnComputer || !m_isEmulating || !m_eiPointer || !m_eiKeyboard ||
-      !m_eiAbs)
-    m_gnomePrefixProbe.invalidate();
-  if (m_gnomePrefixProbe.observed(windowshare::InputCutoffClock::now()))
-    return windowshare::InputCutoffState::BackendObserved;
+      !m_eiAbs || m_sequenceNumber != m_gnomePrefixEmulationGeneration)
+    invalidateGnomeInputCutoff();
+  if (m_gnomeMappedCutoff && m_gnomeMappedCutoff->seal) {
+    auto &mapped = *m_gnomeMappedCutoff;
+    if (!inputCutoffSealLive(*m_gnomePrefixBinding)) {
+      cancelGnomeEiPrefixObservation();
+      return windowshare::InputCutoffState::Denied;
+    }
+    if (!mapped.batch.empty()) {
+      if (mapped.refreshing) {
+        if (const auto update = m_gnomeProvider->takeInputMapBatchUpdate()) {
+          bool valid = update->request == mapped.providerRequest && update->error.empty() &&
+                       update->segments.size() == mapped.batch.size();
+          for (std::size_t index = 0; valid && index < mapped.batch.size(); ++index) {
+            const auto &segment = update->segments[index];
+            valid = segment.binding() == mapped.batch[index].binding && segment.live() && segment.seal() &&
+                    segment.seal()->binding() == *m_gnomePrefixBinding && segment.seal()->live();
+          }
+          if (!valid) {
+            cancelGnomeEiPrefixObservation();
+            return windowshare::InputCutoffState::Denied;
+          }
+          mapped.batchSegments = update->segments;
+          mapped.refreshing = false;
+        }
+      }
+      if (mapped.refreshing) {
+        if (windowshare::InputCutoffClock::now() >= mapped.deadline) {
+          cancelGnomeEiPrefixObservation();
+          return windowshare::InputCutoffState::Denied;
+        }
+        return windowshare::InputCutoffState::Pending;
+      }
+      const auto item = std::find_if(mapped.batch.begin(), mapped.batch.end(), [&](const auto &value) {
+        return value.binding == binding;
+      });
+      if (item == mapped.batch.end())
+        return windowshare::InputCutoffState::Denied;
+      const auto index = static_cast<std::size_t>(item - mapped.batch.begin());
+      if (windowshare::InputCutoffClock::now() >= item->deadline)
+        return windowshare::InputCutoffState::Sealed;
+      if (index >= mapped.batchSegments.size() || !mapped.batchSegments[index].live()) {
+        cancelGnomeEiPrefixObservation();
+        return windowshare::InputCutoffState::Denied;
+      }
+      return windowshare::InputCutoffState::DrainObserved;
+    }
+    if (mapped.refreshing) {
+      if (const auto update = m_gnomeProvider->takeInputMapUpdate()) {
+        if (update->request != mapped.providerRequest || !update->segment || update->segment->binding() != binding ||
+            !update->segment->live() || !update->segment->seal() ||
+            update->segment->seal()->binding() != *m_gnomePrefixBinding || !update->segment->seal()->live()) {
+          cancelGnomeEiPrefixObservation();
+          return windowshare::InputCutoffState::Denied;
+        }
+        mapped.segment = update->segment;
+        mapped.refreshing = false;
+      }
+    }
+    if (windowshare::InputCutoffClock::now() >= mapped.deadline) {
+      if (mapped.refreshing) {
+        cancelGnomeEiPrefixObservation();
+        return windowshare::InputCutoffState::Denied;
+      }
+      return windowshare::InputCutoffState::Sealed;
+    }
+    if (!mapped.refreshing && (!mapped.segment || !mapped.segment->live())) {
+      cancelGnomeEiPrefixObservation();
+      return windowshare::InputCutoffState::Denied;
+    }
+    return mapped.refreshing ? windowshare::InputCutoffState::Pending : windowshare::InputCutoffState::DrainObserved;
+  }
+  if (!m_gnomeCutoffInvalidated &&
+      ((m_gnomePreparation && m_gnomePreparation->prefixObserved && m_gnomePreparation->promotion == binding &&
+        (m_gnomePreparation->state == windowshare::InputPreparationState::Promoting ||
+         m_gnomePreparation->state == windowshare::InputPreparationState::Sealed)) ||
+       m_gnomePrefixProbe.observed(windowshare::InputCutoffClock::now()))) {
+    if (!m_gnomeMappedCutoff)
+      return windowshare::InputCutoffState::BackendObserved;
+    auto &mapped = *m_gnomeMappedCutoff;
+    if (!mapped.providerRequest) {
+      // A matching PONG is necessary but insufficient. The provider performs
+      // the supported native-thread, compositor and exact All-fenced Qt join
+      // at this retained point under the original absolute deadline.
+      mapped.providerRequest = m_gnomeProvider->requestInputDrain(
+          {binding,
+           {binding.capture.epoch, binding.capture.sequence, static_cast<double>(mapped.point.x),
+            static_cast<double>(mapped.point.y)},
+           mapped.deadline,
+           mapped.retainPrefix}
+      );
+      if (!mapped.providerRequest) {
+        cancelGnomeEiPrefixObservation();
+        return windowshare::InputCutoffState::Denied;
+      }
+    }
+    if (const auto update = m_gnomeProvider->takeInputDrainUpdate()) {
+      if (update->request != mapped.providerRequest || !update->segment || update->segment->binding() != binding ||
+          !update->segment->live() || !update->segment->senderOrdering() ||
+          !update->segment->senderOrdering()->live()) {
+        cancelGnomeEiPrefixObservation();
+        return windowshare::InputCutoffState::Denied;
+      }
+      mapped.segment = update->segment;
+      if (mapped.retainPrefix) {
+        if (!mapped.segment->seal() || !mapped.segment->seal()->live() ||
+            mapped.segment->seal()->binding() != binding) {
+          cancelGnomeEiPrefixObservation();
+          return windowshare::InputCutoffState::Denied;
+        }
+        mapped.seal = mapped.segment->seal();
+        cancelIdleEmulationTimer();
+        // The bounded ping has done its job. Do not extend its deadline;
+        // retain a separate continuously closed, independently revocable seal.
+        retireGnomeEiPing();
+      }
+    }
+    if (mapped.segment) {
+      if (!mapped.segment->live() || !mapped.segment->senderOrdering() || !mapped.segment->senderOrdering()->live()) {
+        cancelGnomeEiPrefixObservation();
+        return windowshare::InputCutoffState::Denied;
+      }
+      if (m_gnomePreparation && m_gnomePreparation->promotion == binding)
+        m_gnomePreparation->state = windowshare::InputPreparationState::Sealed;
+      return windowshare::InputCutoffState::DrainObserved;
+    }
+    return windowshare::InputCutoffState::Pending;
+  }
+  if (m_gnomePrefixProbe.state() == windowshare::EiPrefixProbe::State::Denied)
+    cancelGnomeEiPrefixObservation();
   return m_gnomePrefixProbe.state() == windowshare::EiPrefixProbe::State::Denied
              ? windowshare::InputCutoffState::Denied
              : windowshare::InputCutoffState::Pending;
@@ -1243,14 +1856,92 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
   return windowshare::InputCutoffState::Denied;
 #endif
 }
+std::optional<windowshare::InputCutoffMappedResult>
+EiComputer::mappedInputCutoffResult(const windowshare::InputCutoffBinding &binding)
+{
+#ifdef DESKFLOW_GNOME_EI_PING
+  using namespace windowshare;
+  if (inputCutoffState(binding) != InputCutoffState::DrainObserved || !m_gnomeMappedCutoff)
+    return std::nullopt;
+  const auto &mapped = *m_gnomeMappedCutoff;
+  const auto *selected = mapped.segment ? &*mapped.segment : nullptr;
+  auto point = mapped.point;
+  if (!mapped.batch.empty()) {
+    const auto item = std::find_if(mapped.batch.begin(), mapped.batch.end(), [&](const auto &value) {
+      return value.binding == binding;
+    });
+    if (item == mapped.batch.end())
+      return std::nullopt;
+    const auto index = static_cast<std::size_t>(item - mapped.batch.begin());
+    if (index >= mapped.batchSegments.size())
+      return std::nullopt;
+    selected = &mapped.batchSegments[index];
+    point = item->point;
+  }
+  if (!selected)
+    return std::nullopt;
+  const auto &segment = *selected;
+  const auto &snapshot = segment.snapshot();
+  const auto &paint = snapshot.paint;
+  if (!snapshot.routedPoint || snapshot.routedPoint->captureEpoch != binding.capture.epoch ||
+      snapshot.routedPoint->sequence != binding.capture.sequence || snapshot.routedPoint->desktopX != point.x ||
+      snapshot.routedPoint->desktopY != point.y || paint.connection != binding.viewerConnection ||
+      paint.session != binding.forwarding.owner.session || paint.epoch != binding.forwarding.owner.epoch ||
+      paint.geometry != binding.forwarding.geometry || paint.focusRequest != binding.forwarding.focusRequest ||
+      paint.focusRevision != binding.forwarding.focusRevision)
+    return std::nullopt;
+  InputCutoffMappedResult result;
+  result.binding = binding;
+  result.point = point;
+  result.sourceX = snapshot.sourceX;
+  result.sourceY = snapshot.sourceY;
+  result.sourceWidth = paint.sourceWidth;
+  result.sourceHeight = paint.sourceHeight;
+  result.surfaceIncarnation = paint.surfaceIncarnation;
+  result.viewportRevision = paint.viewportRevision;
+  result.nativeSurface = paint.nativeSurface;
+  result.providerGeneration = snapshot.generation;
+  result.nativeRevision = snapshot.nativeRevision;
+  const auto fingerprint = QByteArray::fromHex(paint.peerFingerprint.toLatin1());
+  if (fingerprint.size() != result.viewerPeerFingerprint.size())
+    return std::nullopt;
+  std::copy(fingerprint.begin(), fingerprint.end(), result.viewerPeerFingerprint.begin());
+  const bool ordered =
+      segment.seal() ? segment.seal()->live() : segment.senderOrdering() && segment.senderOrdering()->live();
+  if (!ordered)
+    return std::nullopt;
+  result.orderingContract = segment.seal() ? segment.seal()->contract() : segment.senderOrdering()->contract();
+  return segment.live() && validInputCutoffMappedResult(result) ? std::optional(result) : std::nullopt;
+#else
+  return std::nullopt;
+#endif
+}
 bool EiComputer::resumeInputCutoff(const windowshare::InputCutoffBinding &binding)
 {
 #ifdef DESKFLOW_GNOME_EI_PING
   if (std::this_thread::get_id() != m_gnomePrefixThread || m_gnomePrefixBinding != binding)
     return false;
+  if (m_gnomePreparation && m_gnomePreparation->promotion == binding &&
+      m_gnomePreparation->state != windowshare::InputPreparationState::Released) {
+    // Linked preparation cleanup is asynchronous; direct resume must never
+    // reopen the sender while its distinct Qt gate remains owned.
+    cancelInputPreparation(
+        m_gnomePreparation->binding, windowshare::InputCutoffClock::now() + windowshare::inputCutoffMaximumLifetime
+    );
+    return false;
+  }
   cancelGnomeEiPrefixObservation();
   m_gnomePrefixBinding.reset();
-  return m_gnomePrefixProbe.retire(binding.request);
+  m_gnomeMappedCutoff.reset();
+  const bool retired = m_gnomePrefixProbe.retire(m_gnomePrefixRequest);
+  m_gnomePrefixRequest = 0;
+  if (m_gnomePreparation && m_gnomePreparation->promotion == binding)
+    m_gnomePreparation.reset();
+  // Restore ordinary inactivity only for this still-running session. Resume
+  // never revives a stopped/emulation-replaced backend.
+  if (m_isEmulating && inputSessionLive())
+    ensureEmulating();
+  return retired;
 #else
   return false;
 #endif
@@ -1306,14 +1997,14 @@ void EiComputer::handleSystemEvent(const Event &)
     case EI_EVENT_DEVICE_REMOVED:
 #ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
-        m_gnomePrefixProbe.invalidate();
+        invalidateGnomeInputCutoff();
 #endif
       removeDevice(device);
       break;
     case EI_EVENT_SEAT_REMOVED:
 #ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
-        m_gnomePrefixProbe.invalidate();
+        invalidateGnomeInputCutoff();
 #endif
       if (seat == m_eiSeat) {
         m_eiSeat = ei_seat_unref(m_eiSeat);
@@ -1322,7 +2013,7 @@ void EiComputer::handleSystemEvent(const Event &)
     case EI_EVENT_DISCONNECT:
 #ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled)
-        m_gnomePrefixProbe.invalidate();
+        invalidateGnomeInputCutoff();
 #endif
 #ifdef BUILD_WINDOWSHARE
       if (m_gnomeProvider) {
@@ -1351,7 +2042,7 @@ void EiComputer::handleSystemEvent(const Event &)
     case EI_EVENT_DEVICE_PAUSED:
 #ifdef DESKFLOW_GNOME_EI_PING
       if (m_gnomeProviderEnabled) {
-        m_gnomePrefixProbe.invalidate();
+        invalidateGnomeInputCutoff();
         if (device == m_eiKeyboard)
           m_gnomeSubmittedKeys.reset();
         if (device == m_eiPointer)
@@ -1421,7 +2112,9 @@ void EiComputer::handleSystemEvent(const Event &)
   // libei explicitly permits a synthetic PONG immediately before disconnect.
   // Do not acknowledge the PONG inside the switch or before the full event
   // batch has been consumed, and do not mix observations across EI contexts.
-  m_gnomePrefixProbe.finishEventBatch(windowshare::EiPrefixProbe::Clock::now());
+  if ((!m_gnomeMappedCutoff || !m_gnomeMappedCutoff->seal) &&
+      (!m_gnomePreparation || !m_gnomePreparation->prefixObserved))
+    m_gnomePrefixProbe.finishEventBatch(windowshare::EiPrefixProbe::Clock::now());
   if (m_gnomePrefixPing && !m_gnomePrefixProbe.awaitingPong()) {
     if (m_gnomePrefixProbe.observed(windowshare::EiPrefixProbe::Clock::now()))
       LOG_DEBUG("GNOME EI sender prefix observed after complete event batch; Clutter/Qt drain NOT proven");

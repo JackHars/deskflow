@@ -19,7 +19,7 @@
 #include <QString>
 
 #if defined(BUILD_WINDOWSHARE) && defined(__linux__)
-#include "windowshare/X11DisplayObserver.h"
+#include "windowshare/X11CoordinateEndpoint.h"
 class EventQueueTimer;
 #endif
 
@@ -40,6 +40,10 @@ public:
   // this exact injection connection, never an independently opened DISPLAY.
   void setWindowShareObservationEnabled(bool enabled);
   std::optional<deskflow::windowshare::X11DisplayObservation> windowShareObservation() const;
+  bool createWindowShareWitness(std::uint64_t request, deskflow::windowshare::X11CoordinateClock::time_point deadline);
+  bool confirmWindowShareWitness(const deskflow::windowshare::X11NamespaceWitness &published);
+  std::optional<deskflow::windowshare::X11CoordinateEndpoint::Update> takeWindowShareCoordinateUpdate();
+  bool cancelWindowShareCoordinate(std::uint64_t request);
 #endif
 
   //! @name manipulators
@@ -99,6 +103,7 @@ private:
   void stopWindowShareObservation();
   void pollWindowShareObservation();
   std::unique_ptr<deskflow::windowshare::X11DisplayObserver> m_windowShareObserver;
+  std::unique_ptr<deskflow::windowshare::X11CoordinateEndpoint> m_windowShareCoordinates;
   EventQueueTimer *m_windowShareTimer = nullptr;
   bool m_windowShareRequested = false;
   std::string m_windowShareStatus;

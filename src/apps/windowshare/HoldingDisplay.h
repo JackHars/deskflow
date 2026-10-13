@@ -7,9 +7,69 @@
 #include "Core.h"
 
 #include <QString>
+#include <functional>
 #include <memory>
 
 namespace deskflow::windowshare {
+
+// A held-window resize is a journaled geometry transaction. The callbacks let
+// the native host revalidate its exact window/display identity at each step;
+// isolated tests use rectangles only, without creating or moving any display.
+struct HoldingResizeDisplay
+{
+  std::uint32_t id = 0;
+  Rect bounds;
+};
+struct HoldingResizeAccess
+{
+  std::function<std::optional<HoldingResizeDisplay>()> display;
+  std::function<std::optional<Rect>()> window;
+  std::function<bool()> persist;
+  std::function<bool(Point)> move;
+  std::function<bool(double, double)> resize;
+};
+struct HoldingResizeResult
+{
+  enum class Status
+  {
+    Applied,
+    Refused, // No native mutation was attempted; the existing export survives.
+    Restore  // Identity/containment was lost or a native mutation partly failed.
+  };
+  Status status = Status::Refused;
+  Rect actual;
+};
+HoldingResizeResult resizeHoldingWindow(int width, int height, const HoldingResizeAccess &access);
+
+// The painted acknowledgement must name the current source geometry and a
+// frame actually produced for that geometry. Native callbacks additionally
+// verify the retained AX/window/process identity and physical output layout.
+struct HoldingRelocationWindow
+{
+  Owner owner;
+  std::uint64_t geometry = 0, producedGeometry = 0;
+  Rect frame;
+};
+struct HoldingRelocationAccess
+{
+  std::function<std::optional<HoldingRelocationWindow>()> window;
+  std::function<std::optional<HoldingResizeDisplay>()> display;
+  std::function<bool()> persist;
+  std::function<bool(Rect)> place;
+};
+struct HoldingRelocationResult
+{
+  enum class Status
+  {
+    Applied,
+    Refused, // A stale/malformed acknowledgement performs no native mutation.
+    Restore  // A failed/changed owned transaction must return the source.
+  };
+  Status status = Status::Refused;
+  Rect actual;
+};
+HoldingRelocationResult
+relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingRelocationAccess &access);
 
 // Experimental macOS-only owner of one virtual holding display via a dedicated
 // child process. The helper lives alongside the host executable. Construction

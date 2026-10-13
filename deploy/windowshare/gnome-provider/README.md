@@ -13,7 +13,9 @@ extensions, the configured viewer executable, and the core caller are trusted.
 This is not sandboxing of other same-user processes or process-memory
 attestation. Any local caller may reserve the one available session; subsequent
 operations require that exact caller's D-Bus unique name. No title, application
-ID, process name, matching rectangle, or supplied PID establishes window identity.
+ID, process name, matching rectangle, or supplied PID alone establishes window
+identity. The production Qt path additionally challenges each actual owned
+`xdg_toplevel` with a fresh private random app ID, as described below.
 
 ## Interface
 
@@ -28,8 +30,10 @@ exporting the interface.
 - `GetCapabilities() -> (u version, s shellVersion, a{sv} capabilities)`.
   Version is 1. Capability types are `providerApi:u`, `backend:s`,
   `nativeHitTesting:b`, `exactWaylandClientBinding:b`, `eisSessionOwned:b`,
-  `trustedDesktopOnly:b`, `viewportChannel:b`, `routedPointObservation:b`,
+  `trustedDesktopOnly:b`, `viewportChannel:b`, `perWindowAssociation:b`,
+  `routedPointObservation:b`, `routedPointsObservation:b`,
   `stageUpdateSequence:b` (optional real two-frame read-only diagnostic),
+  `inputDrainSegment:b`, `inputDrainOrderingContract:s`, `inputDrainOrderingLimit:s`,
   `viewportSocketValidated:b`,
   `syncFenceVerified:b`, `pointerDeviceAttribution:b`,
   `qtViewportMapping:b`, and `deliveryReady:b`.
@@ -67,6 +71,19 @@ exporting the interface.
   toplevel and one native surface are supported. Multiple windows or native
   subsurfaces explicitly report unavailable. The first bound window cannot be
   replaced in the same session. Merely accepting a launch is not window readiness.
+- `GetViewerWithAssociation(s session, u generation, s viewer, s association)
+  -> (a{sv} observation)` selects one normal owned toplevel by its exact private
+  role challenge. Qt writes `org.deskflow.window.` followed by 64 lowercase hex
+  characters to its retained actual `xdg_toplevel`, and includes the same token
+  in its authenticated painted snapshot. The provider requires exactly one
+  `Meta.WaylandClient.owns_window()` match whose `wm-class` and instance both
+  equal that token. Mutter's processing of that exact role write supplies the
+  association; a title, PID, user-supplied app ID, or coordinate does not.
+  Other owned windows may coexist. Popups, transients, duplicate tokens and
+  multiple native surface actors within the selected toplevel remain denied.
+  Selecting another token invalidates the old observations and prefix seal.
+  The production client requires this capability and never falls back to
+  inferring a focused surface from the process's window count.
 - `ValidateCurrentHit(s session, u generation, s viewer, s request, d x, d y,
   u expectedRevision) -> (a{sv} observation)` performs a fresh native scene pick.
   The token is a 1–64 character ASCII letter/digit/underscore/hyphen string,
@@ -128,6 +145,7 @@ Every observation contains:
 | `session`, `generation`, `revision`, `viewer` | `s`, `u`, `u`, `s` | Exact provider session and sampled native state |
 | `sampledAtUsec` | `s` | Decimal local monotonic timestamp; not a cross-machine clock or renewable lease |
 | `window`, `surface` | `s`, `s` | Fresh opaque tokens for retained native object identities, when present |
+| `windowAssociation` | `s` | Exact selected private Qt role challenge, or empty for the legacy sole-window diagnostic |
 | `frameRect`, `bufferRect` | `(dddd)` | Native x/y/width/height, when valid |
 | `pointerX`, `pointerY`, `focused` | `d`, `d`, `b` | Native cursor readback and exact focused-window comparison, when a window exists |
 | `request` | `s` | Native hit request echo (not standalone capture authority) |
@@ -169,6 +187,13 @@ The viewer is matched using `Meta.WaylandClient.owns_window()` on actual native
 objects. The private Wayland socket is retained by Mutter, and unrelated
 same-title/PID claims do not match it. A genuine interpreter-launched GTK test
 child is allowed; it must still create its surface on that exact connection.
+The production Qt 6.8/6.10 adapter retains the actual `QWaylandWindow` shell
+role, requires the exact built-in `QWaylandXdgSurface` and a non-null
+`xdg_toplevel*` role, and rotates the random challenge after role/surface
+replacement. It uses Qt's existing Wayland connection. This capability check
+assumes the same trusted in-process Qt runtime as the input drain; it does not
+authenticate arbitrary hostile plugins loaded into that process. The token
+does not grant delivery or focus authority and never extends a point deadline.
 
 Core supplies a CLOEXEC, nonblocking Unix stream endpoint; Shell preserves its
 mode and the child validates its native type, family and connected state. Shell
@@ -231,10 +256,133 @@ Mutter 50's actual input-thread-to-main-context EIS sync requires a build with
 `HAVE_EIS_EVENT_REF`, selected by **libeis >= 1.5**. A Shell version check alone
 does not establish it. The client ping API requires libei >= 1.4; libei can
 synthesize a pong before a disconnect, so a pong alone is not sufficient.
-The provider reports this build-specific fence as unverified. A future delivery
-consumer must separately establish ordering, full route fencing and painted Qt
-content mapping, then bind each validation to the original sequence and its
-host-started deadline. Until then the original input authorizer remains unset.
+`DrainInputPrefix` separately checks an empty global Clutter queue outside
+nested dispatch followed by a later completed update of the same stage view.
+Its closed reply echoes the exact caller binding and has `orderingContract:s`
+and `orderingLimit:s`. A supported mapped build has a `sha256:<digest>` contract
+and an empty limitation; other builds have an empty contract and
+`mutter-eis-sync-build-unverified`. The client requires an exact match to the
+startup capability, then the exact All-fenced Qt queue operation and final
+native point/focus recheck. This operation alone does not prove the caller's
+sender PONG, event batch, authenticated Core connection or original capture.
+
+## Native sender ordering build prerequisite
+
+The closed runtime allowlist supports **Ubuntu resolute amd64** packages
+`libmutter-18-0 50.1-0ubuntu2.2` and `50.1-0ubuntu2.4`, built with
+`libeis-dev 1.5.0-3` and the native backend. It hashes both the actual loaded
+`/usr/lib/x86_64-linux-gnu/libmutter-18.so.0.0.0` and the matching
+`mutter-18/libmutter-clutter-18.so.0.0.0` at startup. The exact expected digests
+are in `logic.js`; a mixed pair is unsupported. Main-module contract digests:
+
+| Package | Main module SHA-256 |
+| --- | --- |
+| 50.1-0ubuntu2.2 | `fec9023139ac8eff93fcc1af90413613cdb526e7f02389dc9d8fe90f7abc81e5` |
+| 50.1-0ubuntu2.4 | `4d7ece1588279dbd3b66de3a28d1bf1098e7905b705d8e44743192b925d66b83` |
+
+`ordering.js` reads bounded `/proc/self/maps` data from the provider's own
+Shell process. It requires one exact, nondeleted, private executable mapping
+identity for each approved path, matches mapped device/inode to the **same
+opened file descriptor** being hashed, and requires root ownership, regular
+files, and no group/other write permission. File size and change metadata must
+stay unchanged across hashing; mapping/file identity is rechecked before a
+drain and at its completion. Hashing yields between 256 KiB reads, with a
+separate two-second startup limit, 2 MiB maps limit and 8 MiB per-file ceiling.
+No environment variable, user manifest, package version text, imported symbol,
+or caller-provided contract can add support. A changed or unknown build loses
+the sender prerequisite; it cannot silently substitute a new contract.
+
+This is a **trusted local desktop build contract**, not process-memory
+attestation. It trusts the Ubuntu builder/HTTPS provenance, root-owned system
+libraries and loader, the running Shell and enabled extensions. It does not
+defend against root rewriting a mapped library in place, code injection,
+LD_PRELOAD/interposition, or hostile in-process extensions. It does not identify
+an EIS device from a Clutter event. Updates/new architectures require another
+reviewed source/build/package contract and native tests. Keeping an older
+supported library installed is not a reason to postpone security updates; a new
+unreviewed build simply denies this experimental sender prerequisite.
+
+The source checkout includes `verify-ordering-build.py` and
+`ordering-builds.json`. The verifier downloads only pinned primary Launchpad
+artifacts when `--download` is supplied, checks source descriptor and builder
+checksums, applies every Debian patch, checks the reviewed sender/queue source
+hashes, checks native/libeis build configuration, and extracts both exact module
+hashes. It makes no installation or desktop change. This reproduces the
+published builder evidence; it does not claim an independent binary rebuild.
+The runtime never reads that manifest or the verifier's output.
+
+```sh
+python3 deploy/windowshare/gnome-provider/verify-ordering-build.py \
+  --cache build/mutter-ordering-evidence --download \
+  --output build/mutter-ordering-evidence/verified.json
+```
+
+The separate `tests/ordering-native.js` GJS probe loads these packaged libraries
+and checks actual process mappings without starting a desktop. Full support
+also requires the private native Shell integration test, exact requested Core
+sender cutoff and retained Qt/All binding. The typed C++ `SenderOrderingEvidence`
+shares the segment's revocation and original absolute deadline. Exact
+`cancelInputDrain(localRequestId)` immediately revokes pending/completed copies
+and removes unread results; a bounded in-flight native call settles before the
+slot is reused. Wrong IDs and late replies cannot revive a canceled result.
+
+Primary build records: [Ubuntu 2.2 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.2/+build/32927878)
+and [Ubuntu 2.4 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.4/+build/33579950).
+Both patched sources retain `meta-eis.c:100–169`'s held SYNC reference,
+input-thread task and main-thread return; `meson.build:590–591` enables that
+path from libeis >=1.5. Exact source and artifact digests are recorded in the
+checked-in evidence manifest, including the Debian patches affecting the
+surrounding native input implementation.
+
+## First-click preparation
+
+The separate IPP1 preparation path accepts only the original capture/connection
+stamp and frozen desktop point; it cannot fabricate a focused All lease. The
+inherited private Qt inventory supplies the actual Viewer connection, peer pin
+and per-window role tokens. A connection-wide preparation gate closes before
+native selection, including Viewers created while preparation is pending.
+
+After the caller's requested EI PONG and complete event batch, the provider
+requires its verified mapped Mutter contract, an exact owned surface hit,
+empty Clutter queue outside nested dispatch, a later completed same-view update,
+and the actual Qt default queue drain. It then activates that retained
+MetaWindow without injecting a click. Activation completes only after two
+completed updates of the same StageView, within the smaller of 120 ms and the
+remaining preparation budget. The exact focused window, owned surface, frozen
+hit, geometry and view layout must remain unchanged. One coalesced `restacked`
+signal before the first completed update is permitted; all other invalidations,
+a second restack, or a later restack refuse activation. Mutter's global signal
+cannot attribute an individual raise, so this is a fresh activation-completion
+boundary, not native event attribution. Every signal still revokes older
+receipts. The supported patched Mutter sources show the synchronous raise/focus
+in `src/core/window.c:4194–4206` and deferred `META_LATER_SYNC_STACK` plus
+`display::restacked` in `src/core/stack-tracker.c:1112–1146`.
+
+A focus-only intent then obtains a fresh Host acknowledgement. Any native
+change after the completed activation reply through final publication refuses
+the prepared focus; the client never adopts a later revision to recover it.
+The original absolute preparation budget is at most
+500 ms; mapped promotion still has its own at-most-250-ms point deadline and
+cannot outlive the original budget.
+
+The genuine Host All fence coexists with the preparation gate. Promotion records
+the exact consumed association and creates the normal fresh mapped receipt and
+historical prefix seal; it does not open preparation. Independent Host resume
+revokes All evidence while preparation continues to suppress forwarded source
+input. Exact cancellation performs another native and Qt queue drain under the
+preparation gate, then removes that gate. Failure, expiry or socket EOF is never
+reported as successful cleanup. The Core caller keeps its sender paused until
+that cleanup result, or tears down its owned route on failure.
+
+`gnome-qt-viewer-tests.py` exercises this native provider/Qt chain with disposable
+mutually pinned TLS peers and synthetic Core capture correlation. Its idle case
+uses the fixture-owned real libei sender, including an actual four-second idle
+stop and restart; it is **not** runtime proof of production `EiComputer` idle
+admission. The report states `productionCoreCutoff: false`,
+`productionEiComputer: false` and `originalDeliveryAuthority: false`. Native
+activation must emit no click, Host All resume must leave preparation closed,
+and only completed cleanup permits a fresh positive input receipt. Native runs
+are separate from pure/private-bus policy regressions and remain required.
 
 ## Primary API sources
 

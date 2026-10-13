@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <span>
 
 namespace deskflow::windowshare {
 
@@ -24,6 +25,13 @@ public:
   {
     std::uint64_t owner = 0, nonce = 0;
     bool operator==(const Reservation &) const = default;
+  };
+  struct Preview
+  {
+    OriginalInputCaptured captured;
+    OriginalInputRouteDecision route;
+    SelectedPeer selected;
+    Clock::time_point deadline;
   };
   enum class State
   {
@@ -91,6 +99,39 @@ public:
   virtual void cancel(const Reservation &reservation) noexcept = 0;
   virtual void release(std::uint64_t owner) noexcept = 0;
   virtual bool live(std::uint64_t owner) const noexcept = 0;
+  // A mapped dispatcher presents the frozen cursor before its native cutoff.
+  // Server must not write a second legacy motion after accepting that receipt.
+  virtual bool presentsCursor() const noexcept
+  {
+    return false;
+  }
+  // An active absolute-position route may explicitly allow replacement of
+  // adjacent, unreserved hover motions. Server still requires no held press,
+  // identical selection/flags and exact consecutive one-part captures. The
+  // raw capture stream and each historical routing outcome remain intact.
+  virtual bool canCoalesceHoverMotion() const noexcept
+  {
+    return false;
+  }
+  // Ordinary fallback can acquire input only after the exact recipient's
+  // private handoff has fully released. Unsupported captures must not reopen
+  // the Core stream while an independent Viewer All gate is still closed.
+  // Existing exact legacy-owned releases remain the Server's responsibility.
+  virtual bool legacyAcquisitionReady(std::uint64_t) const noexcept
+  {
+    return true;
+  }
+  // Advisory bounded lookahead only. It may prepare exact point observations
+  // under an already active owner, but cannot acquire a press or deliver input.
+  // Server still reserves/commits every record in order through the normal API.
+  virtual void preview(std::span<const Preview>)
+  {
+  }
+  // Called on the Core event thread even when no input arrives. Progress
+  // retained cleanup without renewing a delivery deadline or acquiring input.
+  virtual void maintain() noexcept
+  {
+  }
   // Terminal, idempotent revocation of all pending/output authority. Keep exact
   // cleanup ownership until its native boundary completes, even after Server
   // destruction. This is not permission to reopen the viewer forwarding gate.

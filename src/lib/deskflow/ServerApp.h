@@ -14,6 +14,7 @@
 #include "net/NetworkAddress.h"
 #include "server/Config.h"
 
+#include <functional>
 #include <memory>
 
 enum class ServerState
@@ -42,6 +43,8 @@ class ServerArgs;
 namespace windowshare {
 class SelectedPeerMailbox;
 class SelectedPeerPublisher;
+class OriginalInputDispatcher;
+struct OriginalInputBackend;
 #ifdef Q_OS_MACOS
 class OriginalInputCaptureSource;
 #endif
@@ -62,6 +65,9 @@ public:
   void setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox);
 #ifdef Q_OS_MACOS
   void setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> capture);
+  using OriginalDispatcherFactory = std::function<
+      std::shared_ptr<deskflow::windowshare::OriginalInputDispatcher>(deskflow::windowshare::OriginalInputBackend)>;
+  void setOriginalInputDispatcherFactory(OriginalDispatcherFactory factory);
 #endif
 #endif
 
@@ -128,6 +134,7 @@ private:
   std::unique_ptr<deskflow::windowshare::SelectedPeerPublisher> m_selectedPeerPublisher;
 #ifdef Q_OS_MACOS
   std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> m_originalInputCapture;
+  OriginalDispatcherFactory m_originalDispatcherFactory;
 #endif
 #endif
 

@@ -27,13 +27,21 @@ bool NativeHost::recover()
 void NativeHost::setHoldingDisplayEnabled(bool)
 {
 }
+bool NativeHost::setCaptureFrameRate(unsigned)
+{
+  return false;
+}
+unsigned NativeHost::captureFrameRate() const
+{
+  return 0;
+}
 void NativeHost::refresh()
 {
 }
 void NativeHost::exportWindow(std::uint32_t)
 {
 }
-void NativeHost::ready(std::uint64_t, std::uint64_t)
+void NativeHost::ready(std::uint64_t, std::uint64_t, std::uint64_t)
 {
 }
 void NativeHost::input(std::uint64_t, std::uint64_t, const QJsonObject &)
@@ -54,6 +62,13 @@ void NativeHost::restoreAll()
 void NativeHost::releaseAll()
 {
 }
+std::optional<ClipboardFocusObservation> NativeHost::clipboardFocus() const
+{
+  return {};
+}
+void NativeHost::setClipboardTextMonitoring(bool)
+{
+}
 std::optional<KeyboardRouteBinding>
 NativeHost::keyboardRouteCandidate(std::uint64_t, std::uint64_t, std::uint64_t, ForwardingScope) const
 {
@@ -70,5 +85,22 @@ bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &) const
 bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &)
 {
   return false;
+}
+bool NativeHost::establishOriginalInput(const KeyboardRouteBinding &, std::uint64_t)
+{
+  return false;
+}
+bool NativeHost::originalInputCurrent(const KeyboardRouteBinding &, std::uint64_t) const
+{
+  return false;
+}
+bool NativeHost::deliverOriginalInput(
+    const KeyboardRouteBinding &, const OriginalInputRecord &, const LocalInputMappedPoint &
+)
+{
+  return false;
+}
+void NativeHost::revokeOriginalInput(const KeyboardRouteBinding &)
+{
 }
 } // namespace deskflow::windowshare

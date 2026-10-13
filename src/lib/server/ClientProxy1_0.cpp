@@ -181,7 +181,44 @@ bool ClientProxy1_0::parseHandshakeMessage(const uint8_t *code)
 
 bool ClientProxy1_0::parseMessage(const uint8_t *code)
 {
-  if (memcmp(code, kMsgCInputCutoffAck, 4) == 0) {
+  if (memcmp(code, kMsgCInputPreparationAck, 4) == 0) {
+    if (m_messagePacketSize != 8)
+      throw BadClientException("Incorrect preparation ack size");
+    std::array<char, 4> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete preparation ack");
+    std::size_t offset = 0;
+    receiveInputPreparationAck(
+        static_cast<std::uint32_t>(
+            deskflow::windowshare::inputSequenceDetail::read(std::string_view(body.data(), body.size()), offset, 4)
+        )
+    );
+    return true;
+  }
+  if (memcmp(code, kMsgCPreparedInputFocus, 4) == 0 || memcmp(code, kMsgCInputPreparationReceipt, 4) == 0) {
+    using namespace deskflow::windowshare;
+    const bool focus = memcmp(code, kMsgCPreparedInputFocus, 4) == 0;
+    const auto size = focus ? inputPreparationResultBytes : inputPreparationReceiptBytes;
+    if (m_messagePacketSize != size + 4)
+      throw BadClientException("Incorrect preparation reply size");
+    std::string body(size, '\0');
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete preparation reply");
+    if (focus) {
+      const auto value = decodePreparedInputFocusResult(body);
+      if (!value)
+        throw BadClientException("Malformed prepared focus");
+      receivePreparedInputFocus(*value);
+    } else {
+      const auto value = decodeInputPreparationReceipt(body);
+      if (!value)
+        throw BadClientException("Malformed preparation receipt");
+      receiveInputPreparationReceipt(*value);
+    }
+    return true;
+  }
+  if (memcmp(code, kMsgCInputCutoffAck, 4) == 0 || memcmp(code, kMsgCMappedInputCutoffAck, 4) == 0 ||
+      memcmp(code, kMsgCSealedInputCutoffAck, 4) == 0 || memcmp(code, kMsgCBatchedInputCutoffAck, 4) == 0) {
     if (m_messagePacketSize != 8)
       throw BadClientException("Incorrect input cutoff acknowledgement size");
     std::array<char, 4> body{};
@@ -191,8 +228,48 @@ bool ClientProxy1_0::parseMessage(const uint8_t *code)
     receiveInputCutoffAck(
         static_cast<std::uint32_t>(
             deskflow::windowshare::inputSequenceDetail::read(std::string_view(body.data(), body.size()), offset, 4)
-        )
+        ),
+        memcmp(code, kMsgCInputCutoffAck, 4) != 0,
+        memcmp(code, kMsgCSealedInputCutoffAck, 4) == 0 || memcmp(code, kMsgCBatchedInputCutoffAck, 4) == 0,
+        memcmp(code, kMsgCBatchedInputCutoffAck, 4) == 0
     );
+    return true;
+  } else if (memcmp(code, kMsgCInputCutoffBatchResult, 4) == 0) {
+    using namespace deskflow::windowshare;
+    if (m_messagePacketSize < 4 + inputCutoffBatchHeaderBytes ||
+        m_messagePacketSize > 4 + inputCutoffBatchResultMaximumBytes)
+      throw BadClientException("Incorrect batch cutoff result size");
+    std::string body(m_messagePacketSize - 4, '\0');
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete batch cutoff result");
+    const auto result = decodeInputCutoffBatchResult(body);
+    if (!result)
+      throw BadClientException("Malformed batch cutoff result");
+    receiveInputCutoffBatchResult(*result);
+    return true;
+  } else if (memcmp(code, kMsgCSealedInputCutoffResult, 4) == 0) {
+    using namespace deskflow::windowshare;
+    if (m_messagePacketSize != 4 + inputCutoffSealedResultBytes)
+      throw BadClientException("Incorrect sealed cutoff result size");
+    std::array<char, inputCutoffSealedResultBytes> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete sealed cutoff result");
+    const auto result = decodeInputCutoffSealedResult(std::string_view(body.data(), body.size()));
+    if (!result)
+      throw BadClientException("Malformed sealed cutoff result");
+    receiveSealedInputCutoffResult(*result);
+    return true;
+  } else if (memcmp(code, kMsgCMappedInputCutoffResult, 4) == 0) {
+    using namespace deskflow::windowshare;
+    if (m_messagePacketSize != 4 + inputCutoffMappedResultBytes)
+      throw BadClientException("Incorrect mapped cutoff result size");
+    std::array<char, inputCutoffMappedResultBytes> body{};
+    if (getStream()->read(body.data(), body.size()) != body.size())
+      throw BadClientException("Incomplete mapped cutoff result");
+    const auto result = decodeInputCutoffMappedResult(std::string_view(body.data(), body.size()));
+    if (!result)
+      throw BadClientException("Malformed mapped cutoff result");
+    receiveMappedInputCutoffResult(*result);
     return true;
   } else if (memcmp(code, kMsgCInputCutoffReceipt, 4) == 0) {
     using namespace deskflow::windowshare;

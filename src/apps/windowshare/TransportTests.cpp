@@ -437,6 +437,37 @@ void keyboardRouteProtocol()
   auto allBinding = binding;
   allBinding.scope = ForwardingScope::All;
   check(
+      !peerSupportsMappedInput({{"capabilities", keyboardRouteCapabilities(true, true)}}) &&
+          peerSupportsMappedInput({{"capabilities", keyboardRouteCapabilities(true, true, true)}}),
+      "Mapped endpoint identity was not independently negotiated"
+  );
+  KeyboardRouteControl mapped{
+      allBinding,
+      KeyboardRouteAction::Acknowledge,
+      KeyboardRouteMode::Original,
+      KeyboardRouteResult::Ready,
+      KeyboardRouteReason::None,
+      std::numeric_limits<std::uint64_t>::max()
+  };
+  auto mappedObject = encodeKeyboardRouteControl(mapped);
+  check(
+      mappedObject["viewerConnection"] == "ffffffffffffffff" &&
+          parseKeyboardRouteControl({MessageType::InputRoute, 7, 2, 1, jsonBytes(mappedObject)}) == mapped,
+      "Viewer connection identity lost full-width precision"
+  );
+  for (const auto value :
+       {QJsonValue(1), QJsonValue("1"), QJsonValue("FFFFFFFFFFFFFFFF"), QJsonValue("0000000000000000"),
+        QJsonValue("000000000000000g")}) {
+    auto malformed = mappedObject;
+    malformed["viewerConnection"] = value;
+    reject([&] { parseKeyboardRouteControl({MessageType::InputRoute, 7, 2, 1, jsonBytes(malformed)}); });
+  }
+  mapped.mode = KeyboardRouteMode::Viewer;
+  reject([&] { encodeKeyboardRouteControl(mapped); });
+  mapped.mode = KeyboardRouteMode::Original;
+  mapped.binding.scope = ForwardingScope::Keyboard;
+  reject([&] { encodeKeyboardRouteControl(mapped); });
+  check(
       binding.scope == ForwardingScope::Keyboard && validKeyboardRouteBinding(binding) &&
           validKeyboardRouteBinding(allBinding) && binding != allBinding,
       "Scope must be a valid, exact part of the forwarding binding"

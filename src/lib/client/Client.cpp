@@ -309,6 +309,51 @@ void Client::mouseWheel(int32_t xDelta, int32_t yDelta)
 }
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+bool Client::beginInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return deskflow::windowshare::validInputPreparationBinding(binding) &&
+         deskflow::windowshare::validInputCutoffPoint(point) &&
+         deskflow::windowshare::InputCutoffClock::now() < deadline &&
+         m_computer->beginInputPreparation(binding, point, deadline);
+}
+deskflow::windowshare::InputPreparationState
+Client::inputPreparationState(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->inputPreparationState(binding);
+}
+deskflow::windowshare::InputPreparationOutcome
+Client::inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->inputPreparationOutcome(binding);
+}
+std::optional<deskflow::windowshare::PreparedInputFocusResult>
+Client::preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &binding)
+{
+  return m_computer->preparedInputFocusResult(binding);
+}
+bool Client::promoteInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding,
+    const deskflow::windowshare::InputCutoffBinding &cutoff,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->promoteInputPreparation(binding, cutoff, deadline);
+}
+bool Client::cancelInputPreparation(
+    const deskflow::windowshare::InputPreparationBinding &binding,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->cancelInputPreparation(binding, deadline);
+}
+void Client::abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &binding) noexcept
+{
+  m_computer->abortInputPreparation(binding);
+}
+
 bool Client::beginInputCutoff(
     const deskflow::windowshare::InputCutoffBinding &binding,
     deskflow::windowshare::InputCutoffClock::time_point deadline
@@ -324,6 +369,44 @@ Client::inputCutoffState(const deskflow::windowshare::InputCutoffBinding &bindin
 bool Client::resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &binding)
 {
   return m_computer->resumeInputCutoff(binding);
+}
+bool Client::beginMappedInputCutoff(
+    const deskflow::windowshare::InputCutoffBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->beginMappedInputCutoff(binding, point, deadline);
+}
+std::optional<deskflow::windowshare::InputCutoffMappedResult>
+Client::mappedInputCutoffResult(const deskflow::windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->mappedInputCutoffResult(binding);
+}
+bool Client::beginSealedInputCutoff(
+    const deskflow::windowshare::InputCutoffBinding &binding, deskflow::windowshare::InputCutoffPoint point,
+    deskflow::windowshare::InputCutoffClock::time_point deadline
+)
+{
+  return m_computer->beginSealedInputCutoff(binding, point, deadline);
+}
+bool Client::refreshMappedInputCutoff(
+    const deskflow::windowshare::InputCutoffBinding &seal, const deskflow::windowshare::InputCutoffBinding &binding,
+    deskflow::windowshare::InputCutoffPoint point, deskflow::windowshare::InputCutoffClock::time_point deadline,
+    bool presentCursor
+)
+{
+  return m_computer->refreshMappedInputCutoff(seal, binding, point, deadline, presentCursor);
+}
+bool Client::beginMappedInputBatch(
+    const deskflow::windowshare::InputCutoffBinding &seal,
+    const std::vector<deskflow::windowshare::InputCutoffBatchItem> &items
+)
+{
+  return m_computer->beginMappedInputBatch(seal, items);
+}
+bool Client::inputCutoffSealLive(const deskflow::windowshare::InputCutoffBinding &binding)
+{
+  return m_computer->inputCutoffSealLive(binding);
 }
 #endif
 

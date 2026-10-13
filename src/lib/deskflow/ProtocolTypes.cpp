@@ -10,10 +10,26 @@
 const char *const kMsgCInputSequenceAck = "CISA%4i";
 const char *const kMsgDInputSequence = "DSEQ";
 const char *const kMsgCInputSequenceReceipt = "CISR";
+const char *const kMsgCInputPreparationAck = "CIPA%4i";
+const char *const kMsgDInputPreparation = "DIPP";
+const char *const kMsgCPreparedInputFocus = "CIPF";
+const char *const kMsgDInputPreparationPromotion = "DIPM";
+const char *const kMsgDInputPreparationCancel = "DIPX";
+const char *const kMsgCInputPreparationReceipt = "CIPR";
 const char *const kMsgCInputCutoffAck = "CICA%4i";
 const char *const kMsgDInputCutoff = "DICQ";
 const char *const kMsgDInputCutoffResume = "DICX";
 const char *const kMsgCInputCutoffReceipt = "CICR";
+const char *const kMsgCMappedInputCutoffAck = "CIMA%4i";
+const char *const kMsgDMappedInputCutoff = "DICM";
+const char *const kMsgCMappedInputCutoffResult = "CIMR";
+const char *const kMsgCSealedInputCutoffAck = "CICS%4i";
+const char *const kMsgDSealedInputCutoff = "DICS";
+const char *const kMsgDInputCutoffMap = "DICF";
+const char *const kMsgCSealedInputCutoffResult = "CIMS";
+const char *const kMsgCBatchedInputCutoffAck = "CICB%4i";
+const char *const kMsgDInputCutoffBatch = "DICB";
+const char *const kMsgCInputCutoffBatchResult = "CIMB";
 
 // The protocol name string within the hello and hello back messages must be
 // 7 chars for backward compatibility (Synergy and Barrier are 7 chars).

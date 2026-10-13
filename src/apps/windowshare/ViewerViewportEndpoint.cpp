@@ -75,8 +75,20 @@ void ViewerViewportBootstrap::validateOptions(const QStringList &options) const
 {
   if (!inherited())
     return;
-  const QSet<QString> allowed{"gnome-viewport-fd", "enable-seamless", "headless", "connect",       "port",
-                              "identity",          "peer-pin",        "screen",   "export-window", "quit-after"};
+  const QSet<QString> allowed{
+      "gnome-viewport-fd",
+      "enable-seamless",
+      "headless",
+      "connect",
+      "port",
+      "identity",
+      "peer-pin",
+      "screen",
+      "export-window",
+      "quit-after",
+      "share-clipboard-text",
+      "capture-fps"
+  };
   QSet<QString> seen;
   for (const auto &option : options) {
     require(allowed.contains(option) && !seen.contains(option), "Invalid inherited viewport option");
@@ -101,11 +113,32 @@ ViewerViewportEndpoint::ViewerViewportEndpoint(int fd, QObject *parent) : QObjec
     connect(m_read.get(), &QSocketNotifier::activated, this, [this] { read(); });
     connect(m_write.get(), &QSocketNotifier::activated, this, [this] { write(); });
     m_expiry.setSingleShot(true);
-    connect(&m_expiry, &QTimer::timeout, this, [this] { invalidate(QStringLiteral("snapshot-expired")); });
+    connect(&m_expiry, &QTimer::timeout, this, [this] { invalidateSnapshot(QStringLiteral("snapshot-expired")); });
+    m_preparationPoll.setInterval(1);
+    connect(&m_preparationPoll, &QTimer::timeout, this, [this] { pollPreparationFocus(); });
+    m_preparationExpiry.setSingleShot(true);
+    connect(&m_preparationExpiry, &QTimer::timeout, this, [this] {
+      // Expiry revokes the operation but leaves forwarding closed. Give the
+      // owner one bounded cleanup interval; EOF requests actual Bridge shutdown.
+      const auto pending = std::exchange(m_preparationPending, {});
+      const auto binding = m_preparation ? std::optional(m_preparation->binding) : std::nullopt;
+      const QPointer<ViewerViewportEndpoint> alive(this);
+      m_preparationPoll.stop();
+      if (pending)
+        replyPreparation(*pending, false, QStringLiteral("preparation-expired"));
+      if (alive && live() && m_preparation && !m_preparation->promoted)
+        QTimer::singleShot(250, this, [this, binding] {
+          if (m_preparation && binding == m_preparation->binding && !m_preparation->promoted &&
+              m_preparation->deadline.hasExpired())
+            close();
+        });
+    });
     m_queueExpiry.setSingleShot(true);
     connect(&m_queueExpiry, &QTimer::timeout, this, [this] {
       if (m_pendingCheck)
         finishQtQueue(m_pendingCheck->request, false);
+      else if (m_preparationPending)
+        finishPreparationQueue(m_preparationPending->request, false);
     });
   } catch (...) {
     ::close(std::exchange(m_descriptor, -1));
@@ -126,10 +159,15 @@ void ViewerViewportEndpoint::close()
   ::close(std::exchange(m_descriptor, -1));
   m_expiry.stop();
   m_queueExpiry.stop();
+  m_preparationPoll.stop();
+  m_preparationExpiry.stop();
+  m_preparationPending.reset();
+  m_preparation.reset();
   m_queueWitness.cancel();
   m_pendingCheck.reset();
   m_snapshot = 0;
   m_state.reset();
+  m_seal.reset();
   m_output.clear();
   const auto callback = std::move(onClosed);
   try {
@@ -182,7 +220,48 @@ void ViewerViewportEndpoint::write()
 }
 void ViewerViewportEndpoint::invalidate(const QString &reason)
 {
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  if (m_preparation && m_preparation->focused && !m_preparation->promoted &&
+      (!m_preparationPending || m_preparationPending->operation != GnomeViewportOperation::PreparationCleanup)) {
+    const auto expected = *m_preparation->focused;
+    const auto snapshot = onSnapshot;
+    const auto actual = snapshot ? snapshot() : std::nullopt;
+    if (!alive)
+      return;
+    if (actual != std::optional(expected)) {
+      // An unfocused preparation cannot be silently rebound to another focus.
+      // Closing requests owned Bridge teardown, never a successful release.
+      close();
+      return;
+    }
+  }
+  retireSeal(reason);
+  if (alive)
+    invalidateSnapshot(reason);
+}
+void ViewerViewportEndpoint::retireSeal(const QString &reason)
+{
+  const auto seal = std::exchange(m_seal, {});
+  if (!seal || !live())
+    return;
+  GnomeViewportReply reply;
+  reply.operation = GnomeViewportOperation::SealInvalidated;
+  reply.cutoff = seal->origin;
+  reply.reason = reason;
+  send(reply);
+}
+void ViewerViewportEndpoint::invalidateSnapshot(const QString &reason)
+{
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  if (m_preparationPending && (m_preparationPending->operation == GnomeViewportOperation::PreparationDrain ||
+                               m_preparationPending->operation == GnomeViewportOperation::PreparationCleanup)) {
+    finishPreparationQueue(m_preparationPending->request, false);
+    if (!alive)
+      return;
+  }
   m_queueWitness.cancel();
+  if (!alive)
+    return;
   m_queueExpiry.stop();
   if (const auto pending = std::exchange(m_pendingCheck, std::nullopt); pending && live()) {
     GnomeViewportReply denied;
@@ -190,6 +269,7 @@ void ViewerViewportEndpoint::invalidate(const QString &reason)
     denied.request = pending->request.request;
     denied.snapshot = pending->request.snapshot;
     denied.cutoff = pending->request.cutoff;
+    denied.seal = pending->request.seal;
     denied.reason = QStringLiteral("qt-queue-invalidated");
     const QPointer<ViewerViewportEndpoint> alive(this);
     send(denied);
@@ -246,6 +326,17 @@ bool ViewerViewportEndpoint::currentInputDrain(const GnomeViewportRequest &reque
   return alive && live() && valid && m_state && *m_state == state && request.snapshot == m_snapshot &&
          !m_deadline.hasExpired() && !deadline.hasExpired();
 }
+bool ViewerViewportEndpoint::currentInputMap(const GnomeViewportRequest &request, QDeadlineTimer deadline)
+{
+  if (!m_seal || request.seal != m_seal->origin.request || !continuesInputCutoffSeal(m_seal->origin, request.cutoff))
+    return false;
+  const auto origin = m_seal->origin;
+  const auto state = m_seal->state;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  const bool current = currentInputDrain(request, deadline);
+  return alive && current && m_seal && m_seal->origin == origin && m_seal->state == state && m_state &&
+         *m_state == state;
+}
 void ViewerViewportEndpoint::finishQtQueue(const GnomeViewportRequest &request, bool observed)
 {
   if (!m_pendingCheck || m_pendingCheck->request != request || !live())
@@ -263,16 +354,256 @@ void ViewerViewportEndpoint::finishQtQueue(const GnomeViewportRequest &request, 
   reply.request = pending->request.request;
   reply.snapshot = pending->request.snapshot;
   reply.cutoff = pending->request.cutoff;
+  reply.seal = pending->request.seal;
   const QPointer<ViewerViewportEndpoint> alive(this);
   reply.ok =
       observed && !pending->deadline.hasExpired() &&
-      (reply.operation == GnomeViewportOperation::InputDrain ? currentInputDrain(pending->request, pending->deadline)
-                                                             : current(pending->request.snapshot));
+      (reply.operation == GnomeViewportOperation::InputDrain || reply.operation == GnomeViewportOperation::InputSeal
+           ? currentInputDrain(pending->request, pending->deadline)
+           : current(pending->request.snapshot));
   if (!alive)
     return;
   if (!reply.ok)
     reply.reason = QStringLiteral("qt-queue-incomplete-or-viewport-changed");
+  else if (reply.operation == GnomeViewportOperation::InputSeal)
+    m_seal = RetainedSeal{request.cutoff, request.cutoff, *m_state};
   send(reply);
+}
+
+void ViewerViewportEndpoint::replyPreparation(const GnomeViewportRequest &request, bool ok, const QString &why)
+{
+  GnomeViewportReply reply;
+  reply.operation = request.operation;
+  reply.request = request.request;
+  reply.preparation = request.preparation;
+  reply.target = request.target;
+  reply.cutoff = request.cutoff;
+  reply.ok = ok;
+  reply.reason = why.isEmpty() ? QStringLiteral("preparation-unavailable") : why;
+  send(reply);
+}
+bool ViewerViewportEndpoint::currentPreparation(const GnomePreparationTarget &target)
+{
+  if (!live() || !m_preparation ||
+      std::find(m_preparation->inventory.targets.begin(), m_preparation->inventory.targets.end(), target) ==
+          m_preparation->inventory.targets.end())
+    return false;
+  const auto binding = m_preparation->binding;
+  const auto callback = onPreparationCheck;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  const bool valid = callback && callback(binding, target);
+  return alive && live() && m_preparation && m_preparation->binding == binding && valid;
+}
+void ViewerViewportEndpoint::finishPreparationQueue(std::uint64_t id, bool complete)
+{
+  if (!m_preparation || !m_preparationPending || m_preparationPending->request != id)
+    return;
+  const auto request = *m_preparationPending;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  const bool valid = complete && !m_preparationOperationDeadline.hasExpired() && currentPreparation(request.target);
+  if (!alive)
+    return;
+  if (!m_preparationPending || m_preparationPending->request != id)
+    return;
+  m_preparationPending.reset();
+  m_queueExpiry.stop();
+  if (!valid) {
+    replyPreparation(request, false, QStringLiteral("preparation-queue-incomplete"));
+    return;
+  }
+  if (request.operation == GnomeViewportOperation::PreparationCleanup) {
+    const auto finish = onPreparationFinish;
+    const bool retired = finish && finish(request.preparation, request.target, std::nullopt);
+    if (!alive)
+      return;
+    if (!retired || !m_preparation || m_preparation->binding != request.preparation) {
+      replyPreparation(request, false, QStringLiteral("preparation-cleanup-failed"));
+      return;
+    }
+    m_preparation.reset();
+    m_preparationExpiry.stop();
+    replyPreparation(request, true);
+  } else {
+    m_preparation->drained = true;
+    replyPreparation(request, true);
+  }
+}
+void ViewerViewportEndpoint::pollPreparationFocus()
+{
+  if (!m_preparation || !m_preparationPending ||
+      m_preparationPending->operation != GnomeViewportOperation::PreparationFocus) {
+    m_preparationPoll.stop();
+    return;
+  }
+  const auto request = *m_preparationPending;
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  if (m_preparationOperationDeadline.hasExpired() || !currentPreparation(request.target)) {
+    if (!alive)
+      return;
+    m_preparationPoll.stop();
+    m_preparationPending.reset();
+    replyPreparation(request, false, QStringLiteral("preparation-focus-expired"));
+    return;
+  }
+  const auto focus = onPreparationFocus;
+  const auto state = focus ? focus(request.preparation, request.target) : std::nullopt;
+  if (!alive || !m_preparation || !m_preparationPending || m_preparationPending->request != request.request)
+    return;
+  if (!state)
+    return;
+  if (!currentPreparation(request.target) || !alive || !m_preparation || m_preparationOperationDeadline.hasExpired())
+    return;
+  if (state->connection != m_preparation->inventory.connection ||
+      state->peerFingerprint != m_preparation->inventory.peerFingerprint) {
+    close();
+    return;
+  }
+  m_preparation->focused = state;
+  m_preparationPoll.stop();
+  m_preparationPending.reset();
+  GnomeViewportReply reply;
+  reply.operation = request.operation;
+  reply.request = request.request;
+  reply.preparation = request.preparation;
+  reply.target = request.target;
+  reply.ok = true;
+  reply.state = *state;
+  send(reply);
+}
+void ViewerViewportEndpoint::handlePreparation(const GnomeViewportRequest &request)
+{
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  if (request.operation == GnomeViewportOperation::PreparationInventory) {
+    if (m_preparation || m_seal) {
+      replyPreparation(request, false, QStringLiteral("preparation-busy"));
+      return;
+    }
+    invalidateSnapshot(QStringLiteral("preparation-started"));
+    if (!alive || !live())
+      return;
+    Preparation prep;
+    prep.binding = request.preparation;
+    prep.deadline = QDeadlineTimer(request.budgetMs, Qt::PreciseTimer);
+    m_preparation = std::move(prep);
+    const auto callback = onPreparationInventory;
+    const auto value = callback ? callback(request.preparation) : std::nullopt;
+    if (!alive || !live())
+      return;
+    if (!value) {
+      close();
+      return;
+    } // Partial or unsupported gate adoption is terminal.
+    if (value->targets.empty()) {
+      m_preparation.reset();
+      replyPreparation(request, false, QStringLiteral("preparation-no-target"));
+      return;
+    }
+    if (!m_preparation || m_preparation->binding != request.preparation || m_preparation->deadline.hasExpired()) {
+      close();
+      return;
+    }
+    m_preparation->inventory = *value;
+    m_preparationExpiry.start(static_cast<int>(m_preparation->deadline.remainingTime()));
+    GnomeViewportReply reply;
+    reply.operation = request.operation;
+    reply.request = request.request;
+    reply.preparation = request.preparation;
+    reply.ok = true;
+    reply.inventory = *value;
+    send(reply);
+    return;
+  }
+  if (!m_preparation || m_preparation->binding != request.preparation) {
+    replyPreparation(request, false, QStringLiteral("preparation-stale"));
+    return;
+  }
+  const bool cleanup = request.operation == GnomeViewportOperation::PreparationCleanup;
+  if ((!cleanup && m_preparation->deadline.hasExpired()) || !currentPreparation(request.target)) {
+    if (alive)
+      replyPreparation(request, false, QStringLiteral("preparation-target-changed"));
+    return;
+  }
+  m_preparationOperationDeadline = QDeadlineTimer(request.budgetMs, Qt::PreciseTimer);
+  if (!cleanup && m_preparation->deadline < m_preparationOperationDeadline)
+    m_preparationOperationDeadline = m_preparation->deadline;
+  if (m_preparation->target && *m_preparation->target != request.target) {
+    replyPreparation(request, false, QStringLiteral("preparation-target-substituted"));
+    return;
+  }
+  m_preparation->target = request.target;
+  if (request.operation == GnomeViewportOperation::PreparationMap) {
+    const auto callback = onPreparationMap;
+    const auto mapped =
+        callback ? callback(request.preparation, request.target, QPointF(request.x, request.y)) : std::nullopt;
+    if (!alive)
+      return;
+    if (!mapped || m_preparationOperationDeadline.hasExpired() || !currentPreparation(request.target)) {
+      if (alive)
+        replyPreparation(request, false, QStringLiteral("preparation-map-unavailable"));
+      return;
+    }
+    GnomeViewportReply reply;
+    reply.operation = request.operation;
+    reply.request = request.request;
+    reply.preparation = request.preparation;
+    reply.target = request.target;
+    reply.ok = true;
+    reply.x = mapped->x();
+    reply.y = mapped->y();
+    send(reply);
+    return;
+  }
+  if (request.operation == GnomeViewportOperation::PreparationDrain || cleanup) {
+    if (cleanup)
+      m_preparationExpiry.stop();
+    m_preparationOperationDeadline = std::min(m_preparationOperationDeadline, QDeadlineTimer(250, Qt::PreciseTimer));
+    m_preparationPending = request;
+    m_queueExpiry.start(static_cast<int>(std::max<qint64>(1, m_preparationOperationDeadline.remainingTime())));
+    const auto callback = onPreparationDrain;
+    const bool started = callback && callback(
+                                         request.preparation, request.target, m_preparationOperationDeadline,
+                                         [alive, id = request.request](bool ok) {
+                                           if (alive)
+                                             alive->finishPreparationQueue(id, ok);
+                                         }
+                                     );
+    if (alive && !started)
+      finishPreparationQueue(request.request, false);
+    return;
+  }
+  if (request.operation == GnomeViewportOperation::PreparationFocus) {
+    if (!m_preparation->drained || m_preparation->promoted) {
+      replyPreparation(request, false, QStringLiteral("preparation-prefix-not-drained"));
+      return;
+    }
+    m_preparationPending = request;
+    m_preparationPoll.start();
+    pollPreparationFocus();
+    return;
+  }
+  if (request.operation == GnomeViewportOperation::PreparationPromote) {
+    const auto state = m_preparation->focused;
+    const auto &all = request.cutoff;
+    if (!state || m_preparation->promoted || !m_preparation->drained || all.viewerConnection != state->connection ||
+        all.forwarding.owner != Owner{state->session, state->epoch} || all.forwarding.geometry != state->geometry ||
+        all.forwarding.focusRequest != state->focusRequest || all.forwarding.focusRevision != state->focusRevision) {
+      replyPreparation(request, false, QStringLiteral("preparation-promotion-mismatch"));
+      return;
+    }
+    const auto callback = onPreparationFinish;
+    const bool finished = callback && callback(request.preparation, request.target, all);
+    if (!alive)
+      return;
+    if (!finished || !m_preparation || m_preparationOperationDeadline.hasExpired()) {
+      replyPreparation(request, false, QStringLiteral("preparation-promotion-failed"));
+      return;
+    }
+    m_preparation->promoted = all;
+    m_preparationExpiry.stop();
+    replyPreparation(request, true);
+    return;
+  }
+  close();
 }
 
 void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
@@ -280,20 +611,41 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
   // Only one native queue operation may be outstanding. Pipelining while
   // callbacks are unresolved could reorder response identities or overrun
   // the snapshot deadline. Fail the inherited private stream closed.
-  if (m_pendingCheck || request.request <= m_lastRequest) {
+  const bool cancelPreparation = request.operation == GnomeViewportOperation::PreparationCleanup && m_preparation &&
+                                 m_preparation->binding == request.preparation;
+  if ((m_pendingCheck && !cancelPreparation) || (m_preparationPending && !cancelPreparation) ||
+      request.request <= m_lastRequest) {
     close();
     return;
   }
+  if (cancelPreparation) {
+    const QPointer<ViewerViewportEndpoint> alive(this);
+    const auto pending = std::exchange(m_preparationPending, {});
+    m_preparationPoll.stop();
+    m_queueWitness.cancel();
+    if (pending)
+      replyPreparation(*pending, false, QStringLiteral("preparation-canceled"));
+    if (!alive || !live())
+      return;
+    invalidateSnapshot(QStringLiteral("preparation-cleanup"));
+    if (!alive || !live())
+      return;
+  }
   m_lastRequest = request.request;
+  if (isGnomePreparationOperation(request.operation)) {
+    handlePreparation(request);
+    return;
+  }
   const QPointer<ViewerViewportEndpoint> alive(this);
   GnomeViewportReply reply;
   reply.operation = request.operation;
   reply.request = request.request;
   reply.snapshot = request.snapshot;
   reply.cutoff = request.cutoff;
+  reply.seal = request.seal;
   reply.reason = QStringLiteral("viewport-unavailable");
   if (request.operation == GnomeViewportOperation::Snapshot) {
-    invalidate(QStringLiteral("snapshot-replaced"));
+    invalidateSnapshot(QStringLiteral("snapshot-replaced"));
     if (!alive || !live())
       return;
     const QDeadlineTimer deadline(gnomeViewportLifetimeMs, Qt::PreciseTimer);
@@ -321,9 +673,13 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
   } else {
     // Take the inherited budget before any external validation callback. The
     // retained snapshot is an independent earlier absolute deadline.
-    const bool inputDrain = request.operation == GnomeViewportOperation::InputDrain;
-    const auto deadline =
-        inputDrain ? std::min(m_deadline, QDeadlineTimer(request.budgetMs, Qt::PreciseTimer)) : m_deadline;
+    const bool inputDrain = request.operation == GnomeViewportOperation::InputDrain ||
+                            request.operation == GnomeViewportOperation::InputSeal;
+    const bool inputMap = request.operation == GnomeViewportOperation::InputMap;
+    const bool inputMapBatch = request.operation == GnomeViewportOperation::InputMapBatch;
+    const auto deadline = inputDrain || inputMap || inputMapBatch
+                              ? std::min(m_deadline, QDeadlineTimer(request.budgetMs, Qt::PreciseTimer))
+                              : m_deadline;
     const bool valid = current(request.snapshot);
     if (!alive || !live())
       return;
@@ -332,6 +688,11 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
       if (!alive || !live())
         return;
       if (exact && (inputDrain ? bool(onInputDrain) : bool(onQtQueue))) {
+        if (inputDrain) {
+          retireSeal(QStringLiteral("seal-replaced"));
+          if (!alive || !live())
+            return;
+        }
         const auto start = onQtQueue;
         const auto startDrain = onInputDrain;
         const auto state = *m_state;
@@ -365,13 +726,66 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
         // when its exact QtWayland private-API dependency is missing.
         reply.ok = true;
       }
+    } else if (valid && inputMapBatch) {
+      if (!m_seal || m_seal->origin != request.cutoff || request.points.empty() ||
+          !continuesInputCutoffSeal(m_seal->last, request.points.front().cutoff)) {
+        reply.reason = QStringLiteral("prefix-seal-not-current");
+      } else {
+        // Consume the whole exact ordered attempt once. A failure publishes
+        // no partial point list and cannot retry any already checked stamp.
+        m_seal->last = request.points.back().cutoff;
+        const auto callback = onMap;
+        const auto expected = *m_state;
+        bool complete = true;
+        for (const auto &item : request.points) {
+          auto pointRequest = request;
+          pointRequest.cutoff = item.cutoff;
+          pointRequest.seal = request.cutoff.request;
+          const bool before = currentInputMap(pointRequest, deadline);
+          if (!alive || !live())
+            return;
+          if (!before) {
+            complete = false;
+            break;
+          }
+          const auto point = callback ? callback(expected, QPointF(item.x, item.y)) : std::nullopt;
+          if (!alive || !live())
+            return;
+          const bool after = currentInputMap(pointRequest, deadline);
+          if (!alive || !live())
+            return;
+          if (!point || !after) {
+            complete = false;
+            break;
+          }
+          reply.points.push_back({item.cutoff, point->x(), point->y()});
+        }
+        reply.ok = complete;
+        if (!complete) {
+          reply.points.clear();
+          reply.reason = QStringLiteral("batch-point-or-prefix-changed");
+        }
+      }
     } else if (valid) {
+      if (inputMap) {
+        const bool exact =
+            m_seal && continuesInputCutoffSeal(m_seal->last, request.cutoff) && currentInputMap(request, deadline);
+        if (!alive || !live())
+          return;
+        if (!exact) {
+          reply.reason = QStringLiteral("prefix-seal-not-current");
+          send(reply);
+          return;
+        }
+        // Consume each stamped map attempt once, including rejected points.
+        m_seal->last = request.cutoff;
+      }
       const auto callback = onMap;
       const auto expected = *m_state;
       const auto point = callback ? callback(expected, QPointF(request.x, request.y)) : std::nullopt;
       if (!alive || !live())
         return;
-      const bool stillCurrent = current(request.snapshot);
+      const bool stillCurrent = inputMap ? currentInputMap(request, deadline) : current(request.snapshot);
       if (!alive || !live())
         return;
       if (point && stillCurrent) {

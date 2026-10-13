@@ -1,5 +1,165 @@
 # Seamless Windows work state
 
+## Roadmap completion in progress — 2026-10-13
+
+The opt-in original-input evidence collector and production physical harness
+are now connected. The source Record control arms one bounded run only after
+matching live Core/Host ownership and empty declared queues. The recorder
+includes source capture, 13 Core queues, four Host queues and native disposable
+source fields. Independent review caught and corrected a capture/start race
+and omitted Qt receive buffering. Generic EventQueue and platform/kernel
+queues remain explicitly unmeasured; complete queue coverage and H11 are not
+claimed. Pure checks pass: 34 normalizer, 34 Mac harness and 23 Linux harness.
+Final application builds and regression validation are in progress.
+
+The fixed 12-session `focus-recovery-matrix-1` diagnostic verifies all 269
+artifact hashes and cleanup/preservation checks. It uses the earlier identical
+binaries: six prepared-first-click runs pass; three of six ordinary-click runs
+fail. One failure occurs before either recovery mode, so that comparison does
+not establish a causal fix. The failures expose a real window-association
+notification and two insufficiently detailed channel/admission errors. Bounded
+diagnostics now preserve their reasons without changing operation semantics.
+Archive: `f4d01f6cb5f7edcba6711ac94f0dcc3683c9fe57c87fee96a1ac0824366090a4`.
+This diagnostic retains overall FAILED status; no failed session was retried.
+
+The first-click checkpoint now passes actual Core native GNOME integration at
+Qt scale factors 1 and 1.25. Each run keeps one Core/provider connection,
+observes the real four-second idle stop and fresh emulation generation, performs
+focus-only preparation, genuine All promotion, exact cleanup, fresh key input
+and normal peer-verified private IPC shutdown. Its source archive is
+`56058d584cbf1ded23e24ef7a44ac1866179567fa424e5b6e75bddaa9d73c61a`;
+69 returned artifact hashes and all preservation/cleanup checks pass under
+`build/wifiman-resumed-20261013/ubuntu/first-click-core-ipc-stop-1/`.
+The same compiled binaries' parent checkpoint `first-click-abi-timer-1` passes
+35/35 enabled suites, 4/4 disabled suites and the broader native GNOME/Qt
+first-click and two-overlapping-Viewer matrix at both scales. That parent run
+retains its overall failure because its older harness used SIGTERM as a
+graceful stop; the final retest changes only the Python shutdown procedure.
+This establishes the named synthetic/private integration, not physical Mac
+capture, original native delivery or monitor scaling. It predates the new H11
+collector and physical-harness integration currently being completed.
+
+The preceding actual-Core diagnostic reproduced a startup **SIGSEGV before IPC5/
+IPP1 negotiation**. It is not a Linux acceptance pass. The debugger run uses
+the identical Core binary (`81aeeacef30f0e9ab8d43a7dcb2ed3bc6737d0572d6ac90c5d1a92ac9f60b7e7`)
+in the same isolated image. Its stack reaches `EiComputer::handleSystemEvent`
+while reading an invalid mapped-cutoff member. The `DESKFLOW_GNOME_EI_PING`
+definition was private to the platform target despite changing the public
+class layout, so the app target allocated a smaller object. The public build
+definition and real cross-target construction/batch regression now pass in
+both enabled and disabled builds.
+Evidence: `build/wifiman-resumed-20261013/ubuntu/first-click-core-backtrace-1/`.
+All source/artifact hashes and ordinary-process/container preservation checks
+pass; this diagnostic is not an acceptance run.
+
+The preceding `first-click-core-1` archive
+`1216087903edd450ee9d3243e1ee7674d3d3c381ee227bc1e403d645346979d4`
+builds both Ubuntu applications and passes 34/34 enabled suites, then encounters
+that startup crash. The independent native diagnostic also verifies the GNOME
+activation correction: one deferred restack completes before the fresh prepared
+focus is published. It then finds a fixture-only timer that remained active
+after its exact PONG completed. That timer is now retired without extending
+the original preparation deadline; 39 pure fixture regressions and the subsequent
+native rebuild pass. The actual-Core harness has nine passing pure
+wire/process-state tests.
+
+The earlier `first-click-provider-1` source archive
+`8285ea7842c1d2bd6d2e3537060767ed28da9a60452bfae5f2cf479a8c6d9386`
+builds actual Ubuntu Core/Viewer and passes all 34 enabled suites, then fails
+native scale 1 at first-click focus publication (`GNOME preparation focus
+changed before publication`). The fixture observes one actual libei idle stop
+and restart. Scale 1.25 and OFF checks were not reached. The evidence collector
+verifies source/artifact hashes, cleanup and ordinary Deskflow preservation.
+This is retained failing evidence for the subsequently corrected activation
+boundary, not a Linux acceptance pass.
+
+The current Mac applications also package into a separately staged ad-hoc
+experimental bundle and pass the private Core/Host handshake and rejection
+smoke. Evidence is `build/roadmap-completion-20261013/mac-package/`; archive
+SHA-256 is `bc7afaca7ac7e2863b1257dec45ac6fd54bf15bfe7a329a7572f40c973bd7148`.
+This is packaging validation only: no installation, input hooks or physical
+acceptance, and no claim of exact-library native input admission.
+The subsequent exact-library signed package also passes its audit and private
+handshake; evidence is `mac-exact-package/` beside that directory, archive
+`a5940a8cea7efc07d0bf4919d6f5fc160782ec06e2cd08837664fca2213a3867`.
+Linux packaging now checks its complete runtime/diagnostic inventory, and the
+Mac bundle auditor requires the Core companion and real Mach-O executables.
+Eleven Linux and fourteen Mac pure packaging regressions pass. Neither package
+was installed or used to start native input.
+
+The local continuation now connects Server pre-dispatch ownership to a private
+Mac coordinator, exact mapped Core/EI/GNOME/Qt validation and NativeHost original
+input. Private protocol v5 carries mapped coordinates and an explicit completed
+Host release; production registration remains explicit opt-in. The verified
+Mutter ordering build contract, actual-connection X11 namespace witness,
+painted-geometry holding relocation and immediate native lifecycle revocation
+are implemented. X11 still has no proven application-input drain and cannot
+authorize original input.
+
+The subsequent Mac first-click `IPP1` Core build passes **six CTest suites /
+234 Qt entries**, including 28 coordinator cases using actual framed Core
+messages and a private Host child. A follow-up Core/coordinator relink also
+passes all 28 cases after an atomic admission/cleanup ownership correction.
+Fresh scoped ASan/UBSan also passes 28 coordinator, 62 ClientProxy and 44
+ServerProxy entries; retained manifests name the instrumented implementations
+and dependency archives that were not instrumented.
+Evidence is `build/roadmap-completion-20261013/first-click-core-*` and
+`first-click-admission-*`. The later Linux first-click integration results
+are recorded above. The untouched-source rollback change separately passes the native,
+holding and default pure drag-probe suites (3/3). These tests post no OS input.
+The newer Mac app/capture-rate build passes both applications and ten selected
+suites, including the strict 30/60 configuration and native rational-timestamp/
+replay-flood regressions. Capture defaults to 30; 60 is an explicit requested
+active-stream rate, with existing 10/2 inactive/hidden budgets. Live 60 fps
+capture and performance have not been measured.
+
+The earlier IPC5 batched-input, exact multi-window association and focused clipboard
+checkpoint built both Mac applications and passed **18 targeted CTest suites**
+(11 Core/native/policy and seven application/private-input/probe suites).
+Scoped ASan/UBSan passed 45 Server and 15 coordinator Qt entries; retained
+evidence names the instrumented sources and the dependency archives that were
+not instrumented. Logs are in `build/roadmap-completion-20261013/`. This result
+predates the first-click preparation and untouched-source rollback changes now
+being integrated. No OS input or pasteboard access was used by these tests.
+
+The home-Ubuntu `sealed-multiwindow-3` checkpoint builds and passes 34/34
+enabled suites plus private native GNOME/Qt scale 1, including 16-point batches
+and two exact Viewer roles. Scale 1.25 currently fails with `stale-revision`
+after the multi-window sequence; its cause is under investigation. The run
+stopped before OFF validation. This is a **partial, failed overall run**, not a
+full Linux PASS. Its archive SHA-256 is
+`f84bb459918a656f3aa8e4b4728184364cc69867061900244d9f7c45b52f864c`.
+The collector verifies cleanup and preservation of ordinary Deskflow and
+unrelated containers. It excludes the in-progress first-click production code.
+The diagnostic-only `sealed-multiwindow-4` overlay also passes its build and
+34/34 enabled suites, then fails at scale 1 when a retained seal is invalidated
+during the second Viewer's idle-point check. Its archive is
+`e12b4c37f9e32784b1e2fe2002115ece403d161253e265f9dbd642b8885b029f`.
+Cleanup/preservation checks pass. Neither failure has been hidden by retries;
+bounded diagnostics are being added to identify the native or Qt invalidation.
+
+A frozen earlier production-coordinator candidate also passed the actual home
+Ubuntu ON build (33 suites), OFF build (3 suites), and private native GNOME/Qt
+runs at scale 1 and 1.25. Evidence is
+`build/wifiman-resumed-20261013/ubuntu/mapped-coordinator-1/`; its archive SHA-256
+is `9d6bcc4185fe445137e14fd23173a845fcdd17fc6562865b8db2236893bcc029`.
+It predates retained-prefix batching, the final lifecycle changes and clipboard.
+Ordinary Deskflow/configuration and unrelated containers were preserved.
+
+Natural arbitrary-app edge dragging remains unproven: a targeted app mouse-up
+is not a WindowServer grab-release acknowledgement. The owned AppKit probe
+builds and its default pure tests pass; its interactive mode has not run.
+Exact attached Sheet/Drawer focus returns the retained parent locally;
+remote child/popup rendering remains unsupported. First-click native validation,
+final packaging and hardware acceptance remain outstanding. The offline H11
+evidence analyzer passes 31 synthetic parser tests, including a regression for
+aggregated queue counters hiding an intermediate peak; it collects no physical
+evidence and does not complete H11. The user's fresh
+readiness for the physical probe is pending; no test may infer readiness from
+historical confirmations.
+Do not read any older “original input disabled” section below as the newest
+code description; it documents the named historical revision.
+
 ## Requested cutoff and exact GNOME/Qt drain components — 2026-10-13
 
 Implementation `bbe9ed3f2fb4d8519397bca61bb5b539082d00f6` adds negotiated,

@@ -2,9 +2,16 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "CaptureRate.h"
 #include "HoldingDisplay.h"
+#include "NativeAssociatedWindow.h"
+#include "NativeCaptureTiming.h"
 #include "NativeHost.h"
+#include "NativeHostLifecycle.h"
 #include "NativeKeyboardAdmission.h"
+#include "NativeOriginalInputState.h"
+#include "NativeSourceTransaction.h"
+#include "platform/OriginalInput_mac.h"
 
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
@@ -20,12 +27,15 @@
 #include <QJsonDocument>
 #include <QMetaObject>
 #include <QPointF>
+#include <QPointer>
 #include <QRandomGenerator>
 #include <QSaveFile>
+#include <QThread>
 #include <QTimer>
 #include <Qt>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <deque>
@@ -97,7 +107,7 @@ CGEventRef targetedPointerEvent(
       CGEventSourceGetSourceStateID(eventSource) == kCGEventSourceStateHIDSystemState || !window || !frame.valid() ||
       !std::isfinite(point.x) || !std::isfinite(point.y) || point.x < 0 || point.y < 0 || point.x >= frame.width ||
       point.y >= frame.height || !std::isfinite(global.x) || !std::isfinite(global.y) || !mouseType || button > 31 ||
-      eventNumber < 0 || clicks < 0 || clicks > 3)
+      eventNumber < 0 || clicks < 0)
     return nullptr;
   const auto nativeType = type == kCGEventLeftMouseDown       ? NSEventTypeLeftMouseDown
                           : type == kCGEventLeftMouseUp       ? NSEventTypeLeftMouseUp
@@ -138,6 +148,117 @@ CGEventRef targetedPointerEvent(
   location.set(event, local);
   if (!CGPointEqualToPoint(CGEventGetLocation(event), global) || !CGPointEqualToPoint(location.get(event), local) ||
       [NSEvent eventWithCGEvent:event].windowNumber != window) {
+    CFRelease(event);
+    return nullptr;
+  }
+  return event;
+}
+
+// Add an AppKit window annotation to a factory-verified original event.
+// Pointer delivery also needs the separate window-local addressing above.
+// A key event's windowNumber alone does not override AppKit's key-window
+// dispatch; keyboard delivery and cleanup must independently verify focus.
+// Every retained field is copied without Qt key translation or delta scaling.
+// This function only constructs events, never posts.
+CGWindowID annotatedInputWindow(CGEventRef event)
+{
+  return event ? static_cast<CGWindowID>([NSEvent eventWithCGEvent:event].windowNumber) : 0;
+}
+CGEventRef targetedOriginalInputEvent(
+    CGEventRef original, CGEventSourceRef source, CGWindowID window, Rect frame, Point point,
+    std::int64_t eventNumber = 0, int clicks = 0
+)
+{
+  if (!original || !source || !window || !frame.valid() || !std::isfinite(point.x) || !std::isfinite(point.y) ||
+      point.x < 0 || point.y < 0 || point.x >= frame.width || point.y >= frame.height)
+    return nullptr;
+  const auto state = CGEventSourceGetSourceStateID(source);
+  if (state == kCGEventSourceStateCombinedSessionState || state == kCGEventSourceStateHIDSystemState ||
+      CGEventGetIntegerValueField(original, kCGEventSourceStateID) != state ||
+      CGEventGetIntegerValueField(original, kCGEventSourceUserData) != syntheticEventTag)
+    return nullptr;
+  const auto type = CGEventGetType(original);
+  if (type == kCGEventKeyDown || type == kCGEventKeyUp || type == kCGEventFlagsChanged) {
+    // Preserve the factory's Unicode payload as well as its physical key
+    // fields. Empty template strings must not change the default layout result.
+    std::array<UniChar, 64> characters{}, readback{};
+    UniCharCount length = 0;
+    CGEventKeyboardGetUnicodeString(original, 0, &length, nullptr);
+    if (length > characters.size())
+      return nullptr;
+    CGEventKeyboardGetUnicodeString(original, characters.size(), &length, characters.data());
+    NSEvent *native = [NSEvent keyEventWithType:(type == kCGEventKeyUp ? NSEventTypeKeyUp : NSEventTypeKeyDown)
+                                       location:NSMakePoint(point.x, frame.height - point.y)
+                                  modifierFlags:NSEventModifierFlags(CGEventGetFlags(original))
+                                      timestamp:NSProcessInfo.processInfo.systemUptime
+                                   windowNumber:window
+                                        context:nil
+                                     characters:@""
+                    charactersIgnoringModifiers:@""
+                                      isARepeat:CGEventGetIntegerValueField(original, kCGKeyboardEventAutorepeat) != 0
+                                        keyCode:CGEventGetIntegerValueField(original, kCGKeyboardEventKeycode)];
+    if (!native.CGEvent)
+      return nullptr;
+    auto event = CGEventCreateCopy(native.CGEvent);
+    if (!event)
+      return nullptr;
+    CGEventSetSource(event, source);
+    CGEventSetType(event, type);
+    bool exact = true;
+    for (const auto field : {kCGKeyboardEventKeycode, kCGKeyboardEventKeyboardType, kCGKeyboardEventAutorepeat}) {
+      const auto value = CGEventGetIntegerValueField(original, field);
+      CGEventSetIntegerValueField(event, field, value);
+      exact = exact && CGEventGetIntegerValueField(event, field) == value;
+    }
+    CGEventKeyboardSetUnicodeString(event, length, characters.data());
+    UniCharCount readLength = 0;
+    CGEventKeyboardGetUnicodeString(event, readback.size(), &readLength, readback.data());
+    CGEventSetFlags(event, CGEventGetFlags(original));
+    CGEventSetTimestamp(event, CGEventGetTimestamp(original));
+    CGEventSetIntegerValueField(event, kCGEventSourceUserData, syntheticEventTag);
+    CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer, window);
+    CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, window);
+    if (!exact || readLength != length ||
+        !std::equal(characters.begin(), characters.begin() + length, readback.begin()) ||
+        CGEventGetType(event) != type || CGEventGetFlags(event) != CGEventGetFlags(original) ||
+        CGEventGetTimestamp(event) != CGEventGetTimestamp(original) ||
+        CGEventGetIntegerValueField(event, kCGEventSourceStateID) != state || annotatedInputWindow(event) != window) {
+      CFRelease(event);
+      return nullptr;
+    }
+    return event;
+  }
+  const auto button =
+      type == kCGEventScrollWheel ? 0 : CGEventGetIntegerValueField(original, kCGMouseEventButtonNumber);
+  auto event =
+      targetedPointerEvent(source, window, frame, point, type, button, CGEventGetFlags(original), eventNumber, clicks);
+  if (!event)
+    return nullptr;
+  const auto copyField = [&](CGEventField field) {
+    const auto value = CGEventGetIntegerValueField(original, field);
+    CGEventSetIntegerValueField(event, field, value);
+    return CGEventGetIntegerValueField(event, field) == value;
+  };
+  bool exact = true;
+  if (type == kCGEventScrollWheel) {
+    for (const auto field :
+         {kCGScrollWheelEventDeltaAxis1, kCGScrollWheelEventDeltaAxis2, kCGScrollWheelEventDeltaAxis3,
+          kCGScrollWheelEventPointDeltaAxis1, kCGScrollWheelEventPointDeltaAxis2, kCGScrollWheelEventPointDeltaAxis3,
+          kCGScrollWheelEventFixedPtDeltaAxis1, kCGScrollWheelEventFixedPtDeltaAxis2,
+          kCGScrollWheelEventFixedPtDeltaAxis3, kCGScrollWheelEventIsContinuous, kCGScrollWheelEventScrollPhase,
+          kCGScrollWheelEventMomentumPhase})
+      exact = copyField(field) && exact;
+  } else {
+    for (const auto field : {kCGMouseEventButtonNumber, kCGMouseEventDeltaX, kCGMouseEventDeltaY, kCGMouseEventSubtype})
+      exact = copyField(field) && exact;
+    if (type == kCGEventLeftMouseDown || type == kCGEventLeftMouseUp || type == kCGEventRightMouseDown ||
+        type == kCGEventRightMouseUp || type == kCGEventOtherMouseDown || type == kCGEventOtherMouseUp)
+      exact = copyField(kCGMouseEventClickState) && exact;
+  }
+  CGEventSetFlags(event, CGEventGetFlags(original));
+  CGEventSetTimestamp(event, CGEventGetTimestamp(original));
+  if (!exact || CGEventGetFlags(event) != CGEventGetFlags(original) ||
+      CGEventGetTimestamp(event) != CGEventGetTimestamp(original)) {
     CFRelease(event);
     return nullptr;
   }
@@ -233,6 +354,15 @@ public:
   CF(CF &&other) noexcept : m_value(other.m_value)
   {
     other.m_value = nullptr;
+  }
+  CF &operator=(CF &&other) noexcept
+  {
+    if (this != &other) {
+      if (m_value)
+        CFRelease(m_value);
+      m_value = other.take();
+    }
+    return *this;
   }
   T get() const
   {
@@ -439,8 +569,9 @@ std::optional<std::vector<PhysicalOutputSignature>> physicalOutputSnapshot()
     const auto height = CGDisplayModeGetPixelHeight(mode.get());
     if (!width || !height || width > 32768 || height > 32768)
       return std::nullopt;
-    physical.push_back({id, frame, static_cast<std::uint32_t>(width),
-                        static_cast<std::uint32_t>(height), static_cast<int>(rounded)});
+    physical.push_back(
+        {id, frame, static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), static_cast<int>(rounded)}
+    );
   }
   if (physical.empty() || !samePhysicalOutputLayout(physical, physical))
     return std::nullopt;
@@ -452,9 +583,10 @@ std::optional<Rect> recoverFrame(Rect original)
   // and post-crash journal recovery; never choose the private holding output.
   return recoveryRect(original, physicalDisplays());
 }
-bool setBounds(AXUIElementRef element, Rect desired)
+bool setBounds(AXUIElementRef element, Rect desired, const std::function<bool()> &admitted = {})
 {
-  if (!element || !desired.valid())
+  const auto current = [&] { return !admitted || admitted(); };
+  if (!element || !desired.valid() || !current())
     return false;
   CGPoint position{desired.x, desired.y};
   CGSize size{desired.width, desired.height};
@@ -462,14 +594,22 @@ bool setBounds(AXUIElementRef element, Rect desired)
   CF<AXValueRef> sizeValue(AXValueCreate(kAXValueTypeCGSize, &size));
   // Restore visibility before geometry, including after the app minimized itself.
   AXUIElementSetAttributeValue(element, kAXMinimizedAttribute, kCFBooleanFalse);
+  // Export relocation retains its lifecycle token through each AX round trip.
+  // Recovery deliberately passes no predicate so it can restore while fenced.
+  if (!current())
+    return false;
   AXUIElementSetAttributeValue(element, kAXSizeAttribute, sizeValue.get());
+  if (!current())
+    return false;
   AXUIElementSetAttributeValue(element, kAXPositionAttribute, positionValue.get());
+  if (!current())
+    return false;
   auto actual = bounds(element);
   CF<CFTypeRef> minimized(attribute(element, kAXMinimizedAttribute));
   // Some applications have a minimum size. Reaching a physical display is more
   // important than insisting on an exact size they cannot represent.
-  return (!minimized || !CFEqual(minimized.get(), kCFBooleanTrue)) && actual && std::abs(actual->x - desired.x) < 5 &&
-         std::abs(actual->y - desired.y) < 5;
+  return current() && (!minimized || !CFEqual(minimized.get(), kCFBooleanTrue)) && actual &&
+         std::abs(actual->x - desired.x) < 5 && std::abs(actual->y - desired.y) < 5;
 }
 
 // All callbacks return to the QObject thread. Encoded access units are bounded;
@@ -493,15 +633,18 @@ struct Capture final : std::enable_shared_from_this<Capture>
   std::atomic<bool> failurePending{false};
   std::atomic<bool> acceptingFrames{true};
   std::atomic<std::uint64_t> geometry{1}, generation{1};
+  std::atomic<std::uint64_t> configurationGeneration{1};
   std::atomic<int> expectedWidth{0}, expectedHeight{0};
+  std::atomic<unsigned> frameRate{defaultCaptureRate};
   std::atomic<unsigned> inFlight{0};
   std::atomic<qint64> lastSample{0};
   VTCompressionSessionRef encoder = nullptr; // used on the capture serial queue
   CVPixelBufferRef lastImage = nullptr;
   std::uint64_t lastImageGeometry = 0; // capture serial queue only
   int encodedWidth = 0, encodedHeight = 0;
+  unsigned encodedFrameRate = 0;
   std::atomic<bool> hardware{false};
-  CMTime nextTimestamp = kCMTimeZero;
+  CaptureTimeline timeline;
   dispatch_queue_t queue = dispatch_queue_create("org.deskflow.windowshare.capture", DISPATCH_QUEUE_SERIAL);
 
   void fail(QString message)
@@ -528,15 +671,17 @@ struct Capture final : std::enable_shared_from_this<Capture>
     awaitingKeyframe = true;
     forceKeyframe = true;
   }
-  bool configure(std::uint64_t revision, int width, int height)
+  bool configure(std::uint64_t revision, int width, int height, unsigned rate)
   {
     std::lock_guard lock(mutex);
-    if (geometry == revision && expectedWidth == width && expectedHeight == height)
+    if (geometry == revision && expectedWidth == width && expectedHeight == height && frameRate == rate)
       return false;
     acceptingFrames = false;
     geometry = revision;
     expectedWidth = width;
     expectedHeight = height;
+    frameRate = rate;
+    ++configurationGeneration;
     ++generation;
     pending.clear();
     pendingBytes = 0;
@@ -698,10 +843,27 @@ void encoded(void *reference, void *frameReference, OSStatus status, VTEncodeInf
   capture->deliver(std::move(output), keyframe, submitted->geometry, submitted->generation);
 }
 
-bool makeEncoder(const std::shared_ptr<Capture> &capture, int width, int height)
+bool configureEncoderRate(const std::shared_ptr<Capture> &capture, unsigned rate)
+{
+  const auto expected = @(rate), keyframeInterval = @(rate * 2);
+  const auto result = VTSessionSetProperty(
+      capture->encoder, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFNumberRef)expected
+  );
+  const auto keyframes = VTSessionSetProperty(
+      capture->encoder, kVTCompressionPropertyKey_MaxKeyFrameInterval, (__bridge CFNumberRef)keyframeInterval
+  );
+  if (result != noErr || keyframes != noErr) {
+    capture->fail(QString("Cannot configure H.264 frame rate (%1/%2)").arg(result).arg(keyframes));
+    return false;
+  }
+  capture->encodedFrameRate = rate;
+  capture->forceKeyframe = true;
+  return true;
+}
+bool makeEncoder(const std::shared_ptr<Capture> &capture, int width, int height, unsigned rate)
 {
   if (capture->encoder && capture->encodedWidth == width && capture->encodedHeight == height)
-    return true;
+    return capture->encodedFrameRate == rate || configureEncoderRate(capture, rate);
   if (capture->encoder) {
     VTCompressionSessionCompleteFrames(capture->encoder, kCMTimeInvalid);
     VTCompressionSessionInvalidate(capture->encoder);
@@ -724,8 +886,8 @@ bool makeEncoder(const std::shared_ptr<Capture> &capture, int width, int height)
   VTSessionSetProperty(encoder, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_Main_AutoLevel);
   NSNumber *bitrate = @(std::clamp(width * height * 3, 1000000, 16000000));
   VTSessionSetProperty(encoder, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFNumberRef)bitrate);
-  VTSessionSetProperty(encoder, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFNumberRef) @30);
-  VTSessionSetProperty(encoder, kVTCompressionPropertyKey_MaxKeyFrameInterval, (__bridge CFNumberRef) @60);
+  if (!configureEncoderRate(capture, rate))
+    return false;
   VTSessionSetProperty(encoder, kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, (__bridge CFNumberRef) @2);
   CFTypeRef hardware = nullptr;
   if (VTSessionCopyProperty(
@@ -746,12 +908,16 @@ bool makeEncoder(const std::shared_ptr<Capture> &capture, int width, int height)
   return true;
 }
 
-void encodeImage(const std::shared_ptr<Capture> &capture, CVPixelBufferRef image, bool replay = false)
+void encodeImage(
+    const std::shared_ptr<Capture> &capture, CVPixelBufferRef image, bool replay = false,
+    CMTime sourceTime = kCMTimeInvalid, CMTime sourceDuration = kCMTimeInvalid
+)
 {
   if (!image)
     return;
   SubmittedFrame stamp;
   int expectedWidth = 0, expectedHeight = 0;
+  unsigned frameRate = 0;
   {
     // Configuration changes are published as one snapshot. Encoder creation
     // can drain VT callbacks and take long enough for the Qt thread to resize
@@ -762,6 +928,7 @@ void encodeImage(const std::shared_ptr<Capture> &capture, CVPixelBufferRef image
     stamp = {capture->geometry.load(), capture->generation.load()};
     expectedWidth = capture->expectedWidth;
     expectedHeight = capture->expectedHeight;
+    frameRate = capture->frameRate;
   }
   if (replay && capture->lastImageGeometry != stamp.geometry)
     return;
@@ -773,6 +940,12 @@ void encodeImage(const std::shared_ptr<Capture> &capture, CVPixelBufferRef image
     return;
   }
   if (!replay) {
+    if (!CaptureTimeline::valid(sourceTime)) {
+      capture->fail("ScreenCaptureKit returned no usable source presentation timestamp");
+      return;
+    }
+    if (!capture->timeline.observeSource(sourceTime))
+      return;
     // A static window can replay its last image after backpressure. It may not
     // replay an image retained before a geometry/configuration change.
     CVPixelBufferRetain(image);
@@ -785,7 +958,7 @@ void encodeImage(const std::shared_ptr<Capture> &capture, CVPixelBufferRef image
     capture->forceKeyframe = true;
     return;
   }
-  if (!makeEncoder(capture, width, height))
+  if (!makeEncoder(capture, width, height, frameRate))
     return;
   bool keyframe = false;
   {
@@ -796,12 +969,20 @@ void encodeImage(const std::shared_ptr<Capture> &capture, CVPixelBufferRef image
     keyframe = capture->forceKeyframe.exchange(false);
   }
   NSDictionary *properties = keyframe ? @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES} : nil;
-  const auto timestamp = capture->nextTimestamp;
-  capture->nextTimestamp = CMTimeAdd(timestamp, CMTimeMake(1, 30));
+  const auto timestamp =
+      replay ? capture->timeline.replayPresentation(frameRate) : capture->timeline.sourcePresentation(sourceTime);
+  if (!timestamp) {
+    if (keyframe)
+      capture->forceKeyframe = true;
+    return;
+  }
+  // Recovery repeats have no new capture duration. Their tiny synthetic PTS
+  // only satisfies encoder ordering; real samples retain their own timing.
+  const auto duration = replay ? kCMTimeInvalid : CaptureTimeline::duration(sourceDuration, frameRate);
   capture->inFlight.fetch_add(1);
   auto *submitted = new SubmittedFrame(stamp);
   auto status = VTCompressionSessionEncodeFrame(
-      capture->encoder, image, timestamp, CMTimeMake(1, 30), (__bridge CFDictionaryRef)properties, submitted, nullptr
+      capture->encoder, image, *timestamp, duration, (__bridge CFDictionaryRef)properties, submitted, nullptr
   );
   if (status != noErr) {
     delete submitted;
@@ -986,7 +1167,9 @@ bool modifier(CGKeyCode code)
   auto image = CMSampleBufferGetImageBuffer(sample);
   if (!image)
     return;
-  deskflow::windowshare::native::encodeImage(capture, image);
+  deskflow::windowshare::native::encodeImage(
+      capture, image, false, CMSampleBufferGetPresentationTimeStamp(sample), CMSampleBufferGetDuration(sample)
+  );
 }
 @end
 
@@ -1009,7 +1192,10 @@ struct NativeHost::Impl
     int pixelWidth = 0, pixelHeight = 0;
     std::uint64_t resizeRequest = 0;
     std::uint64_t focusRequest = 0;
-    bool visible = true, moved = false;
+    std::uint64_t producedGeometry = 0;
+    bool visible = true, moved = false, relocating = false;
+    NativeAssociatedReturn associatedReturn;
+    std::shared_ptr<NativeSourceTransaction> sourceTransaction = std::make_shared<NativeSourceTransaction>();
     QPointF pointer;
     std::map<std::uint32_t, std::pair<std::int64_t, int>> buttons;
     ~Entry()
@@ -1024,6 +1210,37 @@ struct NativeHost::Impl
     QString text;
     CGEventFlags flags;
   };
+  struct OriginalTarget
+  {
+    KeyboardRouteBinding binding;
+    WindowIdentity identity;
+    CF<AXUIElementRef> window;
+    Rect frame;
+    std::array<std::int64_t, originalInputButtonCount> buttons{};
+    OriginalTarget(const KeyboardRouteBinding &binding, const Entry &entry)
+        : binding(binding),
+          identity(entry.identity),
+          window(static_cast<AXUIElementRef>(CFRetain(entry.window))),
+          frame(entry.session.source)
+    {
+    }
+  };
+  struct ClipboardTarget
+  {
+    ClipboardFocusBinding binding;
+    WindowIdentity identity;
+    CF<AXUIElementRef> window;
+    Rect frame;
+    NativeHostLifecycle::Admission admitted;
+    ClipboardTarget(ClipboardFocusBinding binding, const Entry &entry, NativeHostLifecycle::Admission admitted)
+        : binding(binding),
+          identity(entry.identity),
+          window(static_cast<AXUIElementRef>(CFRetain(entry.window))),
+          frame(entry.session.source),
+          admitted(admitted)
+    {
+    }
+  };
   NativeHost *q;
   QString journalPath;
   std::map<std::uint64_t, std::unique_ptr<Entry>> entries;
@@ -1037,14 +1254,20 @@ struct NativeHost::Impl
   Owner focusOwner;
   std::uint64_t focusOwnerRequest = 0, focusOwnerRevision = 0;
   NativeKeyboardAdmission keyboardAdmission;
+  NativeOriginalInputState originalInput;
+  std::shared_ptr<OriginalTarget> originalTarget;
+  bool originalCleanupFailed = false;
   std::map<std::pair<std::uint64_t, std::uint32_t>, KeyPress> keys;
   QTimer timer;
+  QTimer clipboardTimer;
+  std::unique_ptr<ClipboardChangeMonitor> clipboardMonitor;
   CGEventSourceRef eventSource = nullptr;
   CFMachPortRef tap = nullptr;
   CFRunLoopSourceRef tapSource = nullptr;
-  id sleepObserver = nil, sessionObserver = nil;
+  id sleepObserver = nil, wakeObserver = nil, sessionObserver = nil, activeObserver = nil;
   bool refreshing = false, destroying = false, recovered = false;
   bool holdingEnabled = false;
+  unsigned selectedCaptureRate = defaultCaptureRate;
   HoldingDisplay holding;
   unsigned callbackDepth = 0;
   std::uint64_t exportGeneration = 0;
@@ -1052,16 +1275,19 @@ struct NativeHost::Impl
   struct CallbackScope
   {
     Impl &host;
-    explicit CallbackScope(Impl &value) : host(value)
+    QPointer<NativeHost> alive;
+    explicit CallbackScope(Impl &value) : host(value), alive(value.q)
     {
       ++host.callbackDepth;
     }
     ~CallbackScope()
     {
-      --host.callbackDepth;
+      if (alive)
+        --host.callbackDepth;
     }
   };
   std::shared_ptr<Capture> lifetime = std::make_shared<Capture>();
+  std::shared_ptr<NativeHostLifecycle> lifecycle = std::make_shared<NativeHostLifecycle>();
 
   explicit Impl(NativeHost *owner, QString path) : q(owner), journalPath(std::move(path))
   {
@@ -1073,23 +1299,51 @@ struct NativeHost::Impl
     }
     // Recovery is deferred so the caller can attach error callbacks first.
     QTimer::singleShot(0, q, [this] {
+      const QPointer<NativeHost> alive(q);
       recoverJournal();
-      installSafetyHooks();
+      if (alive)
+        installSafetyHooks();
     });
     QObject::connect(&timer, &QTimer::timeout, q, [this] { poll(); });
     timer.start(500);
+    const QPointer<NativeHost> clipboardOwner(q);
+    ClipboardChangeMonitor::Callbacks clipboardCallbacks;
+    clipboardCallbacks.focus = [clipboardOwner] {
+      return clipboardOwner ? clipboardOwner->clipboardFocus() : std::nullopt;
+    };
+    clipboardCallbacks.readRevision = []() -> std::optional<std::int64_t> {
+      return NSPasteboard.generalPasteboard.changeCount;
+    };
+    clipboardCallbacks.changed = [clipboardOwner](const ClipboardFocusObservation &observation) {
+      if (!clipboardOwner)
+        return;
+      // No retained Entry and no NativeHost callback-depth scope. The exact
+      // sampled focus is checked again before any text read in the controller.
+      const auto changed = clipboardOwner->onClipboardTextChanged;
+      if (changed)
+        changed(observation);
+    };
+    clipboardMonitor = std::make_unique<ClipboardChangeMonitor>(std::move(clipboardCallbacks));
+    QObject::connect(&clipboardTimer, &QTimer::timeout, q, [this] { clipboardMonitor->poll(); });
   }
   ~Impl()
   {
+    lifecycle->signal(NativeHostLifecycle::Event::Shutdown);
     destroying = true;
+    clipboardTimer.stop();
+    clipboardMonitor->setEnabled(false);
     restoreAll();
     lifetime->shutdown();
     timer.stop();
     auto center = NSWorkspace.sharedWorkspace.notificationCenter;
     if (sleepObserver)
       [center removeObserver:sleepObserver];
+    if (wakeObserver)
+      [center removeObserver:wakeObserver];
     if (sessionObserver)
       [center removeObserver:sessionObserver];
+    if (activeObserver)
+      [center removeObserver:activeObserver];
     if (tap) {
       CGEventTapEnable(tap, false);
       CFMachPortInvalidate(tap);
@@ -1106,7 +1360,8 @@ struct NativeHost::Impl
   {
     if (!destroying && q->onError) {
       CallbackScope scope(*this);
-      q->onError(std::move(message));
+      const auto callback = q->onError;
+      callback(std::move(message));
     }
   }
   Entry *entry(std::uint64_t session, std::uint64_t epoch)
@@ -1124,10 +1379,14 @@ struct NativeHost::Impl
       ForwardingScope scope = ForwardingScope::Keyboard
   ) const
   {
+    const QPointer<NativeHost> alive(q);
+    if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild({session, epoch}) || !alive)
+      return {};
+    const auto admitted = lifecycle->admission();
     const Owner owner{session, epoch};
     const auto *e = entry(session, epoch);
-    if (destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote || focusOwner != owner ||
-        !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
+    if (!admitted || destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote ||
+        focusOwner != owner || !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
       return std::nullopt;
     const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry,
                                        scope};
@@ -1148,7 +1407,193 @@ struct NativeHost::Impl
         !CFEqual(minimized.get(), kCFBooleanFalse) || !actualBounds ||
         !sameGeometry(*actualBounds, e->session.source) || (e->moved && !holding.available()))
       return std::nullopt;
-    return binding;
+    return lifecycle->current(admitted) ? std::optional(binding) : std::nullopt;
+  }
+  bool clipboardCurrent(const std::shared_ptr<const ClipboardTarget> &target) const
+  {
+    const QPointer<NativeHost> alive(q);
+    if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild(target->binding.owner) || !alive)
+      return false;
+    const auto lifecycle = this->lifecycle;
+    const auto current = [&] {
+      if (!alive || QThread::currentThread() != alive->thread() || !lifecycle->current(target->admitted))
+        return false;
+      const auto *host = alive->m_impl.get();
+      const auto &binding = target->binding;
+      const auto *e = host->entry(binding.owner.session, binding.owner.epoch);
+      return !host->destroying && !host->callbackDepth && e && e->visible && e->session.phase == Phase::Remote &&
+             e->capture && !e->capture->stopped && host->focusOwner == binding.owner &&
+             host->focusOwnerRequest == binding.focusRequest && host->focusOwnerRevision == binding.focusRevision &&
+             host->focus.permits(binding.owner, binding.focusRevision) && e->session.geometry == binding.geometry &&
+             e->identity.id == target->identity.id && e->identity.pid == target->identity.pid &&
+             e->identity.launch == target->identity.launch && CFEqual(e->window, target->window.get()) &&
+             sameGeometry(e->session.source, target->frame) && (!e->moved || host->holding.available());
+    };
+    if (!current() || !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() || !current())
+      return false;
+    const auto native = identity(target->identity.id);
+    if (!current() || !native || native->pid != target->identity.pid || native->launch != target->identity.launch ||
+        !sameGeometry(native->frame, target->frame))
+      return false;
+    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!current() || !active || active.processIdentifier != target->identity.pid)
+      return false;
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(target->identity.pid));
+    if (!current() || !app)
+      return false;
+    AXUIElementSetMessagingTimeout(app.get(), 0.25f);
+    if (!current())
+      return false;
+    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
+    if (!current() || !focused || !CFEqual(focused.get(), target->window.get()))
+      return false;
+    CF<CFTypeRef> minimized(attribute(target->window.get(), kAXMinimizedAttribute));
+    if (!current() || !minimized || !CFEqual(minimized.get(), kCFBooleanFalse))
+      return false;
+    const auto frame = bounds(target->window.get());
+    return current() && frame && sameGeometry(*frame, target->frame);
+  }
+  std::optional<ClipboardFocusObservation> clipboardFocus() const
+  {
+    if (QThread::currentThread() != q->thread())
+      return {};
+    const QPointer<NativeHost> guard(q);
+    if (q->m_impl->handleAssociatedChild(focusOwner) || !guard)
+      return {};
+    const auto admitted = lifecycle->admission();
+    const auto *e = entry(focusOwner.session, focusOwner.epoch);
+    const ClipboardFocusBinding binding{focusOwner, focusOwnerRequest, focusOwnerRevision, e ? e->session.geometry : 0};
+    if (!admitted || !e || !e->window || !validClipboardFocus(binding))
+      return {};
+    const auto target = std::make_shared<const ClipboardTarget>(binding, *e, admitted);
+    const QPointer<NativeHost> alive(q);
+    if (!clipboardCurrent(target) || !alive)
+      return {};
+    return ClipboardFocusObservation{binding, [alive, target] {
+                                       return alive && alive->m_impl->clipboardCurrent(target);
+                                     }};
+  }
+  void completeAssociatedReturn(const NativeAssociatedParent &parent)
+  {
+    const auto *e = entry(parent.owner.session, parent.owner.epoch);
+    if (!e || !e->associatedReturn.returning(parent))
+      return;
+    if (callbackDepth) {
+      // At most one queued return per export. Never erase an Entry underneath
+      // an outgoing NativeHost callback running a nested Qt loop.
+      QTimer::singleShot(10, q, [this, parent] { completeAssociatedReturn(parent); });
+      return;
+    }
+    restore(parent.owner.session, false);
+  }
+  bool handleAssociatedChild(Owner owner)
+  {
+    if (QThread::currentThread() != q->thread())
+      return false;
+    const auto admitted = lifecycle->admission();
+    auto *e = entry(owner.session, owner.epoch);
+    if (!e)
+      return false;
+    if (e->associatedReturn.blocked())
+      return true;
+    if (!admitted || destroying || !e->visible || !e->window ||
+        (e->session.phase != Phase::Preparing && e->session.phase != Phase::Remote))
+      return false;
+    const QPointer<NativeHost> alive(q);
+    const auto fence = lifecycle;
+    const NativeAssociatedParent parent{owner, e->identity.id, e->identity.pid, e->identity.launch};
+    CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(e->window)));
+    const auto current = [&] {
+      if (!alive || !fence->current(admitted))
+        return false;
+      const auto *item = alive->m_impl->entry(owner.session, owner.epoch);
+      return item && !alive->m_impl->destroying && item->identity.id == parent.window &&
+             item->identity.pid == parent.process && item->identity.launch == parent.birth &&
+             CFEqual(item->window, retained.get()) && !item->associatedReturn.blocked() &&
+             (item->session.phase == Phase::Preparing || item->session.phase == Phase::Remote);
+    };
+    if (!AXIsProcessTrusted() || !current())
+      return false;
+    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!current() || !active || active.processIdentifier != parent.process)
+      return false;
+    const auto native = identity(parent.window);
+    if (!current() || !native || native->pid != parent.process || native->launch != parent.birth)
+      return false;
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(parent.process));
+    if (!current() || !app)
+      return false;
+    AXUIElementSetMessagingTimeout(app.get(), 0.25f);
+    if (!current())
+      return false;
+    const auto element = [](CFTypeRef value) {
+      return value && CFGetTypeID(value) == AXUIElementGetTypeID() ? static_cast<AXUIElementRef>(value) : nullptr;
+    };
+    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
+    if (!current() || !element(focused.get()))
+      return false;
+    CF<CFTypeRef> top(attribute(element(focused.get()), kAXTopLevelUIElementAttribute));
+    if (!current())
+      return false;
+    if (!element(top.get()) || CFEqual(top.get(), retained.get())) {
+      // Some apps focus the Sheet/Drawer itself. Its parent shortcut can then
+      // name the Window; retain the explicitly typed focused object instead.
+      CF<CFTypeRef> focusedRole(attribute(element(focused.get()), kAXRoleAttribute));
+      if (!current() || !focusedRole || CFGetTypeID(focusedRole.get()) != CFStringGetTypeID() ||
+          (!CFEqual(focusedRole.get(), kAXSheetRole) && !CFEqual(focusedRole.get(), kAXDrawerRole)))
+        return false;
+      top = CF<CFTypeRef>(CFRetain(focused.get()));
+    }
+    if (!element(top.get()) || CFEqual(top.get(), retained.get()))
+      return false;
+    CF<CFTypeRef> role(attribute(element(top.get()), kAXRoleAttribute));
+    if (!current() || !role || CFGetTypeID(role.get()) != CFStringGetTypeID())
+      return false;
+    const auto kind = CFEqual(role.get(), kAXSheetRole)    ? NativeAssociatedRole::Sheet
+                      : CFEqual(role.get(), kAXDrawerRole) ? NativeAssociatedRole::Drawer
+                                                           : NativeAssociatedRole::Other;
+    if (kind == NativeAssociatedRole::Other)
+      return false;
+    // Apple's AXAttributeConstants.h specifies AXWindow as the attached Window
+    // parent of a Sheet/Drawer, while AXTopLevelUIElement names that child. A
+    // matching process alone is never sufficient to return an exported window.
+    CF<CFTypeRef> attached(attribute(element(top.get()), kAXWindowAttribute));
+    if (!current() || !element(attached.get()) || !CFEqual(attached.get(), retained.get()))
+      return false;
+    for (const auto item : {element(focused.get()), element(top.get()), element(attached.get())}) {
+      pid_t pid = 0;
+      if (AXUIElementGetPid(item, &pid) != kAXErrorSuccess || !current() || pid != parent.process)
+        return false;
+    }
+    CF<CFTypeRef> freshFocus(attribute(app.get(), kAXFocusedUIElementAttribute));
+    if (!current() || !freshFocus || !CFEqual(freshFocus.get(), focused.get()))
+      return false;
+    CF<CFTypeRef> freshParent(attribute(element(top.get()), kAXWindowAttribute));
+    if (!current() || !freshParent || !CFEqual(freshParent.get(), retained.get()))
+      return false;
+    const auto freshNative = identity(parent.window);
+    if (!current() || !freshNative || freshNative->pid != parent.process || freshNative->launch != parent.birth)
+      return false;
+    const auto freshActive = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!current() || !freshActive || freshActive.processIdentifier != parent.process)
+      return false;
+    e = entry(owner.session, owner.epoch);
+    const NativeAssociatedEvidence evidence{{owner, native->id, native->pid, native->launch}, kind, true, true};
+    if (!e || !e->associatedReturn.observe(parent, evidence))
+      return false;
+    // Fence first, before queueing restoration or invoking any user callback.
+    // Existing owned releases can still run, but there is no new focus/input,
+    // clipboard, capture relocation or re-export for this session incarnation.
+    e->session.beginReturn();
+    QTimer::singleShot(0, q, [this, parent] { completeAssociatedReturn(parent); });
+    releases(owner, KeyboardRouteReason::FocusChanged);
+    if (alive)
+      error(
+          kind == NativeAssociatedRole::Sheet
+              ? "Attached macOS sheet interaction is unsupported remotely; returning its exact parent to the Mac"
+              : "Attached macOS drawer interaction is unsupported remotely; returning its exact parent to the Mac"
+      );
+    return true;
   }
   bool qtInputEmpty() const
   {
@@ -1169,8 +1614,210 @@ struct NativeHost::Impl
         qtInputEmpty()
     );
   }
+  bool originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+  {
+    const auto admitted = lifecycle->admission();
+    if (!admitted || QThread::currentThread() != q->thread() || destroying || callbackDepth || originalCleanupFailed ||
+        binding.scope != ForwardingScope::All || !originalInput.current(binding, captureEpoch) || !originalTarget ||
+        originalTarget->binding != binding)
+      return false;
+    QPointer<NativeHost> alive(q);
+    const auto target = originalTarget;
+    const auto candidate =
+        keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All);
+    if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
+      return false;
+    const auto current = identity(target->identity.id);
+    if (!alive)
+      return false;
+    const auto frame = bounds(target->window.get());
+    if (!alive)
+      return false;
+    const auto *e = entry(binding.owner.session, binding.owner.epoch);
+    return lifecycle->current(admitted) && originalTarget == target && originalInput.current(binding, captureEpoch) &&
+           current && frame && e && CFEqual(e->window, target->window.get()) && current->pid == target->identity.pid &&
+           current->launch == target->identity.launch && sameGeometry(*frame, target->frame) &&
+           sameGeometry(e->session.source, target->frame);
+  }
+  bool establishOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch)
+  {
+    const auto admitted = lifecycle->admission();
+    if (!admitted || QThread::currentThread() != q->thread() || destroying || callbackDepth || originalCleanupFailed ||
+        !captureEpoch || binding.scope != ForwardingScope::All)
+      return false;
+    if (originalInput.binding())
+      return originalInputCurrent(binding, captureEpoch);
+    QPointer<NativeHost> alive(q);
+    if (!keyboardRouteQuiesced(binding) || !alive)
+      return false;
+    const auto *e = entry(binding.owner.session, binding.owner.epoch);
+    if (!e || !e->window || !eventSource || !targetedPointerAvailable() || !lifecycle->current(admitted))
+      return false;
+    auto target = std::make_shared<OriginalTarget>(binding, *e);
+    if (!originalInput.establish(binding, captureEpoch))
+      return false;
+    originalTarget = std::move(target);
+    if (originalInputCurrent(binding, captureEpoch) && lifecycle->current(admitted))
+      return true;
+    if (alive)
+      revokeOriginalInput(binding);
+    return false;
+  }
+  void revokeOriginalInput(const KeyboardRouteBinding &binding)
+  {
+    const auto target = originalTarget;
+    const auto cleanup = originalInput.revoke(binding);
+    if (!cleanup)
+      return;
+    originalTarget.reset();
+    if (!target || target->binding != binding)
+      return;
+    // The endpoint is already dead before any native cleanup. Its retained AX
+    // object/process birth names the destination. AppKit routes keyboard input
+    // through its key window despite an event's window annotation, so a key
+    // release also requires that exact original window to remain focused.
+    // https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/EventOverview/EventArchitecture/EventArchitecture.html
+    // Never redirect cleanup or raise/refocus a window to make it possible.
+    const auto timestamp = std::max(cleanup->timestamp, localInputMonotonicNs());
+    const auto postCleanup = [&](const OriginalInputRelease *release, const OriginalInputRecord *scroll) {
+      bool missing = false;
+      const auto current = identity(target->identity.id, &missing);
+      if (missing || (current && (current->pid != target->identity.pid || current->launch != target->identity.launch)))
+        return true; // The original recipient is gone, never send to its replacement.
+      const auto frame = bounds(target->window.get());
+      if (!current || !frame || !closeEnough(*frame, current->frame) || !AXIsProcessTrusted() ||
+          launchTime(target->identity.pid) != target->identity.launch)
+        return false;
+      const bool keyboard = release && std::holds_alternative<OriginalInputKey>(release->press.payload);
+      const auto keyDestinationCurrent = [&] {
+        if (!keyboard)
+          return true;
+        const auto *owner = entry(target->binding.owner.session, target->binding.owner.epoch);
+        if (owner && owner->associatedReturn.blocked())
+          return false; // An attached sheet may consume parent-key-window ups.
+        CF<AXUIElementRef> app(AXUIElementCreateApplication(target->identity.pid));
+        CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
+        return focused && CFEqual(focused.get(), target->window.get());
+      };
+      if (!keyDestinationCurrent())
+        return false;
+      const Point point{
+          std::clamp(cleanup->point.x, 0.0, std::nextafter(frame->width, 0.0)),
+          std::clamp(cleanup->point.y, 0.0, std::nextafter(frame->height, 0.0))
+      };
+      const auto global = CGPointMake(frame->x + point.x, frame->y + point.y);
+      CF<CGEventRef> raw;
+      std::int64_t number = 0;
+      int clicks = 0;
+      if (release) {
+        raw = CF<CGEventRef>(createOriginalInputRelease(*release, timestamp, global, eventSource));
+        if (const auto *button = std::get_if<OriginalInputButton>(&release->press.payload)) {
+          number = target->buttons[button->button];
+          clicks = int(button->clickCount);
+        }
+      } else {
+        auto ending = *scroll;
+        ending.sourceTimestampNs = timestamp;
+        raw = CF<CGEventRef>(createOriginalInputEvent(ending, global, eventSource));
+      }
+      CF<CGEventRef> event(
+          targetedOriginalInputEvent(raw.get(), eventSource, target->identity.id, *frame, point, number, clicks)
+      );
+      if (!event || !AXIsProcessTrusted() || launchTime(target->identity.pid) != target->identity.launch ||
+          !keyDestinationCurrent())
+        return false;
+      CGEventPostToPid(target->identity.pid, event.get());
+      return true;
+    };
+    bool complete = true;
+    if (cleanup->scroll)
+      complete = postCleanup(nullptr, &*cleanup->scroll);
+    for (const auto &release : cleanup->releases)
+      complete = postCleanup(&release, nullptr) && complete;
+    if (!complete) {
+      // Never reopen Qt acquisition over a native press whose release could
+      // not be verified/submitted. Restart/recovery remains available.
+      originalCleanupFailed = true;
+      // Report after cleanup callers have unwound: onError may destroy the
+      // host or initiate another restore, but the safety latch is immediate.
+      const QPointer<NativeHost> alive(q);
+      QTimer::singleShot(0, q, [alive] {
+        if (alive)
+          alive->m_impl->error("Original-input owner release could not be submitted; input admission remains closed");
+      });
+    }
+  }
+  bool deliverOriginalInput(
+      const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
+  )
+  {
+    const auto admitted = lifecycle->admission();
+    if (!admitted || QThread::currentThread() != q->thread() || !originalInput.current(binding, record.epoch))
+      return false;
+    QPointer<NativeHost> alive(q);
+    const auto deny = [&] {
+      if (alive)
+        revokeOriginalInput(binding);
+      return false;
+    };
+    if (!originalInputCurrent(binding, record.epoch) || !alive)
+      return deny();
+    const auto target = originalTarget;
+    const auto prepared = originalInput.prepare(binding, record, point, target->frame.width, target->frame.height);
+    if (!prepared)
+      return deny();
+    std::int64_t number = 0;
+    int clicks = 0;
+    std::optional<std::uint8_t> buttonSlot;
+    bool buttonDown = false;
+    if (const auto *button = std::get_if<OriginalInputButton>(&record.payload)) {
+      buttonSlot = button->button;
+      buttonDown = button->down;
+      if (buttonDown && mouseSequence == std::numeric_limits<std::int64_t>::max())
+        return deny();
+      number = buttonDown ? mouseSequence + 1 : target->buttons[*buttonSlot];
+      clicks = int(button->clickCount);
+    } else if (const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
+               motion && motion->dragButton < originalInputButtonCount) {
+      number = target->buttons[motion->dragButton];
+      clicks = int(std::get<OriginalInputButton>(prepared->press->payload).clickCount);
+    }
+    CF<CGEventRef> event;
+    if (prepared->posts) {
+      CF<CGEventRef> raw(createOriginalInputEvent(
+          record, CGPointMake(target->frame.x + point.x, target->frame.y + point.y), eventSource
+      ));
+      event = CF<CGEventRef>(targetedOriginalInputEvent(
+          raw.get(), eventSource, target->identity.id, target->frame, {point.x, point.y}, number, clicks
+      ));
+      if (!event)
+        return deny();
+    }
+    // Native identity/focus reads may block. The receipt is never renewed by
+    // them; recheck it and the pending exact owner immediately before posting.
+    if (!originalInputCurrent(binding, record.epoch) || !alive || !liveLocalInputMappedPoint(point) ||
+        originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
+      return deny();
+    if (prepared->posts)
+      CGEventPostToPid(target->identity.pid, event.get());
+    // CGEventPostToPid is a synchronous submission and runs no application/Qt
+    // callbacks. Record the submitted press before any further native queries.
+    if (!originalInput.submitted(prepared->token))
+      return deny();
+    if (buttonSlot) {
+      target->buttons[*buttonSlot] = buttonDown ? number : 0;
+      if (buttonDown)
+        mouseSequence = number;
+    }
+    if (!liveLocalInputMappedPoint(point) || !originalInputCurrent(binding, record.epoch) || !alive ||
+        !lifecycle->current(admitted))
+      return deny();
+    return true;
+  }
   void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)
   {
+    if (const auto binding = originalInput.binding(); binding && (!owner || binding->owner == *owner))
+      revokeOriginalInput(*binding);
     const auto binding = keyboardAdmission.invalidate(owner);
     if (binding && !destroying && q->onKeyboardRouteInvalidated) {
       CallbackScope scope(*this);
@@ -1197,17 +1844,24 @@ struct NativeHost::Impl
   }
   void opened(const Entry &e)
   {
-    if (q->onOpened) {
+    if (lifecycle->admission() && q->onOpened) {
       CallbackScope scope(*this);
       q->onOpened(e.session.id, e.session.epoch, metadata(e));
     }
   }
   QJsonObject journalRecord(const Entry &e) const
   {
-    return {{"windowId", double(e.identity.id)},   {"pid", e.identity.pid},
-            {"launch", double(e.identity.launch)}, {"bundle", e.identity.bundle},
-            {"title", e.identity.title},           {"original", json(e.session.original)},
-            {"session", double(e.session.id)},     {"epoch", double(e.session.epoch)}};
+    return {
+        {"windowId", double(e.identity.id)},
+        {"pid", e.identity.pid},
+        {"launch", double(e.identity.launch)},
+        {"bundle", e.identity.bundle},
+        {"title", e.identity.title},
+        {"original", json(e.session.original)},
+        {"session", double(e.session.id)},
+        {"epoch", double(e.session.epoch)},
+        {"restoreRequired", e.sourceTransaction->journalRestoreRequired()}
+    };
   }
   bool writeJournal()
   {
@@ -1243,19 +1897,28 @@ struct NativeHost::Impl
       return;
     }
     const auto records = document["windows"].toArray();
-    if (!records.isEmpty() && !AXIsProcessTrusted()) {
-      error("Accessibility permission is required to restore journaled windows; grant it and rerun --recover");
-      return;
-    }
     recovery = {};
     for (const auto &value : records) {
       const auto record = value.toObject();
       const auto id = integer(record["windowId"], UINT32_MAX), pid = integer(record["pid"], INT_MAX),
                  launch = integer(record["launch"]);
       const auto original = rect(record["original"].toObject());
-      if (!id || !*id || !pid || !*pid || !launch || !*launch || !original.valid()) {
+      const auto restoreRequired = nativeJournalRestoreRequired(record);
+      const auto savedSession = integer(record["session"]), savedEpoch = integer(record["epoch"]);
+      if (!id || !*id || !pid || !*pid || !launch || !*launch || !original.valid() || !restoreRequired ||
+          (!*restoreRequired && (!savedSession || !*savedSession || !savedEpoch || !*savedEpoch))) {
         recovery.append(value);
         error("Recovery journal contains an invalid window entry; export disabled");
+        continue;
+      }
+      // A durable untouched preparation has never owned native placement or
+      // remote input. Retire only its record; do not query/move/raise the source
+      // or disturb a local drag that continued after this host exited.
+      if (!*restoreRequired)
+        continue;
+      if (!AXIsProcessTrusted()) {
+        recovery.append(value);
+        error("Accessibility permission is required to restore journaled windows; grant it and rerun --recover");
         continue;
       }
       bool missing = false;
@@ -1281,22 +1944,77 @@ struct NativeHost::Impl
     // the original journal is safe even if some of its windows already moved.
     recovered = writeJournal();
   }
+  void queueLifecycleRestore()
+  {
+    // Owner-thread/event-tap path: no mutex, native queries, I/O or waits.
+    if (lifecycle->cleanup() && lifecycle->claimQueue() &&
+        !QMetaObject::invokeMethod(q, [this] { restoreLifecycle(); }, Qt::QueuedConnection))
+      lifecycle->releaseQueue();
+  }
+  void restoreLifecycle()
+  {
+    const auto fence = lifecycle;
+    const auto ticket = fence->cleanup();
+    const QPointer<NativeHost> alive(q);
+    if (ticket) {
+      restoreAll(KeyboardRouteReason::AuthorityLost);
+      if (!alive) {
+        fence->releaseQueue();
+        return;
+      }
+      // A failed original release or unresolved restoration never reopens
+      // admission merely because the desktop became active again.
+      if (entries.empty() && recovery.isEmpty() && recovered && !originalCleanupFailed && writeJournal() && alive)
+        fence->complete(ticket);
+    }
+    fence->releaseQueue();
+    // A notification during restoration needs fresh cleanup. Failure of this
+    // same ticket stays closed without spinning an unbounded retry queue.
+    if (alive && fence->cleanup() && fence->cleanup() != ticket)
+      queueLifecycleRestore();
+  }
   void installSafetyHooks()
   {
     auto life = lifetime;
-    auto notify = ^(NSNotification *) {
+    auto fence = lifecycle;
+    auto notify = ^(NativeHostLifecycle::Event event) {
+      // Do this before acquiring the enqueue/destruction mutex. Even a busy
+      // owner thread immediately loses its old admission/relocation token.
+      fence->signal(event);
+      if (!fence->claimQueue())
+        return;
       std::lock_guard lock(life->mutex);
-      if (life->receiver)
-        QMetaObject::invokeMethod(
-            life->receiver, [this] { restoreAll(KeyboardRouteReason::AuthorityLost); }, Qt::QueuedConnection
-        );
+      if (!life->receiver ||
+          !QMetaObject::invokeMethod(
+              life->receiver, [owner = life->receiver] { owner->m_impl->restoreLifecycle(); }, Qt::QueuedConnection
+          ))
+        fence->releaseQueue();
     };
     auto center = NSWorkspace.sharedWorkspace.notificationCenter;
-    sleepObserver = [center addObserverForName:NSWorkspaceWillSleepNotification object:nil queue:nil usingBlock:notify];
+    sleepObserver = [center addObserverForName:NSWorkspaceWillSleepNotification
+                                        object:nil
+                                         queue:nil
+                                    usingBlock:^(NSNotification *) {
+                                      notify(NativeHostLifecycle::Event::Sleep);
+                                    }];
+    wakeObserver = [center addObserverForName:NSWorkspaceDidWakeNotification
+                                       object:nil
+                                        queue:nil
+                                   usingBlock:^(NSNotification *) {
+                                     notify(NativeHostLifecycle::Event::Wake);
+                                   }];
     sessionObserver = [center addObserverForName:NSWorkspaceSessionDidResignActiveNotification
                                           object:nil
                                            queue:nil
-                                      usingBlock:notify];
+                                      usingBlock:^(NSNotification *) {
+                                        notify(NativeHostLifecycle::Event::Deactivate);
+                                      }];
+    activeObserver = [center addObserverForName:NSWorkspaceSessionDidBecomeActiveNotification
+                                         object:nil
+                                          queue:nil
+                                     usingBlock:^(NSNotification *) {
+                                       notify(NativeHostLifecycle::Event::Activate);
+                                     }];
     installTap();
   }
   void installTap()
@@ -1331,9 +2049,8 @@ struct NativeHost::Impl
     if (CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == kVK_Escape &&
         (modifiers & required) == required) {
       // No AX calls, I/O, or waits in an event tap.
-      QMetaObject::invokeMethod(
-          self->q, [self] { self->restoreAll(KeyboardRouteReason::AuthorityLost); }, Qt::QueuedConnection
-      );
+      self->lifecycle->signal(NativeHostLifecycle::Event::Emergency);
+      self->queueLifecycleRestore();
     }
     return event;
   }
@@ -1409,7 +2126,7 @@ struct NativeHost::Impl
     config.width = e.pixelWidth;
     config.height = e.pixelHeight;
     config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-    config.minimumFrameInterval = CMTimeMake(1, active ? 30 : (e.visible ? 10 : 2));
+    config.minimumFrameInterval = CMTimeMake(1, effectiveCaptureRate(selectedCaptureRate, active, e.visible));
     config.queueDepth = 3;
     config.showsCursor = NO;
     config.scalesToFit = YES;
@@ -1433,7 +2150,9 @@ struct NativeHost::Impl
     auto capture = e.capture;
     const auto revision = e.session.geometry;
     const int width = e.pixelWidth, height = e.pixelHeight;
-    const bool changed = capture->configure(revision, width, height);
+    const auto rate = static_cast<unsigned>(e.configuration.minimumFrameInterval.timescale);
+    const bool changed = capture->configure(revision, width, height, rate);
+    const auto configurationGeneration = capture->configurationGeneration.load();
     [e.stream updateConfiguration:e.configuration
                 completionHandler:^(NSError *failure) {
                   if (failure) {
@@ -1444,7 +2163,8 @@ struct NativeHost::Impl
                     dispatch_async(capture->queue, ^{
                       std::lock_guard lock(capture->mutex);
                       if (capture->stopped || capture->geometry != revision || capture->expectedWidth != width ||
-                          capture->expectedHeight != height)
+                          capture->expectedHeight != height || capture->frameRate != rate ||
+                          capture->configurationGeneration != configurationGeneration)
                         return;
                       // The output serial queue drains older callbacks before accepting the
                       // updated configuration. Dimensions independently reject stale buffers.
@@ -1456,12 +2176,20 @@ struct NativeHost::Impl
   }
   void exportWindow(std::uint32_t id, unsigned attempt = 0)
   {
+    const auto admitted = lifecycle->admission();
+    const QPointer<NativeHost> alive(q);
+    if (!admitted || destroying)
+      return;
     recoverJournal();
+    if (!alive || !lifecycle->current(admitted))
+      return;
     if (!recovered || !recovery.isEmpty()) {
       error("Unresolved recovery journal entries prevent a new export");
       return;
     }
     const auto currentOutputs = physicalOutputSnapshot();
+    if (!lifecycle->current(admitted))
+      return;
     if (!currentOutputs) {
       error("Cannot verify active physical monitor identity/mode; export disabled");
       return;
@@ -1508,11 +2236,13 @@ struct NativeHost::Impl
     QString diagnostic;
     bool retryable = false;
     e->window = matchAX(*current, &diagnostic, &retryable);
+    if (!alive || !lifecycle->current(admitted))
+      return;
     if (!e->window) {
       if (retryable && attempt < 3) {
         const auto generation = exportGeneration;
-        QTimer::singleShot(250, q, [this, id, attempt, generation] {
-          if (generation == exportGeneration)
+        QTimer::singleShot(250, q, [this, id, attempt, generation, admitted] {
+          if (generation == exportGeneration && lifecycle->current(admitted))
             exportWindow(id, attempt + 1);
         });
         return;
@@ -1531,6 +2261,8 @@ struct NativeHost::Impl
     e->identity = *current;
     e->shareable = found->second;
     auto axFrame = bounds(e->window);
+    if (!lifecycle->current(admitted))
+      return;
     if (!axFrame) {
       error("Cannot read this window's Accessibility geometry");
       return;
@@ -1547,8 +2279,10 @@ struct NativeHost::Impl
     const auto session = e->session.id, epoch = e->session.epoch;
     e->capture->frame = [this, session, epoch](std::uint64_t geometry, QByteArray bytes) {
       auto *entry = this->entry(session, epoch);
-      if (!entry || geometry != entry->session.geometry)
+      if (!lifecycle->admission() || !entry || geometry != entry->session.geometry ||
+          (entry->session.phase != Phase::Preparing && entry->session.phase != Phase::Remote))
         return;
+      entry->producedGeometry = geometry;
       if (!entry->session.firstFrame)
         entry->session.frameReady(epoch);
       if (q->onFrame) {
@@ -1557,9 +2291,15 @@ struct NativeHost::Impl
       }
     };
     e->capture->error = [this, session, epoch](QString message) {
+      const QPointer<NativeHost> alive(q);
+      if (!entry(session, epoch))
+        return;
       releases(Owner{session, epoch}, KeyboardRouteReason::Failed);
+      if (!alive || !entry(session, epoch))
+        return;
       error(std::move(message));
-      restore(session);
+      if (alive && entry(session, epoch))
+        restore(session);
     };
     e->delegate = [[DFWindowStream alloc] init];
     e->delegate->capture = e->capture;
@@ -1567,6 +2307,7 @@ struct NativeHost::Impl
     e->capture->geometry = e->session.geometry;
     e->capture->expectedWidth = e->pixelWidth;
     e->capture->expectedHeight = e->pixelHeight;
+    e->capture->frameRate = selectedCaptureRate;
     auto filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:e->shareable];
     e->stream = [[SCStream alloc] initWithFilter:filter configuration:e->configuration delegate:e->delegate];
     NSError *failure = nil;
@@ -1577,16 +2318,29 @@ struct NativeHost::Impl
       error("Cannot attach window capture output: " + string(failure.localizedDescription));
       return;
     }
-    entries.emplace(session, std::move(e));
-    if (!writeJournal()) {
-      auto it = entries.find(session);
-      it->second->capture->shutdown();
-      entries.erase(it);
+    if (!lifecycle->current(admitted)) {
+      e->capture->shutdown();
       return;
     }
+    entries.emplace(session, std::move(e));
+    const bool persisted = writeJournal();
+    if (!alive)
+      return;
+    if (!persisted) {
+      auto it = entries.find(session);
+      if (it != entries.end()) {
+        it->second->capture->shutdown();
+        entries.erase(it);
+      }
+      return;
+    }
+    if (!lifecycle->current(admitted))
+      return;
     auto &stored = *entries.at(session);
     auto capture = stored.capture;
     opened(stored);
+    if (!alive || !lifecycle->current(admitted))
+      return;
     auto *stillOpen = entry(session, epoch);
     if (!stillOpen)
       return;
@@ -1595,15 +2349,78 @@ struct NativeHost::Impl
         capture->fail("Cannot start window capture: " + string(failure.localizedDescription));
     }];
   }
-  void ready(std::uint64_t session, std::uint64_t epoch)
+  void ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
   {
-    auto *e = entry(session, epoch);
-    if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame)
+    const QPointer<NativeHost> childGuard(q);
+    if (handleAssociatedChild({session, epoch}) || !childGuard)
       return;
-    const auto outputs = physicalOutputSnapshot();
-    if (!physicalAtExport || !outputs || !samePhysicalOutputLayout(*physicalAtExport, *outputs)) {
-      error("Physical monitor topology changed before source relocation; restoring all exported windows");
-      restoreAll(KeyboardRouteReason::AuthorityLost);
+    const auto admitted = lifecycle->admission();
+    if (!admitted || QThread::currentThread() != q->thread() || destroying)
+      return;
+    auto *e = entry(session, epoch);
+    if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame || !paintedGeometry ||
+        paintedGeometry != e->session.geometry || e->producedGeometry != paintedGeometry || e->relocating)
+      return;
+    const QPointer<NativeHost> alive(q);
+    const auto expected = e->identity;
+    const auto paintedSource = e->session.source;
+    CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(e->window)));
+    const auto capture = e->capture;
+    const auto sourceTransaction = e->sourceTransaction;
+    bool placementStarted = false;
+    e->relocating = true; // A nested/duplicate Ready cannot own the same move.
+    const auto current = [&]() -> Entry * {
+      if (!alive || !lifecycle->current(admitted))
+        return nullptr;
+      auto *item = entry(session, epoch);
+      return item && item->session.phase == Phase::Preparing && item->relocating && item->visible &&
+                     item->session.geometry == paintedGeometry && item->producedGeometry == paintedGeometry &&
+                     item->capture == capture && item->sourceTransaction == sourceTransaction && !capture->stopped &&
+                     !capture->failurePending && item->identity.id == expected.id &&
+                     item->identity.pid == expected.pid && item->identity.launch == expected.launch &&
+                     CFEqual(item->window, window.get())
+                 ? item
+                 : nullptr;
+    };
+    const auto readWindow = [&]() -> std::optional<HoldingRelocationWindow> {
+      if (!current())
+        return std::nullopt;
+      const auto observed = identity(expected.id);
+      const auto actual = bounds(window.get());
+      CF<CFTypeRef> minimized(attribute(window.get(), kAXMinimizedAttribute));
+      if (!current() || !observed || observed->pid != expected.pid || observed->launch != expected.launch || !actual ||
+          !closeEnough(*actual, observed->frame) || (!placementStarted && !sameGeometry(*actual, paintedSource)) ||
+          (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) || !AXIsProcessTrusted() ||
+          !CGPreflightScreenCaptureAccess())
+        return std::nullopt;
+      return HoldingRelocationWindow{{session, epoch}, paintedGeometry, paintedGeometry, *actual};
+    };
+    const auto layoutCurrent = [&] {
+      if (!current())
+        return false;
+      const auto outputs = physicalOutputSnapshot();
+      return current() && physicalAtExport && outputs && samePhysicalOutputLayout(*physicalAtExport, *outputs);
+    };
+    const auto failed = [&](QString message, bool all = false) {
+      if (!alive)
+        return;
+      if (auto *item = entry(session, epoch))
+        item->relocating = false;
+      error(std::move(message));
+      if (!alive)
+        return;
+      if (all)
+        restoreAll(KeyboardRouteReason::AuthorityLost);
+      else if (entry(session, epoch))
+        restore(session);
+    };
+    const auto before = readWindow();
+    if (!before || !current() || !sameGeometry(before->frame, current()->session.source)) {
+      failed("Source identity or geometry changed after the painted frame; preserving its physical visibility");
+      return;
+    }
+    if (!layoutCurrent()) {
+      failed("Physical monitor topology changed before source relocation; restoring all exported windows", true);
       return;
     }
     if (holdingEnabled) {
@@ -1611,8 +2428,7 @@ struct NativeHost::Impl
         const bool hasHiddenSources =
             std::any_of(entries.begin(), entries.end(), [](const auto &item) { return item.second->moved; });
         if (hasHiddenSources) {
-          error("Holding display changed while sources were exported; restoring all windows");
-          restoreAll();
+          failed("Holding display changed while sources were exported; restoring all windows", true);
           return;
         }
       }
@@ -1620,54 +2436,105 @@ struct NativeHost::Impl
       if (holding.available() || holding.create(&failure, 4096, 4096)) {
         // Creating the virtual holding display can itself rearrange existing
         // physical outputs. Never move a window using a stale source layout.
-        const auto afterCreate = physicalOutputSnapshot();
-        if (!afterCreate || !samePhysicalOutputLayout(*physicalAtExport, *afterCreate)) {
-          error("Physical outputs changed during holding-display creation; restoring sources");
-          restoreAll(KeyboardRouteReason::AuthorityLost);
+        if (!alive)
+          return;
+        if (!layoutCurrent()) {
+          failed("Physical outputs changed during holding-display creation; restoring sources", true);
           return;
         }
-        const auto destination = fitInside(e->session.source, holding.bounds());
-        if (e->session.journaled && writeJournal() && setBounds(e->window, destination)) {
-          const auto actual = bounds(e->window);
-          if (actual && CGRectContainsRect(rect(holding.bounds()), rect(*actual))) {
-            e->session.source = *actual;
-            e->moved = true;
-            ++e->session.geometry;
-            updateCapture(*e);
-          } else {
-            error("Holding display placement did not verify; restoring source window");
-            restore(session);
-            return;
-          }
-        } else {
-          error("Cannot safely relocate the source window; restoring it");
-          restore(session);
+        HoldingRelocationAccess access;
+        access.window = readWindow;
+        access.display = [&]() -> std::optional<HoldingResizeDisplay> {
+          if (!layoutCurrent() || !holding.available())
+            return std::nullopt;
+          return HoldingResizeDisplay{holding.displayId(), holding.bounds()};
+        };
+        access.persist = [&] {
+          return current() && current()->session.journaled &&
+                 sourceTransaction->arm([&] { return current() && writeJournal() && current(); });
+        };
+        access.place = [&](Rect destination) {
+          if (!current() || !sourceTransaction->attemptMutation())
+            return false;
+          placementStarted = true;
+          return setBounds(window.get(), destination, [&] { return current() != nullptr; });
+        };
+        const auto result = relocateHoldingWindow({session, epoch}, paintedGeometry, access);
+        if (!alive)
+          return;
+        e = current();
+        if (!e || result.status != HoldingRelocationResult::Status::Applied) {
+          failed("Holding display placement did not verify; restoring source window");
           return;
         }
+        e->session.source = result.actual;
+        e->moved = true;
+        ++e->session.geometry;
+        updateCapture(*e);
       } else {
-        error("Holding display unavailable; source remains visible: " + failure);
-        // Reporting an error may cause the caller to disconnect and restore.
-        e = entry(session, epoch);
-        if (!e)
+        if (!alive)
           return;
+        error("Holding display unavailable; source remains visible: " + failure);
+        if (!alive)
+          return;
+        e = current();
+        if (!e || !readWindow() || !layoutCurrent()) {
+          failed("Source-visible fallback changed during holding-display creation; restoring source");
+          return;
+        }
       }
     }
     // The default source-visible fallback never parks a window off-screen.
+    if (!alive)
+      return;
+    e = entry(session, epoch);
+    if (!e || !e->relocating || e->session.phase != Phase::Preparing || !lifecycle->current(admitted))
+      return;
+    // A source-visible committed session can still receive native input and
+    // resize/focus changes. Persist its recovery intent before enabling those
+    // operations, just as for a holding-display mutation.
+    if (e->sourceTransaction != sourceTransaction || !sourceTransaction->arm([&] {
+          const auto *item = entry(session, epoch);
+          return item && item->sourceTransaction == sourceTransaction && writeJournal() && alive;
+        })) {
+      failed("Cannot persist source recovery before committing the export");
+      return;
+    }
+    if (!alive || !lifecycle->current(admitted))
+      return;
+    e = entry(session, epoch);
+    if (!e || e->sourceTransaction != sourceTransaction || e->session.phase != Phase::Preparing || !e->relocating ||
+        !sourceTransaction->commit())
+      return;
+    e->relocating = false;
     e->session.commit(epoch);
     opened(*e);
-    if (entry(session, epoch) && q->onCommitted) {
+    if (alive && lifecycle->current(admitted) && entry(session, epoch) && q->onCommitted) {
       CallbackScope scope(*this);
       q->onCommitted(session, epoch);
     }
   }
-  bool post(Entry &e, CGEventRef event, CGEventFlags modifiers = 0)
+  bool post(
+      Entry &e, CGEventRef event, CGEventFlags modifiers, NativeHostLifecycle::Admission admitted, bool cleanup = false
+  )
   {
-    if (!event || !AXIsProcessTrusted() || launchTime(e.identity.pid) != e.identity.launch)
+    if (cleanup && e.associatedReturn.blocked() && event &&
+        (CGEventGetType(event) == kCGEventKeyUp || CGEventGetType(event) == kCGEventFlagsChanged)) {
+      // A sheet can share its parent's AXFocusedWindow while owning AppKit key
+      // dispatch. Do not redirect the parent's release into that child or claim
+      // successful cleanup. Restore remains possible with this latch closed.
+      originalCleanupFailed = true;
+      return false;
+    }
+    if (!event || (!cleanup && !lifecycle->current(admitted)) || !AXIsProcessTrusted() ||
+        launchTime(e.identity.pid) != e.identity.launch)
       return false;
     CGEventSetIntegerValueField(event, kCGEventSourceUserData, syntheticEventTag);
     CGEventSetFlags(event, modifiers);
     CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer, e.identity.id);
     CGEventSetIntegerValueField(event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, e.identity.id);
+    if (!cleanup && !lifecycle->current(admitted))
+      return false;
     CGEventPostToPid(e.identity.pid, event);
     return true;
   }
@@ -1680,15 +2547,21 @@ struct NativeHost::Impl
         eventSource, e.identity.id, e.session.source, {e.pointer.x(), e.pointer.y()}, type, button, modifiers,
         eventNumber, clicks
     );
-    if (!event)
-      error("macOS targeted pointer construction failed; private window-location API required");
+    if (!event) {
+      // Native construction can fail while a caller retains an Entry. Report
+      // after that caller unwinds rather than allowing onError to destroy it.
+      QTimer::singleShot(0, q, [this] {
+        error("macOS targeted pointer construction failed; private window-location API required");
+      });
+    }
     return event;
   }
-  void key(Entry &e, const KeyPress &press, bool down, bool repeat = false)
+  bool
+  key(Entry &e, const KeyPress &press, bool down, bool repeat = false, NativeHostLifecycle::Admission admitted = {})
   {
     CF<CGEventRef> event(CGEventCreateKeyboardEvent(eventSource, press.code, down));
     if (!event)
-      return;
+      return false;
     if (modifier(press.code))
       CGEventSetType(event.get(), kCGEventFlagsChanged);
     CGEventSetIntegerValueField(event.get(), kCGKeyboardEventAutorepeat, repeat);
@@ -1697,9 +2570,12 @@ struct NativeHost::Impl
           event.get(), press.text.size(), reinterpret_cast<const UniChar *>(press.text.utf16())
       );
     }
-    post(e, event.get(), press.flags);
+    return post(e, event.get(), press.flags, admitted, !down);
   }
-  void button(Entry &e, std::uint32_t code, bool down, CGEventFlags modifiers = 0, int clicks = 1)
+  bool button(
+      Entry &e, std::uint32_t code, bool down, CGEventFlags modifiers = 0, int clicks = 1,
+      NativeHostLifecycle::Admission admitted = {}
+  )
   {
     const CGEventType type = code == 0   ? (down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp)
                              : code == 1 ? (down ? kCGEventRightMouseDown : kCGEventRightMouseUp)
@@ -1715,12 +2591,21 @@ struct NativeHost::Impl
     CF<CGEventRef> event(pointerEvent(e, type, code, modifiers, number, clicks));
     if (event) {
       CGEventSetIntegerValueField(event.get(), kCGMouseEventClickState, clicks);
-      post(e, event.get(), modifiers);
+      if (post(e, event.get(), modifiers, admitted, !down))
+        return true;
     }
+    if (down)
+      e.buttons.erase(code);
+    return false;
   }
   void
   releases(std::optional<Owner> owner = std::nullopt, KeyboardRouteReason reason = KeyboardRouteReason::FocusChanged)
   {
+    const QPointer<NativeHost> alive(q);
+    if (!owner || *owner == focusOwner)
+      clipboardMonitor->resetBaseline();
+    if (const auto binding = originalInput.binding(); binding && (!owner || binding->owner == *owner))
+      revokeOriginalInput(*binding);
     Owner revoked;
     std::uint64_t revokedRequest = 0;
     if (!owner || *owner == focusOwner) {
@@ -1746,51 +2631,90 @@ struct NativeHost::Impl
         button(*e, press.code, false);
     }
     invalidateKeyboard(reason, owner);
-    if (revoked.session && revokedRequest && !destroying && q->onFocused) {
+    if (alive && revoked.session && revokedRequest && !destroying && q->onFocused) {
       // Revoke the acknowledged request, not a newer request already received
       // by input(). Clear ownership before the callback can echo a release.
       CallbackScope scope(*this);
       q->onFocused(revoked.session, revoked.epoch, 0, revokedRequest);
     }
   }
-  bool setFocus(Entry &e, std::uint64_t request)
+  bool setFocus(Entry &e, std::uint64_t request, NativeHostLifecycle::Admission admitted)
   {
+    if (!lifecycle->current(admitted))
+      return false;
+    const QPointer<NativeHost> alive(q);
+    const Owner owner{e.session.id, e.session.epoch};
+    const auto pid = e.identity.pid;
+    CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(e.window)));
     releases();
     // A release/invalidation callback may have processed a newer focus request.
     // Do not overwrite that lease or acknowledge the now-obsolete request.
-    if (e.focusRequest != request || focusOwner.session)
+    const auto current = [&]() -> Entry * {
+      if (!alive || !lifecycle->current(admitted))
+        return nullptr;
+      auto *item = entry(owner.session, owner.epoch);
+      return item && item->session.phase == Phase::Remote && item->focusRequest == request && !focusOwner.session &&
+                     CFEqual(item->window, window.get())
+                 ? item
+                 : nullptr;
+    };
+    if (!current())
       return false;
-    CF<AXUIElementRef> app(AXUIElementCreateApplication(e.identity.pid));
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(pid));
+    if (!app)
+      return false;
     AXUIElementSetMessagingTimeout(app.get(), 0.25f);
-    AXUIElementPerformAction(e.window, kAXRaiseAction);
-    AXUIElementSetAttributeValue(e.window, kAXMainAttribute, kCFBooleanTrue);
-    AXUIElementSetAttributeValue(app.get(), kAXFocusedWindowAttribute, e.window);
-    [[NSRunningApplication runningApplicationWithProcessIdentifier:e.identity.pid] activateWithOptions:0];
+    AXUIElementPerformAction(window.get(), kAXRaiseAction);
+    if (!current())
+      return false;
+    AXUIElementSetAttributeValue(window.get(), kAXMainAttribute, kCFBooleanTrue);
+    if (!current())
+      return false;
+    AXUIElementSetAttributeValue(app.get(), kAXFocusedWindowAttribute, window.get());
+    if (!current())
+      return false;
+    [[NSRunningApplication runningApplicationWithProcessIdentifier:pid] activateWithOptions:0];
+    if (!current())
+      return false;
+    if (handleAssociatedChild(owner) || !alive)
+      return false;
     CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
-    if (!focused || !CFEqual(focused.get(), e.window)) {
+    if (!current())
+      return false;
+    if (!focused || !CFEqual(focused.get(), window.get())) {
       error("The app did not accept focus for this window");
       return false;
     }
-    focusOwner = {e.session.id, e.session.epoch};
+    focusOwner = owner;
     const auto revision = focus.request(focusOwner);
     focus.acknowledge(focusOwner, revision);
     focusOwnerRequest = request;
     focusOwnerRevision = revision;
+    clipboardMonitor->resetBaseline();
     for (auto &[id, other] : entries)
       updateCapture(*other);
-    if (q->onFocused) {
+    if (lifecycle->current(admitted) && q->onFocused) {
       CallbackScope scope(*this);
-      q->onFocused(e.session.id, e.session.epoch, revision, request);
+      q->onFocused(owner.session, owner.epoch, revision, request);
     }
     return true;
   }
   void input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event)
   {
+    const auto admitted = lifecycle->admission();
+    const QPointer<NativeHost> alive(q);
     auto *e = entry(session, epoch);
     if (!e)
       return;
     const Owner owner{session, epoch};
     const auto kind = event["kind"].toString();
+    if (kind != "release" && kind != "visibility") {
+      if (handleAssociatedChild(owner) || !alive)
+        return;
+      e = entry(session, epoch);
+      if (!e)
+        return;
+    }
     // Owner releases remain valid after geometry/focus changes and never release
     // another session's keys. This is also the focus-cancellation path.
     if (kind == "release") {
@@ -1803,7 +2727,9 @@ struct NativeHost::Impl
       e->visible = event["visible"].toBool();
       if (!e->visible)
         releases(owner, KeyboardRouteReason::Hidden);
-      updateCapture(*e);
+      if (alive)
+        if (auto *current = entry(session, epoch))
+          updateCapture(*current);
       return;
     }
     const auto code = integer(event["code"], 0x01ffffff);
@@ -1832,6 +2758,8 @@ struct NativeHost::Impl
       }
       return;
     }
+    if (!admitted)
+      return;
     auto geometry = integer(event["geometry"]);
     if (!geometry || !e->session.acceptsInput(epoch, *geometry) || !AXIsProcessTrusted())
       return;
@@ -1839,7 +2767,7 @@ struct NativeHost::Impl
       const auto request = integer(event["request"]);
       if (request && *request > e->focusRequest) {
         e->focusRequest = *request;
-        setFocus(*e, *request);
+        setFocus(*e, *request, admitted);
       }
       return;
     }
@@ -1867,7 +2795,7 @@ struct NativeHost::Impl
           // characters and flags must follow the current validated event.
           saved->second.flags = modifiers;
           saved->second.text = text;
-          key(*e, saved->second, true, true);
+          key(*e, saved->second, true, true, admitted);
         }
         return;
       }
@@ -1875,7 +2803,10 @@ struct NativeHost::Impl
         return;
       KeyPress press{native.value_or(CGKeyCode(kVK_ANSI_A)), text, modifiers};
       keys[{session, std::uint32_t(*code)}] = press;
-      key(*e, press, true);
+      if (!key(*e, press, true, false, admitted)) {
+        ledger.up(true, std::uint32_t(*code), owner);
+        keys.erase({session, std::uint32_t(*code)});
+      }
       return;
     }
     if (keyboardAdmission.blocksPointers())
@@ -1886,11 +2817,14 @@ struct NativeHost::Impl
       return;
     e->pointer = QPointF(x, y);
     if (kind == "button") {
-      if (code && *code <= 15 && event["down"].isBool() && down && ledger.down(false, std::uint32_t(*code), owner))
-        button(
-            *e, std::uint32_t(*code), true, modifiers,
-            int(std::clamp(integer(event["clickCount"], 3).value_or(1), std::uint64_t(1), std::uint64_t(3)))
-        );
+      if (code && *code <= 15 && event["down"].isBool() && down && ledger.down(false, std::uint32_t(*code), owner)) {
+        if (!button(
+                *e, std::uint32_t(*code), true, modifiers,
+                int(std::clamp(integer(event["clickCount"], 3).value_or(1), std::uint64_t(1), std::uint64_t(3))),
+                admitted
+            ))
+          ledger.up(false, std::uint32_t(*code), owner);
+      }
     } else if (kind == "move") {
       CGEventType type = kCGEventMouseMoved;
       CGMouseButton active = kCGMouseButtonLeft;
@@ -1903,7 +2837,7 @@ struct NativeHost::Impl
           break;
         }
       CF<CGEventRef> motion(pointerEvent(*e, type, active, modifiers));
-      post(*e, motion.get(), modifiers);
+      post(*e, motion.get(), modifiers, admitted);
     } else if (kind == "scroll") {
       const double dx = event["dx"].toDouble(NAN), dy = event["dy"].toDouble(NAN);
       if (!std::isfinite(dx) || !std::isfinite(dy) || std::abs(dx) > 10000 || std::abs(dy) > 10000)
@@ -1920,35 +2854,113 @@ struct NativeHost::Impl
           CGEventSetIntegerValueField(scroll.get(), field, CGEventGetIntegerValueField(source.get(), field));
         for (const auto field : {kCGScrollWheelEventFixedPtDeltaAxis1, kCGScrollWheelEventFixedPtDeltaAxis2})
           CGEventSetDoubleValueField(scroll.get(), field, CGEventGetDoubleValueField(source.get(), field));
-        post(*e, scroll.get(), modifiers);
+        post(*e, scroll.get(), modifiers, admitted);
       }
     }
   }
   void resizeWindow(std::uint64_t session, std::uint64_t epoch, int width, int height, std::uint64_t request)
   {
+    const auto admitted = lifecycle->admission();
+    const QPointer<NativeHost> alive(q);
     auto *e = entry(session, epoch);
-    if (!e || e->session.phase != Phase::Remote || width < 64 || height < 64 || width > 8192 || height > 8192 ||
-        request > maxJsonInteger)
+    if (!admitted || !e || e->session.phase != Phase::Remote || width < 64 || height < 64 || width > 8192 ||
+        height > 8192 || request > maxJsonInteger)
       return;
+    if (e->moved) {
+      const auto current = [&]() -> Entry * {
+        if (!alive || !lifecycle->current(admitted))
+          return nullptr;
+        auto *item = entry(session, epoch);
+        return item && item->moved && item->session.phase == Phase::Remote &&
+                       launchTime(item->identity.pid) == item->identity.launch
+                   ? item
+                   : nullptr;
+      };
+      HoldingResizeAccess access;
+      access.display = [&]() -> std::optional<HoldingResizeDisplay> {
+        const auto outputs = physicalOutputSnapshot();
+        if (!current() || !holding.available() || !physicalAtExport || !outputs ||
+            !samePhysicalOutputLayout(*physicalAtExport, *outputs))
+          return std::nullopt;
+        return HoldingResizeDisplay{holding.displayId(), holding.bounds()};
+      };
+      access.window = [&]() -> std::optional<Rect> {
+        auto *item = current();
+        return item ? bounds(item->window) : std::nullopt;
+      };
+      access.persist = [&] {
+        releases(Owner{session, epoch}, KeyboardRouteReason::GeometryChanged);
+        auto *item = current();
+        return item && item->session.journaled && writeJournal();
+      };
+      access.move = [&](Point point) {
+        auto *item = current();
+        CGPoint position{point.x, point.y};
+        CF<AXValueRef> value(AXValueCreate(kAXValueTypeCGPoint, &position));
+        return item && value &&
+               AXUIElementSetAttributeValue(item->window, kAXPositionAttribute, value.get()) == kAXErrorSuccess;
+      };
+      access.resize = [&](double requestedWidth, double requestedHeight) {
+        auto *item = current();
+        CGSize size{requestedWidth, requestedHeight};
+        CF<AXValueRef> value(AXValueCreate(kAXValueTypeCGSize, &size));
+        return item && value &&
+               AXUIElementSetAttributeValue(item->window, kAXSizeAttribute, value.get()) == kAXErrorSuccess;
+      };
+      const auto result = resizeHoldingWindow(width, height, access);
+      if (!alive)
+        return;
+      if (result.status == HoldingResizeResult::Status::Restore) {
+        error("Holding-display resize did not verify; restoring the source window");
+        if (alive)
+          restore(session);
+        return;
+      }
+      e = current();
+      if (!e)
+        return;
+      e->resizeRequest = request;
+      if (result.status == HoldingResizeResult::Status::Applied) {
+        e->session.source = result.actual;
+        ++e->session.geometry;
+        updateCapture(*e);
+      } else {
+        error("Requested source size cannot be safely applied inside the holding display");
+        e = current();
+        if (!e)
+          return;
+      }
+      opened(*e);
+      return;
+    }
     releases(Owner{session, epoch}, KeyboardRouteReason::GeometryChanged);
-    if (!e->session.journaled || !writeJournal())
+    if (!alive || !lifecycle->current(admitted))
+      return;
+    e = entry(session, epoch);
+    if (!e || !e->session.journaled || !writeJournal() || !alive || !lifecycle->current(admitted))
       return;
     e->resizeRequest = request;
     CGSize size{CGFloat(width), CGFloat(height)};
     CF<AXValueRef> value(AXValueCreate(kAXValueTypeCGSize, &size));
     if (AXUIElementSetAttributeValue(e->window, kAXSizeAttribute, value.get()) != kAXErrorSuccess) {
       error("This app window does not support resizing through Accessibility");
-      opened(*e);
+      if (alive)
+        if (auto *current = entry(session, epoch))
+          opened(*current);
       return;
     }
     if (auto actual = bounds(e->window))
       e->session.source = *actual;
+    if (!lifecycle->current(admitted))
+      return;
     ++e->session.geometry;
     updateCapture(*e);
     opened(*e);
   }
   void requestKeyframe(std::uint64_t session, std::uint64_t epoch)
   {
+    if (!lifecycle->admission())
+      return;
     auto *e = entry(session, epoch);
     if (!e || !e->capture)
       return;
@@ -1959,60 +2971,101 @@ struct NativeHost::Impl
         encodeImage(capture, capture->lastImage, true);
     });
   }
-  void restore(std::uint64_t session)
+  void restore(std::uint64_t session, bool raise = true)
   {
+    const QPointer<NativeHost> alive(q);
     auto found = entries.find(session);
     if (found == entries.end())
       return;
-    auto &e = *found->second;
-    e.session.beginReturn();
-    releases(Owner{session, e.session.epoch}, KeyboardRouteReason::Returned);
-    e.capture->shutdown();
+    const auto &e = *found->second;
+    const Owner owner{session, e.session.epoch};
+    const auto transaction = e.sourceTransaction;
+    const auto expected = e.identity;
+    const auto original = e.session.original;
+    CF<AXUIElementRef> window(e.window ? static_cast<AXUIElementRef>(CFRetain(e.window)) : nullptr);
+    const auto capture = e.capture;
     SCStream *stream = e.stream;
     DFWindowStream *delegate = e.delegate;
-    [stream stopCaptureWithCompletionHandler:^(NSError *) {
-      // Keep the stream and its output alive until asynchronous teardown ends.
-      (void)stream;
-      (void)delegate;
-    }];
-    bool missing = false;
-    auto current = identity(e.identity.id, &missing);
-    bool restored = missing || (current && (current->pid != e.identity.pid || current->launch != e.identity.launch));
-    if (!restored) {
+    raise = raise && !e.associatedReturn.blocked();
+    const auto current = [&]() -> Entry * {
+      if (!alive)
+        return nullptr;
+      auto *item = entry(owner.session, owner.epoch);
+      return item && item->sourceTransaction == transaction && item->capture == capture ? item : nullptr;
+    };
+    NativeSourceReturnAccess access;
+    access.current = [&] { return current() != nullptr; };
+    access.fence = [&] {
+      if (auto *item = current(); item && item->session.phase != Phase::Returning)
+        item->session.beginReturn();
+    };
+    access.releaseInput = [&] { releases(owner, KeyboardRouteReason::Returned); };
+    access.stopCapture = [capture, stream, delegate] {
+      capture->shutdown();
+      [stream stopCaptureWithCompletionHandler:^(NSError *) {
+        // Keep the stream and its output alive until asynchronous teardown ends.
+        (void)stream;
+        (void)delegate;
+      }];
+    };
+    access.restoreSource = [&] {
+      bool missing = false;
+      const auto observed = identity(expected.id, &missing);
+      if (!current())
+        return false;
+      if (missing || (observed && (observed->pid != expected.pid || observed->launch != expected.launch)))
+        return true; // The old recipient is gone, never mutate its replacement.
       // A failed WindowServer query is not proof that the window disappeared.
-      // The retained AX identity can still restore the original window, but
-      // only while its process-start identity continues to match.
-      const auto destination = recoverFrame(e.session.original);
-      restored = destination && launchTime(e.identity.pid) == e.identity.launch && setBounds(e.window, *destination);
-      if (restored)
-        AXUIElementPerformAction(e.window, kAXRaiseAction);
-    }
-    if (!restored) {
-      recovery.append(journalRecord(e));
-      error("Could not restore " + e.identity.title + "; journal retained for --recover");
-    }
-    entries.erase(found);
-    writeJournal();
-    if (entries.empty() && recovery.isEmpty())
-      holding.shutdown();
-    if (!destroying && q->onClosed) {
-      CallbackScope scope(*this);
-      q->onClosed(session);
-    }
+      // Restoration can use retained AX identity only at the same process birth.
+      const auto destination = recoverFrame(original);
+      if (!current() || !destination || launchTime(expected.pid) != expected.launch || !current() ||
+          !setBounds(window.get(), *destination, [&] { return current() != nullptr; }))
+        return false;
+      if (current() && raise)
+        AXUIElementPerformAction(window.get(), kAXRaiseAction);
+      return current() != nullptr;
+    };
+    access.retainFailure = [&] {
+      if (const auto *item = current()) {
+        recovery.append(journalRecord(*item));
+        error("Could not restore " + expected.title + "; journal retained for --recover");
+      }
+    };
+    access.finish = [&] {
+      if (!current())
+        return;
+      entries.erase(owner.session);
+      writeJournal();
+      if (!alive)
+        return;
+      if (entries.empty() && recovery.isEmpty())
+        holding.shutdown();
+      if (!destroying && q->onClosed) {
+        CallbackScope scope(*this);
+        q->onClosed(owner.session);
+      }
+    };
+    (void)returnNativeSource(*transaction, access);
   }
   void restoreAll(KeyboardRouteReason reason = KeyboardRouteReason::Returned)
   {
+    const QPointer<NativeHost> alive(q);
     ++exportGeneration; // cancel pending AX-startup retries on disconnect/restore
     releases(std::nullopt, reason);
+    if (!alive)
+      return;
     std::vector<std::uint64_t> ids;
     for (const auto &[id, unused] : entries)
       ids.push_back(id);
-    for (auto id : ids)
+    for (auto id : ids) {
       restore(id);
+      if (!alive)
+        return;
+    }
   }
   void poll()
   {
-    if (!recovered)
+    if (!recovered || !lifecycle->admission())
       return;
     if (entries.empty())
       physicalAtExport.reset();
@@ -2029,6 +3082,15 @@ struct NativeHost::Impl
     }
     if (AXIsProcessTrusted() && !tap)
       installTap();
+    const QPointer<NativeHost> childGuard(q);
+    std::vector<Owner> parents;
+    for (const auto &[id, e] : entries)
+      parents.push_back({id, e->session.epoch});
+    for (const auto owner : parents) {
+      handleAssociatedChild(owner);
+      if (!childGuard)
+        return;
+    }
     if (focusOwner.session) {
       auto *focused = entry(focusOwner.session, focusOwner.epoch);
       const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -2045,6 +3107,8 @@ struct NativeHost::Impl
     const auto now = QDateTime::currentMSecsSinceEpoch();
     std::vector<std::uint64_t> restoreIds;
     for (auto &[id, e] : entries) {
+      if (e->associatedReturn.blocked())
+        continue; // One separately queued, exact-parent return owns this entry.
       if (e->moved && !holding.available()) {
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         error("Holding display configuration changed; restoring source windows");
@@ -2142,6 +3206,17 @@ void NativeHost::setHoldingDisplayEnabled(bool enabled)
 {
   m_impl->holdingEnabled = enabled;
 }
+bool NativeHost::setCaptureFrameRate(unsigned framesPerSecond)
+{
+  if (QThread::currentThread() != thread() || !validCaptureRate(framesPerSecond) || !m_impl->entries.empty())
+    return false;
+  m_impl->selectedCaptureRate = framesPerSecond;
+  return true;
+}
+unsigned NativeHost::captureFrameRate() const
+{
+  return m_impl->selectedCaptureRate;
+}
 void NativeHost::refresh()
 {
   m_impl->refresh();
@@ -2150,9 +3225,9 @@ void NativeHost::exportWindow(std::uint32_t id)
 {
   m_impl->exportWindow(id);
 }
-void NativeHost::ready(std::uint64_t session, std::uint64_t epoch)
+void NativeHost::ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
 {
-  m_impl->ready(session, epoch);
+  m_impl->ready(session, epoch, paintedGeometry);
 }
 void NativeHost::input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event)
 {
@@ -2192,6 +3267,21 @@ std::optional<KeyboardRouteBinding> NativeHost::keyboardRouteCandidate(
 {
   return m_impl->keyboardRouteCandidate(session, epoch, generation, scope);
 }
+std::optional<ClipboardFocusObservation> NativeHost::clipboardFocus() const
+{
+  return m_impl->clipboardFocus();
+}
+void NativeHost::setClipboardTextMonitoring(bool enabled)
+{
+  if (QThread::currentThread() != thread())
+    return;
+  m_impl->clipboardTimer.stop();
+  m_impl->clipboardMonitor->setEnabled(false);
+  if (!enabled || m_impl->destroying)
+    return;
+  m_impl->clipboardMonitor->setEnabled(true);
+  m_impl->clipboardTimer.start(100);
+}
 bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
 {
   return m_impl->quiesceKeyboard(binding);
@@ -2202,6 +3292,30 @@ bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) cons
 }
 bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &binding)
 {
+  if (QThread::currentThread() != thread())
+    return false;
+  m_impl->revokeOriginalInput(binding);
+  if (m_impl->originalCleanupFailed)
+    return false;
   return m_impl->keyboardAdmission.resume(binding);
+}
+bool NativeHost::establishOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch)
+{
+  return m_impl->establishOriginalInput(binding, captureEpoch);
+}
+bool NativeHost::originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+{
+  return m_impl->originalInputCurrent(binding, captureEpoch);
+}
+bool NativeHost::deliverOriginalInput(
+    const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
+)
+{
+  return m_impl->deliverOriginalInput(binding, record, point);
+}
+void NativeHost::revokeOriginalInput(const KeyboardRouteBinding &binding)
+{
+  if (QThread::currentThread() == thread())
+    m_impl->revokeOriginalInput(binding);
 }
 } // namespace deskflow::windowshare

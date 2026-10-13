@@ -245,7 +245,10 @@ ServerProxy::ConnectionResult ServerProxy::parseHandshakeMessage(const uint8_t *
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   if (memcmp(code, kMsgDInputSequence, 4) == 0 || memcmp(code, kMsgDInputCutoff, 4) == 0 ||
-      memcmp(code, kMsgDInputCutoffResume, 4) == 0)
+      memcmp(code, kMsgDMappedInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffResume, 4) == 0 ||
+      memcmp(code, kMsgDSealedInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffMap, 4) == 0 ||
+      memcmp(code, kMsgDInputCutoffBatch, 4) == 0 || memcmp(code, kMsgDInputPreparation, 4) == 0 ||
+      memcmp(code, kMsgDInputPreparationPromotion, 4) == 0 || memcmp(code, kMsgDInputPreparationCancel, 4) == 0)
     throw BadClientException("Input sequence before handshake completion");
 #endif
 
@@ -325,8 +328,15 @@ ServerProxy::ConnectionResult ServerProxy::handleMessage(const uint8_t *code)
   const auto alive = m_alive;
   // Gate before virtual version-specific parsers, key layout changes, and
   // compressed motion. Only an exact Resume may restore legacy dispatch.
-  if (m_cutoff && memcmp(code, kMsgDInputCutoffResume, 4) && memcmp(code, kMsgCKeepAlive, 4) &&
-      memcmp(code, kMsgCNoop, 4) && memcmp(code, kMsgCClose, 4))
+  if (m_preparation && m_preparation->state != deskflow::windowshare::InputPreparationState::Released &&
+      m_preparation->state != deskflow::windowshare::InputPreparationState::Sealed &&
+      memcmp(code, kMsgDInputPreparationCancel, 4) && memcmp(code, kMsgDInputPreparationPromotion, 4) &&
+      memcmp(code, kMsgDInputCutoffResume, 4) && memcmp(code, kMsgCKeepAlive, 4) && memcmp(code, kMsgCNoop, 4) &&
+      memcmp(code, kMsgCClose, 4))
+    throw BadClientException("Input crossed a frozen preparation");
+  if (m_cutoff && memcmp(code, kMsgDInputPreparationCancel, 4) && memcmp(code, kMsgDInputCutoffResume, 4) &&
+      memcmp(code, kMsgCKeepAlive, 4) && memcmp(code, kMsgCNoop, 4) && memcmp(code, kMsgCClose, 4) &&
+      memcmp(code, kMsgDInputCutoffMap, 4) && memcmp(code, kMsgDInputCutoffBatch, 4))
     throw BadClientException("Legacy/control input crossed a frozen cutoff");
 #endif
   const auto result = parseMessage(code);
@@ -352,8 +362,25 @@ ServerProxy::ConnectionResult ServerProxy::parseMessage(const uint8_t *code)
   using enum ConnectionResult;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
-  if (memcmp(code, kMsgDInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffResume, 4) == 0) {
-    inputCutoff(memcmp(code, kMsgDInputCutoffResume, 4) == 0);
+  if (memcmp(code, kMsgDInputPreparation, 4) == 0 || memcmp(code, kMsgDInputPreparationCancel, 4) == 0 ||
+      memcmp(code, kMsgDInputPreparationPromotion, 4) == 0) {
+    inputPreparation(
+        memcmp(code, kMsgDInputPreparationCancel, 4) == 0, memcmp(code, kMsgDInputPreparationPromotion, 4) == 0
+    );
+    return Okay;
+  }
+  if (memcmp(code, kMsgDInputCutoffBatch, 4) == 0) {
+    inputCutoffBatch();
+    return Okay;
+  }
+  if (memcmp(code, kMsgDInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffResume, 4) == 0 ||
+      memcmp(code, kMsgDMappedInputCutoff, 4) == 0 || memcmp(code, kMsgDSealedInputCutoff, 4) == 0 ||
+      memcmp(code, kMsgDInputCutoffMap, 4) == 0) {
+    const bool sealed = memcmp(code, kMsgDSealedInputCutoff, 4) == 0 || memcmp(code, kMsgDInputCutoffMap, 4) == 0;
+    inputCutoff(
+        memcmp(code, kMsgDInputCutoffResume, 4) == 0, sealed || memcmp(code, kMsgDMappedInputCutoff, 4) == 0, sealed,
+        memcmp(code, kMsgDInputCutoffMap, 4) == 0
+    );
     return Okay;
   }
   if (memcmp(code, kMsgDInputSequence, 4) == 0) {
@@ -1001,14 +1028,25 @@ void ServerProxy::stopInputCutoffTimer()
 void ServerProxy::revokeInputCutoff()
 {
   const auto old = std::exchange(m_cutoff, std::nullopt);
+  const auto preparation = std::exchange(m_preparation, std::nullopt);
+  if (preparation && preparation->state == deskflow::windowshare::InputPreparationState::Released)
+    m_retiredPreparation = preparation->binding;
+  m_preparationCapable = false;
   if (old)
-    m_retiredCutoff = old->binding;
+    m_retiredCutoff = old->seal.value_or(old->binding);
   stopInputCutoffTimer();
   m_cutoffGeneration = 0;
+  m_cutoffMappedCapable = false;
+  m_cutoffSealedCapable = false;
   m_cutoffPeer.reset();
+  if (preparation && preparation->backendStarted &&
+      preparation->state != deskflow::windowshare::InputPreparationState::Released) {
+    m_client->abortInputPreparation(preparation->binding);
+    return; // No surviving provider may treat TLS teardown as completed drain.
+  }
   if (old && old->backendStarted) {
     try {
-      m_client->resumeInputCutoff(old->binding);
+      m_client->resumeInputCutoff(old->seal.value_or(old->binding));
     } catch (...) {
       // Connection teardown owns all remaining platform cleanup. No receipt
       // or continued dispatch may be authorized by this abandoned result.
@@ -1020,37 +1058,374 @@ void ServerProxy::setInputCutoffOptions(const OptionsList &options)
 {
   if (!supportsInputSequence())
     return;
-  std::optional<std::uint32_t> generation;
+  const auto alive = m_alive;
+  std::optional<std::uint32_t> generation, preparation;
+  bool mapped = false, sealed = false, batched = false;
   for (std::size_t i = 0; i < options.size(); i += 2) {
-    if (options[i] != kOptionInputCutoff)
+    if (options[i] == kOptionInputPreparation) {
+      if (preparation)
+        throw BadClientException("Duplicate preparation option");
+      preparation = options[i + 1];
+      continue;
+    }
+    if (options[i] != kOptionInputCutoff && options[i] != kOptionMappedInputCutoff &&
+        options[i] != kOptionSealedInputCutoff && options[i] != kOptionBatchedInputCutoff)
       continue;
     if (generation)
       throw BadClientException("Duplicate input cutoff option");
     generation = options[i + 1];
+    mapped = options[i] != kOptionInputCutoff;
+    batched = options[i] == kOptionBatchedInputCutoff;
+    sealed = options[i] == kOptionSealedInputCutoff || batched;
   }
-  if (!generation)
+  if (!generation) {
+    if (preparation && *preparation)
+      throw BadClientException("Preparation requires IPC5 generation");
+    if (preparation && !*preparation && m_preparation) {
+      revokeInputCutoff();
+      if (*alive)
+        requestDisconnect("Preparation capability withdrawn during owned gate");
+    }
     return;
+  }
+  if (preparation && *preparation && (!batched || *preparation != *generation))
+    throw BadClientException("Preparation generation mismatch");
   if (!*generation) {
     revokeInputCutoff();
     return;
   }
   if (*generation == m_cutoffGeneration && inputCutoffConnectionLive()) {
-    ProtocolUtil::writef(m_stream, kMsgCInputCutoffAck, *generation);
+    if (mapped != m_cutoffMappedCapable || sealed != m_cutoffSealedCapable || batched != m_cutoffBatchedCapable)
+      throw BadClientException("Input cutoff capability version changed");
+    ProtocolUtil::writef(
+        m_stream,
+        batched  ? kMsgCBatchedInputCutoffAck
+        : sealed ? kMsgCSealedInputCutoffAck
+        : mapped ? kMsgCMappedInputCutoffAck
+                 : kMsgCInputCutoffAck,
+        *generation
+    );
+    if (!*alive)
+      return;
+    if (preparation && *preparation) {
+      m_preparationCapable = true;
+      ProtocolUtil::writef(m_stream, kMsgCInputPreparationAck, *generation);
+    }
     return;
   }
   if (*generation <= m_cutoffGenerationHighWater)
     throw BadClientException("Reused input cutoff connection generation");
   revokeInputCutoff();
+  if (!*alive)
+    return;
   m_cutoffGenerationHighWater = *generation;
   const auto peer = m_stream->authenticatedPeerTicket();
   if (!peer || !peer->live())
     return;
   m_cutoffGeneration = *generation;
+  m_cutoffMappedCapable = mapped;
+  m_cutoffSealedCapable = sealed;
+  m_cutoffBatchedCapable = batched;
   m_cutoffPeer = peer;
-  ProtocolUtil::writef(m_stream, kMsgCInputCutoffAck, *generation);
+  ProtocolUtil::writef(
+      m_stream,
+      batched  ? kMsgCBatchedInputCutoffAck
+      : sealed ? kMsgCSealedInputCutoffAck
+      : mapped ? kMsgCMappedInputCutoffAck
+               : kMsgCInputCutoffAck,
+      *generation
+  );
+  if (!*alive)
+    return;
+  if (preparation && *preparation) {
+    m_preparationCapable = true;
+    ProtocolUtil::writef(m_stream, kMsgCInputPreparationAck, *generation);
+  }
 }
 
-void ServerProxy::inputCutoff(bool resume)
+void ServerProxy::ensureInputCutoffTimer()
+{
+  if (m_cutoffTimer)
+    return;
+  m_cutoffTimer = m_events->newTimer(0.005, &m_cutoffTimerTarget);
+  m_events->addHandler(EventTypes::Timer, &m_cutoffTimerTarget, [this](const auto &) { pollInputCutoff(); });
+}
+
+void ServerProxy::startPreparationCleanup(deskflow::windowshare::InputCutoffClock::time_point deadline)
+{
+  using namespace deskflow::windowshare;
+  if (!m_preparation || m_preparation->state == InputPreparationState::Released ||
+      m_preparation->state == InputPreparationState::Canceling)
+    return;
+  const auto binding = m_preparation->binding;
+  const auto alive = m_alive;
+  m_preparation->state = InputPreparationState::Canceling;
+  m_preparation->cleanupDeadline = deadline;
+  bool started = !m_preparation->backendStarted;
+  try {
+    if (m_preparation->backendStarted)
+      started = m_client->cancelInputPreparation(binding, deadline);
+  } catch (...) {
+  }
+  if (!*alive)
+    return;
+  if (!m_preparation || m_preparation->binding != binding || !started) {
+    m_client->abortInputPreparation(binding);
+    if (*alive)
+      requestDisconnect("Preparation cleanup could not retain its owned gates");
+  }
+}
+
+void ServerProxy::inputPreparation(bool cancel, bool promote)
+{
+  using namespace deskflow::windowshare;
+  const auto alive = m_alive;
+  const bool oldDispatch = std::exchange(m_cutoffDispatching, true);
+  const auto done = qScopeGuard([this, alive, oldDispatch] {
+    if (*alive)
+      m_cutoffDispatching = oldDispatch;
+  });
+  if (!supportsInputSequence() || !m_preparationCapable || !m_cutoffBatchedCapable || !inputCutoffConnectionLive())
+    throw BadClientException("Unnegotiated input preparation");
+  const auto size = cancel    ? inputPreparationCancelBytes
+                    : promote ? inputPreparationPromotionBytes
+                              : inputPreparationRequestBytes;
+  if (m_messageBytes != size + 4)
+    throw BadClientException("Incorrect preparation packet size");
+  std::string bytes(size, '\0');
+  if (m_stream->read(bytes.data(), bytes.size()) != bytes.size())
+    throw BadClientException("Incomplete input preparation");
+  if (cancel) {
+    const auto request = decodeInputPreparationCancellation(bytes);
+    if (!request || request->binding.coreConnectionGeneration != m_cutoffGeneration)
+      throw BadClientException("Malformed preparation cancellation");
+    if (!m_preparation || m_preparation->binding != request->binding) {
+      if (m_retiredPreparation == request->binding) {
+        const auto reply = encodeInputPreparationReceipt(
+            {request->binding, InputPreparationState::Released, InputPreparationOutcome::None}
+        );
+        m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+        return;
+      }
+      throw BadClientException("Unknown preparation cancellation");
+    }
+    if (m_preparation->state == InputPreparationState::Released) {
+      const auto reply =
+          encodeInputPreparationReceipt({request->binding, InputPreparationState::Released, m_preparation->outcome});
+      m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+      return;
+    }
+    m_preparation->cleanupViaPreparation = true;
+    startPreparationCleanup(InputCutoffClock::now() + std::chrono::milliseconds(request->remainingMs));
+    if (*alive)
+      pollInputPreparation();
+    return;
+  }
+  if (promote) {
+    const auto request = decodeInputPreparationPromotion(bytes);
+    if (!request || !m_preparation || m_preparation->binding != request->preparation ||
+        m_preparation->state != InputPreparationState::Prepared || !m_preparation->focus || m_cutoff ||
+        !matchesInputPreparationPromotion(*m_preparation->focus, request->cutoff) ||
+        request->cutoff.request <= m_cutoffRequestHighWater || InputCutoffClock::now() >= m_preparation->deadline)
+      throw BadClientException("Invalid or stale preparation promotion");
+    const auto deadline =
+        std::min(m_preparation->deadline, InputCutoffClock::now() + std::chrono::milliseconds(request->remainingMs));
+    m_cutoffRequestHighWater = request->cutoff.request;
+    m_preparation->state = InputPreparationState::Promoting;
+    m_preparation->promotion = request->cutoff;
+    m_cutoff = Cutoff{request->cutoff, deadline, true};
+    m_cutoff->point = m_preparation->point;
+    m_cutoff->seal = request->cutoff;
+    bool started = false;
+    auto *client = m_client;
+    try {
+      started = client->promoteInputPreparation(request->preparation, request->cutoff, deadline);
+    } catch (...) {
+    }
+    if (!*alive) {
+      client->abortInputPreparation(request->preparation);
+      return;
+    }
+    if (!m_preparation || m_preparation->binding != request->preparation || !m_cutoff ||
+        m_cutoff->binding != request->cutoff || !inputCutoffConnectionLive() || m_sequenceProtocolFailed) {
+      client->abortInputPreparation(request->preparation);
+      if (*alive)
+        throw BadClientException("Preparation changed during promotion");
+      return;
+    }
+    if (!started) {
+      m_cutoff->failed = true;
+      m_preparation->outcome = InputPreparationOutcome::Failed;
+      m_preparation->state = InputPreparationState::Failed;
+    }
+    pollInputCutoff();
+    return;
+  }
+  const auto request = decodeInputPreparationRequest(bytes);
+  if (!request || request->binding.coreConnectionGeneration != m_cutoffGeneration ||
+      request->binding.request <= m_cutoffRequestHighWater || m_cutoff ||
+      (m_preparation && m_preparation->state != InputPreparationState::Released))
+    throw BadClientException("Invalid or overlapping input preparation");
+  const auto deadline = InputCutoffClock::now() + std::chrono::milliseconds(request->remainingMs);
+  m_cutoffRequestHighWater = request->binding.request;
+  flushCompressedMouse();
+  if (!*alive)
+    return;
+  if (m_sequenceProtocolFailed || !inputCutoffConnectionLive() || InputCutoffClock::now() >= deadline)
+    throw BadClientException("Preparation changed while flushing old input");
+  if (m_preparation)
+    m_retiredPreparation = m_preparation->binding;
+  m_preparation = Preparation{request->binding, request->point, deadline};
+  // A throwing begin is potentially started; only an explicit false promises
+  // that no provider gate or deferred work was retained.
+  m_preparation->backendStarted = true;
+  auto *client = m_client;
+  bool started = false, threw = false;
+  try {
+    started = client->beginInputPreparation(request->binding, request->point, deadline);
+  } catch (...) {
+    threw = true;
+  }
+  if (!*alive) {
+    if (started || threw)
+      client->abortInputPreparation(request->binding);
+    return;
+  }
+  if (!m_preparation || m_preparation->binding != request->binding || !inputCutoffConnectionLive() ||
+      m_sequenceProtocolFailed) {
+    if (started || threw)
+      client->abortInputPreparation(request->binding);
+    if (*alive)
+      throw BadClientException("Preparation changed during begin");
+    return;
+  }
+  if (threw) {
+    m_preparation->state = InputPreparationState::Failed;
+    m_preparation->outcome = InputPreparationOutcome::Failed;
+  } else if (!started) {
+    m_preparation->backendStarted = false;
+    m_preparation->state = InputPreparationState::Released;
+    m_preparation->outcome = InputPreparationOutcome::Unsupported;
+    const auto reply = encodeInputPreparationReceipt(
+        {request->binding, InputPreparationState::Released, InputPreparationOutcome::Unsupported}
+    );
+    m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+    return;
+  }
+  ensureInputCutoffTimer();
+  pollInputPreparation();
+}
+
+void ServerProxy::pollInputPreparation()
+{
+  using namespace deskflow::windowshare;
+  const auto pollingLifetime = m_alive;
+  const bool previousDispatch = std::exchange(m_cutoffDispatching, true);
+  const auto pollingDone = qScopeGuard([this, pollingLifetime, previousDispatch] {
+    if (*pollingLifetime)
+      m_cutoffDispatching = previousDispatch;
+  });
+  if (!m_preparation || m_preparation->state == InputPreparationState::Released ||
+      m_preparation->state == InputPreparationState::Sealed)
+    return;
+  const auto alive = m_alive;
+  const auto binding = m_preparation->binding;
+  if (!inputCutoffConnectionLive()) {
+    m_client->abortInputPreparation(binding);
+    if (*alive)
+      requestDisconnect("Input preparation connection expired");
+    return;
+  }
+  const auto fail = [&] {
+    m_client->abortInputPreparation(binding);
+    if (*alive)
+      requestDisconnect("Input preparation lost its cleanup boundary");
+  };
+  const bool canceling = m_preparation->state == InputPreparationState::Canceling;
+  if (canceling && InputCutoffClock::now() >= m_preparation->cleanupDeadline) {
+    fail();
+    return;
+  }
+  InputPreparationState observed = InputPreparationState::Failed;
+  InputPreparationOutcome outcome = InputPreparationOutcome::Failed;
+  std::optional<PreparedInputFocusResult> focus;
+  try {
+    observed =
+        m_preparation->backendStarted ? m_client->inputPreparationState(binding) : InputPreparationState::Released;
+    if (!*alive)
+      return;
+    if (observed == InputPreparationState::Prepared)
+      focus = m_client->preparedInputFocusResult(binding);
+    if (!*alive)
+      return;
+    if (observed == InputPreparationState::Failed)
+      outcome = m_client->inputPreparationOutcome(binding);
+  } catch (...) {
+  }
+  if (!*alive)
+    return;
+  if (!m_preparation || m_preparation->binding != binding || !inputCutoffConnectionLive()) {
+    fail();
+    return;
+  }
+  if (canceling) {
+    if (observed == InputPreparationState::Released) {
+      const auto promotion = m_preparation->promotion;
+      const bool cutoffReply = m_preparation->cleanupViaCutoff;
+      const bool preparationReply = m_preparation->cleanupViaPreparation || !cutoffReply;
+      const auto outcome = m_preparation->outcome;
+      if (m_cutoff) {
+        m_retiredCutoff = m_cutoff->seal.value_or(m_cutoff->binding);
+        m_cutoff.reset();
+      }
+      m_preparation->state = InputPreparationState::Released;
+      m_retiredPreparation = binding;
+      if (cutoffReply && promotion) {
+        const auto reply = encodeInputCutoffReceipt({*promotion, InputCutoffState::Resumed});
+        m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+        if (!*alive)
+          return;
+      }
+      if (preparationReply) {
+        const auto reply = encodeInputPreparationReceipt({binding, InputPreparationState::Released, outcome});
+        m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+      }
+      return;
+    }
+    if (observed != InputPreparationState::Canceling && observed != InputPreparationState::Preparing)
+      fail();
+    return;
+  }
+  if (InputCutoffClock::now() >= m_preparation->deadline || m_preparation->state == InputPreparationState::Failed)
+    observed = InputPreparationState::Failed;
+  if (observed == InputPreparationState::Prepared) {
+    if (!focus || !validPreparedInputFocusResult(*focus) || focus->binding != binding ||
+        focus->point != m_preparation->point || (m_preparation->focus && m_preparation->focus != focus)) {
+      observed = InputPreparationState::Failed;
+    } else if (m_preparation->state == InputPreparationState::Preparing) {
+      m_preparation->focus = focus;
+      m_preparation->state = InputPreparationState::Prepared;
+      const auto reply = encodePreparedInputFocusResult(*focus);
+      m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+      return;
+    }
+  }
+  if (observed == InputPreparationState::Failed) {
+    if (outcome == InputPreparationOutcome::None)
+      outcome = InputPreparationOutcome::Failed;
+    if (m_preparation->outcome == InputPreparationOutcome::None)
+      m_preparation->outcome = outcome;
+    const auto reply = encodeInputPreparationReceipt({binding, InputPreparationState::Failed, m_preparation->outcome});
+    const bool report = !m_preparation->failureReported;
+    m_preparation->failureReported = true;
+    m_preparation->cleanupViaPreparation = true;
+    startPreparationCleanup(InputCutoffClock::now() + inputCutoffMaximumLifetime);
+    if (*alive && report && m_preparation && m_preparation->binding == binding)
+      m_stream->write(reply.data(), static_cast<std::uint32_t>(reply.size()));
+  }
+}
+
+void ServerProxy::inputCutoff(bool resume, bool mapped, bool sealed, bool refresh)
 {
   using namespace deskflow::windowshare;
   const auto alive = m_alive;
@@ -1059,12 +1434,15 @@ void ServerProxy::inputCutoff(bool resume)
     if (*alive)
       m_cutoffDispatching = false;
   });
-  if (!supportsInputSequence() || !m_cutoffGeneration || !inputCutoffConnectionLive())
+  if (!supportsInputSequence() || !m_cutoffGeneration || (mapped && !m_cutoffMappedCapable) ||
+      (!resume && sealed != m_cutoffSealedCapable) || !inputCutoffConnectionLive())
     throw BadClientException("Unnegotiated input cutoff");
-  const auto size = resume ? inputCutoffBindingBytes : inputCutoffRequestBytes;
+  const auto size = resume    ? inputCutoffBindingBytes
+                    : refresh ? inputCutoffMapRequestBytes
+                              : (mapped ? inputCutoffMappedRequestBytes : inputCutoffRequestBytes);
   if (m_messageBytes != 4 + size)
     throw BadClientException("Incorrect input cutoff packet size");
-  std::array<char, inputCutoffRequestBytes> bytes{};
+  std::array<char, inputCutoffMapRequestBytes> bytes{};
   if (m_stream->read(bytes.data(), static_cast<std::uint32_t>(size)) != size)
     throw BadClientException("Incomplete input cutoff packet");
   const std::string_view body(bytes.data(), size);
@@ -1072,11 +1450,21 @@ void ServerProxy::inputCutoff(bool resume)
     const auto binding = decodeInputCutoffResume(body);
     if (!binding || binding->coreConnectionGeneration != m_cutoffGeneration)
       throw BadClientException("Malformed input cutoff resume");
+    if (m_preparation && m_preparation->promotion == binding &&
+        m_preparation->state != InputPreparationState::Released) {
+      if (!m_cutoff || m_cutoff->seal.value_or(m_cutoff->binding) != binding)
+        throw BadClientException("Preparation resume lost its promoted origin");
+      m_preparation->cleanupViaCutoff = true;
+      startPreparationCleanup(InputCutoffClock::now() + inputCutoffMaximumLifetime);
+      if (*alive)
+        pollInputPreparation();
+      return;
+    }
     if (!m_cutoff) {
       if (m_retiredCutoff != binding)
         throw BadClientException("Unknown input cutoff resume");
     } else {
-      if (m_cutoff->binding != binding)
+      if (m_cutoff->seal.value_or(m_cutoff->binding) != binding)
         throw BadClientException("Mismatched input cutoff resume");
       const auto old = std::exchange(m_cutoff, std::nullopt);
       stopInputCutoffTimer();
@@ -1092,12 +1480,57 @@ void ServerProxy::inputCutoff(bool resume)
       if (!released || m_sequenceProtocolFailed || !inputCutoffConnectionLive())
         throw BadClientException("Input cutoff backend failed exact resume");
     }
+    if (m_preparation && m_preparation->promotion == binding)
+      m_preparation->state = InputPreparationState::Released;
     const auto receipt = encodeInputCutoffReceipt({*binding, InputCutoffState::Resumed});
     m_stream->write(receipt.data(), static_cast<std::uint32_t>(receipt.size()));
     return;
   }
-  const auto request = decodeInputCutoffRequest(body);
+  if (refresh) {
+    const auto request = decodeInputCutoffMapRequest(body);
+    if (!request || !m_cutoff || !m_cutoff->seal || m_cutoff->failed ||
+        m_cutoff->seal->request != request->sealRequest || !m_cutoff->reported ||
+        (*m_cutoff->reported != InputCutoffState::DrainObserved && *m_cutoff->reported != InputCutoffState::Sealed) ||
+        !continuesInputCutoffSeal(m_cutoff->binding, request->mapping.cutoff.binding) ||
+        request->mapping.cutoff.binding.request <= m_cutoffRequestHighWater)
+      throw BadClientException("Invalid or overlapping sealed input map");
+    const auto origin = *m_cutoff->seal;
+    const auto binding = request->mapping.cutoff.binding;
+    const auto deadline = InputCutoffClock::now() + std::chrono::milliseconds(request->mapping.cutoff.remainingMs);
+    m_cutoffRequestHighWater = binding.request;
+    m_cutoff->binding = binding;
+    m_cutoff->deadline = deadline;
+    m_cutoff->point = request->mapping.point;
+    m_cutoff->batch.clear();
+    m_cutoff->reported.reset();
+    auto *client = m_client;
+    bool started = false;
+    try {
+      started =
+          client->refreshMappedInputCutoff(origin, binding, request->mapping.point, deadline, request->presentCursor);
+    } catch (...) {
+    }
+    if (!*alive) {
+      if (started)
+        client->resumeInputCutoff(origin);
+      return;
+    }
+    if (!m_cutoff || m_cutoff->binding != binding || !inputCutoffConnectionLive() || m_sequenceProtocolFailed) {
+      if (started)
+        client->resumeInputCutoff(origin);
+      if (!*alive)
+        return;
+      throw BadClientException("Sealed input map invalidated during request");
+    }
+    m_cutoff->failed = !started;
+    pollInputCutoff();
+    return;
+  }
+  const auto mappedRequest = mapped ? decodeInputCutoffMappedRequest(body) : std::nullopt;
+  const auto request =
+      mapped ? (mappedRequest ? std::optional(mappedRequest->cutoff) : std::nullopt) : decodeInputCutoffRequest(body);
   if (!request || request->binding.coreConnectionGeneration != m_cutoffGeneration || m_cutoff ||
+      (m_preparation && m_preparation->state != InputPreparationState::Released) ||
       request->binding.request <= m_cutoffRequestHighWater)
     throw BadClientException("Invalid or reused input cutoff request");
   m_cutoffRequestHighWater = request->binding.request;
@@ -1110,10 +1543,16 @@ void ServerProxy::inputCutoff(bool resume)
   if (m_sequenceProtocolFailed || !inputCutoffConnectionLive() || InputCutoffClock::now() >= deadline)
     throw BadClientException("Input cutoff invalidated while flushing prior input");
   m_cutoff = Cutoff{request->binding, deadline, true};
+  if (mappedRequest)
+    m_cutoff->point = mappedRequest->point;
+  if (sealed)
+    m_cutoff->seal = request->binding;
   auto *client = m_client;
   bool started = false;
   try {
-    started = client->beginInputCutoff(request->binding, deadline);
+    started = sealed          ? client->beginSealedInputCutoff(request->binding, mappedRequest->point, deadline)
+              : mappedRequest ? client->beginMappedInputCutoff(request->binding, mappedRequest->point, deadline)
+                              : client->beginInputCutoff(request->binding, deadline);
   } catch (...) {
     if (*alive)
       throw BadClientException("Input cutoff backend failed");
@@ -1131,17 +1570,77 @@ void ServerProxy::inputCutoff(bool resume)
     throw BadClientException("Input cutoff invalidated during backend request");
   }
   m_cutoff->backendStarted = started;
-  m_cutoffTimer = m_events->newTimer(0.010, &m_cutoffTimerTarget);
-  m_events->addHandler(EventTypes::Timer, &m_cutoffTimerTarget, [this](const auto &) { pollInputCutoff(); });
+  ensureInputCutoffTimer();
+  pollInputCutoff();
+}
+
+void ServerProxy::inputCutoffBatch()
+{
+  using namespace deskflow::windowshare;
+  const auto alive = m_alive;
+  m_cutoffDispatching = true;
+  const auto done = qScopeGuard([this, alive] {
+    if (*alive)
+      m_cutoffDispatching = false;
+  });
+  if (!supportsInputSequence() || !m_cutoffBatchedCapable || !inputCutoffConnectionLive() ||
+      m_messageBytes < 4 + inputCutoffBatchHeaderBytes || m_messageBytes > 4 + inputCutoffBatchRequestMaximumBytes)
+    throw BadClientException("Unnegotiated or oversized input map batch");
+  std::string bytes(m_messageBytes - 4, '\0');
+  if (m_stream->read(bytes.data(), bytes.size()) != bytes.size())
+    throw BadClientException("Incomplete input map batch");
+  const auto request = decodeInputCutoffBatchRequest(bytes);
+  if (!request || !m_cutoff || !m_cutoff->seal || m_cutoff->failed || m_cutoff->seal->request != request->sealRequest ||
+      !m_cutoff->reported ||
+      (*m_cutoff->reported != InputCutoffState::DrainObserved && *m_cutoff->reported != InputCutoffState::Sealed) ||
+      !continuesInputCutoffSeal(m_cutoff->binding, request->items.front().mapping.cutoff.binding) ||
+      request->items.front().mapping.cutoff.binding.request <= m_cutoffRequestHighWater)
+    throw BadClientException("Invalid or overlapping input map batch");
+  const auto origin = *m_cutoff->seal;
+  const auto binding = request->items.back().mapping.cutoff.binding;
+  const auto now = InputCutoffClock::now();
+  std::vector<InputCutoffBatchItem> items;
+  auto earliest = now + inputCutoffMaximumLifetime;
+  for (const auto &item : request->items) {
+    const auto deadline = now + std::chrono::milliseconds(item.mapping.cutoff.remainingMs);
+    earliest = std::min(earliest, deadline);
+    items.push_back({item.mapping.cutoff.binding, item.mapping.point, deadline, item.presentCursor});
+  }
+  m_cutoffRequestHighWater = binding.request;
+  m_cutoff->binding = binding;
+  m_cutoff->deadline = earliest;
+  m_cutoff->point.reset();
+  m_cutoff->batch = items;
+  m_cutoff->reported.reset();
+  auto *client = m_client;
+  bool started = false;
+  try {
+    started = client->beginMappedInputBatch(origin, items);
+  } catch (...) {
+  }
+  if (!*alive) {
+    if (started)
+      client->resumeInputCutoff(origin);
+    return;
+  }
+  if (!m_cutoff || m_cutoff->binding != binding || !inputCutoffConnectionLive() || m_sequenceProtocolFailed) {
+    if (started)
+      client->resumeInputCutoff(origin);
+    if (!*alive)
+      return;
+    throw BadClientException("Input map batch invalidated during request");
+  }
+  m_cutoff->failed = !started;
   pollInputCutoff();
 }
 
 void ServerProxy::pollInputCutoff()
 {
   using namespace deskflow::windowshare;
-  if (!m_cutoff)
-    return;
   const auto alive = m_alive;
+  pollInputPreparation();
+  if (!*alive || !m_cutoff || (m_preparation && m_preparation->state == InputPreparationState::Canceling))
+    return;
   const bool wasDispatching = std::exchange(m_cutoffDispatching, true);
   const auto done = qScopeGuard([this, alive, wasDispatching] {
     if (*alive)
@@ -1152,10 +1651,39 @@ void ServerProxy::pollInputCutoff()
     return;
   }
   const auto binding = m_cutoff->binding;
+  const auto seal = m_cutoff->seal;
+  const auto batch = m_cutoff->batch;
+  const auto prior = m_cutoff->reported;
+  const auto deadline = m_cutoff->deadline;
   auto state = InputCutoffState::Denied;
-  if (m_cutoff->backendStarted && InputCutoffClock::now() < m_cutoff->deadline) {
+  std::optional<InputCutoffMappedResult> mappedResult;
+  std::vector<InputCutoffMappedResult> batchResults;
+  bool sealLive = false;
+  if (m_cutoff->backendStarted && !m_cutoff->failed && (seal || InputCutoffClock::now() < m_cutoff->deadline)) {
     try {
       state = m_client->inputCutoffState(binding);
+      if (*alive && seal)
+        sealLive = m_client->inputCutoffSealLive(*seal);
+      if (*alive && sealLive && InputCutoffClock::now() >= deadline &&
+          (prior == InputCutoffState::DrainObserved || prior == InputCutoffState::Sealed) &&
+          (state == InputCutoffState::DrainObserved || state == InputCutoffState::Sealed))
+        state = InputCutoffState::Sealed;
+      if (*alive && state == InputCutoffState::DrainObserved) {
+        if (batch.empty()) {
+          mappedResult = m_client->mappedInputCutoffResult(binding);
+        } else {
+          for (const auto &item : batch) {
+            const auto result = m_client->mappedInputCutoffResult(item.binding);
+            if (!*alive)
+              return;
+            if (!m_cutoff || m_cutoff->binding != binding || !result || result->binding != item.binding ||
+                result->point != item.point || !validInputCutoffMappedResult(*result) ||
+                (!batchResults.empty() && !sameInputCutoffMappedIdentity(batchResults.front(), *result)))
+              break;
+            batchResults.push_back(*result);
+          }
+        }
+      }
     } catch (...) {
     }
   }
@@ -1165,14 +1693,42 @@ void ServerProxy::pollInputCutoff()
     requestDisconnect("Input cutoff invalidated during backend observation");
     return;
   }
-  if (InputCutoffClock::now() >= m_cutoff->deadline || state == InputCutoffState::Resumed)
+  if ((InputCutoffClock::now() >= m_cutoff->deadline &&
+       !(sealLive &&
+         (m_cutoff->reported == InputCutoffState::DrainObserved || m_cutoff->reported == InputCutoffState::Sealed))) ||
+      state == InputCutoffState::Resumed || state == InputCutoffState::Resuming)
+    state = InputCutoffState::Denied;
+  if (state == InputCutoffState::DrainObserved &&
+      (batch.empty() ? (!mappedResult || !validInputCutoffMappedResult(*mappedResult) ||
+                        mappedResult->binding != binding || m_cutoff->point != mappedResult->point)
+                     : batchResults.size() != batch.size()))
+    state = InputCutoffState::Denied;
+  if ((m_cutoff->point || !batch.empty()) && state == InputCutoffState::BackendObserved)
+    state = InputCutoffState::Pending;
+  if (seal && state == InputCutoffState::DrainObserved && !sealLive)
+    state = InputCutoffState::Denied;
+  if (state == InputCutoffState::Sealed && (!sealLive || (m_cutoff->reported != InputCutoffState::DrainObserved &&
+                                                          m_cutoff->reported != InputCutoffState::Sealed)))
+    state = InputCutoffState::Denied;
+  if (m_cutoff->reported == InputCutoffState::DrainObserved && state != InputCutoffState::DrainObserved &&
+      state != InputCutoffState::Sealed)
     state = InputCutoffState::Denied;
   if (m_cutoff->reported == InputCutoffState::Denied)
     state = InputCutoffState::Denied;
+  if (state == InputCutoffState::Sealed) {
+    m_cutoff->reported = state;
+    return; // Durable prefix fact only. Never send an expired point or a new grant.
+  }
   if (state == InputCutoffState::Pending || m_cutoff->reported == state)
     return;
   m_cutoff->reported = state;
-  const auto bytes = encodeInputCutoffReceipt({binding, state});
+  if (state == InputCutoffState::DrainObserved && m_preparation && m_preparation->promotion == binding)
+    m_preparation->state = InputPreparationState::Sealed;
+  const auto bytes = state == InputCutoffState::DrainObserved
+                         ? !batch.empty() ? encodeInputCutoffBatchResult({seal->request, batchResults})
+                           : seal         ? encodeInputCutoffSealedResult({*mappedResult, seal->request})
+                                          : encodeInputCutoffMappedResult(*mappedResult)
+                         : encodeInputCutoffReceipt({binding, state});
   m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
 }
 

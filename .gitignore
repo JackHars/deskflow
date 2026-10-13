@@ -12,6 +12,7 @@
 /vcpkg_installed
 /.cache
 /.venv
+__pycache__/
 aqtinstall.log
 Brewfile.lock.json
 

@@ -36,6 +36,349 @@ void check(bool condition, const char *message)
   }
 }
 
+void relocationTransactions()
+{
+  using namespace deskflow::windowshare;
+  using WindowRect = deskflow::windowshare::Rect;
+  using Status = HoldingRelocationResult::Status;
+  struct Fixture
+  {
+    std::optional<HoldingRelocationWindow> window = HoldingRelocationWindow{{71, 2}, 9, 9, {-800, -400, 640, 480}};
+    std::optional<HoldingResizeDisplay> display = HoldingResizeDisplay{42, {2200, -600, 4096, 4096}};
+    bool journal = true, placed = true;
+    std::function<void()> afterJournal, afterPlace;
+    std::vector<std::string> calls;
+    HoldingRelocationResult run(Owner owner = {71, 2}, std::uint64_t painted = 9)
+    {
+      HoldingRelocationAccess access;
+      access.window = [&] { return window; };
+      access.display = [&] { return display; };
+      access.persist = [&] {
+        calls.push_back("journal");
+        if (afterJournal)
+          afterJournal();
+        return journal;
+      };
+      access.place = [&](WindowRect destination) {
+        check(calls == std::vector<std::string>{"journal"}, "one durable journal precedes native relocation");
+        calls.push_back("place");
+        window->frame = destination;
+        if (afterPlace)
+          afterPlace();
+        return placed;
+      };
+      return relocateHoldingWindow(owner, painted, access);
+    }
+  };
+  {
+    Fixture f;
+    const auto result = f.run();
+    check(
+        result.status == Status::Applied && result.actual.x == 2200 && result.actual.y == -400 &&
+            result.actual.width == 640 && result.actual.height == 480,
+        "exact painted source relocates into the owned display with negative coordinates"
+    );
+    check(f.calls == std::vector<std::string>{"journal", "place"}, "successful relocation has one mutation");
+  }
+  for (const auto owner : {Owner{0, 2}, Owner{71, 0}, Owner{72, 2}, Owner{71, 3}}) {
+    Fixture f;
+    check(
+        f.run(owner).status == Status::Refused && f.calls.empty(),
+        "malformed or substituted session/epoch cannot journal or relocate a source"
+    );
+  }
+  for (const auto painted : {0u, 8u, 10u}) {
+    Fixture f;
+    check(
+        f.run({71, 2}, painted).status == Status::Refused && f.calls.empty(),
+        "zero, late and future paint acknowledgements cannot hide the current source"
+    );
+  }
+  for (int missing = 0; missing != 4; ++missing) {
+    Fixture f;
+    if (missing == 0)
+      f.window->producedGeometry = 0;
+    else if (missing == 1)
+      f.window->producedGeometry = 8;
+    else if (missing == 2)
+      f.window->frame.width = 0;
+    else
+      f.window.reset();
+    check(
+        f.run().status == Status::Refused && f.calls.empty(),
+        "paint acknowledgement needs an actual produced current frame and a live source"
+    );
+  }
+  for (int invalid = 0; invalid != 3; ++invalid) {
+    Fixture f;
+    if (invalid == 0)
+      f.display->id = 0;
+    else if (invalid == 1)
+      f.display->bounds.height = 0;
+    else
+      f.display.reset();
+    check(
+        f.run().status == Status::Restore && f.calls.empty(),
+        "missing or invalid owned holding display cannot cause source movement"
+    );
+  }
+  {
+    Fixture f;
+    f.journal = false;
+    check(
+        f.run().status == Status::Restore && f.calls == std::vector<std::string>{"journal"},
+        "journal failure preserves visible source without a native move"
+    );
+  }
+  for (int change = 0; change != 9; ++change) {
+    Fixture f;
+    f.afterJournal = [&] {
+      switch (change) {
+      case 0:
+        ++f.window->owner.session;
+        break;
+      case 1:
+        ++f.window->owner.epoch;
+        break;
+      case 2:
+        ++f.window->geometry;
+        break;
+      case 3:
+        --f.window->producedGeometry;
+        break;
+      case 4:
+        f.window->frame.x += 1;
+        break;
+      case 5:
+        ++f.display->id;
+        break;
+      case 6:
+        f.display->bounds.x -= 1;
+        break;
+      case 7:
+        f.display.reset();
+        break;
+      case 8:
+        f.window.reset();
+        break;
+      }
+    };
+    check(
+        f.run().status == Status::Restore && f.calls == std::vector<std::string>{"journal"},
+        "owner/frame/display loss during journaling stops before any native mutation"
+    );
+  }
+  for (int change = 0; change != 7; ++change) {
+    Fixture f;
+    f.afterPlace = [&] {
+      switch (change) {
+      case 0:
+        ++f.window->owner.epoch;
+        break;
+      case 1:
+        ++f.window->geometry;
+        break;
+      case 2:
+        f.display.reset();
+        break;
+      case 3:
+        ++f.display->id;
+        break;
+      case 4:
+        f.window->frame.x = f.display->bounds.x - 1;
+        break;
+      case 5:
+        f.window->frame.width = f.display->bounds.width + 1;
+        break;
+      case 6:
+        f.window.reset();
+        break;
+      }
+    };
+    check(
+        f.run().status == Status::Restore && f.calls.size() == 2,
+        "uncertain partial placement never commits hidden-source ownership"
+    );
+  }
+  {
+    Fixture f;
+    f.placed = false;
+    check(f.run().status == Status::Restore, "partly applied native placement requires immediate restoration");
+  }
+  {
+    Fixture f;
+    f.afterPlace = [&] { f.window->frame.width = 700; };
+    const auto result = f.run();
+    check(
+        result.status == Status::Applied && result.actual.width == 700,
+        "contained app-quantized geometry is published as actually observed"
+    );
+  }
+  for (const bool afterMutation : {false, true}) {
+    Fixture f;
+    auto fail = [] { throw std::runtime_error("injected relocation callback failure"); };
+    if (afterMutation)
+      f.afterPlace = fail;
+    else
+      f.afterJournal = fail;
+    check(
+        f.run().status == Status::Restore && f.calls.size() == (afterMutation ? 2u : 1u),
+        "callback exceptions cannot fabricate a completed relocation"
+    );
+  }
+  check(relocateHoldingWindow({71, 2}, 9, {}).status == Status::Refused, "missing relocation operations fail closed");
+  std::cout << "PASS: isolated first-painted-frame relocation transactions; exact owner/frame, journal and rollback\n";
+}
+
+void resizeTransactions()
+{
+  using namespace deskflow::windowshare;
+  using WindowRect = deskflow::windowshare::Rect;
+  using LogicalPoint = deskflow::windowshare::Point;
+  using Status = HoldingResizeResult::Status;
+  struct Fixture
+  {
+    std::optional<HoldingResizeDisplay> display = HoldingResizeDisplay{41, {2200, -600, 4096, 4096}};
+    std::optional<WindowRect> window = WindowRect{5796, 2996, 500, 500};
+    bool persisted = true, moved = true, resized = true;
+    std::function<void()> afterPersist, afterMove, afterResize;
+    std::vector<std::string> calls;
+
+    HoldingResizeResult run(int width, int height)
+    {
+      HoldingResizeAccess access;
+      access.display = [&] { return display; };
+      access.window = [&] { return window; };
+      access.persist = [&] {
+        calls.push_back("journal");
+        if (afterPersist)
+          afterPersist();
+        return persisted;
+      };
+      access.move = [&](LogicalPoint position) {
+        calls.push_back("move");
+        check(calls.front() == "journal", "journal precedes every holding-window mutation");
+        window->x = position.x;
+        window->y = position.y;
+        check(
+            window->x >= display->bounds.x && window->y >= display->bounds.y &&
+                window->x + window->width <= display->bounds.x + display->bounds.width &&
+                window->y + window->height <= display->bounds.y + display->bounds.height,
+            "moving inward must keep the old window completely inside the holding display"
+        );
+        if (afterMove)
+          afterMove();
+        return moved;
+      };
+      access.resize = [&](double width, double height) {
+        calls.push_back("resize");
+        check(calls.front() == "journal", "journal precedes resizing at an unchanged origin");
+        window->width = width;
+        window->height = height;
+        if (afterResize)
+          afterResize();
+        return resized;
+      };
+      return resizeHoldingWindow(width, height, access);
+    }
+  };
+  for (const auto size : {std::array<int, 2>{8192, 8192}, {4097, 500}, {500, 4097}, {0, 500}, {500, 63}}) {
+    Fixture f;
+    check(f.run(size[0], size[1]).status == Status::Refused, "impossible held resize is refused");
+    check(f.calls.empty(), "oversized request cannot journal, move or resize a native window");
+  }
+  {
+    Fixture f;
+    const auto result = f.run(4096, 4096);
+    check(result.status == Status::Applied, "full holding-display size is accepted");
+    check(
+        f.calls == std::vector<std::string>{"journal", "move", "resize"},
+        "edge growth moves inward before applying the larger size"
+    );
+    check(
+        result.actual.x == 2200 && result.actual.y == -600 && result.actual.width == 4096 &&
+            result.actual.height == 4096,
+        "exact-fit growth preserves negative display origin and requested size"
+    );
+  }
+  {
+    Fixture f;
+    check(f.run(320, 240).status == Status::Applied, "contained shrink succeeds");
+    check(f.calls == std::vector<std::string>{"journal", "resize"}, "shrink does not move a source unnecessarily");
+  }
+  {
+    Fixture f;
+    f.afterResize = [&] { f.window->width = 512; };
+    const auto result = f.run(640, 480);
+    check(
+        result.status == Status::Applied && result.actual.width == 512,
+        "application-quantized contained size publishes actual geometry"
+    );
+  }
+  {
+    Fixture f;
+    f.window->x += 1;
+    check(
+        f.run(640, 480).status == Status::Restore && f.calls.empty(),
+        "an already escaped source requires restoration before any mutation"
+    );
+  }
+  {
+    Fixture f;
+    f.persisted = false;
+    check(
+        f.run(640, 480).status == Status::Refused && f.calls == std::vector<std::string>{"journal"},
+        "failed durable journal prevents all native mutations"
+    );
+  }
+  for (int stage = 0; stage != 3; ++stage) {
+    Fixture f;
+    const auto replaceDisplay = [&] { ++f.display->id; };
+    if (stage == 0)
+      f.afterPersist = replaceDisplay;
+    else if (stage == 1)
+      f.afterMove = replaceDisplay;
+    else
+      f.afterResize = replaceDisplay;
+    check(f.run(640, 640).status == Status::Restore, "display replacement revokes every transaction checkpoint");
+    check(f.calls.size() == std::size_t(stage + 1), "no further mutation follows a lost exact display identity");
+  }
+  {
+    Fixture f;
+    f.afterMove = [&] { f.window->x += 1; };
+    check(
+        f.run(640, 640).status == Status::Restore && f.calls.size() == 2,
+        "rounded position that cannot fit the requested size never reaches native resize"
+    );
+  }
+  for (bool failMove : {true, false}) {
+    Fixture f;
+    f.moved = !failMove;
+    f.resized = failMove;
+    check(f.run(640, 640).status == Status::Restore, "partial native move or size failure restores the source");
+    check(f.calls.size() == (failMove ? 2u : 3u), "native failure cannot be published as committed geometry");
+  }
+  for (int change = 0; change != 4; ++change) {
+    Fixture f;
+    f.afterResize = [&] {
+      if (change == 0)
+        f.window->width = 8192;
+      else if (change == 1)
+        f.window.reset();
+      else if (change == 2)
+        f.display->bounds.x += 20;
+      else
+        f.display.reset();
+    };
+    check(
+        f.run(640, 640).status == Status::Restore,
+        "escaped size, unreadable source, changed bounds and helper loss require immediate restore"
+    );
+  }
+  check(resizeHoldingWindow(640, 480, {}).status == Status::Refused, "missing transaction callbacks fail closed");
+  std::cout << "PASS: isolated holding-window resize transactions; journal, containment, identity and rollback\n";
+}
+
 struct Display
 {
   CGDirectDisplayID id;
@@ -340,6 +683,8 @@ int run(int argc, char **argv)
     return 2;
   }
   try {
+    relocationTransactions();
+    resizeTransactions();
     const auto before = displays();
     const auto mainBefore = CGMainDisplayID();
     HoldingDisplay display;

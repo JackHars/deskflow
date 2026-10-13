@@ -19,6 +19,7 @@
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputSequence.h"
 #include "windowshare/InputRouteState.h"
+#include "windowshare/OriginalInputBackend.h"
 #include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputDispatch.h"
 #include "windowshare/OriginalInputRoute.h"
@@ -230,6 +231,7 @@ public:
   // changes no legacy packets or ownership. Production must establish native
   // prerequisites independently before installing this provider.
   bool setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher> dispatcher) noexcept;
+  deskflow::windowshare::OriginalInputBackend originalInputBackend();
 #endif
 
   //@}

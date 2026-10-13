@@ -95,6 +95,28 @@ void arguments()
       "0"
   };
   check(config.viewerArguments() == expected, "Fixed viewer arguments differ");
+  check(!config.viewerArguments().contains("--share-clipboard-text"), "default viewer configuration enabled clipboard");
+  check(!config.viewerArguments().contains("--capture-fps"), "absent capture rate must retain the local app default");
+  for (const auto rate : {30, 60}) {
+    auto object = fixture.valid;
+    object.insert("captureFps", rate);
+    check(
+        fixture.load(object).viewerArguments() == expected + QStringList{"--capture-fps", QString::number(rate)},
+        "GNOME configuration lost the exact local capture rate option"
+    );
+  }
+  for (const bool enabled : {false, true}) {
+    auto clipboard = fixture.valid;
+    clipboard.insert("shareClipboardText", enabled);
+    auto wanted = expected;
+    if (enabled)
+      wanted.append("--share-clipboard-text");
+    const auto configured = fixture.load(clipboard);
+    check(
+        configured.viewerArguments() == wanted && configured.peerFingerprint() == config.peerFingerprint(),
+        "explicit clipboard boolean must only append its one policy flag without changing peer identity"
+    );
+  }
   auto object = fixture.valid;
   object.insert("port", 65535);
   object.insert("screen", 63);
@@ -129,6 +151,17 @@ void rejection()
       {"exportWindow", "4294967296"},
       {"exportWindow", "18446744073709551615"},
       {"exportWindow", 1},
+      {"shareClipboardText", 1},
+      {"shareClipboardText", "true"},
+      {"shareClipboardText", QJsonValue{}},
+      {"captureFps", 0},
+      {"captureFps", 29},
+      {"captureFps", 45},
+      {"captureFps", 61},
+      {"captureFps", 30.5},
+      {"captureFps", "60"},
+      {"captureFps", true},
+      {"captureFps", QJsonValue{}},
       {"viewerExecutable", "relative"},
       {"viewerExecutable", fixture.directory.path()},
       {"viewerExecutable", fixture.directory.filePath("missing")},
@@ -150,6 +183,12 @@ void rejection()
   }
   auto duplicate = QJsonDocument(fixture.valid).toJson(QJsonDocument::Compact);
   duplicate.insert(1, "\"vers\\u0069on\":1,");
+  fixture.deny(duplicate);
+  duplicate = QJsonDocument(fixture.valid).toJson(QJsonDocument::Compact);
+  duplicate.insert(1, "\"shareClipboardText\":true,\"share\\u0043lipboardText\":false,");
+  fixture.deny(duplicate);
+  duplicate = QJsonDocument(fixture.valid).toJson(QJsonDocument::Compact);
+  duplicate.insert(1, "\"captureFps\":30,\"capture\\u0046ps\":60,");
   fixture.deny(duplicate);
   fixture.deny(QByteArray("[]"));
   fixture.deny(QByteArray("{bad"));

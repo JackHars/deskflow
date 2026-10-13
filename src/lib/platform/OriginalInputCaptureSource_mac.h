@@ -17,7 +17,7 @@ namespace deskflow::windowshare {
 class OriginalInputCaptureSource final
 {
 public:
-  OriginalInputCaptureSource() = default;
+  OriginalInputCaptureSource();
   ~OriginalInputCaptureSource();
   OriginalInputCaptureSource(const OriginalInputCaptureSource &) = delete;
   OriginalInputCaptureSource &operator=(const OriginalInputCaptureSource &) = delete;
@@ -51,6 +51,7 @@ public:
   void stop() noexcept;
 
 private:
+  OriginalInputTransitionEvidence classifyTransition(const OriginalInputRecord &) noexcept;
   enum class State : std::uint8_t
   {
     Ready,
@@ -61,7 +62,18 @@ private:
   std::atomic<State> m_state{State::Ready};
   std::uint64_t m_sequence = 0;
   OriginalInputStamp m_openStamp;
-  std::array<OriginalInputTranslation, OriginalInputStream::capacity> m_completed;
+  OriginalInputTransitionEvidence m_openTransition;
+  // Zero means Unknown or held, never "up by default". Only a captured Up
+  // establishes a released control; each subsequent Down consumes that edge.
+  std::array<std::uint64_t, originalKey::keyCount> m_releasedKeys{};
+  std::array<std::uint64_t, originalInputButtonCount> m_releasedButtons{};
+  OriginalScrollState m_scroll = OriginalScrollState::Unknown;
+  struct Completed
+  {
+    OriginalInputTranslation translation;
+    OriginalInputTransitionEvidence transition;
+  };
+  std::array<Completed, OriginalInputStream::capacity> m_completed;
   std::atomic<std::uint64_t> m_completedWritten{0}, m_completedRead{0};
   std::shared_ptr<OriginalInputRoutes> m_routes = std::make_shared<OriginalInputRoutes>();
   std::shared_ptr<OriginalInputCapturedInbox> m_completedInput =

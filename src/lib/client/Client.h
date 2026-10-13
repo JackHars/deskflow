@@ -17,6 +17,7 @@
 #include "net/NetworkAddress.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputCutoff.h"
+#include "windowshare/InputPreparation.h"
 #endif
 
 #include <climits>
@@ -192,10 +193,48 @@ public:
   void resetOptions() override;
   void setOptions(const OptionsList &options) override;
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  virtual bool beginInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &);
+  virtual deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &);
+  virtual std::optional<deskflow::windowshare::PreparedInputFocusResult>
+  preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &);
+  virtual bool promoteInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual void abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &) noexcept;
+
   virtual bool beginInputCutoff(
       const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffClock::time_point
   );
   virtual deskflow::windowshare::InputCutoffState inputCutoffState(const deskflow::windowshare::InputCutoffBinding &);
+  virtual bool beginMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual std::optional<deskflow::windowshare::InputCutoffMappedResult>
+  mappedInputCutoffResult(const deskflow::windowshare::InputCutoffBinding &);
+  virtual bool beginSealedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  );
+  virtual bool refreshMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffPoint, deskflow::windowshare::InputCutoffClock::time_point, bool
+  );
+  virtual bool beginMappedInputBatch(
+      const deskflow::windowshare::InputCutoffBinding &,
+      const std::vector<deskflow::windowshare::InputCutoffBatchItem> &
+  );
+  virtual bool inputCutoffSealLive(const deskflow::windowshare::InputCutoffBinding &);
   virtual bool resumeInputCutoff(const deskflow::windowshare::InputCutoffBinding &);
 #endif
   std::string getName() const override;

@@ -172,6 +172,61 @@ def json_bytes(value, **options):
     return json.dumps(value, **options).encode("utf-8")
 
 
+class BundleInventoryTests(unittest.TestCase):
+    """Pure layout/audit fixtures: no compiler, codesign, or executable launch."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="deskflow-bundle-inventory-")
+        self.addCleanup(self.temporary.cleanup)
+        self.app = Path(self.temporary.name).resolve() / "Core.app"
+        self.executables = self.app / "Contents/MacOS"
+        self.executables.mkdir(parents=True)
+        self.names = ("deskflow-core", "deskflow-holding-display-helper", "deskflow-windowshare")
+        for name in self.names:
+            path = self.executables / name
+            path.write_bytes(b"\xcf\xfa\xed\xfe" + b"fixture-only")
+            path.chmod(0o755)
+        with (self.app / "Contents/Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleExecutable": "deskflow-core", "LSMinimumSystemVersion": "13.0"}, stream)
+        inspector = mock.patch.object(bundle_tool, "inspect", side_effect=lambda path: bundle_tool.MachO(
+            path, [], [], [], (13, 0, 0), {"arm64"}, set()))
+        inspector.start()
+        self.addCleanup(inspector.stop)
+        # Any accidental system inspection/signing is a test failure.
+        commands = mock.patch.object(bundle_tool.subprocess, "run", side_effect=AssertionError("not a pure audit"))
+        commands.start()
+        self.addCleanup(commands.stop)
+
+    def test_core_bundle_requires_its_companion_before_inspection(self):
+        (self.executables / "deskflow-windowshare").unlink()
+        with self.assertRaisesRegex(RuntimeError, "Missing or external bundle executable.*deskflow-windowshare"):
+            bundle_tool.Bundle(self.app)
+
+    def test_complete_core_bundle_covers_all_fixed_executables(self):
+        bundle = bundle_tool.Bundle(self.app)
+        self.assertEqual(bundle.fixed_executables(), {self.executables / name for name in self.names})
+        self.assertEqual(bundle.verify(signature=False)["errors"], [])
+
+    def test_removed_companion_cannot_disappear_from_later_audit(self):
+        bundle = bundle_tool.Bundle(self.app)
+        (self.executables / "deskflow-windowshare").unlink()
+        with self.assertRaisesRegex(RuntimeError, "fixed executable must be a contained regular file"):
+            bundle.verify(signature=False)
+
+    def test_non_mach_companion_fails_even_without_restricted_signing(self):
+        (self.executables / "deskflow-windowshare").write_text("#!/bin/sh\nexit 0\n")
+        report = bundle_tool.Bundle(self.app).verify(signature=False)
+        self.assertEqual(len(report["errors"]), 1)
+        self.assertIn("fixed executable is not a contained Mach-O binary", report["errors"][0])
+        self.assertIn("deskflow-windowshare", report["errors"][0])
+
+    def test_windowshare_only_bundle_does_not_require_optional_core(self):
+        (self.executables / "deskflow-core").unlink()
+        with (self.app / "Contents/Info.plist").open("wb") as stream:
+            plistlib.dump({"CFBundleExecutable": "deskflow-windowshare", "LSMinimumSystemVersion": "13.0"}, stream)
+        self.assertEqual(bundle_tool.Bundle(self.app).verify(signature=False)["errors"], [])
+
+
 @unittest.skipUnless(sys.platform == "darwin", "Mach-O fixtures require macOS command-line tools")
 class BundleTests(unittest.TestCase):
     @classmethod

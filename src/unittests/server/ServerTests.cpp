@@ -447,13 +447,14 @@ struct RecordingOriginalDispatcher : Server::OriginalInputDispatcher
   std::vector<Sent> reserved, committed;
   std::vector<std::uint64_t> cancelled, released;
   std::vector<std::uint64_t> requestedOwners;
+  std::vector<Preview> previewed;
   std::optional<std::uint64_t> forcedOwner;
   std::function<void()> onReserve, onCommit, onPoll, onCancelPreparation;
   std::vector<std::uint64_t> polled, cancelledPreparations;
   std::map<std::uint64_t, Reservation> preparations;
   std::vector<Clock::time_point> preparationDeadlines;
   State completion = State::Accepted;
-  bool asynchronous = false, waiting = true, throwPoll = false;
+  bool asynchronous = false, waiting = true, throwPoll = false, coalesceHover = false;
   std::optional<Result> forcedPoll;
   std::uint64_t nextTicket = 0;
   int aborted = 0;
@@ -534,6 +535,14 @@ struct RecordingOriginalDispatcher : Server::OriginalInputDispatcher
   {
     return alive;
   }
+  bool canCoalesceHoverMotion() const noexcept override
+  {
+    return coalesceHover;
+  }
+  void preview(std::span<const Preview> values) override
+  {
+    previewed.assign(values.begin(), values.end());
+  }
 };
 
 struct OriginalDispatchFixture : RoutingFixture
@@ -568,6 +577,19 @@ struct OriginalDispatchFixture : RoutingFixture
         type, primary.getEventTarget(), data, Event::EventFlags::DontFreeData,
         {captured.input.record.epoch, captured.input.record.sequence, part}
     ));
+  }
+};
+
+struct FencedOriginalDispatcher : RecordingOriginalDispatcher
+{
+  std::uint64_t fencedRecipient = 0;
+  bool hostReleased = false, coreReleased = false;
+  mutable std::function<void()> onReadiness;
+  bool legacyAcquisitionReady(std::uint64_t recipient) const noexcept override
+  {
+    if (auto callback = std::exchange(onReadiness, {}))
+      callback();
+    return recipient != fencedRecipient || (hostReleased && coreReleased);
   }
 };
 
@@ -1065,6 +1087,373 @@ void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()
   QVERIFY(!f.routes->pop());
   QVERIFY(f.first->take().isEmpty());
   QCOMPARE(server.m_inputRoutes.size(), std::size_t(0));
+}
+
+void ServerTests::originalDispatch_hoverCompressionPreservesBarriersAndHistory()
+{
+  using namespace deskflow::windowshare;
+  OriginalDispatchFixture f;
+  auto &server = *f.server;
+  QVERIFY(f.install());
+  f.first->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  f.clear();
+  f.dispatcher->asynchronous = true;
+  f.dispatcher->coalesceHover = true;
+  IPlatformComputer::MotionInfo motion{1, 0};
+  for (unsigned i = 0; i < 120; ++i) {
+    const auto capture = f.capture(OriginalInputMotion{1, 0});
+    QVERIFY(f.inbox->publish(capture));
+    QVERIFY(f.dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion, capture));
+    QVERIFY(server.m_originalPending.size() <= 2);
+  }
+  // A reserved point never moves under its outstanding preparation. The only
+  // other retained point already includes all 120 Server motion deltas.
+  QCOMPARE(f.dispatcher->reserved.size(), std::size_t(1));
+  QCOMPARE(f.dispatcher->reserved.front().route.x, 101);
+  QCOMPARE(server.m_originalPending.back().route.x, 220);
+  QCOMPARE(server.m_originalPending.back().route.stamp.sequence, std::uint64_t(120));
+  QVERIFY(!f.routes->pop());
+  f.dispatcher->waiting = false;
+  f.dispatcher->asynchronous = false;
+  f.events.tick();
+  QVERIFY(!server.m_originalDispatchTerminal);
+  QCOMPARE(f.dispatcher->committed.size(), std::size_t(2));
+  QCOMPARE(f.dispatcher->committed.back().captured.input.record.sequence, std::uint64_t(120));
+  QCOMPARE(std::get<OriginalInputMotion>(f.dispatcher->committed.back().captured.input.record.payload).dx, 1);
+  for (std::uint64_t sequence = 1; sequence <= 120; ++sequence) {
+    const auto decision = f.routes->pop();
+    QVERIFY(decision);
+    QCOMPARE(decision->stamp.sequence, sequence);
+    QCOMPARE(
+        decision->outcome,
+        sequence == 1 || sequence == 120 ? OriginalInputRouteOutcome::Original : OriginalInputRouteOutcome::Coalesced
+    );
+  }
+  // Held keys are a barrier even when mouse records have no drag button.
+  IPlatformComputer::KeyInfo key{'a', 0, 30, 1, ""};
+  auto capture = f.capture(OriginalInputKey{});
+  QVERIFY(f.inbox->publish(capture));
+  QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &key, capture));
+  f.dispatcher->asynchronous = true;
+  f.dispatcher->waiting = true;
+  for (unsigned i = 0; i < 4; ++i) {
+    capture = f.capture(OriginalInputMotion{1, 0});
+    QVERIFY(f.inbox->publish(capture));
+    QVERIFY(f.dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion, capture));
+  }
+  QCOMPARE(server.m_originalPending.size(), std::size_t(4));
+  f.dispatcher->asynchronous = false;
+  f.dispatcher->waiting = false;
+  f.events.tick();
+  QCOMPARE(f.dispatcher->committed.size(), std::size_t(7));
+  QVERIFY(server.m_originalPending.empty());
+}
+
+void ServerTests::originalDispatch_inlineTerminalReservationContract()
+{
+  using namespace deskflow::windowshare;
+  struct InlineDispatcher : RecordingOriginalDispatcher
+  {
+    bool malformed = false;
+    Result reserve(
+        const Captured &captured, const OriginalInputRouteDecision &route, const SelectedPeer &selected,
+        std::uint64_t owner, Clock::time_point deadline
+    ) override
+    {
+      auto result = RecordingOriginalDispatcher::reserve(captured, route, selected, owner, deadline);
+      if (malformed && result.state == State::Accepted)
+        result.ticket = nextTicket + 1;
+      return result;
+    }
+  };
+  for (bool malformed : {false, true}) {
+    OriginalDispatchFixture f;
+    auto dispatcher = std::make_shared<InlineDispatcher>();
+    f.dispatcher = dispatcher;
+    auto &server = *f.server;
+    QVERIFY(f.install());
+    f.first->authenticate();
+    server.switchComputer(f.firstClient, 100, 100, false);
+    f.clear();
+    dispatcher->asynchronous = true;
+    dispatcher->waiting = false;
+    IPlatformComputer::KeyInfo key{'a', 0, 30, 1, ""};
+    const auto down = f.capture(OriginalInputKey{});
+    QVERIFY(f.inbox->publish(down));
+    QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &key, down));
+    QCOMPARE(server.m_originalPending.front().preparation, std::uint64_t(1));
+    f.events.tick();
+    QCOMPARE(dispatcher->committed.size(), std::size_t(1));
+    // Model a prefetched second record: its reservation nonce remains unique,
+    // but an inline terminal result has no asynchronous preparation ticket.
+    dispatcher->asynchronous = false;
+    dispatcher->malformed = malformed;
+    OriginalInputKey rawUp;
+    rawUp.kind = OriginalKeyKind::Up;
+    rawUp.transition = OriginalKeyTransition::Up;
+    const auto up = f.capture(rawUp);
+    QVERIFY(f.inbox->publish(up));
+    QVERIFY(f.dispatch(EventTypes::KeyStateKeyUp, &key, up));
+    QCOMPARE(server.m_originalDispatchTerminal, malformed);
+    QCOMPARE(dispatcher->committed.size(), malformed ? std::size_t(1) : std::size_t(2));
+    QCOMPARE(server.m_inputRoutes.size(), std::size_t(0));
+    QVERIFY(server.m_originalPending.empty());
+    QVERIFY(f.first->take().isEmpty()); // Neither outcome falls through to DKUP.
+    auto decision = f.routes->pop();
+    QVERIFY(decision && decision->outcome == OriginalInputRouteOutcome::Original);
+    decision = f.routes->pop();
+    QVERIFY(decision);
+    QCOMPARE(decision->outcome, malformed ? OriginalInputRouteOutcome::Failed : OriginalInputRouteOutcome::Original);
+  }
+}
+
+void ServerTests::originalDispatch_retainedLookaheadPreventsHoverReplacement()
+{
+  using namespace deskflow::windowshare;
+  OriginalDispatchFixture f;
+  auto &server = *f.server;
+  QVERIFY(f.install());
+  f.first->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  f.clear();
+  f.dispatcher->asynchronous = true;
+  f.dispatcher->coalesceHover = true;
+  bool retained = false;
+  f.dispatcher->onPoll = [&] {
+    if (!retained && f.dispatcher->previewed.size() == 2) {
+      // The production coordinator now closes this eligibility when a map
+      // batch retains future points, before their per-record reserve calls.
+      retained = true;
+      f.dispatcher->coalesceHover = false;
+    }
+  };
+  IPlatformComputer::WheelInfo wheel{0, 120};
+  OriginalInputScroll raw;
+  raw.points = {0, 1};
+  const auto scroll = f.capture(raw);
+  QVERIFY(f.inbox->publish(scroll));
+  QVERIFY(f.dispatch(EventTypes::PrimaryComputerWheel, &wheel, scroll));
+  IPlatformComputer::MotionInfo motion{1, 0};
+  const auto first = f.capture(OriginalInputMotion{1, 0});
+  QVERIFY(f.inbox->publish(first));
+  QVERIFY(f.dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion, first));
+  QVERIFY(retained);
+  QCOMPARE(f.dispatcher->previewed[1].route.x, 101);
+  const auto second = f.capture(OriginalInputMotion{1, 0});
+  QVERIFY(f.inbox->publish(second));
+  QVERIFY(f.dispatch(EventTypes::PrimaryComputerMotionOnSecondary, &motion, second));
+  QCOMPARE(server.m_originalPending.size(), std::size_t(3));
+  QCOMPARE(f.dispatcher->previewed.size(), std::size_t(3));
+  QCOMPARE(f.dispatcher->previewed[1].captured.input.record.sequence, first.input.record.sequence);
+  QCOMPARE(f.dispatcher->previewed[2].captured.input.record.sequence, second.input.record.sequence);
+  QVERIFY(!f.routes->pop());
+  f.dispatcher->asynchronous = false;
+  f.dispatcher->waiting = false;
+  f.events.tick();
+  QVERIFY(!server.m_originalDispatchTerminal && server.m_originalPending.empty());
+  QCOMPARE(f.dispatcher->committed.size(), std::size_t(3));
+  for (std::uint64_t sequence = 1; sequence <= 3; ++sequence) {
+    QCOMPARE(f.dispatcher->committed[sequence - 1].captured.input.record.sequence, sequence);
+    const auto decision = f.routes->pop();
+    QVERIFY(
+        decision && decision->stamp.sequence == sequence && decision->outcome == OriginalInputRouteOutcome::Original
+    );
+  }
+  QCOMPARE(f.first->take(), "DMMV" + QByteArray::fromHex("0065 0064") + "DMMV" + QByteArray::fromHex("0066 0064"));
+}
+
+void ServerTests::originalDispatch_ineligibleInputWaitsForExactCleanup()
+{
+  using namespace deskflow::windowshare;
+  // Missing stamps, expansion and uncertainty are all ordinary legacy inputs
+  // when no handoff exists. None certifies cleanup of a closed full gate.
+  for (int mode = 0; mode != 3; ++mode) {
+    OriginalDispatchFixture f;
+    auto dispatcher = std::make_shared<FencedOriginalDispatcher>();
+    f.dispatcher = dispatcher;
+    auto &server = *f.server;
+    QVERIFY(f.install());
+    f.first->authenticate();
+    server.switchComputer(f.firstClient, 100, 100, false);
+    dispatcher->fencedRecipient = server.selectedPeer()->recipient();
+    f.clear();
+    IPlatformComputer::KeyInfo owned{'a', 0, 30, 1, ""};
+    const auto down = f.capture(OriginalInputKey{});
+    QVERIFY(f.inbox->publish(down));
+    QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &owned, down));
+    QCOMPARE(dispatcher->committed.size(), std::size_t(1));
+    const auto deliver = [&](EventTypes type, void *data, decltype(OriginalInputRecord::payload) payload) {
+      if (mode == 0) {
+        QVERIFY(f.events.dispatchEvent(Event(type, f.primary.getEventTarget(), data, Event::EventFlags::DontFreeData)));
+      } else {
+        const auto captured = f.capture(std::move(payload), mode == 1 ? 2 : 1, mode == 2);
+        QVERIFY(f.inbox->publish(captured));
+        QVERIFY(f.dispatch(type, data, captured));
+        if (mode == 1)
+          QVERIFY(f.dispatch(type, data, captured, 2));
+      }
+    };
+    IPlatformComputer::KeyInfo key{'b', 0, 48, 1, ""};
+    OriginalInputKey rawKey;
+    rawKey.code = 11;
+    deliver(EventTypes::KeyStateKeyDown, &key, rawKey);
+    IPlatformComputer::ButtonInfo button(1, 0);
+    deliver(EventTypes::PrimaryComputerButtonDown, &button, OriginalInputButton{0, true, 1});
+    IPlatformComputer::WheelInfo wheel{0, 120};
+    deliver(EventTypes::PrimaryComputerWheel, &wheel, OriginalInputScroll{});
+    IPlatformComputer::MotionInfo motion{1, 0};
+    deliver(EventTypes::PrimaryComputerMotionOnSecondary, &motion, OriginalInputMotion{1, 0});
+    server.onKeyDown(kKeySetModifiers, KeyModifierShift, 0, "", nullptr);
+    server.m_relativeMoves = server.m_lockedToComputer = true;
+    server.onMouseMoveSecondary(2, 3);
+    server.m_relativeMoves = server.m_lockedToComputer = false;
+    QVERIFY(f.first->take().isEmpty());
+    QCOMPARE(dispatcher->released, std::vector<std::uint64_t>{41});
+    QCOMPARE(dispatcher->committed.size(), std::size_t(1));
+    QVERIFY(!server.m_originalDispatchTerminal);
+    const auto press = server.m_inputRoutes.repeat(Server::InputRoutes::keyControl('b', 48));
+    const auto heldButton = server.m_inputRoutes.repeat({Server::InputRoutes::Kind::Button, 1});
+    QVERIFY(press && !press->originalOwner && press->recipients.empty());
+    QVERIFY(heldButton && !heldButton->originalOwner && heldButton->recipients.empty());
+    // One acknowledgement is insufficient, including for pointer writes that
+    // would implicitly resume the Core seal before Host cleanup completes.
+    dispatcher->hostReleased = true;
+    server.onKeyDown('c', 0, 46, "", nullptr);
+    server.onMouseMoveSecondary(1, 0);
+    server.onMouseWheel(0, 120);
+    QVERIFY(f.first->take().isEmpty());
+    dispatcher->coreReleased = true;
+    server.onKeyDown('d', 0, 32, "", nullptr);
+    server.onKeyUp('d', 0, 32, nullptr);
+    QCOMPARE(
+        f.first->take(), "DKDN" + QByteArray::fromHex("0064 0000 0020") + "DKUP" + QByteArray::fromHex("0064 0000 0020")
+    );
+    server.onKeyDown('b', 0, 48, "", nullptr);
+    QVERIFY(f.first->take().isEmpty()); // A held tombstone cannot become a new press.
+    if (mode) {
+      rawKey.kind = OriginalKeyKind::Up;
+      rawKey.transition = OriginalKeyTransition::Up;
+      QVERIFY(f.inbox->publish(f.capture(rawKey, 0)));
+      QVERIFY(f.inbox->publish(f.capture(OriginalInputButton{0, false, 1}, 0)));
+      f.events.tick(); // No translated ups: physical completion retires the exact tombstones.
+    } else {
+      server.onKeyUp('b', 0, 48, nullptr);
+      server.onMouseUp(1);
+    }
+    server.onKeyUp('a', 0, 30, nullptr);
+    server.onKeyUp('c', 0, 46, nullptr);
+    QVERIFY(f.first->take().isEmpty());
+    QCOMPARE(server.m_inputRoutes.size(), std::size_t(0));
+    server.onKeyDown('b', 0, 48, "", nullptr);
+    server.onKeyUp('b', 0, 48, nullptr);
+    QCOMPARE(
+        f.first->take(), "DKDN" + QByteArray::fromHex("0062 0000 0030") + "DKUP" + QByteArray::fromHex("0062 0000 0030")
+    );
+  }
+}
+
+void ServerTests::originalDispatch_legacyReleaseAndOtherRecipientsSurviveGate()
+{
+  using namespace deskflow::windowshare;
+  OriginalDispatchFixture f;
+  auto dispatcher = std::make_shared<FencedOriginalDispatcher>();
+  f.dispatcher = dispatcher;
+  auto &server = *f.server;
+  QVERIFY(f.install());
+  f.first->authenticate();
+  f.second->authenticate();
+  server.switchComputer(f.firstClient, 100, 100, false);
+  // Existing delivered ownership is still entitled to its exact release.
+  server.onKeyDown('a', 0, 30, "", nullptr);
+  server.onMouseDown(2);
+  server.onKeyDown(kKeySetModifiers, KeyModifierShift, 0, "", nullptr);
+  dispatcher->fencedRecipient = server.selectedPeer()->recipient();
+  f.clear();
+  server.onKeyRepeat('a', 0, 1, 30, "");
+  QVERIFY(f.first->take().isEmpty());
+  server.onKeyUp('a', 0, 30, nullptr);
+  server.onMouseUp(2);
+  server.onKeyDown(kKeyClearModifiers, KeyModifierShift, 0, "", nullptr);
+  QCOMPARE(
+      f.first->take(), "DKUP" + QByteArray::fromHex("0061 0000 001e") + "DMUP" + QByteArray(1, '\2') + "DKDN" +
+                           QByteArray::fromHex("ee07 0001 0000")
+  );
+  QVERIFY(f.second->take().isEmpty());
+  // A blocked first recipient must not disable an unrelated broadcast target.
+  server.onKeyDown('z', 0, 44, "", "*");
+  QVERIFY(f.first->take().isEmpty());
+  QCOMPARE(f.second->take(), "DKDN" + QByteArray::fromHex("007a 0000 002c"));
+  dispatcher->hostReleased = dispatcher->coreReleased = true;
+  server.onKeyDown('z', 0, 44, "", "*");
+  server.onKeyUp('z', 0, 44, nullptr);
+  QVERIFY(f.first->take().isEmpty());
+  QCOMPARE(
+      f.second->take(), "DKDN" + QByteArray::fromHex("007a 0000 002c") + "DKUP" + QByteArray::fromHex("007a 0000 002c")
+  );
+  QCOMPARE(server.m_inputRoutes.size(), std::size_t(0));
+}
+
+void ServerTests::originalDispatch_closedGateSurvivesFlushAndTerminal()
+{
+  using namespace deskflow::windowshare;
+  for (int mode = 0; mode != 4; ++mode) {
+    OriginalDispatchFixture f;
+    auto dispatcher = std::make_shared<FencedOriginalDispatcher>();
+    f.dispatcher = dispatcher;
+    auto &server = *f.server;
+    QVERIFY(f.install());
+    f.first->authenticate();
+    f.second->authenticate();
+    server.switchComputer(f.firstClient, 100, 100, false);
+    dispatcher->fencedRecipient = server.selectedPeer()->recipient();
+    f.clear();
+    IPlatformComputer::KeyInfo key{'a', 0, 30, 1, ""};
+    if (mode < 2) {
+      const auto captured = f.capture(OriginalInputKey{});
+      QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &key, captured)); // Completion is still missing.
+      QVERIFY(f.first->take().isEmpty());
+      if (mode == 0)
+        server.switchComputer(f.secondClient, 200, 300, false);
+      else
+        server.drainOriginalInput(server.m_originalPending.front().deadline);
+      QCOMPARE(server.m_originalDispatchTerminal, mode == 1);
+      QVERIFY(!f.first->take().contains("DKDN"));
+      f.clear();
+      server.onKeyDown('b', 0, 48, "", nullptr);
+      server.onMouseMoveSecondary(1, 0);
+      server.onMouseWheel(0, 120);
+      QVERIFY(f.first->take().isEmpty());
+      const auto second = f.second->take();
+      if (mode == 0) {
+        QVERIFY(second.contains("DKDN"));
+        QVERIFY(second.contains("DMMV"));
+        QVERIFY(second.contains("DMWM"));
+      } else {
+        QVERIFY(second.isEmpty());
+        dispatcher->hostReleased = dispatcher->coreReleased = true;
+        server.onKeyDown('c', 0, 46, "", nullptr);
+        QCOMPARE(f.first->take(), "DKDN" + QByteArray::fromHex("0063 0000 002e"));
+      }
+    } else {
+      dispatcher->onReadiness = [&] {
+        if (mode == 2)
+          server.switchComputer(f.secondClient, 200, 300, false);
+        else
+          f.server.reset();
+      };
+      server.onKeyDown('a', 0, 30, "", nullptr);
+      QVERIFY(!f.first->take().contains("DKDN"));
+      QVERIFY(!f.second->take().contains("DKDN"));
+      if (mode == 2) {
+        QVERIFY(server.m_active == f.secondClient);
+        const auto press = server.m_inputRoutes.repeat(Server::InputRoutes::keyControl('a', 30));
+        QVERIFY(press && press->recipients.empty());
+      } else {
+        QVERIFY(!f.server);
+      }
+    }
+  }
 }
 
 void ServerTests::originalDispatch_pendingRefusalAndRawRelease()
@@ -2299,8 +2688,8 @@ void ServerTests::inputFilter_ownedActionsAndConnectionLifetime()
 
   unsigned received = 0;
   for (const auto type :
-       {EventTypes::ServerLockCursorToComputer, EventTypes::ServerSwitchInDirection, EventTypes::ServerKeyboardBroadcast
-       }) {
+       {EventTypes::ServerLockCursorToComputer, EventTypes::ServerSwitchInDirection,
+        EventTypes::ServerKeyboardBroadcast}) {
     events.addHandler(type, this, [&](const Event &event) {
       QVERIFY(!event.getData());
       QVERIFY(event.getDataObject());

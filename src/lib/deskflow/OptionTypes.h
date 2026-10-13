@@ -62,6 +62,10 @@ static const OptionID kOptionClipboardSharingSize = OPTION_CODE("CLSZ");
 static const OptionID kOptionInputSequenceTrace = OPTION_CODE("ISQ1");
 // Separately negotiated backend-prefix cutoff, never native delivery authority.
 static const OptionID kOptionInputCutoff = OPTION_CODE("IPC1");
+static const OptionID kOptionMappedInputCutoff = OPTION_CODE("IPC2");
+static const OptionID kOptionSealedInputCutoff = OPTION_CODE("IPC4");
+static const OptionID kOptionBatchedInputCutoff = OPTION_CODE("IPC5");
+static const OptionID kOptionInputPreparation = OPTION_CODE("IPP1");
 //@}
 
 //! @name Computer switch corner masks

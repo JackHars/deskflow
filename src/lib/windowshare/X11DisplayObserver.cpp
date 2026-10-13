@@ -856,6 +856,10 @@ X11DisplayObserver::X11DisplayObserver(xcb_connection_t *borrowed, int screenInd
     : m_impl(std::make_unique<Impl>(borrowed, screenIndex))
 {
 }
+xcb_connection_t *X11DisplayObserver::borrowedConnection() const noexcept
+{
+  return m_impl->closed ? nullptr : m_impl->connection;
+}
 X11DisplayObserver::~X11DisplayObserver()
 {
   close();

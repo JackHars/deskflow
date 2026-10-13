@@ -1,5 +1,45 @@
 # Experimental window sharing
 
+## Current implementation — 2026-10-13
+
+The configured Mac Core now connects original captured input to the exact
+exported source through the production coordinator. Private protocol v5 and
+Core IPC5 retain the authenticated selections, full forwarding gate, native
+queue seal, mapped point/deadline and completed cleanup. Up to 16 independently
+mapped records share one closed prefix; held input survives point expiry while
+the exact owner remains valid. This is explicit opt-in with paired certificates
+and native/code admission, not the ordinary Deskflow default.
+
+The current working candidate also includes exact Qt xdg_toplevel-to-Mutter
+window association, painted-frame holding relocation, lifecycle fencing,
+attached-sheet/drawer local return, and opt-in focused text clipboard. X11
+namespace and hit checks are implemented, but X11 original delivery is denied
+without a proven native application-input drain. Unknown Mutter builds and
+unsupported roles/input contexts are likewise unavailable.
+
+First-click preparation now has a distinct `IPP1` gate and focus-only activation
+before the genuine Host All lease. Mac protocol/coordinator tests and scoped
+sanitizers pass; native Linux verification is still in progress. Natural
+bidirectional edge dragging remains open.
+Physical input, real app compatibility, two monitors, installation and sustained
+performance still require acceptance on the final candidate. See the checked
+implementation roadmap in [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md), precise
+test evidence in [`TESTING.md`](../TESTING.md), the
+[input path](../deploy/windowshare/original-input-dispatch.md), and
+[clipboard policy](../deploy/windowshare/focused-clipboard.md).
+
+The experimental Mac host accepts `--capture-fps 30|60`, or numeric
+`"captureFps": 60` in its companion configuration. The default is 30;
+visible inactive and hidden streams retain their 10 and 2 fps budgets.
+ScreenCaptureKit and VideoToolbox use the selected effective rate. Real capture
+timestamps are preserved; recovery re-encoding uses a separately bounded
+synthetic presentation timestamp. Selecting 60 is a requested rate, not a
+measured delivery guarantee. See the
+[performance evidence procedure](../deploy/windowshare/h11-evidence.md).
+
+The dated sections below record historical checkpoints; their statements about
+disabled or missing production coordination apply to those named revisions.
+
 ### Requested input cutoff and exact GNOME/Qt drain (2026-10-13)
 
 The Core now negotiates a bounded, authenticated cutoff for a captured input
@@ -163,14 +203,10 @@ proxies; it is not native drain authority or hardware acceptance. See
 
 ## Roadmap status
 
-The project remains in integration. The original cloud handoff estimated about
-50% overall; that historical estimate is not a count of passing tests. Private
-full-input scope and asynchronous preparation contracts are now implemented.
-Core cutoff and separate GNOME/Qt drain components are implemented. The next
-milestone joins them under the verified Mutter ordering prerequisite and the
-production coordinator. Earlier two-machine synthetic capture/input
-checks passed, but physical keyboard/trackpad ownership and window return still
-need acceptance on the current code.
+The production input integration is implemented and undergoing final candidate
+verification. The original cloud handoff's 50% estimate is historical. Code
+completion and physical acceptance remain separate: no count of passing unit
+tests establishes that a real keyboard, trackpad or desktop drag works.
 
 For cloud implementation, use [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md).
 The cloud implementer records available automated results and the procedures
@@ -180,12 +216,12 @@ pending until the returned code is tested on the actual machines.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Private protocol v4 retains full-input scope; Server and private preflight can defer preparation without renewing deadlines. Core negotiates an exact cutoff/PONG/resume, and GNOME/Qt implement a distinct exact-fenced drain segment. Production original delivery remains disabled. | Join the segments using the same Server frozen point/lease, verify Mutter sender ordering, and connect the production coordinator. |
+| Original input integration | Production coordinator, private v5 mapped delivery, IPC5 retained prefix/batches and audited Mutter build ordering are implemented. Exact cleanup requires both Host release and Core resume. | Complete first-click preparation and run final native/physical acceptance. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
-| Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
+| Multiple windows and holding display | Actual Qt role challenges select unique owned Mutter windows; holding relocation retains the first-painted geometry and exact restore journal. | Verify the new native multi-window fixture, focus changes, both monitors and physical failure recovery. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
-| App compatibility | Basic native input and recovery paths exist. | Complete dialogs, menus, clipboard, shortcuts, browser and Electron tests. |
-| Recovery, performance and release | Journaling, disconnect cleanup, the independent Mac watchdog, stream recovery, a separate Mac package and an inert Linux archive exist. Isolated unreaped-host recovery and hosted packaging checks pass. | Verify real-window crash recovery, sustained performance and experimental installation/upgrade/removal on both machines. |
+| App compatibility | Exact original modifiers/repeats and opt-in focused text clipboard are implemented. Attached sheets/drawers return their parent locally; remote transients and IME remain unsupported. | Run native, browser and Electron shortcut/dialog/menu/copy-paste scenarios and resolve supported-path failures. |
+| Recovery, performance and release | Journal/watchdog recovery, immediate lifecycle fencing, bounded fair media queues, passive CPU/RSS tooling and experimental packaging exist. | Verify final packaging, real-window crash recovery, latency/resource soak and installation/upgrade/removal. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
 hostname `jack` at `192.168.1.12`. The GNOME viewport milestone
@@ -306,6 +342,8 @@ mode. Ordinary builds and invocations continue to use their existing backend.
 The JSON configuration has a closed schema. `version`, `viewerExecutable`,
 `connect`, `identity` and `peerPin` are required. `port` defaults to 24810 and
 `screen` to 0. `exportWindow` is an optional nonzero uint32 decimal string.
+`shareClipboardText` is an optional boolean, default false; sharing also
+requires the host's explicit policy and exact current exported-window focus.
 The executable must be an existing absolute executable path; identity must be
 an absolute path, and the pinned fingerprint must have 64 hexadecimal characters
 and cannot be all zeroes. Arguments and environment overrides cannot be supplied
@@ -572,7 +610,10 @@ to that packaged core. The file must be a regular JSON file of at most 16 KiB:
 }
 ```
 
-`holdingDisplay`, `headless` and `inputPeerPairs` are optional. Use the Mac's actual interface
+`holdingDisplay`, `headless`, `inputPeerPairs` and `shareClipboardText` are optional.
+Text clipboard sharing defaults off and requires both peers to opt in; see the
+[focused clipboard policy](../deploy/windowshare/focused-clipboard.md).
+Use the Mac's actual interface
 address, a previously created identity, and the approved viewer's fingerprint.
 Unknown/duplicate fields, wrong types, relative identity/journal paths and arbitrary
 child arguments are rejected. This option starts the real native host and needs
@@ -584,7 +625,7 @@ SIGTERM and allows five more seconds before killing an unresponsive owned host.
 The recovery journal remains the fallback for interrupted restoration. The
 handshake-only probe uses a shorter shutdown interval.
 
-For eventual original-input admission, `inputPeerPairs` explicitly pairs the
+For original-input admission, `inputPeerPairs` explicitly pairs the
 approved Deskflow TLS certificate with the approved WindowShare viewer TLS
 certificate. The two fingerprints identify separate connections and may differ:
 
@@ -611,9 +652,10 @@ The core retains one immutable configuration snapshot and forwards its canonical
 public pin map through a bounded internal option to its inherited companion.
 The host retains that same map; neither process rereads or learns policy from
 network messages, computer names or discovery. Replacing the file requires a new
-launch to take effect. This configuration does not enable original input: the
-production preflight controller and authorizer remain uninstalled until the real
-neutrality, module-admission and ordered-delivery providers are available.
+launch to take effect. The production controller uses this configured route
+only when exact module admission, source acquisition, native queue ordering,
+mapped geometry, focus and complete forwarding ownership are available.
+The configuration alone cannot satisfy those checks.
 
 Both processes verify fixed role paths, PID birth identities and exact signed
 code against the running bundle main's resource seal. A same-user process, an
@@ -957,9 +999,9 @@ that a job passed.
 
 ## Remaining work
 
-The [coordinate integration plan](seamless-windows-coordinate-plan.md) describes
-the proposed native X11 witness, ordered pointer validation and the separate
-GNOME Wayland compositor requirement. It is a plan, not implemented behavior.
+The [coordinate integration plan](seamless-windows-coordinate-plan.md) retains
+the original design. Its X11 namespace witness and native hit checks are now
+implemented; X11 still lacks the native drain required for original input.
 
 Automatic edge-drag export/return and transactional drag ownership are unfinished.
 Precise Wayland placement may need compositor cooperation; Qt screen selection
@@ -968,8 +1010,9 @@ foundation/application checks and private-Xvfb viewport/core tests now pass. The
 actual GNOME Wayland desktop currently reports one active monitor; live window
 input and a two-monitor arrangement still require direct validation.
 
-Dialogs, popup menus, clipboard integration with exported-window focus, complete
-shortcut remapping, browser/Electron behavior, active-stream media
-scheduling, crash-watchdog recovery, and packaged cross-machine performance tests
-remain development work. Do not treat this application as a replacement for the
-working Deskflow installation yet.
+Remote dialog/popup rendering and IME composition remain unavailable. Exact
+attached sheets/drawers trigger local parent return. Focused text clipboard,
+original shortcut/repeat delivery, stream scheduling and watchdog recovery have
+code and automated coverage; real application and packaged cross-machine
+acceptance remains separate. The experimental application does not replace the
+ordinary Deskflow installation.

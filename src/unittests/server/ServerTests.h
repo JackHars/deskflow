@@ -32,6 +32,12 @@ private Q_SLOTS:
   void originalDispatch_timeoutOverflowAndFeatureDefault();
   void originalDispatch_reentrantFailureAndDestruction();
   void originalDispatch_pendingOrderingAndCaptureArrival();
+  void originalDispatch_hoverCompressionPreservesBarriersAndHistory();
+  void originalDispatch_inlineTerminalReservationContract();
+  void originalDispatch_retainedLookaheadPreventsHoverReplacement();
+  void originalDispatch_ineligibleInputWaitsForExactCleanup();
+  void originalDispatch_legacyReleaseAndOtherRecipientsSurviveGate();
+  void originalDispatch_closedGateSurvivesFlushAndTerminal();
   void originalDispatch_pendingRefusalAndRawRelease();
   void originalDispatch_pendingCancellationLifetime();
   void originalDispatch_pendingMalformedRepliesAndDeadline();

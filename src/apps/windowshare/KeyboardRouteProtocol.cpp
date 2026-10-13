@@ -50,6 +50,12 @@ void validate(const KeyboardRouteControl &control)
   name(control.mode, modes);
   name(control.result, results);
   name(control.reason, reasons);
+  require(
+      !control.viewerConnection ||
+          (control.binding.scope == ForwardingScope::All && control.action == KeyboardRouteAction::Acknowledge &&
+           control.result == KeyboardRouteResult::Ready && control.mode == KeyboardRouteMode::Original),
+      "Invalid viewer connection attestation"
+  );
   if (control.action == KeyboardRouteAction::Request)
     require(
         control.result == KeyboardRouteResult::None && control.reason == KeyboardRouteReason::None,
@@ -68,13 +74,15 @@ void validate(const KeyboardRouteControl &control)
     );
 }
 } // namespace
-QJsonArray keyboardRouteCapabilities(bool includeInput, bool includeMediaRecovery)
+QJsonArray keyboardRouteCapabilities(bool includeInput, bool includeMediaRecovery, bool includeMapped)
 {
   QJsonArray capabilities{QLatin1String(keyboardRouteCapability)};
   if (includeInput)
     capabilities.append(QLatin1String(inputRouteCapability));
   if (includeMediaRecovery)
     capabilities.append(QLatin1String(mediaRecoveryCapability));
+  if (includeInput && includeMapped)
+    capabilities.append(QLatin1String(mappedInputCapability));
   return capabilities;
 }
 bool peerSupportsMediaRecovery(const QJsonObject &negotiation)
@@ -104,6 +112,11 @@ bool peerSupportsInputRoute(const QJsonObject &negotiation)
   return peerSupportsKeyboardRoute(negotiation) &&
          negotiation["capabilities"].toArray().contains(QLatin1String(inputRouteCapability));
 }
+bool peerSupportsMappedInput(const QJsonObject &negotiation)
+{
+  return peerSupportsInputRoute(negotiation) &&
+         negotiation["capabilities"].toArray().contains(QLatin1String(mappedInputCapability));
+}
 MessageType forwardingRouteMessageType(const KeyboardRouteBinding &binding)
 {
   require(validKeyboardRouteBinding(binding), "Invalid forwarding route binding");
@@ -125,6 +138,8 @@ QJsonObject encodeKeyboardRouteControl(const KeyboardRouteControl &control)
     object.insert("result", name(control.result, results));
   else if (control.action == KeyboardRouteAction::Withdraw)
     object.insert("reason", name(control.reason, reasons));
+  if (control.viewerConnection)
+    object.insert("viewerConnection", QString::number(control.viewerConnection, 16).rightJustified(16, '0'));
   return object;
 }
 KeyboardRouteControl parseKeyboardRouteControl(const Packet &packet)
@@ -150,6 +165,16 @@ KeyboardRouteControl parseKeyboardRouteControl(const Packet &packet)
     control.result = value<KeyboardRouteResult>(object["result"], results);
   else if (control.action == KeyboardRouteAction::Withdraw)
     control.reason = value<KeyboardRouteReason>(object["reason"], reasons);
+  if (object.contains("viewerConnection")) {
+    const auto text = object["viewerConnection"].toString();
+    bool ok = false;
+    control.viewerConnection = text.toULongLong(&ok, 16);
+    require(
+        ok && control.viewerConnection && text.size() == 16 &&
+            text == QString::number(control.viewerConnection, 16).rightJustified(16, '0'),
+        "Invalid viewer connection incarnation"
+    );
+  }
   validate(control);
   // Exact schema: native key codes, flags and unnegotiated extensions can never
   // sneak through this network-only forwarding control.

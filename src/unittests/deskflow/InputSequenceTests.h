@@ -16,4 +16,8 @@ private Q_SLOTS:
   void nestedAndExhaustedScopesFail();
   void originScopeDoesNotLeak();
   void inputCutoffCodecIsBoundedAndExact();
+  void mappedCutoffCodecPreservesPointAndProof();
+  void sealedCutoffCodecSeparatesPrefixAndPoint();
+  void batchedCutoffCodecBoundsEveryItem();
+  void preparationCodecHasNoInventedLease();
 };

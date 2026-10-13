@@ -9,6 +9,10 @@ and the Mac native source. Only the disposable source window is exported.
 The test does not enable original-input delivery, move a source to a holding
 display, use the ordinary Linux desktop, or establish two-monitor/drag support.
 
+For the distinct opt-in production original-input mode and its optional
+separate-control holding run, use [original-input-physical.md](original-input-physical.md).
+Its v2 Mac/v3 Linux plans cannot be used by this legacy default.
+
 First install and verify the experimental Mac package containing the Option
 hotkey fix. Build the current `windowshare-smoke-source` target. Prepare a
 fresh Linux plan as described in [physical-linux.md](physical-linux.md).

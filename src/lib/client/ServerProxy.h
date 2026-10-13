@@ -15,6 +15,7 @@
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputCutoffProtocol.h"
+#include "deskflow/InputPreparationProtocol.h"
 #include "deskflow/OptionTypes.h"
 #include "io/AuthenticatedPeerTicket.h"
 #endif
@@ -131,7 +132,12 @@ private:
   void revokeInputSequence();
   bool inputSequenceConnectionLive() const;
   void setInputCutoffOptions(const OptionsList &);
-  void inputCutoff(bool resume);
+  void inputCutoff(bool resume, bool mapped = false, bool sealed = false, bool refresh = false);
+  void inputCutoffBatch();
+  void inputPreparation(bool cancel, bool promote);
+  void pollInputPreparation();
+  void startPreparationCleanup(deskflow::windowshare::InputCutoffClock::time_point);
+  void ensureInputCutoffTimer();
   void pollInputCutoff();
   void revokeInputCutoff();
   void stopInputCutoffTimer();
@@ -160,7 +166,25 @@ private:
     deskflow::windowshare::InputCutoffClock::time_point deadline;
     bool backendStarted = false;
     std::optional<deskflow::windowshare::InputCutoffState> reported;
+    std::optional<deskflow::windowshare::InputCutoffPoint> point;
+    std::optional<deskflow::windowshare::InputCutoffBinding> seal;
+    bool failed = false;
+    std::vector<deskflow::windowshare::InputCutoffBatchItem> batch;
   };
+  struct Preparation
+  {
+    deskflow::windowshare::InputPreparationBinding binding;
+    deskflow::windowshare::InputCutoffPoint point;
+    deskflow::windowshare::InputCutoffClock::time_point deadline, cleanupDeadline{};
+    deskflow::windowshare::InputPreparationState state = deskflow::windowshare::InputPreparationState::Preparing;
+    deskflow::windowshare::InputPreparationOutcome outcome = deskflow::windowshare::InputPreparationOutcome::None;
+    std::optional<deskflow::windowshare::PreparedInputFocusResult> focus;
+    bool backendStarted = false, failureReported = false, cleanupViaCutoff = false, cleanupViaPreparation = false;
+    std::optional<deskflow::windowshare::InputCutoffBinding> promotion;
+  };
+  std::optional<Preparation> m_preparation;
+  std::optional<deskflow::windowshare::InputPreparationBinding> m_retiredPreparation;
+  bool m_preparationCapable = false;
   std::optional<Cutoff> m_cutoff;
   std::optional<deskflow::windowshare::InputCutoffBinding> m_retiredCutoff;
   std::optional<deskflow::AuthenticatedPeerTicket> m_cutoffPeer;
@@ -169,6 +193,9 @@ private:
   EventQueueTimer *m_cutoffTimer = nullptr;
   char m_cutoffTimerTarget = 0;
   bool m_cutoffDispatching = false;
+  bool m_cutoffMappedCapable = false;
+  bool m_cutoffSealedCapable = false;
+  bool m_cutoffBatchedCapable = false;
 #endif
 
   uint32_t m_seqNum = 0;

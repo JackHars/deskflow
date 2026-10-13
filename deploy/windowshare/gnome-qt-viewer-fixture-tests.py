@@ -124,6 +124,229 @@ class ForwardingProtocol(unittest.TestCase):
             host.packet(18, 1, 2, self.ack["payload"])
 
 
+class PreparationEvidence(unittest.TestCase):
+    def setUp(self):
+        self.initial = painted_snapshot()
+        self.initial["paint"].update({"nativeSurface": 42, "windowAssociation": "org.deskflow.window." + "b" * 64,
+                                      "connection": "7", "peerFingerprint": "a" * 64})
+        self.prepared_snapshot = deepcopy(self.initial)
+        self.prepared_snapshot["paint"].update({"focusRequest": "5", "focusRevision": "6"})
+        self.binding = {"request": "30", "coreConnectionGeneration": 1,
+                        "captureEpoch": "1", "captureSequence": "30", "capturePart": 1}
+        self.contract = module.SUPPORTED_ORDERING_CONTRACTS[1]
+        self.reply = {"id": 30, "live": True, "error": "", "outcome": "none",
+                      "binding": self.binding, "snapshot": self.prepared_snapshot,
+                      "contract": self.contract, "originalDeliveryAuthority": False}
+
+    def verify(self, reply):
+        return module.prepared_focus_receipt(reply, self.initial, (300, 220), self.contract, "a" * 64)
+
+    def test_preparation_has_distinct_exact_capture_and_fresh_real_focus(self):
+        self.assertEqual(self.verify(self.reply), self.reply)
+        for field, value in (("request", "31"), ("captureSequence", "31"), ("capturePart", True),
+                             ("scope", "all"), ("session", "1"), ("viewerConnection", "7")):
+            bad = deepcopy(self.reply)
+            bad["binding"][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.verify(bad)
+        for field, value in (("focusRequest", "3"), ("focusRevision", "4"), ("nativeSurface", 99),
+                             ("connection", "8"), ("peerFingerprint", "c" * 64),
+                             ("windowAssociation", "org.deskflow.window." + "d" * 64)):
+            bad = deepcopy(self.reply)
+            bad["snapshot"]["paint"][field] = value
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                self.verify(bad)
+        for change in ({"contract": "GNOME50"}, {"originalDeliveryAuthority": True}, {"outcome": "unsupported"},
+                       {"live": False}, {"snapshot": {**self.prepared_snapshot, "desktopX": 301}}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                self.verify({**self.reply, **change})
+
+    def test_focus_only_interval_rejects_acquisitions_after_all_has_resumed(self):
+        focus = viewer_packet(7, {"kind": "focus", "request": 5, "active": True})
+        resumed = viewer_packet(18, {"action": "ack", "mode": "viewer", "result": "ready"})
+        messages = [focus, resumed, viewer_packet(7, {"kind": "release"})]
+        self.assertEqual(module.preparation_input_receipts(messages, 0, 3)["forwardedInput"], [])
+        for kind in module.INPUT_KINDS:
+            with self.subTest(kind=kind), self.assertRaisesRegex(RuntimeError, "forwarded source input"):
+                module.preparation_input_receipts(messages + [viewer_packet(7, {"kind": kind})], 0, 4)
+        with self.assertRaisesRegex(RuntimeError, "evidence interval"):
+            module.preparation_input_receipts(messages, 2, 1)
+
+    def test_completed_prefix_timer_retires_before_promotion_without_renewing_preparation(self):
+        prepared = {"clientRequest": "42"}
+        retained = {"clientRequest": "42", "live": True, "prefixPending": False,
+                    "ageMs": 300, "remainingMs": 199, "originalDeliveryAuthority": False}
+        self.assertEqual(module.preparation_retained_receipt(retained, prepared), retained)
+        for change in ({"prefixPending": True}, {"prefixPending": 0}, {"clientRequest": "43"},
+                       {"live": False}, {"ageMs": 200, "remainingMs": 299},
+                       {"ageMs": 300, "remainingMs": 499}, {"ageMs": 500, "remainingMs": 0},
+                       {"ageMs": True}, {"remainingMs": True}, {"originalDeliveryAuthority": True}):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "PONG timer or renewed"):
+                module.preparation_retained_receipt({**retained, **change}, prepared)
+
+    def test_retained_preparation_uses_its_own_reply_without_requesting_a_new_ping(self):
+        driver = module.Driver.__new__(module.Driver)
+        driver.request = 41
+        driver.child = SimpleNamespace(stdin=io.BytesIO())
+        driver.event = Mock(return_value={"id": 42, "event": "preparation-retained"})
+        driver.command("preparation-retained")
+        self.assertEqual(json.loads(driver.child.stdin.getvalue()), {"id": 42, "op": "preparation-retained"})
+        driver.event.assert_called_once_with("preparation-retained")
+
+    def test_promotion_keeps_original_capture_under_a_new_genuine_all_request(self):
+        request = module.forwarding_request(self.prepared_snapshot, 6, "original")
+        binding = {"request": "31", **{key: value for key, value in self.binding.items() if key != "request"},
+                   "viewerConnection": "7", "session": "1", "epoch": "2", "generation": "6",
+                   "focusRequest": "5", "focusRevision": "6", "geometry": "5", "scope": "all"}
+        reply = {"id": 31, "live": True, "error": "", "originalDeliveryAuthority": False,
+                 "orderingLimitation": "", "senderOrdering": {"live": True, "contract": self.contract},
+                 "cutoff": binding, "snapshot": self.prepared_snapshot}
+        self.assertEqual(module.input_drain_receipt(reply, request, self.prepared_snapshot, self.contract,
+                                                   capture=self.binding), reply)
+        with self.assertRaisesRegex(RuntimeError, "exact cutoff binding"):
+            module.input_drain_receipt(reply, request, self.prepared_snapshot, self.contract)
+        bad = deepcopy(reply)
+        bad["cutoff"]["captureSequence"] = "31"
+        with self.assertRaisesRegex(RuntimeError, "exact cutoff binding"):
+            module.input_drain_receipt(bad, request, self.prepared_snapshot, self.contract, capture=self.binding)
+
+
+class FocusRecoveryDiagnostic(unittest.TestCase):
+    def setUp(self):
+        self.processes, self.host, self.driver, self.focus = Mock(), Mock(), Mock(), Mock()
+        self.initial, self.focus_path, self.center = painted_snapshot(), Path("/fixture/focus.json"), (640, 360)
+        self.ready, self.report = Mock(), {}
+        self.steps = []
+        self.focus.terminate.side_effect = lambda: self.steps.append("terminate")
+        self.focus.wait.side_effect = lambda **kwargs: self.steps.append(("wait", kwargs))
+        self.driver.command.side_effect = lambda operation, **kwargs: self.steps.append((operation, kwargs))
+
+    def recover(self, contract="verified-build", mode=None):
+        kwargs = {} if mode is None else {"mode": mode}
+        return module.recover_independent_focus(
+            self.processes, self.host, self.driver, self.initial, self.focus, self.focus_path, contract,
+            self.center, self.ready, self.report, **kwargs)
+
+    def test_default_prepared_path_keeps_its_native_chain_and_adds_no_ordinary_click(self):
+        prepared = {"supported": True, "scope": "fixture-result"}
+        with patch.object(module, "native_first_click_acceptance",
+                          side_effect=lambda *args: self.steps.append("prepared") or prepared) as native, \
+                patch.object(module.common, "wait_for") as readiness, \
+                patch.object(module.time, "sleep", side_effect=AssertionError("No new settling delay")):
+            self.recover()
+        native.assert_called_once_with(self.processes, self.host, self.driver, self.initial,
+                                       self.focus, self.focus_path, "verified-build")
+        self.assertEqual(self.report, {"firstClickPreparation": prepared})
+        self.assertEqual(self.steps, ["prepared", "terminate", ("wait", {"timeout": 5}),
+                                      ("move", {"x": 640, "y": 360})])
+        readiness.assert_called_once_with(self.processes, self.ready, "original viewer focus recovery",
+                                          timeout=5, retry_errors=False)
+
+    def test_ordinary_click_path_closes_focus_child_then_moves_and_clicks_exactly_once(self):
+        with patch.object(module, "native_first_click_acceptance") as native, \
+                patch.object(module.common, "wait_for") as readiness, \
+                patch.object(module.time, "sleep", side_effect=AssertionError("No settling delay")):
+            self.recover(mode="ordinary-click")
+        native.assert_not_called()
+        self.assertNotIn("firstClickPreparation", self.report)
+        self.assertEqual(self.steps, ["terminate", ("wait", {"timeout": 5}),
+                                      ("move", {"x": 640, "y": 360}), ("click", {})])
+        readiness.assert_called_once_with(self.processes, self.ready, "original viewer focus recovery",
+                                          timeout=5, retry_errors=False)
+
+    def test_unverified_default_keeps_existing_explicit_preparation_denial_then_ordinary_recovery(self):
+        denied = {"supported": False, "originalDeliveryAuthority": False}
+        with patch.object(module, "native_first_click_acceptance", return_value=denied) as native, \
+                patch.object(module.common, "wait_for"):
+            self.recover(contract="")
+        native.assert_called_once()
+        self.assertEqual(self.report["firstClickPreparation"], denied)
+        self.assertEqual(self.steps[-1], ("click", {}))
+
+    def test_failed_preparation_is_terminal_without_ordinary_fallback_or_retry(self):
+        with patch.object(module, "native_first_click_acceptance", side_effect=RuntimeError("stale-revision")) as native, \
+                patch.object(module.common, "wait_for") as readiness:
+            with self.assertRaisesRegex(RuntimeError, "stale-revision"):
+                self.recover()
+        native.assert_called_once()
+        readiness.assert_not_called()
+        self.driver.command.assert_not_called()
+        self.focus.terminate.assert_not_called()
+
+    def test_invalid_mode_fails_before_any_transition(self):
+        with patch.object(module, "native_first_click_acceptance") as native:
+            with self.assertRaisesRegex(RuntimeError, "Unknown diagnostic"):
+                self.recover(mode="retry-after-sleep")
+        native.assert_not_called()
+        self.driver.command.assert_not_called()
+
+    def test_cli_default_and_explicit_modes_are_preserved_in_run_arguments(self):
+        executable = str(Path(__file__).resolve())
+        required = ["--viewer", executable, "--fixture", executable, "--output", "/fixture/output"]
+        for value in (None, "prepared-first-click", "ordinary-click"):
+            with self.subTest(value=value), patch.object(module, "run", return_value=0) as run:
+                self.assertEqual(module.main(required + ([] if value is None else ["--focus-recovery", value])), 0)
+                self.assertEqual(run.call_args.args[0].focus_recovery, value or "prepared-first-click")
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(module, "run") as run:
+            with self.assertRaises(SystemExit) as result:
+                module.main(required + ["--focus-recovery", "retry"])
+            self.assertEqual(result.exception.code, 2)
+            run.assert_not_called()
+
+
+class FixtureBatchTransport(unittest.TestCase):
+    def test_second_window_search_never_clicks_the_old_window_point(self):
+        driver = Mock()
+        wrong = {"live": True, "snapshot": {"paint": {"session": "1"}}}
+        expected = {"live": True, "snapshot": {"paint": {"session": "2"}, "window": "actual-second"}}
+        replies = iter((wrong, expected))
+        driver.command.side_effect = lambda operation, **kwargs: next(replies) if operation == "observe" else {"event": "synced"}
+
+        def wait(_processes, predicate, _description, **kwargs):
+            self.assertIsNone(predicate())
+            return predicate()
+
+        with patch.object(module.common, "wait_for", side_effect=wait):
+            self.assertEqual(module.locate_focused_viewer(Mock(), driver, 2, [0, 0, 1280, 720]), expected["snapshot"])
+        self.assertEqual([call.args[0] for call in driver.command.call_args_list], ["move", "observe", "move", "observe"])
+
+    def driver(self):
+        driver = module.Driver.__new__(module.Driver)
+        driver.processes = Mock()
+        driver.child = Mock()
+        driver.selector = Mock()
+        driver.selector.select.return_value = [True]
+        driver.transcript = io.StringIO()
+        driver.buffer = b""
+        return driver
+
+    def test_complete_sixteen_point_receipts_cross_scalar_output_limit(self):
+        # Native receipts include a full painted state, ordering contract and
+        # origin seal for every independently stamped point. Exercise the real
+        # line reader in the same bounded chunks as an actual subprocess pipe.
+        reply = {"event": "batch-mapped", "id": 50, "segments": [
+            {"cutoff": {"request": str(50 + i)}, "snapshot": {"paint": {
+                "peerFingerprint": "a" * 64, "windowAssociation": "org.deskflow.window." + "b" * 64,
+                "nativeEvidence": "x" * 1800}}, "live": True}
+            for i in range(16)]}
+        wire = json.dumps(reply, separators=(",", ":")).encode() + b"\n"
+        self.assertGreater(len(wire), 16384)
+        self.assertLessEqual(len(wire), 65536)
+        driver = self.driver()
+        with patch.object(module.os, "read", side_effect=[wire[i:i + 4096] for i in range(0, len(wire), 4096)]):
+            self.assertEqual(driver.event("batch-mapped"), reply)
+        self.assertEqual(driver.buffer, b"")
+        self.assertEqual(driver.transcript.getvalue().encode(), wire)
+
+    def test_oversized_batch_still_fails_closed(self):
+        wire = b'{"event":"batch-mapped","oversized":"' + b"x" * 65536 + b'"}\n'
+        driver = self.driver()
+        with patch.object(module.os, "read", side_effect=[wire[i:i + 4096] for i in range(0, len(wire), 4096)]):
+            with self.assertRaisesRegex(RuntimeError, "output exceeded bound"):
+                driver.event("batch-mapped")
+        self.assertEqual(driver.transcript.getvalue(), "")
+
+
 class FixtureTransportShutdown(unittest.TestCase):
     def run_failure(self, error, expected):
         host = module.TlsHost.__new__(module.TlsHost)
@@ -284,7 +507,8 @@ class NativeDrainReceipts(unittest.TestCase):
         self.snapshot["paint"]["connection"] = "11"
         self.request = module.forwarding_request(self.snapshot, 9, "original")
         self.reply = {"live": True, "error": "", "id": 12, "originalDeliveryAuthority": False,
-                      "orderingLimitation": "mutter-eis-sync-build-unverified", "snapshot": deepcopy(self.snapshot),
+                      "orderingLimitation": "mutter-eis-sync-build-unverified", "senderOrdering": None,
+                      "snapshot": deepcopy(self.snapshot),
                       "cutoff": {"request": "12", "coreConnectionGeneration": 1, "captureEpoch": "1",
                                  "captureSequence": "12", "capturePart": 1, "viewerConnection": "11",
                                  "session": "1", "epoch": "2", "generation": "9", "focusRequest": "3",
@@ -295,6 +519,27 @@ class NativeDrainReceipts(unittest.TestCase):
 
     def test_complete_exact_receipt_retains_explicit_authority_limitation(self):
         self.assertEqual(self.verify(self.reply), self.reply)
+
+    def test_supported_receipt_requires_exact_live_build_and_still_has_no_delivery_authority(self):
+        for contract in module.SUPPORTED_ORDERING_CONTRACTS:
+            reply = {**self.reply, "orderingLimitation": "",
+                     "senderOrdering": {"live": True, "contract": contract}}
+            self.assertEqual(module.input_drain_receipt(reply, self.request, self.snapshot, contract), reply)
+            for change in ({"live": False}, {"contract": "sha256:" + "0" * 64},
+                           {"live": 1}, {"extra": False}):
+                wrong = {**reply, "senderOrdering": {**reply["senderOrdering"], **change}}
+                with self.subTest(change=change), self.assertRaises(RuntimeError):
+                    module.input_drain_receipt(wrong, self.request, self.snapshot, contract)
+            with self.assertRaises(RuntimeError):
+                module.input_drain_receipt({**reply, "originalDeliveryAuthority": True},
+                                           self.request, self.snapshot, contract)
+            with self.assertRaises(RuntimeError):
+                self.verify(reply)
+        for value in ({}, {"live": True, "contract": ""}, False):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                self.verify({**self.reply, "senderOrdering": value})
+        with self.assertRaises(RuntimeError):
+            module.input_drain_receipt(self.reply, self.request, self.snapshot, "GNOME-50")
 
     def test_each_cutoff_field_and_unknown_fields_are_checked(self):
         for field in self.reply["cutoff"]:
@@ -307,6 +552,48 @@ class NativeDrainReceipts(unittest.TestCase):
         value["cutoff"]["authority"] = True
         with self.assertRaisesRegex(RuntimeError, "exact cutoff"):
             self.verify(value)
+
+    def test_prefix_seal_is_exact_live_and_supported_independently_of_point(self):
+        contract = module.SUPPORTED_ORDERING_CONTRACTS[0]
+        origin = self.reply["cutoff"]
+        seal = {"live": True, "origin": deepcopy(origin), "contract": contract}
+        self.assertEqual(module.input_seal_receipt({"seal": seal}, origin, contract), seal)
+        for change in ({"live": False}, {"live": 1}, {"origin": {}}, {"contract": "GNOME50"}, {"extra": True}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                module.input_seal_receipt({"seal": {**seal, **change}}, origin, contract)
+        for field in origin:
+            changed = {**origin, field: True}
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                module.input_seal_receipt({"seal": {**seal, "origin": changed}}, origin, contract)
+        with self.assertRaises(RuntimeError):
+            module.input_seal_receipt({"seal": seal}, origin, "GNOME50")
+
+    def test_batch_requires_all_ordered_captures_without_another_ping_or_drain(self):
+        contract = module.SUPPORTED_ORDERING_CONTRACTS[0]
+        sealed = {**self.reply, "requestedPings": 2, "requestedDrains": 1}
+        items = []
+        for index in range(16):
+            item = deepcopy(self.reply)
+            item["orderingLimitation"] = ""
+            item["senderOrdering"] = {"live": True, "contract": contract}
+            item["seal"] = {"live": True, "origin": deepcopy(sealed["cutoff"]), "contract": contract}
+            item["cutoff"]["request"] = item["cutoff"]["captureSequence"] = str(13 + index)
+            item["snapshot"]["desktopX"] += index % 4
+            item["snapshot"]["desktopY"] += index // 4
+            items.append(item)
+        reply = {"id": 13, "segments": items, "error": "", "requestedPings": 2, "requestedDrains": 1,
+                 "originalDeliveryAuthority": False}
+        verify = lambda value: module.input_batch_receipt(value, 16, self.request, self.snapshot, sealed, contract)
+        self.assertEqual(verify(reply), reply)
+        for change in ({"segments": items[:15]}, {"segments": items + [items[0]]}, {"segments": list(reversed(items))},
+                       {"requestedPings": 3}, {"requestedDrains": 2}, {"error": "failed"},
+                       {"originalDeliveryAuthority": True}):
+            with self.subTest(change=list(change)), self.assertRaises(RuntimeError):
+                verify({**reply, **change})
+        wrong = deepcopy(reply)
+        wrong["segments"][7]["cutoff"]["captureSequence"] = "999"
+        with self.assertRaises(RuntimeError):
+            verify(wrong)
 
     def test_native_identity_point_and_authority_cannot_be_substituted(self):
         for field, invalid in (("window", "other"), ("surface", "other"), ("paint", {}),

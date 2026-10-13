@@ -41,6 +41,14 @@ private Q_SLOTS:
   void inputCutoff_deadlineAndConnectionRevocation();
   void inputCutoff_rejectsWrongAndMalformedReceipts();
   void inputCutoff_callbackMayDestroyDuringOptions();
+  void mappedCutoff_exactObservationAndRevocation();
+  void mappedCutoff_rejectsSubstitutionAndUnnegotiatedResult();
+  void sealedCutoff_refreshRetainsPrefixAndExactCleanup();
+  void sealedCutoff_rejectsSubstitutionAndRevokesLifetime();
+  void batchedCutoff_preservesEveryReceiptAndExactCleanup();
+  void batchedCutoff_rejectsPartialChangedAndLateResults();
+  void preparation_negotiatesPromotesAndWaitsForCleanup();
+  void preparation_boundsCancellationAndPreservesAttemptIdentity();
 
 private:
   Log m_log;

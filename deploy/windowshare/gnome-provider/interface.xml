@@ -37,6 +37,13 @@
       <arg name="viewer" type="s" direction="in"/>
       <arg name="observation" type="a{sv}" direction="out"/>
     </method>
+    <method name="GetViewerWithAssociation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="association" type="s" direction="in"/>
+      <arg name="observation" type="a{sv}" direction="out"/>
+    </method>
     <!-- Read-only exact compositor-stage point; no EIS drain or delivery permit. -->
     <method name="ValidateRoutedPoint">
       <arg name="session" type="s" direction="in"/>
@@ -45,6 +52,18 @@
       <arg name="request" type="s" direction="in"/>
       <arg name="x" type="d" direction="in"/>
       <arg name="y" type="d" direction="in"/>
+      <arg name="expectedRevision" type="u" direction="in"/>
+      <arg name="observation" type="a{sv}" direction="out"/>
+    </method>
+    <!-- Atomic same-native-state points: cutoff request, capture sequence,
+         capture part, frozen stage x/y. No per-point drain or input submission. -->
+    <method name="ValidateRoutedPoints">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="captureEpoch" type="s" direction="in"/>
+      <arg name="points" type="a(ssudd)" direction="in"/>
       <arg name="expectedRevision" type="u" direction="in"/>
       <arg name="observation" type="a{sv}" direction="out"/>
     </method>
@@ -60,8 +79,10 @@
       <arg name="expectedRevision" type="u" direction="in"/>
       <arg name="observation" type="a{sv}" direction="out"/>
     </method>
-    <!-- Caller-ordered compositor segment only. The exact inherited cutoff is
-         echoed; compiled Mutter EIS ordering and the Qt fence are independent. -->
+    <!-- Caller-ordered compositor segment; exact inherited cutoff is echoed.
+         orderingContract names a separately verified mapped native build or is
+         empty with orderingLimit=mutter-eis-sync-build-unverified. It does not
+         certify the caller's sender PONG, exact All gate or Qt queue by itself. -->
     <method name="DrainInputPrefix">
       <arg name="session" type="s" direction="in"/>
       <arg name="generation" type="u" direction="in"/>
@@ -73,6 +94,66 @@
       <arg name="binding" type="a{sv}" direction="in"/>
       <arg name="budgetMs" type="u" direction="in"/>
       <arg name="segment" type="a{sv}" direction="out"/>
+    </method>
+    <method name="SelectInputPreparation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="associations" type="as" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="budgetMs" type="u" direction="in"/>
+      <arg name="result" type="a{sv}" direction="out"/>
+    </method>
+    <method name="QueryInputPreparation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="revision" type="u" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="cleanup" type="b" direction="in"/>
+      <arg name="result" type="a{sv}" direction="out"/>
+    </method>
+    <method name="ActivateInputPreparation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="revision" type="u" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="budgetMs" type="u" direction="in"/>
+      <arg name="result" type="a{sv}" direction="out"/>
+    </method>
+    <method name="DrainInputPreparation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="revision" type="u" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="budgetMs" type="u" direction="in"/>
+      <arg name="cleanup" type="b" direction="in"/>
+      <arg name="result" type="a{sv}" direction="out"/>
+    </method>
+    <method name="FinishInputPreparation">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="revision" type="u" direction="in"/>
+      <arg name="binding" type="a{sv}" direction="in"/>
+      <arg name="budgetMs" type="u" direction="in"/>
     </method>
     <method name="ValidateCurrentHit">
       <arg name="session" type="s" direction="in"/>

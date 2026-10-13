@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputBootstrap.h"
+#include "CaptureRate.h"
 #include "LocalInputPeerTrust.h"
 #include "UniqueJson.h"
 #include <QFile>
@@ -169,6 +170,7 @@ LocalInputHostBootstrap LocalInputHostBootstrap::inspect(int argc, char *const a
   constexpr std::string_view descriptor = "--core-input-fd=", probe = "--core-input-probe",
                              policy = "--core-input-peer-pairs=";
   std::optional<std::string_view> encodedPairs;
+  bool evidenceSupplied = false;
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (related(argument, descriptor.substr(0, descriptor.size() - 1))) {
@@ -183,6 +185,14 @@ LocalInputHostBootstrap LocalInputHostBootstrap::inspect(int argc, char *const a
       );
       result.m_descriptor = fd;
       require(protectLocalInputDescriptor(fd), "Inherited input descriptor is not a private socketpair");
+    } else if (related(argument, "--input-evidence-config")) {
+      require(
+          !evidenceSupplied && argument == "--input-evidence-config" && index + 1 < argc && argv[index + 1][0] != '-',
+          "Use one canonical --input-evidence-config FILE"
+      );
+      evidenceSupplied = true;
+      const auto path = pathValue(argv[++index]);
+      require(QFileInfo(path).isAbsolute(), "Evidence configuration path must be absolute");
     } else if (related(argument, probe)) {
       require(argument == probe && !result.m_probe, "Use one --core-input-probe option");
       result.m_probe = true;
@@ -206,6 +216,11 @@ LocalInputHostBootstrap LocalInputHostBootstrap::inspect(int argc, char *const a
         peerPairs(QByteArray(encodedPairs->data(), static_cast<qsizetype>(encodedPairs->size()))).policy;
     result.m_peerPairsSupplied = true;
   }
+  require(
+      !evidenceSupplied || (result.inherited() && !result.probe() && !result.m_peerPolicy.empty()),
+      "Evidence requires an inherited companion and explicit input peer pairs"
+  );
+  result.m_evidenceSupplied = evidenceSupplied;
   return result;
 }
 LocalInputHostBootstrap::~LocalInputHostBootstrap()
@@ -217,6 +232,7 @@ LocalInputHostBootstrap::LocalInputHostBootstrap(LocalInputHostBootstrap &&other
     : m_descriptor(std::exchange(other.m_descriptor, -1)),
       m_probe(other.m_probe),
       m_peerPairsSupplied(other.m_peerPairsSupplied),
+      m_evidenceSupplied(other.m_evidenceSupplied),
       m_peerPolicy(other.m_peerPolicy)
 {
 }
@@ -244,8 +260,19 @@ void LocalInputHostBootstrap::validateOptions(const QStringList &names) const
     return;
   }
   const QSet<QString> allowed{
-      "core-input-fd", "enable-seamless", "listen",          "port",     "identity",
-      "peer-pin",      "journal",         "holding-display", "headless", "core-input-peer-pairs"
+      "core-input-fd",
+      "enable-seamless",
+      "listen",
+      "port",
+      "identity",
+      "peer-pin",
+      "journal",
+      "holding-display",
+      "headless",
+      "core-input-peer-pairs",
+      "share-clipboard-text",
+      "capture-fps",
+      "input-evidence-config"
   };
   QSet<QString> seen;
   for (const auto &name : names) {
@@ -255,15 +282,20 @@ void LocalInputHostBootstrap::validateOptions(const QStringList &names) const
   for (const auto &name : {"core-input-fd", "enable-seamless", "listen", "identity", "peer-pin", "journal"})
     require(seen.contains(name), "Private input companion requires explicit host configuration");
   require(
-      seen.contains("core-input-peer-pairs") == m_peerPairsSupplied, "Input peer policy option changed after bootstrap"
+      seen.contains("core-input-peer-pairs") == m_peerPairsSupplied &&
+          seen.contains("input-evidence-config") == m_evidenceSupplied,
+      "Input policy or evidence option changed after bootstrap"
   );
 }
-std::unique_ptr<LocalInputChannel> LocalInputHostBootstrap::adopt()
+std::unique_ptr<LocalInputChannel> LocalInputHostBootstrap::adopt(const std::function<void()> &verifiedSetup)
 {
   require(inherited(), "No inherited input descriptor");
   const auto parent = localInputProcess(getppid());
   const auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Core);
   require(parent && trust && trust->verify(*parent), "Private input parent failed packaged-code verification");
+  require(protectLocalInputDescriptor(m_descriptor), "Inherited input descriptor is no longer a private socketpair");
+  if (verifiedSetup)
+    verifiedSetup();
   return LocalInputChannel::adoptHost(std::exchange(m_descriptor, -1), *parent);
 }
 
@@ -295,8 +327,9 @@ LocalInputHostConfiguration LocalInputHostConfiguration::load(const QString &con
   );
   requireUniqueJsonKeys(bytes);
   const auto object = document.object();
-  const QSet<QString> allowed{"version", "listen",         "port",     "identity",      "peerPin",
-                              "journal", "holdingDisplay", "headless", "inputPeerPairs"};
+  const QSet<QString> allowed{"version",    "listen",         "port",     "identity",       "peerPin",
+                              "journal",    "holdingDisplay", "headless", "inputPeerPairs", "shareClipboardText",
+                              "captureFps", "inputEvidence"};
   for (auto it = object.begin(); it != object.end(); ++it)
     require(allowed.contains(it.key()), "Unknown WindowShare host configuration field");
   require(integerField(object, "version", 1, 1) == 1, "Unsupported WindowShare host configuration version");
@@ -322,7 +355,10 @@ LocalInputHostConfiguration LocalInputHostConfiguration::load(const QString &con
       "--journal",
       journal
   };
-  for (const auto &[key, option] : {std::pair{"holdingDisplay", "--holding-display"}, {"headless", "--headless"}}) {
+  for (const auto &[key, option] :
+       {std::pair{"holdingDisplay", "--holding-display"},
+        {"headless", "--headless"},
+        {"shareClipboardText", "--share-clipboard-text"}}) {
     if (object.contains(key)) {
       require(object[key].isBool(), "Invalid WindowShare configuration boolean");
       if (object[key].toBool())
@@ -330,14 +366,41 @@ LocalInputHostConfiguration LocalInputHostConfiguration::load(const QString &con
     }
   }
   LocalInputHostConfiguration result;
+  if (object.contains("captureFps")) {
+    const auto rate = integerField(object, "captureFps", 30, 60);
+    require(validCaptureRate(static_cast<unsigned>(rate)), "WindowShare captureFps must be 30 or 60");
+    arguments.append({"--capture-fps", QString::number(rate)});
+  }
   if (object.contains("inputPeerPairs")) {
     require(object["inputPeerPairs"].isArray(), "WindowShare input peer pairs must be a JSON array");
     const auto parsed = peerPairs(object["inputPeerPairs"].toArray());
     result.m_peerPolicy = parsed.policy;
     arguments.append(QStringLiteral("--core-input-peer-pairs=") + QString::fromUtf8(parsed.encoded));
   }
+  if (object.contains("inputEvidence")) {
+    require(
+        !result.m_peerPolicy.empty() && object["inputEvidence"].isObject(),
+        "Input evidence requires explicit input peer pairs"
+    );
+    const auto evidence = object["inputEvidence"].toObject();
+    require(
+        evidence.size() == 2 && evidence.contains("core") && evidence.contains("host"),
+        "Input evidence requires exactly core and host config paths"
+    );
+    const auto core = stringField(evidence, "core", 4096), host = stringField(evidence, "host", 4096);
+    require(
+        QFileInfo(core).isAbsolute() && QFileInfo(host).isAbsolute() && core != host,
+        "Input evidence configuration paths must be distinct and absolute"
+    );
+    result.m_inputEvidenceConfig = core;
+    arguments.append({"--input-evidence-config", host});
+  }
   result.m_arguments = std::move(arguments);
   return result;
+}
+const QString &LocalInputHostConfiguration::inputEvidenceConfig() const
+{
+  return m_inputEvidenceConfig;
 }
 const QStringList &LocalInputHostConfiguration::hostArguments() const
 {

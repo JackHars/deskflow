@@ -211,6 +211,61 @@ void testDecoder()
   check(decoded.error.isEmpty() && !decoded.image.isNull(), "Decoder failed after reset");
 }
 
+void testFocusedClipboardLifetime()
+{
+  for (int invalidation = 0; invalidation < 6; ++invalidation) {
+    Recording recording;
+    auto viewer = std::make_unique<Viewer>(301, 19, metadata());
+    recording.attach(*viewer);
+    check(!viewer->clipboardFocus(), "an unpainted viewer cannot read or apply clipboard text");
+    makeReady(*viewer, recording);
+    viewer->activateWindow();
+    viewer->setFocus(Qt::OtherFocusReason);
+    QCoreApplication::processEvents();
+    makeFocused(*viewer, recording);
+    const auto observation = viewer->clipboardFocus();
+    check(
+        observation && observation->live() && observation->binding.owner == Owner{301, 19} &&
+            observation->binding.focusRequest == recording.focusRequest() && observation->binding.focusRevision == 7 &&
+            observation->binding.geometry == 1,
+        "clipboard retains the actual focused, committed and painted viewer tuple"
+    );
+    if (invalidation == 0)
+      focus(*viewer, false);
+    if (invalidation == 1)
+      viewer->hide();
+    if (invalidation == 2)
+      viewer->setWindowState(Qt::WindowMinimized);
+    if (invalidation == 3)
+      viewer->applyMetadata(metadata(2));
+    if (invalidation == 4)
+      viewer->disconnected();
+    if (invalidation == 5)
+      viewer.reset();
+    check(
+        !observation->live() && (!viewer || !viewer->clipboardFocus()),
+        "blur, hide, minimize, stale paint, disconnect and destruction revoke retained clipboard focus"
+    );
+  }
+  Recording recording;
+  Viewer viewer(302, 20, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  viewer.activateWindow();
+  viewer.setFocus(Qt::OtherFocusReason);
+  QCoreApplication::processEvents();
+  makeFocused(viewer, recording);
+  const auto before = viewer.clipboardFocus();
+  check(before && before->live(), "focus replacement clipboard fixture is ready");
+  focus(viewer, false);
+  makeFocused(viewer, recording, 8);
+  const auto after = viewer.clipboardFocus();
+  check(
+      !before->live() && after && after->live() && before->binding != after->binding,
+      "new focus cannot revive or relabel a retained clipboard observation"
+  );
+}
+
 void testMappingAndReadiness()
 {
   Recording recording;
@@ -987,6 +1042,92 @@ void testFullInputFenceInvalidation()
   viewer.disconnected();
 }
 
+void testPreparationGateSurvivesAllResume()
+{
+  Recording recording;
+  Viewer viewer(61, 22, metadata());
+  recording.attach(viewer);
+  makeReady(viewer, recording);
+  makeFocused(viewer, recording);
+  const InputPreparationBinding preparation{100, 6, {71, 83, 1}};
+  check(viewer.beginInputPreparation(preparation), "Preparation gate did not close");
+  const auto before = recording.events.size();
+  const auto position = viewer.videoRect().center();
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+  check(recording.events.size() == before, "Preparation forwarded the withheld click or keyboard input");
+  check(viewer.requestInputPreparationFocus(preparation), "Preparation did not admit explicit focus-only intent");
+  check(
+      recording.events.size() == before + 1 && recording.events.back().object["kind"] == "focus",
+      "Preparation focus intent synthesized input"
+  );
+  viewer.focusAcknowledged(9, recording.focusRequest());
+  auto all = originalRoute(viewer, recording, 1, 9);
+  all.binding.scope = ForwardingScope::All;
+  viewer.keyboardRoute(all);
+  check(
+      recording.lastRoute().result == KeyboardRouteResult::Ready && viewer.allForwardingFenced(all.binding) &&
+          viewer.inputPreparationFenced(preparation),
+      "Genuine All could not coexist with preparation"
+  );
+  viewer.keyboardRoute(resumeRoute(all));
+  check(
+      recording.lastRoute().result == KeyboardRouteResult::Ready && !viewer.allForwardingFenced(all.binding) &&
+          viewer.inputPreparationFenced(preparation),
+      "Host resume incorrectly consumed the preparation gate"
+  );
+  const auto resumed = recording.events.size();
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::NoButton);
+  mouse(viewer, QEvent::MouseButtonPress, position);
+  mouse(viewer, QEvent::MouseButtonRelease, position, Qt::LeftButton, Qt::NoButton);
+  key(viewer, QEvent::KeyPress, Qt::Key_B, "b");
+  key(viewer, QEvent::KeyRelease, Qt::Key_B, "b");
+  check(recording.events.size() == resumed, "Host All resume exposed input before preparation cleanup");
+  auto stale = preparation;
+  ++stale.request;
+  check(!viewer.finishInputPreparation(stale, {}), "Substituted preparation origin opened the gate");
+  check(viewer.finishInputPreparation(preparation, {}), "Exact preparation cleanup did not retire the gate");
+  mouse(viewer, QEvent::MouseMove, position, Qt::NoButton, Qt::NoButton);
+  check(recording.events.size() == resumed + 1, "Completed preparation cleanup did not allow fresh neutral input");
+  viewer.disconnected();
+}
+
+void testNewViewerInheritsPreparationGate()
+{
+  Recording recording;
+  Viewer viewer(62, 22, metadata());
+  recording.attach(viewer);
+  const InputPreparationBinding preparation{101, 6, {71, 84, 1}};
+  // Bridge installs its connection gate before showing/admitting a new
+  // Viewer, including after the consumed Host All fence has gone away.
+  check(viewer.beginInputPreparation(preparation), "New Viewer could not inherit preparation gate");
+  makeReady(viewer, recording);
+  viewer.committed();
+  focus(viewer, true);
+  const auto before = recording.events.size();
+  const auto point = viewer.videoRect().center();
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  mouse(viewer, QEvent::MouseMove, point, Qt::NoButton, Qt::NoButton);
+  mouse(viewer, QEvent::MouseButtonPress, point);
+  mouse(viewer, QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton);
+  check(
+      viewer.inputPreparationFenced(preparation) && recording.events.size() == before &&
+          recording.count(MessageType::Input, "focus") == 0,
+      "New Viewer bypassed connection preparation through automatic focus or source input"
+  );
+  auto stale = preparation;
+  ++stale.request;
+  check(
+      !viewer.finishInputPreparation(stale, {}) && viewer.inputPreparationFenced(preparation),
+      "Old cleanup opened the new Viewer's preparation gate"
+  );
+  check(viewer.finishInputPreparation(preparation, {}), "Exact cleanup did not retire inherited preparation");
+  viewer.disconnected();
+}
+
 void testFullInputFenceReceiptLifetime()
 {
   Recording recording;
@@ -1268,6 +1409,7 @@ int main(int argc, char **argv)
   try {
     testDecoder();
     testInputMethodIsExplicitlyUnsupported();
+    testFocusedClipboardLifetime();
     testMappingAndReadiness();
     testViewportLifecycle();
     testFocusQueueAndOwnership();
@@ -1286,6 +1428,8 @@ int main(int argc, char **argv)
     testKeyboardRoutePendingFocus(ForwardingScope::All, true);
     testFullInputFenceAndResume();
     testFullInputFenceInvalidation();
+    testPreparationGateSurvivesAllResume();
+    testNewViewerInheritsPreparationGate();
     testFullInputFenceReceiptLifetime();
     testKeyboardRouteBindingValidation();
     testKeyboardRouteInvalidation();

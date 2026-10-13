@@ -14,10 +14,26 @@
 extern const char *const kMsgCInputSequenceAck;     // CISA + generation:u32
 extern const char *const kMsgDInputSequence;        // DSEQ + body length:u16 + bounded body
 extern const char *const kMsgCInputSequenceReceipt; // CISR + fixed 15-byte body
-extern const char *const kMsgCInputCutoffAck;       // CICA + negotiated generation:u32
-extern const char *const kMsgDInputCutoff;          // DICQ + fixed bounded request
-extern const char *const kMsgDInputCutoffResume;    // DICX + exact binding
-extern const char *const kMsgCInputCutoffReceipt;   // CICR + exact binding and outcome
+extern const char *const kMsgCInputPreparationAck;
+extern const char *const kMsgDInputPreparation;
+extern const char *const kMsgCPreparedInputFocus;
+extern const char *const kMsgDInputPreparationPromotion;
+extern const char *const kMsgDInputPreparationCancel;
+extern const char *const kMsgCInputPreparationReceipt;
+extern const char *const kMsgCInputCutoffAck;          // CICA + negotiated generation:u32
+extern const char *const kMsgDInputCutoff;             // DICQ + fixed bounded request
+extern const char *const kMsgDInputCutoffResume;       // DICX + exact binding
+extern const char *const kMsgCInputCutoffReceipt;      // CICR + exact binding and outcome
+extern const char *const kMsgCMappedInputCutoffAck;    // CIMA + negotiated IPC2 generation
+extern const char *const kMsgDMappedInputCutoff;       // DICM + cutoff and frozen point
+extern const char *const kMsgCMappedInputCutoffResult; // CIMR + exact mapped result
+extern const char *const kMsgCSealedInputCutoffAck;    // CICS + negotiated IPC4 generation
+extern const char *const kMsgDSealedInputCutoff;       // DICS + initial sealed cutoff and point
+extern const char *const kMsgDInputCutoffMap;          // DICF + fresh map bound to retained seal
+extern const char *const kMsgCSealedInputCutoffResult; // CIMS + mapped result and origin seal
+extern const char *const kMsgCBatchedInputCutoffAck;   // CICB + negotiated IPC5 generation
+extern const char *const kMsgDInputCutoffBatch;        // DICB + bounded fresh maps
+extern const char *const kMsgCInputCutoffBatchResult;  // CIMB + all exact mapped results
 /**
  * @file ProtocolTypes.h
  * @brief Deskflow Network Protocol Specification and Implementation

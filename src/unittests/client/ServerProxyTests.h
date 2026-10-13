@@ -39,6 +39,14 @@ private Q_SLOTS:
   void inputCutoff_requiresNegotiationAndExactBoundedPackets();
   void inputCutoff_freezeRejectsLaterInputAndWrongResume();
   void inputCutoff_deadlineInvalidationAndDestruction();
+  void mappedCutoff_delegatesExactPointAndWaitsForDrain();
+  void mappedCutoff_rejectsMissingProofAndStaleCompletion();
+  void sealedCutoff_refreshesWithoutReopeningLegacy();
+  void sealedCutoff_rejectsStaleOverlappingAndInvalidatedMaps();
+  void batchedCutoff_delegatesAtomicallyWithoutNewPrefix();
+  void batchedCutoff_rejectsOverlapLossAndSubstitution();
+  void preparation_ordersFocusPromotionAndLinkedCleanup();
+  void preparation_rejectsSubstitutionAndNeverInfersRelease();
 #endif
 
 private:

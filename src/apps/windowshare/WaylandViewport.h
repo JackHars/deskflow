@@ -54,6 +54,22 @@ std::optional<WaylandViewportGeometry> readWaylandViewport(QWindow *window, QStr
 std::optional<QPointF>
 mapWaylandViewport(QWindow *window, const WaylandViewportGeometry &expected, QPointF surfacePoint);
 
+struct WaylandWindowAssociation
+{
+  QString token;
+  QPointer<QObject> role;
+  quintptr surface = 0, topLevel = 0;
+  std::uint32_t resource = 0;
+};
+// Writes an opaque app_id on this exact existing xdg_toplevel. Its appearance
+// on one owned MetaWindow is the compositor-side challenge response; window
+// titles, PIDs, rectangles and other windows on this connection are irrelevant.
+std::optional<WaylandWindowAssociation>
+associateWaylandWindow(QWindow *window, const WaylandViewportGeometry &expected);
+bool currentWaylandAssociation(
+    QWindow *window, const WaylandViewportGeometry &expected, const WaylandWindowAssociation &association
+);
+
 // Read-only, bounded observation on the *existing* QtWayland default input
 // event queue. Two ordered wl_display_sync callbacks are chained: the second
 // request is issued only after the first callback. Qt QPA events are dispatched

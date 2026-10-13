@@ -34,10 +34,12 @@ apt-get install -y --no-install-recommends \
   gnome-shell mutter gjs python3 python3-gi gir1.2-gtk-4.0 \
   libei-dev libeis-dev build-essential pkg-config dbus-daemon dbus-bin libglib2.0-bin libglib2.0-dev \
   libgl1-mesa-dri libegl-mesa0 fonts-dejavu-core nodejs \
-  cmake ninja-build qt6-base-dev qt6-base-private-dev qt6-tools-dev \
+  git ca-certificates help2man cmake ninja-build qt6-base-dev qt6-base-private-dev qt6-tools-dev \
   qt6-wayland qt6-wayland-dev qt6-wayland-private-dev libwayland-dev \
   libssl-dev openssl libavcodec-dev libavutil-dev libswscale-dev libx264-dev ffmpeg \
-  libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 libxkbcommon-x11-0 xvfb xauth
+  libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 libxkbcommon-x11-0 xvfb xauth \
+  libx11-dev libx11-xcb-dev libxtst-dev libxkbfile-dev libxinerama-dev libxrandr-dev libxi-dev \
+  libxkbregistry-dev libxkbcommon-dev libportal-dev
 dbus-uuidgen --ensure=/etc/machine-id
 
 # This account exists only in this container; never adjust the checkout's owner.
@@ -49,7 +51,7 @@ scratch=$(mktemp -d /tmp/deskflow-gnome-container-XXXXXX)
 finish() {
   local exit_status=$?
   mkdir -p "$scratch/report"
-  for name in readiness viewer-fixture configure build application-tests launcher-native; do
+  for name in readiness viewer-fixture core-input-fixture configure build core-configure core-build core-layout-tests application-tests launcher-native; do
     if [[ -f "$scratch/$name.log" ]]; then
       cp "$scratch/$name.log" "$scratch/report/"
       if [[ $exit_status != 0 ]]; then
@@ -72,11 +74,23 @@ runuser -u "$fixture_user" -- /usr/bin/python3 \
 runuser -u "$fixture_user" -- /usr/bin/python3 \
   "$source_root/deploy/windowshare/gnome-qt-viewer-fixture-tests.py" \
   >"$scratch/viewer-fixture.log" 2>&1
+runuser -u "$fixture_user" -- /usr/bin/python3 \
+  "$source_root/deploy/windowshare/gnome-core-input-tests.py" --self-test \
+  >"$scratch/core-input-fixture.log" 2>&1
 runuser -u "$fixture_user" -- cmake -S "$source_root/src/apps/windowshare" -B "$scratch/build" -G Ninja \
   -DWINDOWSHARE_APP=ON -DWINDOWSHARE_GNOME_FIXTURE=ON -DCMAKE_BUILD_TYPE=Debug \
   >"$scratch/configure.log" 2>&1
 runuser -u "$fixture_user" -- cmake --build "$scratch/build" --parallel 2 \
   >"$scratch/build.log" 2>&1
+runuser -u "$fixture_user" -- cmake -S "$source_root" -B "$scratch/core" -G Ninja \
+  -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON \
+  -DSKIP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug \
+  >"$scratch/core-configure.log" 2>&1
+runuser -u "$fixture_user" -- cmake --build "$scratch/core" --target deskflow-core EiComputerTests --parallel 2 \
+  >"$scratch/core-build.log" 2>&1
+runuser -u "$fixture_user" -- env QT_QPA_PLATFORM=offscreen LANG=C.UTF-8 \
+  ctest --test-dir "$scratch/core/src/unittests" --no-tests=error --output-on-failure \
+  --timeout 30 -R '^EiComputerTests$' >"$scratch/core-layout-tests.log" 2>&1
 set +e
 runuser -u "$fixture_user" -- env QT_QPA_PLATFORM=offscreen LANG=C.UTF-8 \
   ctest --test-dir "$scratch/build" --output-on-failure --timeout 120 \
@@ -100,6 +114,19 @@ if [[ $result == 0 ]]; then
       --viewer "$scratch/build/deskflow-windowshare" \
       --fixture "$scratch/build/windowshare-gnome-viewer-fixture" \
       --scale "$scale" --output "$scratch/report/qt-scale-$scale"
+    result=$?
+    if [[ $result != 0 ]]; then
+      break
+    fi
+  done
+fi
+if [[ $result == 0 ]]; then
+  for scale in 1 1.25; do
+    runuser -u "$fixture_user" -- /usr/bin/python3 \
+      "$source_root/deploy/windowshare/gnome-core-input-tests.py" \
+      --core "$scratch/core/bin/deskflow-core" \
+      --viewer "$scratch/build/deskflow-windowshare" \
+      --scale "$scale" --output "$scratch/report/core-input-scale-$scale"
     result=$?
     if [[ $result != 0 ]]; then
       break

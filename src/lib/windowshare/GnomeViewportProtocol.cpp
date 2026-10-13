@@ -4,11 +4,13 @@
  */
 #include "GnomeViewportProtocol.h"
 #include "UniqueJson.h"
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QtEndian>
 #include <algorithm>
 #include <charconv>
 #include <cmath>
+#include <set>
 #include <stdexcept>
 
 namespace deskflow::windowshare {
@@ -63,6 +65,26 @@ QString operationName(GnomeViewportOperation operation)
     return QStringLiteral("invalidated");
   case GnomeViewportOperation::InputDrain:
     return QStringLiteral("input-drain");
+  case GnomeViewportOperation::InputSeal:
+    return QStringLiteral("input-seal");
+  case GnomeViewportOperation::InputMap:
+    return QStringLiteral("input-map");
+  case GnomeViewportOperation::SealInvalidated:
+    return QStringLiteral("seal-invalidated");
+  case GnomeViewportOperation::InputMapBatch:
+    return QStringLiteral("input-map-batch");
+  case GnomeViewportOperation::PreparationInventory:
+    return QStringLiteral("preparation-inventory");
+  case GnomeViewportOperation::PreparationMap:
+    return QStringLiteral("preparation-map");
+  case GnomeViewportOperation::PreparationDrain:
+    return QStringLiteral("preparation-drain");
+  case GnomeViewportOperation::PreparationFocus:
+    return QStringLiteral("preparation-focus");
+  case GnomeViewportOperation::PreparationPromote:
+    return QStringLiteral("preparation-promote");
+  case GnomeViewportOperation::PreparationCleanup:
+    return QStringLiteral("preparation-cleanup");
   }
   throw std::runtime_error("Unknown viewport operation");
 }
@@ -73,7 +95,12 @@ GnomeViewportOperation operation(const QJsonObject &object)
   require(name.isString(), "Viewport operation must be a string");
   for (auto candidate :
        {GnomeViewportOperation::Snapshot, GnomeViewportOperation::Map, GnomeViewportOperation::Check,
-        GnomeViewportOperation::Invalidated, GnomeViewportOperation::InputDrain})
+        GnomeViewportOperation::Invalidated, GnomeViewportOperation::InputDrain, GnomeViewportOperation::InputSeal,
+        GnomeViewportOperation::InputMap, GnomeViewportOperation::SealInvalidated,
+        GnomeViewportOperation::InputMapBatch, GnomeViewportOperation::PreparationInventory,
+        GnomeViewportOperation::PreparationMap, GnomeViewportOperation::PreparationDrain,
+        GnomeViewportOperation::PreparationFocus, GnomeViewportOperation::PreparationPromote,
+        GnomeViewportOperation::PreparationCleanup})
     if (name.toString() == operationName(candidate))
       return candidate;
   throw std::runtime_error("Unknown viewport operation");
@@ -138,6 +165,51 @@ InputCutoffBinding cutoff(const QJsonObject &message)
   require(validInputCutoffBinding(result), "Invalid viewport cutoff binding");
   return result;
 }
+QJsonArray pointsJson(const std::vector<GnomeViewportRequest::MapItem> &points, const InputCutoffBinding &origin)
+{
+  QJsonArray result;
+  auto previous = origin;
+  for (const auto &point : points) {
+    require(continuesInputCutoffSeal(previous, point.cutoff), "Viewport batch changed its common lifetime");
+    result.append(
+        QJsonObject{
+            {"request", QString::number(point.cutoff.request)},
+            {"sequence", QString::number(point.cutoff.capture.sequence)},
+            {"part", qint64(point.cutoff.capture.part)},
+            {"x", point.x},
+            {"y", point.y}
+        }
+    );
+    previous = point.cutoff;
+  }
+  return result;
+}
+std::vector<GnomeViewportRequest::MapItem>
+mapPoints(const QJsonObject &message, const InputCutoffBinding &origin, bool mapped)
+{
+  require(message.value("points").isArray(), "Viewport map points missing");
+  const auto array = message.value("points").toArray();
+  require(!array.empty() && array.size() <= 16, "Viewport map batch exceeds bound");
+  std::vector<GnomeViewportRequest::MapItem> result;
+  auto previous = origin;
+  for (const auto &value : array) {
+    require(value.isObject(), "Viewport map point is not an object");
+    const auto point = value.toObject();
+    fields(point, {"request", "sequence", "part", "x", "y"});
+    auto binding = origin;
+    binding.request = sequence(point, "request");
+    binding.capture.sequence = sequence(point, "sequence");
+    binding.capture.part =
+        static_cast<decltype(binding.capture.part)>(integer(point, "part", maximumOriginalInputParts));
+    require(continuesInputCutoffSeal(previous, binding), "Viewport map points changed or reordered their cutoff");
+    result.push_back(
+        {binding, number(point, "x", mapped ? 0 : -16777216, 16777216),
+         number(point, "y", mapped ? 0 : -16777216, 16777216)}
+    );
+    previous = binding;
+  }
+  return result;
+}
 QJsonObject stateJson(const GnomeViewportState &s)
 {
   return {
@@ -150,6 +222,7 @@ QJsonObject stateJson(const GnomeViewportState &s)
       {"surfaceIncarnation", QString::number(s.surfaceIncarnation)},
       {"viewportRevision", QString::number(s.viewportRevision)},
       {"peerFingerprint", s.peerFingerprint},
+      {"windowAssociation", s.windowAssociation},
       {"nativeSurface", qint64(s.nativeSurface)},
       {"clientWidth", s.clientWidth},
       {"clientHeight", s.clientHeight},
@@ -171,15 +244,35 @@ QJsonObject stateJson(const GnomeViewportState &s)
 }
 GnomeViewportState state(const QJsonObject &object)
 {
-  fields(object, {"connection",         "session",          "epoch",
-                  "geometry",           "focusRequest",     "focusRevision",
-                  "surfaceIncarnation", "viewportRevision", "peerFingerprint",
-                  "nativeSurface",      "clientWidth",      "clientHeight",
-                  "sourceWidth",        "sourceHeight",     "imageWidth",
-                  "imageHeight",        "videoX",           "videoY",
-                  "videoWidth",         "videoHeight",      "dpr",
-                  "surfaceWidth",       "surfaceHeight",    "contentX",
-                  "contentY",           "logicalScale"});
+  fields(
+      object, {"connection",
+               "session",
+               "epoch",
+               "geometry",
+               "focusRequest",
+               "focusRevision",
+               "surfaceIncarnation",
+               "viewportRevision",
+               "peerFingerprint",
+               "windowAssociation",
+               "nativeSurface",
+               "clientWidth",
+               "clientHeight",
+               "sourceWidth",
+               "sourceHeight",
+               "imageWidth",
+               "imageHeight",
+               "videoX",
+               "videoY",
+               "videoWidth",
+               "videoHeight",
+               "dpr",
+               "surfaceWidth",
+               "surfaceHeight",
+               "contentX",
+               "contentY",
+               "logicalScale"}
+  );
   GnomeViewportState s;
   s.connection = sequence(object, "connection");
   s.session = sequence(object, "session");
@@ -190,6 +283,17 @@ GnomeViewportState state(const QJsonObject &object)
   s.surfaceIncarnation = sequence(object, "surfaceIncarnation");
   s.viewportRevision = sequence(object, "viewportRevision");
   s.peerFingerprint = object.value("peerFingerprint").toString();
+  s.windowAssociation = object.value("windowAssociation").toString();
+  const auto associationPrefix = QStringLiteral("org.deskflow.window.");
+  require(
+      s.windowAssociation.startsWith(associationPrefix) &&
+          s.windowAssociation.size() == associationPrefix.size() + 64 &&
+          std::all_of(
+              s.windowAssociation.begin() + associationPrefix.size(), s.windowAssociation.end(),
+              [](QChar c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
+          ),
+      "Invalid per-window Wayland association"
+  );
   require(
       s.peerFingerprint.size() == 64 &&
           std::all_of(
@@ -234,33 +338,245 @@ GnomeViewportState state(const QJsonObject &object)
   );
   return s;
 }
+
+QJsonObject preparationJson(const InputPreparationBinding &b)
+{
+  return {
+      {"request", QString::number(b.request)},
+      {"coreConnectionGeneration", QString::number(b.coreConnectionGeneration)},
+      {"captureEpoch", QString::number(b.capture.epoch)},
+      {"captureSequence", QString::number(b.capture.sequence)},
+      {"capturePart", QString::number(b.capture.part)}
+  };
+}
+InputPreparationBinding preparation(const QJsonObject &object)
+{
+  require(object.value("preparation").isObject(), "Missing preparation binding");
+  const auto value = object.value("preparation").toObject();
+  fields(value, {"request", "coreConnectionGeneration", "captureEpoch", "captureSequence", "capturePart"});
+  const auto generation = sequence(value, "coreConnectionGeneration"), part = sequence(value, "capturePart");
+  require(generation <= UINT32_MAX && part <= maximumOriginalInputParts, "Invalid preparation generation or part");
+  InputPreparationBinding result{
+      sequence(value, "request"),
+      static_cast<std::uint32_t>(generation),
+      {sequence(value, "captureEpoch"), sequence(value, "captureSequence"), static_cast<std::uint16_t>(part)}
+  };
+  require(validInputPreparationBinding(result), "Invalid preparation binding");
+  return result;
+}
+QJsonObject preparationTargetJson(const GnomePreparationTarget &target)
+{
+  return {
+      {"session", QString::number(target.session)},
+      {"epoch", QString::number(target.epoch)},
+      {"geometry", QString::number(target.geometry)},
+      {"surfaceIncarnation", QString::number(target.surfaceIncarnation)},
+      {"paintRevision", QString::number(target.paintRevision)},
+      {"nativeSurface", qint64(target.nativeSurface)},
+      {"windowAssociation", target.windowAssociation}
+  };
+}
+GnomePreparationTarget preparationTarget(const QJsonObject &value)
+{
+  fields(
+      value,
+      {"session", "epoch", "geometry", "surfaceIncarnation", "paintRevision", "nativeSurface", "windowAssociation"}
+  );
+  GnomePreparationTarget result{
+      sequence(value, "session"),
+      sequence(value, "epoch"),
+      sequence(value, "geometry"),
+      sequence(value, "surfaceIncarnation"),
+      sequence(value, "paintRevision"),
+      integer(value, "nativeSurface", UINT32_MAX),
+      value.value("windowAssociation").toString()
+  };
+  const auto prefix = QStringLiteral("org.deskflow.window.");
+  require(
+      result.windowAssociation.startsWith(prefix) && result.windowAssociation.size() == prefix.size() + 64 &&
+          std::all_of(
+              result.windowAssociation.begin() + prefix.size(), result.windowAssociation.end(),
+              [](QChar c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
+          ),
+      "Invalid preparation role challenge"
+  );
+  return result;
+}
+GnomePreparationTarget preparationTargetField(const QJsonObject &value)
+{
+  require(value.value("target").isObject(), "Missing preparation target");
+  return preparationTarget(value.value("target").toObject());
+}
+QJsonObject inventoryJson(const GnomePreparationInventory &inventory)
+{
+  QJsonArray targets;
+  for (const auto &target : inventory.targets)
+    targets.append(preparationTargetJson(target));
+  return {
+      {"connection", QString::number(inventory.connection)},
+      {"peerFingerprint", inventory.peerFingerprint},
+      {"targets", targets}
+  };
+}
+GnomePreparationInventory inventory(const QJsonObject &value)
+{
+  fields(value, {"connection", "peerFingerprint", "targets"});
+  GnomePreparationInventory result;
+  result.connection = sequence(value, "connection");
+  result.peerFingerprint = value.value("peerFingerprint").toString();
+  require(
+      result.peerFingerprint.size() == 64 &&
+          std::all_of(
+              result.peerFingerprint.begin(), result.peerFingerprint.end(),
+              [](QChar c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); }
+          ) &&
+          result.peerFingerprint != QString(64, '0'),
+      "Invalid preparation peer fingerprint"
+  );
+  require(value.value("targets").isArray(), "Missing preparation inventory");
+  const auto targets = value.value("targets").toArray();
+  require(!targets.isEmpty() && targets.size() <= 16, "Preparation inventory exceeds bound");
+  QSet<QString> associations;
+  std::set<std::uint64_t> sessions;
+  for (const auto &target : targets) {
+    require(target.isObject(), "Invalid preparation target entry");
+    auto parsed = preparationTarget(target.toObject());
+    require(
+        !associations.contains(parsed.windowAssociation) && sessions.insert(parsed.session).second,
+        "Duplicate preparation target"
+    );
+    associations.insert(parsed.windowAssociation);
+    result.targets.push_back(std::move(parsed));
+  }
+  return result;
+}
+GnomeViewportRequest parsePreparationRequest(const QJsonObject &object, GnomeViewportOperation op)
+{
+  GnomeViewportRequest result;
+  result.operation = op;
+  result.request = sequence(object, "request");
+  result.preparation = preparation(object);
+  result.budgetMs = integer(object, "budgetMs", 500);
+  QSet<QString> expected{"version", "operation", "request", "preparation", "budgetMs"};
+  if (op != GnomeViewportOperation::PreparationInventory) {
+    expected.insert("target");
+    result.target = preparationTargetField(object);
+  }
+  if (op == GnomeViewportOperation::PreparationMap) {
+    expected.insert("x");
+    expected.insert("y");
+    result.x = number(object, "x", -16777216, 16777216);
+    result.y = number(object, "y", -16777216, 16777216);
+  }
+  if (op == GnomeViewportOperation::PreparationPromote) {
+    expected.insert("cutoff");
+    result.cutoff = cutoff(object);
+    require(
+        result.cutoff.request > result.preparation.request &&
+            result.cutoff.coreConnectionGeneration == result.preparation.coreConnectionGeneration &&
+            result.cutoff.capture == result.preparation.capture,
+        "Promotion reply changed its original preparation capture"
+    );
+    require(
+        result.cutoff.request > result.preparation.request && result.cutoff.capture == result.preparation.capture &&
+            result.cutoff.coreConnectionGeneration == result.preparation.coreConnectionGeneration,
+        "Preparation promotion changed capture"
+    );
+  }
+  fields(object, expected);
+  return result;
+}
+GnomeViewportReply parsePreparationReply(const QJsonObject &object, GnomeViewportOperation op)
+{
+  GnomeViewportReply result;
+  result.operation = op;
+  result.request = sequence(object, "request");
+  result.preparation = preparation(object);
+  require(object.value("ok").isBool(), "Preparation reply needs boolean result");
+  result.ok = object.value("ok").toBool();
+  QSet<QString> expected{"version", "operation", "request", "preparation", "ok"};
+  if (op != GnomeViewportOperation::PreparationInventory) {
+    expected.insert("target");
+    result.target = preparationTargetField(object);
+  }
+  if (op == GnomeViewportOperation::PreparationPromote) {
+    expected.insert("cutoff");
+    result.cutoff = cutoff(object);
+  }
+  if (!result.ok) {
+    expected.insert("reason");
+    result.reason = reason(object);
+  } else if (op == GnomeViewportOperation::PreparationInventory) {
+    expected.insert("inventory");
+    require(object.value("inventory").isObject(), "Missing preparation inventory result");
+    result.inventory = inventory(object.value("inventory").toObject());
+  } else if (op == GnomeViewportOperation::PreparationMap) {
+    expected.insert("x");
+    expected.insert("y");
+    result.x = number(object, "x", 0, 16777216);
+    result.y = number(object, "y", 0, 16777216);
+  } else if (op == GnomeViewportOperation::PreparationFocus) {
+    expected.insert("state");
+    require(object.value("state").isObject(), "Missing preparation focus result");
+    result.state = state(object.value("state").toObject());
+    require(
+        result.state.session == result.target.session && result.state.epoch == result.target.epoch &&
+            result.state.geometry == result.target.geometry &&
+            result.state.surfaceIncarnation == result.target.surfaceIncarnation &&
+            result.state.nativeSurface == result.target.nativeSurface &&
+            result.state.windowAssociation == result.target.windowAssociation,
+        "Preparation focus changed target"
+    );
+  }
+  fields(object, expected);
+  return result;
+}
 } // namespace
 
 GnomeViewportRequest parseGnomeViewportRequest(const QJsonObject &object)
 {
   GnomeViewportRequest result;
   result.operation = operation(object);
+  if (isGnomePreparationOperation(result.operation))
+    return parsePreparationRequest(object, result.operation);
   result.request = sequence(object, "request");
   QSet<QString> expected{"version", "operation", "request"};
   if (result.operation == GnomeViewportOperation::Map || result.operation == GnomeViewportOperation::Check ||
-      result.operation == GnomeViewportOperation::InputDrain) {
+      result.operation == GnomeViewportOperation::InputDrain || result.operation == GnomeViewportOperation::InputSeal ||
+      result.operation == GnomeViewportOperation::InputMap ||
+      result.operation == GnomeViewportOperation::InputMapBatch) {
     expected.insert("snapshot");
     result.snapshot = sequence(object, "snapshot");
     require(result.snapshot < result.request, "Map/check must follow its snapshot request");
   }
-  if (result.operation == GnomeViewportOperation::InputDrain) {
+  if (result.operation == GnomeViewportOperation::InputDrain || result.operation == GnomeViewportOperation::InputSeal ||
+      result.operation == GnomeViewportOperation::InputMap ||
+      result.operation == GnomeViewportOperation::InputMapBatch) {
     expected.insert("cutoff");
     expected.insert("budgetMs");
     result.cutoff = cutoff(object);
     result.budgetMs = integer(object, "budgetMs", gnomeViewportLifetimeMs);
   }
-  if (result.operation == GnomeViewportOperation::Map) {
+  if (result.operation == GnomeViewportOperation::InputMap) {
+    expected.insert("seal");
+    result.seal = sequence(object, "seal");
+    require(result.seal < result.cutoff.request, "Fresh input map must follow its prefix seal");
+  }
+  if (result.operation == GnomeViewportOperation::InputMapBatch) {
+    expected.insert("points");
+    result.points = mapPoints(object, result.cutoff, false);
+  }
+  if (result.operation == GnomeViewportOperation::Map || result.operation == GnomeViewportOperation::InputMap) {
     expected.insert("x");
     expected.insert("y");
     result.x = number(object, "x", -16777216, 16777216);
     result.y = number(object, "y", -16777216, 16777216);
   }
-  require(result.operation != GnomeViewportOperation::Invalidated, "Invalidated is not a request");
+  require(
+      result.operation != GnomeViewportOperation::Invalidated &&
+          result.operation != GnomeViewportOperation::SealInvalidated,
+      "Invalidation is not a request"
+  );
   fields(object, expected);
   return result;
 }
@@ -268,11 +584,19 @@ GnomeViewportReply parseGnomeViewportReply(const QJsonObject &object)
 {
   GnomeViewportReply result;
   result.operation = operation(object);
+  if (isGnomePreparationOperation(result.operation))
+    return parsePreparationReply(object, result.operation);
   QSet<QString> expected{"version", "operation"};
-  if (result.operation == GnomeViewportOperation::Invalidated) {
-    expected.insert("snapshot");
+  if (result.operation == GnomeViewportOperation::Invalidated ||
+      result.operation == GnomeViewportOperation::SealInvalidated) {
     expected.insert("reason");
-    result.snapshot = sequence(object, "snapshot");
+    if (result.operation == GnomeViewportOperation::Invalidated) {
+      expected.insert("snapshot");
+      result.snapshot = sequence(object, "snapshot");
+    } else {
+      expected.insert("cutoff");
+      result.cutoff = cutoff(object);
+    }
     result.reason = reason(object);
   } else {
     expected.insert("request");
@@ -280,12 +604,19 @@ GnomeViewportReply parseGnomeViewportReply(const QJsonObject &object)
     result.request = sequence(object, "request");
     require(object.value("ok").isBool(), "Viewport reply needs boolean result");
     result.ok = object.value("ok").toBool();
-    if (result.operation == GnomeViewportOperation::InputDrain) {
+    if (result.operation == GnomeViewportOperation::InputDrain ||
+        result.operation == GnomeViewportOperation::InputSeal || result.operation == GnomeViewportOperation::InputMap ||
+        result.operation == GnomeViewportOperation::InputMapBatch) {
       expected.insert("cutoff");
       expected.insert("snapshot");
       result.cutoff = cutoff(object);
       result.snapshot = sequence(object, "snapshot");
       require(result.snapshot < result.request, "Invalid input drain snapshot association");
+    }
+    if (result.operation == GnomeViewportOperation::InputMap) {
+      expected.insert("seal");
+      result.seal = sequence(object, "seal");
+      require(result.seal < result.cutoff.request, "Invalid input map prefix seal");
     }
     if (!result.ok) {
       expected.insert("reason");
@@ -299,11 +630,15 @@ GnomeViewportReply parseGnomeViewportReply(const QJsonObject &object)
       expected.insert("snapshot");
       result.snapshot = sequence(object, "snapshot");
       require(result.snapshot < result.request, "Invalid viewport snapshot association");
-      if (result.operation == GnomeViewportOperation::Map) {
+      if (result.operation == GnomeViewportOperation::Map || result.operation == GnomeViewportOperation::InputMap) {
         expected.insert("x");
         expected.insert("y");
         result.x = number(object, "x", 0, 16777216);
         result.y = number(object, "y", 0, 16777216);
+      }
+      if (result.operation == GnomeViewportOperation::InputMapBatch) {
+        expected.insert("points");
+        result.points = mapPoints(object, result.cutoff, true);
       }
     }
   }
@@ -315,15 +650,37 @@ QJsonObject gnomeViewportJson(const GnomeViewportRequest &request)
   QJsonObject result{
       {"version", 1}, {"operation", operationName(request.operation)}, {"request", QString::number(request.request)}
   };
+  if (isGnomePreparationOperation(request.operation)) {
+    result.insert("preparation", preparationJson(request.preparation));
+    result.insert("budgetMs", qint64(request.budgetMs));
+    if (request.operation != GnomeViewportOperation::PreparationInventory)
+      result.insert("target", preparationTargetJson(request.target));
+    if (request.operation == GnomeViewportOperation::PreparationMap) {
+      result.insert("x", request.x);
+      result.insert("y", request.y);
+    }
+    if (request.operation == GnomeViewportOperation::PreparationPromote)
+      result.insert("cutoff", cutoffJson(request.cutoff));
+    (void)parseGnomeViewportRequest(result);
+    return result;
+  }
   if (request.operation == GnomeViewportOperation::Map || request.operation == GnomeViewportOperation::Check ||
-      request.operation == GnomeViewportOperation::InputDrain)
+      request.operation == GnomeViewportOperation::InputDrain ||
+      request.operation == GnomeViewportOperation::InputSeal || request.operation == GnomeViewportOperation::InputMap ||
+      request.operation == GnomeViewportOperation::InputMapBatch)
     result.insert("snapshot", QString::number(request.snapshot));
-  if (request.operation == GnomeViewportOperation::InputDrain) {
+  if (request.operation == GnomeViewportOperation::InputDrain ||
+      request.operation == GnomeViewportOperation::InputSeal || request.operation == GnomeViewportOperation::InputMap ||
+      request.operation == GnomeViewportOperation::InputMapBatch) {
     require(validInputCutoffBinding(request.cutoff), "Invalid viewport cutoff binding");
     result.insert("cutoff", cutoffJson(request.cutoff));
     result.insert("budgetMs", qint64(request.budgetMs));
   }
-  if (request.operation == GnomeViewportOperation::Map) {
+  if (request.operation == GnomeViewportOperation::InputMap)
+    result.insert("seal", QString::number(request.seal));
+  if (request.operation == GnomeViewportOperation::InputMapBatch)
+    result.insert("points", pointsJson(request.points, request.cutoff));
+  if (request.operation == GnomeViewportOperation::Map || request.operation == GnomeViewportOperation::InputMap) {
     result.insert("x", request.x);
     result.insert("y", request.y);
   }
@@ -333,27 +690,57 @@ QJsonObject gnomeViewportJson(const GnomeViewportRequest &request)
 QJsonObject gnomeViewportJson(const GnomeViewportReply &reply)
 {
   QJsonObject result{{"version", 1}, {"operation", operationName(reply.operation)}};
-  if (reply.operation == GnomeViewportOperation::Invalidated) {
-    result.insert("snapshot", QString::number(reply.snapshot));
+  if (isGnomePreparationOperation(reply.operation)) {
+    result.insert("preparation", preparationJson(reply.preparation));
+    result.insert("request", QString::number(reply.request));
+    result.insert("ok", reply.ok);
+    if (reply.operation != GnomeViewportOperation::PreparationInventory)
+      result.insert("target", preparationTargetJson(reply.target));
+    if (reply.operation == GnomeViewportOperation::PreparationPromote)
+      result.insert("cutoff", cutoffJson(reply.cutoff));
+    if (!reply.ok)
+      result.insert("reason", reply.reason);
+    else if (reply.operation == GnomeViewportOperation::PreparationInventory)
+      result.insert("inventory", inventoryJson(reply.inventory));
+    else if (reply.operation == GnomeViewportOperation::PreparationMap) {
+      result.insert("x", reply.x);
+      result.insert("y", reply.y);
+    } else if (reply.operation == GnomeViewportOperation::PreparationFocus)
+      result.insert("state", stateJson(reply.state));
+    (void)parseGnomeViewportReply(result);
+    return result;
+  }
+  if (reply.operation == GnomeViewportOperation::Invalidated ||
+      reply.operation == GnomeViewportOperation::SealInvalidated) {
+    if (reply.operation == GnomeViewportOperation::Invalidated)
+      result.insert("snapshot", QString::number(reply.snapshot));
+    else
+      result.insert("cutoff", cutoffJson(reply.cutoff));
     result.insert("reason", reply.reason);
   } else {
     result.insert("request", QString::number(reply.request));
     result.insert("ok", reply.ok);
-    if (reply.operation == GnomeViewportOperation::InputDrain) {
+    if (reply.operation == GnomeViewportOperation::InputDrain || reply.operation == GnomeViewportOperation::InputSeal ||
+        reply.operation == GnomeViewportOperation::InputMap ||
+        reply.operation == GnomeViewportOperation::InputMapBatch) {
       require(validInputCutoffBinding(reply.cutoff), "Invalid viewport cutoff binding");
       result.insert("cutoff", cutoffJson(reply.cutoff));
       result.insert("snapshot", QString::number(reply.snapshot));
     }
+    if (reply.operation == GnomeViewportOperation::InputMap)
+      result.insert("seal", QString::number(reply.seal));
     if (!reply.ok)
       result.insert("reason", reply.reason);
     else if (reply.operation == GnomeViewportOperation::Snapshot)
       result.insert("state", stateJson(reply.state));
     else {
       result.insert("snapshot", QString::number(reply.snapshot));
-      if (reply.operation == GnomeViewportOperation::Map) {
+      if (reply.operation == GnomeViewportOperation::Map || reply.operation == GnomeViewportOperation::InputMap) {
         result.insert("x", reply.x);
         result.insert("y", reply.y);
       }
+      if (reply.operation == GnomeViewportOperation::InputMapBatch)
+        result.insert("points", pointsJson(reply.points, reply.cutoff));
     }
   }
   (void)parseGnomeViewportReply(result);

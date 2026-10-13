@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "OriginalInput.h"
+#include "InputEvidence.h"
 
 #include <algorithm>
 #include <limits>
@@ -274,6 +275,7 @@ OriginalInputStream::OriginalInputStream()
         return std::make_shared<OriginalInputEpoch::State>(reserveEpoch(next));
       }())
 {
+  inputEvidenceInitialize(InputEvidenceQueue::Capture, this, capacity);
   static_assert(std::is_trivially_copyable_v<OriginalInputRecord>);
   static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
   static_assert(std::atomic<OriginalInputRevocation>::is_always_lock_free);
@@ -324,6 +326,7 @@ bool OriginalInputStream::push(const OriginalInputRecord &record) noexcept
     revoke(OriginalInputRevocation::Overflow);
     return false;
   }
+  InputEvidenceMutation evidence(InputEvidenceQueue::Capture, this, 1, 0);
   m_records[written % capacity] = record;
   m_lastSequence = record.sequence;
   m_lastTimestamp = record.sourceTimestampNs;
@@ -339,6 +342,7 @@ std::optional<OriginalInputDelivery> OriginalInputStream::pop() noexcept
   const auto read = m_read.load(std::memory_order_relaxed);
   if (read == m_written.load(std::memory_order_acquire))
     return std::nullopt;
+  InputEvidenceMutation evidence(InputEvidenceQueue::Capture, this, 0, 1);
   OriginalInputDelivery result{m_records[read % capacity], m_epoch};
   m_read.store(read + 1, std::memory_order_release);
   return result.live() ? std::optional<OriginalInputDelivery>(std::move(result)) : std::nullopt;
@@ -346,6 +350,7 @@ std::optional<OriginalInputDelivery> OriginalInputStream::pop() noexcept
 
 void OriginalInputStream::revoke(OriginalInputRevocation reason) noexcept
 {
+  inputEvidenceInvalidate(InputEvidenceLoss::PipelineRevoked);
   m_epoch.revoke(reason);
 }
 

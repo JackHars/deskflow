@@ -2,12 +2,14 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "InputEvidence.h"
 #include "LocalInputChannel.h"
 #include <QCoreApplication>
 #include <QEventLoop>
 #include <QTextStream>
 #include <QThread>
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -33,6 +35,22 @@ struct LocalInputChannelTestAccess
   static qint64 queued(const LocalInputChannel &channel)
   {
     return channel.m_socket.bytesToWrite();
+  }
+  static std::uint64_t received(const LocalInputChannel &channel)
+  {
+    return channel.m_received;
+  }
+  static qint64 buffered(const LocalInputChannel &channel)
+  {
+    return channel.m_socket.bytesAvailable();
+  }
+  static bool incomingEmpty(const LocalInputChannel &channel)
+  {
+    return channel.m_incoming.isEmpty();
+  }
+  static void observeReadyRead(LocalInputChannel &channel, const std::function<void()> &callback)
+  {
+    QObject::connect(&channel.m_socket, &QLocalSocket::readyRead, &channel, callback, Qt::DirectConnection);
   }
   static void exhaustOutput(LocalInputChannel &channel)
   {
@@ -287,7 +305,7 @@ struct Fixture
     // These codec/callback fixtures inject frames directly into read(). They
     // consume sequence slots the real peer never sent, so neither side may
     // interleave periodic heartbeats with those synthetic frames.
-    if (mode == "synthetic")
+    if (mode == "synthetic" || mode.startsWith("buffered-evidence-"))
       LocalInputChannelTestAccess::stopTimer(*core);
     core->authorize = [this](const LocalInputLease &lease, LocalInputCheck) { return lease == expectedLease; };
     core->onAuthenticated = [&] { ready = true; };
@@ -371,7 +389,7 @@ wireFrame(const QByteArray &hello, unsigned type, unsigned role, std::uint64_t s
 {
   QByteArray header;
   number(header, 0x444c4931, 4);
-  number(header, 4, 2);
+  number(header, LocalInputChannel::version, 2);
   number(header, type, 1);
   number(header, role, 1);
   number(header, payload.size(), 4);
@@ -513,6 +531,132 @@ int delayedReadyChild(QCoreApplication &application, int descriptor, LocalInputP
   host->close();
   return result;
 }
+
+constexpr std::uint64_t bufferedEvidenceFrames = 96;
+int bufferedEvidenceChild(QCoreApplication &application, int descriptor, LocalInputProcess core, bool recording)
+{
+  auto evidence = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Host);
+  check(inputEvidenceInstalled.exchange(evidence.get()) == nullptr, "Fixture recorder was already installed");
+  struct Uninstall
+  {
+    ~Uninstall()
+    {
+      inputEvidenceInstalled.store(nullptr);
+    }
+  } uninstall;
+  auto host = LocalInputChannel::adoptHost(descriptor, core, {1000, 10000, 2000});
+  LocalInputChannelTestAccess::stopTimer(*host);
+  bool active = false, announced = false, observed = false, finished = false;
+  std::uint64_t firstSequence = 0;
+  const auto checked = [&](const std::function<void()> &action) {
+    try {
+      action();
+    } catch (const std::exception &error) {
+      QTextStream(stderr) << "FAIL: " << error.what() << '\n';
+      application.exit(1);
+    }
+  };
+  host->authorize = [](const LocalInputLease &lease, LocalInputCheck) { return lease == fixtureLease(); };
+  host->onPrepare = [&](const LocalInputLease &lease) {
+    check(host->acknowledgePrepare(lease), "Buffered evidence Host prepare failed");
+  };
+  host->onActivated = [&](const LocalInputLease &) { active = true; };
+  host->onClosed = [&](QString) {
+    if (!finished) {
+      QTextStream(stderr) << "FAIL: Buffered evidence channel closed before its burst was consumed\n";
+      application.exit(1);
+    }
+  };
+  LocalInputChannelTestAccess::observeReadyRead(*host, [&] {
+    if (!announced || observed)
+      return;
+    checked([&] {
+      // This is the real QLocalSocket signal, after its direct byte observer
+      // and before LocalInputChannel's queued read() dispatch. No frame has
+      // entered m_incoming or receive(), so only the buffered queue can block
+      // an otherwise ready recorder here.
+      check(
+          LocalInputChannelTestAccess::buffered(*host) > 0 && LocalInputChannelTestAccess::incomingEmpty(*host) &&
+              LocalInputChannelTestAccess::received(*host) == firstSequence,
+          "Buffered evidence fixture did not reach the pre-dispatch socket boundary"
+      );
+      if (!recording) {
+        check(!evidence->readyOwner(), "Qt-buffered input was invisible to recorder readiness");
+        check(
+            !evidence->arm(5000000000) && evidence->state() == InputEvidenceState::Denied &&
+                evidence->loss() == InputEvidenceLoss::Baseline,
+            "Recorder armed with private socket input waiting for queued dispatch"
+        );
+      }
+      observed = true;
+    });
+  });
+  QTimer poll;
+  poll.setInterval(1);
+  QObject::connect(&poll, &QTimer::timeout, &application, [&] {
+    checked([&] {
+      if (!announced) {
+        if (!active || !evidence->readyOwner())
+          return;
+        check(evidence->loss() == InputEvidenceLoss::None, "Private bootstrap lost recorder accounting");
+        if (recording)
+          check(evidence->arm(5000000000), "Empty authenticated Host recorder could not arm");
+        firstSequence = LocalInputChannelTestAccess::received(*host);
+        announced = true;
+        QTextStream(stdout) << "BUFFERED_EVIDENCE_READY\n" << Qt::flush;
+        return;
+      }
+      if (LocalInputChannelTestAccess::received(*host) != firstSequence + bufferedEvidenceFrames)
+        return;
+      check(observed, "Real socket burst skipped the direct readyRead observation");
+      check(
+          LocalInputChannelTestAccess::buffered(*host) == 0 && LocalInputChannelTestAccess::incomingEmpty(*host),
+          "Private input remained buffered after the complete burst"
+      );
+      if (recording) {
+        evidence->stop();
+        evidence->finish();
+        check(
+            evidence->state() == InputEvidenceState::Stopped && evidence->loss() == InputEvidenceLoss::None,
+            "Complete private burst did not reach an accounted recorder boundary"
+        );
+        std::uint64_t enqueued = 0, retired = 0, depth = 0, peak = 0;
+        while (const auto row = evidence->pop()) {
+          if (row->kind != InputEvidenceKind::Queue || row->queue != InputEvidenceQueue::PrivateBufferedInput)
+            continue;
+          check(
+              row->capacity == 4 * (LocalInputChannel::headerBytes + LocalInputChannel::maxPayloadBytes) &&
+                  row->depth <= row->capacity && row->enqueued >= enqueued && row->retired >= retired,
+              "Private buffered byte counters or capacity changed"
+          );
+          enqueued = row->enqueued;
+          retired = row->retired;
+          depth = row->depth;
+          peak = std::max(peak, depth);
+        }
+        check(
+            peak > 0 && enqueued == bufferedEvidenceFrames * LocalInputChannel::headerBytes && retired == enqueued &&
+                depth == 0,
+            "Private buffered input was omitted, double counted, or left pending after a >64-frame burst"
+        );
+      }
+      finished = true;
+      application.quit();
+    });
+  });
+  poll.start();
+  QTimer timeout;
+  timeout.setSingleShot(true);
+  QObject::connect(&timeout, &QTimer::timeout, &application, [&] {
+    QTextStream(stderr) << "FAIL: Buffered evidence fixture exceeded its absolute timeout\n";
+    application.exit(1);
+  });
+  timeout.start(3000);
+  const auto result = application.exec();
+  host->onClosed = {};
+  host->close();
+  return result;
+}
 #endif
 
 int childMain(QCoreApplication &application, int descriptor, const QString &mode)
@@ -524,6 +668,8 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     return wireChild(descriptor);
   const auto expectedCore = localInputProcess(getppid());
   check(expectedCore.has_value(), "Controlled fixture launcher is unavailable");
+  if (mode.startsWith("buffered-evidence-"))
+    return bufferedEvidenceChild(application, descriptor, *expectedCore, mode == "buffered-evidence-recording");
   if (mode == "late-ready" || mode == "late-ready-transition" || mode == "slow-ready")
     return delayedReadyChild(application, descriptor, *expectedCore, mode);
   auto hostLimits = mode == "patient" ? LocalInputLimits{20, 2000, 2000} : limits;
@@ -537,6 +683,8 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   int callbackEvents = 0;
   bool retiredDelivered = false;
   host->authorize = [&, marker = QString(256, 'a')](const LocalInputLease &lease, LocalInputCheck phase) {
+    if (phase == LocalInputCheck::Deliver && mode == "mapped-expire")
+      QThread::msleep(50);
     if (phase == LocalInputCheck::Deliver && mode == "nested-capture") {
       auto retired = fixtureLease();
       --retired.routeGeneration;
@@ -612,6 +760,21 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     }
     if ((mode == "reuse" || mode.startsWith("retired-")) && lease.routeGeneration == fixtureLease().routeGeneration)
       host->revoke();
+  };
+  host->onMappedOriginal = [&](const LocalInputLease &lease, const OriginalInputRecord &record,
+                               const LocalInputMappedPoint &point) {
+    ++originalEvents;
+    const auto records = mixedRecords();
+    check(
+        mode == "mapped" && lease == fixtureLease() && originalEvents <= records.size() &&
+            originalPayload(lease, record) == originalPayload(lease, records[originalEvents - 1]) && point.x == 17.25 &&
+            point.y == 33.5 && point.width == 640 && point.height == 480 && liveLocalInputMappedPoint(point),
+        "Mapped private input changed its record, position, geometry or deadline"
+    );
+    if (originalEvents == records.size()) {
+      host->revoke();
+      check(host->sendReleased(lease), "Exact mapped owner release could not be acknowledged");
+    }
   };
   host->onOriginal = [&, marker = QString(256, 'o')](const LocalInputLease &lease, const OriginalInputRecord &event) {
     ++originalEvents;
@@ -729,6 +892,10 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(callbackEvents == 1, "Destructive callback fixture did not execute exactly once");
   if (mode == "expired-original" || mode == "disconnected-original" || mode.startsWith("host-authority-"))
     check(originalEvents == 0, "Revoked or expired original event reached the receiver");
+  if (mode == "mapped-expire" || mode == "mapped-malformed")
+    check(originalEvents == 0, "Invalid or expired mapping reached delivery");
+  if (mode == "mapped")
+    check(originalEvents == mixedRecords().size(), "Mapped input did not deliver every input family exactly once");
   if (mode == "retired-original")
     check(retiredDelivered && originalEvents == 1, "Retired input prevented the next owner's valid delivery");
   else if (mode.startsWith("retired-"))
@@ -750,8 +917,8 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 4);
-  static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 256);
+  static_assert(LocalInputChannel::version == 5);
+  static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 320);
   static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
   static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
   const auto original = fixtureLease();
@@ -820,6 +987,84 @@ void preflightValues()
       lease.windowShareClientIncarnation = {};
     check(!validLocalInputLease(lease), "An empty preflight identity was accepted");
     check(validLocalInputOffer(lease) == (field == 3), "Offer validity depended on host-only fields");
+  }
+}
+void mappedInput()
+{
+  static_assert(LocalInputChannel::maxMappedOriginalPayloadBytes == 284);
+  LocalInputTarget target{123, {}};
+  check(!validLocalInputTarget(target), "An empty endpoint pin was accepted");
+  target.viewerPeerFingerprint[0] = 9;
+  check(validLocalInputTarget(target), "A valid endpoint target was rejected");
+  auto point = LocalInputMappedPoint{17.25, 33.5, 640, 480, localInputMonotonicNs() + 200000000};
+  check(liveLocalInputMappedPoint(point), "Valid mapped point was rejected");
+  for (const int fault : {0, 1, 2, 3, 4, 5}) {
+    auto invalid = point;
+    if (fault == 0)
+      invalid.x = std::numeric_limits<double>::quiet_NaN();
+    if (fault == 1)
+      invalid.y = -1;
+    if (fault == 2)
+      invalid.x = invalid.width;
+    if (fault == 3)
+      invalid.height = 0;
+    if (fault == 4)
+      invalid.deadlineNs = localInputMonotonicNs() - 1;
+    if (fault == 5)
+      invalid.deadlineNs = localInputMonotonicNs() + 1000000000;
+    check(!liveLocalInputMappedPoint(invalid), "Invalid point or extended deadline was accepted");
+  }
+  {
+    Fixture fixture("mapped");
+    fixture.activate();
+    check(fixture.core->supportsMappedInput(), "Mapped capability was not negotiated");
+    check(!fixture.core->sendInputTarget(fixtureLease(), target), "Core impersonated the Viewer target attestation");
+    check(!fixture.core->sendReleased(fixtureLease()), "Core impersonated Host cleanup completion");
+    bool released = false;
+    fixture.core->onReleased = [&](const LocalInputOffer &offer) {
+      check(
+          offer == static_cast<const LocalInputOffer &>(fixtureLease()) && fixture.revoked == 1 &&
+              fixture.core->phase() == LocalInputPhase::Idle,
+          "Release changed the retained offer or overtook revocation"
+      );
+      released = true;
+    };
+    for (const auto &record : mixedRecords()) {
+      point.deadlineNs = localInputMonotonicNs() + 200000000;
+      check(fixture.core->sendMappedOriginal(fixtureLease(), record, point), "Cannot send mapped original");
+    }
+    check(
+        until([&] { return fixture.revoked || fixture.closed; }) && fixture.revoked == 1 && !fixture.closed,
+        "Mapped receiver did not revoke the exact owner after all records"
+    );
+    check(
+        until([&] { return released || fixture.closed; }) && released && !fixture.closed,
+        "Mapped release completion did not reach the Core"
+    );
+    fixture.core->close();
+    fixture.childExitedCleanly();
+  }
+  for (const bool expireDuringAuthorization : {false, true}) {
+    Fixture fixture(expireDuringAuthorization ? "mapped-expire" : "mapped-malformed");
+    fixture.activate();
+    point.deadlineNs = localInputMonotonicNs() + 20000000;
+    if (expireDuringAuthorization)
+      check(fixture.core->sendMappedOriginal(fixtureLease(), fixtureEvent(1), point), "Cannot queue expiry fixture");
+    else {
+      // Bypass sender validation to exercise the actual receiver decoder.
+      auto payload = originalPayload(fixtureLease(), fixtureEvent(1));
+      QByteArray mapping;
+      for (const double value : {point.width, point.y, point.width, point.height})
+        number(mapping, std::bit_cast<std::uint64_t>(value), 8);
+      number(mapping, point.deadlineNs, 8);
+      payload.insert(LocalInputChannel::leasePayloadBytes, mapping);
+      check(LocalInputChannelTestAccess::raw(*fixture.core, 17, payload), "Cannot queue malformed mapped fixture");
+    }
+    check(
+        until([&] { return fixture.closed; }) && fixture.revoked == 1,
+        "Expired or malformed mapped input did not close and release its exact lease"
+    );
+    fixture.childExitedCleanly();
   }
 }
 void preflightRoundtrip()
@@ -1065,8 +1310,10 @@ void preflightCallbacks()
       check(callbacks == 1 && fixture.revoked == 1, "Preflight callback lost or duplicated lease release");
       if (action == "revoke") {
         if (nested != 1 || fixture.closed || fixture.core->lease())
-          throw std::runtime_error(QStringLiteral("Reentrant preflight notification failed: type=%1 action=%2 "
-                                                  "nested=%3 closed=%4 reason=%5")
+          throw std::runtime_error(QStringLiteral(
+                                       "Reentrant preflight notification failed: type=%1 action=%2 "
+                                       "nested=%3 closed=%4 reason=%5"
+          )
                                        .arg(type)
                                        .arg(action)
                                        .arg(nested)
@@ -1886,6 +2133,31 @@ void captureEpochCutover()
     fixture.childExitedCleanly();
   }
 }
+void bufferedInputEvidence()
+{
+#ifdef Q_OS_UNIX
+  for (const auto &mode : {"buffered-evidence-waiting", "buffered-evidence-recording"}) {
+    Fixture fixture(mode, {1000, 10000, 2000});
+    fixture.activate();
+    QByteArray output;
+    check(
+        until([&] {
+          output += fixture.child.readAllStandardOutput();
+          return output.contains("BUFFERED_EVIDENCE_READY\n") || fixture.child.state() == QProcess::NotRunning;
+        }) &&
+            output.contains("BUFFERED_EVIDENCE_READY\n") && fixture.child.state() != QProcess::NotRunning,
+        "Host recorder did not establish an empty authenticated baseline"
+    );
+    // The burst exceeds read()'s 64-frame scheduling budget and the actual
+    // QLocalSocket read buffer. It must be accounted across every refill;
+    // nothing is injected directly into the decoder or recorder.
+    for (std::uint64_t index = 0; index != bufferedEvidenceFrames; ++index)
+      check(LocalInputChannelTestAccess::raw(*fixture.core, 5, {}), "Cannot send private buffered-input burst");
+    LocalInputChannelTestAccess::flush(*fixture.core);
+    fixture.childExitedCleanly();
+  }
+#endif
+}
 void lossAndLimits()
 {
   {
@@ -2097,6 +2369,8 @@ int main(int argc, char **argv)
     exclusiveInheritance();
     QTextStream(stdout) << "RUN: preflightValues\n" << Qt::flush;
     preflightValues();
+    QTextStream(stdout) << "RUN: mappedInput\n" << Qt::flush;
+    mappedInput();
     QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;
     preflightRoundtrip();
     QTextStream(stdout) << "RUN: preflightWireLayout\n" << Qt::flush;
@@ -2135,9 +2409,12 @@ int main(int argc, char **argv)
     mixedInputAndMalformedRecords();
     QTextStream(stdout) << "RUN: captureEpochCutover\n" << Qt::flush;
     captureEpochCutover();
+    QTextStream(stdout) << "RUN: bufferedInputEvidence\n" << Qt::flush;
+    bufferedInputEvidence();
     QTextStream(stdout) << "RUN: lossAndLimits\n" << Qt::flush;
     lossAndLimits();
-    QTextStream(stdout
+    QTextStream(
+        stdout
     ) << "PASS: inherited IPC, process/role/incarnation binding, version 4 preflight isolation and framing, "
          "absolute bootstrap deadlines, independent authenticated expiry, authoritative leases, "
          "original-event framing, stale/replayed/malformed rejection, bounded queues and owner revocation\n";

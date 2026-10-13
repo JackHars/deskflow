@@ -218,7 +218,7 @@ int main(int argc, char **argv)
     decoded = true;
     QTextStream(stdout) << "Captured and decoded " << frame.image.width() << 'x' << frame.image.height() << " using "
                         << decoder.backend() << '\n';
-    host.ready(session, epoch);
+    host.ready(session, epoch, revision);
   };
   host.onCommitted = [&](std::uint64_t, std::uint64_t) {
     committed = true;

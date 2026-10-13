@@ -62,6 +62,108 @@
 @end
 
 namespace deskflow::windowshare {
+
+HoldingRelocationResult
+relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingRelocationAccess &access)
+{
+  using Status = HoldingRelocationResult::Status;
+  if (!owner.session || !owner.epoch || !paintedGeometry || !access.window || !access.display || !access.persist ||
+      !access.place)
+    return {};
+  const auto sameFrame = [](Rect a, Rect b) {
+    return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+  };
+  const auto bound = [&](const std::optional<HoldingRelocationWindow> &window) {
+    return window && window->owner == owner && window->geometry == paintedGeometry &&
+           window->producedGeometry == paintedGeometry && window->frame.valid();
+  };
+  try {
+    const auto before = access.window();
+    if (!bound(before))
+      return {};
+    const auto display = access.display();
+    if (!display || !display->id || !display->bounds.valid())
+      return {Status::Restore, {}};
+    const auto current = [&]() -> std::optional<HoldingRelocationWindow> {
+      const auto observed = access.display();
+      const auto window = access.window();
+      if (!observed || observed->id != display->id || !sameFrame(observed->bounds, display->bounds) || !bound(window))
+        return std::nullopt;
+      return window;
+    };
+    // The recovery journal must be durable before a source is hidden. A
+    // callback may cancel/replace the owner or observe a newer source frame.
+    if (!access.persist())
+      return {Status::Restore, {}};
+    const auto prepared = current();
+    if (!prepared || !sameFrame(prepared->frame, before->frame))
+      return {Status::Restore, {}};
+    if (!access.place(fitInside(before->frame, display->bounds)))
+      return {Status::Restore, {}};
+    const auto after = current();
+    if (!after || after->frame.x < display->bounds.x || after->frame.y < display->bounds.y ||
+        after->frame.x + after->frame.width > display->bounds.x + display->bounds.width ||
+        after->frame.y + after->frame.height > display->bounds.y + display->bounds.height)
+      return {Status::Restore, {}};
+    return {Status::Applied, after->frame};
+  } catch (...) {
+    // No callback failure may turn an uncertain partial move into ownership.
+    return {Status::Restore, {}};
+  }
+}
+
+HoldingResizeResult resizeHoldingWindow(int width, int height, const HoldingResizeAccess &access)
+{
+  using Status = HoldingResizeResult::Status;
+  const auto contains = [](Rect outer, Rect inner) {
+    return outer.valid() && inner.valid() && inner.x >= outer.x && inner.y >= outer.y &&
+           inner.x + inner.width <= outer.x + outer.width && inner.y + inner.height <= outer.y + outer.height;
+  };
+  if (width < 64 || height < 64 || width > 8192 || height > 8192 || !access.display || !access.window ||
+      !access.persist || !access.move || !access.resize)
+    return {};
+  const auto display = access.display();
+  const auto before = access.window();
+  if (!display || !display->id || !before || !contains(display->bounds, *before))
+    return {Status::Restore, {}};
+  if (width > display->bounds.width || height > display->bounds.height)
+    return {};
+  const auto current = [&]() -> std::optional<Rect> {
+    const auto observed = access.display();
+    const auto frame = access.window();
+    if (!observed || observed->id != display->id || observed->bounds.x != display->bounds.x ||
+        observed->bounds.y != display->bounds.y || observed->bounds.width != display->bounds.width ||
+        observed->bounds.height != display->bounds.height || !frame || !contains(display->bounds, *frame))
+      return std::nullopt;
+    return frame;
+  };
+  if (!access.persist())
+    return {};
+  auto actual = current();
+  if (!actual)
+    return {Status::Restore, {}};
+  const auto destination = fitInside({actual->x, actual->y, double(width), double(height)}, display->bounds);
+  if (destination.x != actual->x || destination.y != actual->y) {
+    // Move inward while the old, smaller frame still fits. Resizing first can
+    // expose the source on a physical output until the periodic recovery poll.
+    if (!access.move({destination.x, destination.y}))
+      return {Status::Restore, {}};
+    actual = current();
+    if (!actual)
+      return {Status::Restore, {}};
+  }
+  // AX applications may round/refuse a position. Never grow at an unverified
+  // anchor, even when the old frame itself remains inside the holding display.
+  if (!contains(display->bounds, {actual->x, actual->y, double(width), double(height)}))
+    return {Status::Restore, {}};
+  if (!access.resize(width, height))
+    return {Status::Restore, {}};
+  actual = current();
+  // A size can be quantized by the source application; publish its actual
+  // contained rectangle, or immediately return the source on any uncertainty.
+  return actual ? HoldingResizeResult{Status::Applied, *actual} : HoldingResizeResult{Status::Restore, {}};
+}
+
 namespace {
 
 bool fail(QString *error, const QString &message)

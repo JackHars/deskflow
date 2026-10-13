@@ -53,6 +53,18 @@ public:
   std::function<bool(const GnomeViewportState &, const InputCutoffBinding &, QDeadlineTimer, std::function<void(bool)>)>
       onInputDrain;
   std::function<void()> onClosed;
+  std::function<std::optional<GnomePreparationInventory>(const InputPreparationBinding &)> onPreparationInventory;
+  std::function<bool(const InputPreparationBinding &, const GnomePreparationTarget &)> onPreparationCheck;
+  std::function<std::optional<QPointF>(const InputPreparationBinding &, const GnomePreparationTarget &, QPointF)>
+      onPreparationMap;
+  std::function<
+      bool(const InputPreparationBinding &, const GnomePreparationTarget &, QDeadlineTimer, std::function<void(bool)>)>
+      onPreparationDrain;
+  std::function<std::optional<GnomeViewportState>(const InputPreparationBinding &, const GnomePreparationTarget &)>
+      onPreparationFocus;
+  std::function<
+      bool(const InputPreparationBinding &, const GnomePreparationTarget &, const std::optional<InputCutoffBinding> &)>
+      onPreparationFinish;
   bool startWaylandQueue(QWindow *window, const WaylandViewportGeometry &expected, std::function<void(bool)> finished);
   bool startWaylandInputDrain(
       QWindow *window, const WaylandViewportGeometry &expected, QDeadlineTimer deadline,
@@ -69,10 +81,24 @@ private:
   void read();
   void write();
   void handle(const GnomeViewportRequest &request);
+  void handlePreparation(const GnomeViewportRequest &request);
+  void finishPreparationQueue(std::uint64_t request, bool complete);
+  void pollPreparationFocus();
+  bool currentPreparation(const GnomePreparationTarget &target);
+  void replyPreparation(const GnomeViewportRequest &request, bool ok, const QString &reason = {});
   bool send(const GnomeViewportReply &reply);
   bool current(std::uint64_t snapshot);
   bool currentInputDrain(const GnomeViewportRequest &request, QDeadlineTimer deadline);
   void finishQtQueue(const GnomeViewportRequest &request, bool observed);
+  void invalidateSnapshot(const QString &reason);
+  void retireSeal(const QString &reason);
+  bool currentInputMap(const GnomeViewportRequest &request, QDeadlineTimer deadline);
+  struct RetainedSeal
+  {
+    InputCutoffBinding origin, last;
+    GnomeViewportState state;
+  };
+  std::optional<RetainedSeal> m_seal;
   struct PendingQueue
   {
     GnomeViewportRequest request;
@@ -92,5 +118,19 @@ private:
   QtWaylandQueueWitness m_queueWitness;
   std::optional<PendingQueue> m_pendingCheck;
   bool m_reading = false;
+  struct Preparation
+  {
+    InputPreparationBinding binding;
+    GnomePreparationInventory inventory;
+    QDeadlineTimer deadline;
+    std::optional<GnomePreparationTarget> target;
+    std::optional<GnomeViewportState> focused;
+    std::optional<InputCutoffBinding> promoted;
+    bool drained = false;
+  };
+  std::optional<Preparation> m_preparation;
+  std::optional<GnomeViewportRequest> m_preparationPending;
+  QDeadlineTimer m_preparationOperationDeadline;
+  QTimer m_preparationPoll, m_preparationExpiry;
 };
 } // namespace deskflow::windowshare

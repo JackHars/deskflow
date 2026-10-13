@@ -83,6 +83,31 @@ void testDisconnectAndReusedClientName()
   expect(routes.down(mouse, 0, 0, 42, {replacement}), {replacement}, "Fresh press after physical up stayed tombstoned");
   check(routes.detach(lost).presses.empty(), "Repeated disconnect produced duplicate releases");
 }
+void testHandoffReleasesWithoutReplacingConnection()
+{
+  Routes routes;
+  const auto peer = routes.attach(), other = routes.attach();
+  const auto key = Routes::keyControl('A', 31);
+  const Routes::Control button{Routes::Kind::Button, 1};
+  routes.down(key, 'A', 2, 31, {peer, other});
+  routes.down(button, 0, 0, 1, {peer});
+  routes.observeModifiers(peer, 2);
+  const auto cleanup = routes.releaseRecipient(peer);
+  check(cleanup.presses.size() == 2 && cleanup.modifiers == 2, "Handoff lost delivered-owner cleanup");
+  for (const auto &press : cleanup.presses)
+    check(press.recipients == Routes::Recipients{peer}, "Handoff released an unrelated recipient");
+  expect(routes.repeat(key), {other}, "Handoff changed the remaining broadcast owner");
+  expect(routes.repeat(button), {}, "Handoff failed to retain a physical button tombstone");
+  check(
+      routes.downOriginal(button, 0, 0, 1, 42)->originalOwner == 0,
+      "A held legacy button migrated into the original route"
+  );
+  check(routes.releaseRecipient(peer).presses.empty(), "Repeated handoff duplicated releases");
+  routes.up(button);
+  expect(routes.down(button, 0, 0, 1, {peer}), {peer}, "Handoff invalidated the live connection incarnation");
+  routes.observeModifiers(peer, 4);
+  check(routes.releaseModifiers(4).size() == 1, "Handoff detached the live modifier recipient");
+}
 
 void testModifierCleanupIsPaired()
 {
@@ -295,6 +320,7 @@ int main()
     testComputerSwitchAndBroadcastSnapshot();
     testLocalPassThroughAndUnknownUps();
     testDisconnectAndReusedClientName();
+    testHandoffReleasesWithoutReplacingConnection();
     testModifierCleanupIsPaired();
     testCommandAndPhysicalNamespaces();
     testBoundedOrphans();

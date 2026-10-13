@@ -110,6 +110,8 @@ public:
   std::string unavailableReason() const;
 
 private:
+  friend class X11CoordinateEndpoint;
+  xcb_connection_t *borrowedConnection() const noexcept;
   struct Impl;
   std::unique_ptr<Impl> m_impl;
 };

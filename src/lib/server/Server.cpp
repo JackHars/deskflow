@@ -37,6 +37,10 @@
 using namespace deskflow::server;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+#include "windowshare/InputEvidence.h"
+using deskflow::windowshare::inputEvidenceApply;
+using deskflow::windowshare::InputEvidenceMutation;
+using deskflow::windowshare::InputEvidenceQueue;
 namespace {
 constexpr KeyModifierMask routedMomentaryModifiers =
     KeyModifierShift | KeyModifierControl | KeyModifierAlt | KeyModifierMeta | KeyModifierSuper | KeyModifierAltGr;
@@ -88,6 +92,8 @@ public:
         m_lifetime(server.m_originalLifetime),
         m_wasAlive(*m_lifetime)
   {
+    if (auto *evidence = deskflow::windowshare::inputEvidence())
+      evidence->revokeOwner();
     m_server.m_selectionChanging = true;
     m_server.invalidateSelectedPeer();
     if (m_wasAlive)
@@ -132,6 +138,9 @@ Server::Server(ServerConfig &config, PrimaryClient *primaryClient, deskflow::Com
       m_events(events)
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  deskflow::windowshare::inputEvidenceInitialize(InputEvidenceQueue::ServerPending, this, originalPendingCapacity);
+  deskflow::windowshare::inputEvidenceInitialize(InputEvidenceQueue::ServerCompleted, this, originalPendingCapacity);
+  deskflow::windowshare::inputEvidenceInitialize(InputEvidenceQueue::ServerExecuting, this, originalPendingCapacity);
   // In-process snapshots outlive Server objects, but never survive this
   // process. Saturate rather than reuse an earlier Server incarnation.
   static std::atomic<std::uint64_t> nextServer{0};
@@ -250,8 +259,11 @@ Server::~Server()
     m_events->deleteTimer(m_originalDispatchTimer);
   m_events->removeHandler(EventTypes::Timer, &m_originalDispatchTimer);
   const auto dispatcher = m_originalDispatcher;
-  auto pending = std::move(m_originalPending);
-  m_originalPending.clear();
+  auto pending = inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 0, m_originalPending.size(), [&] {
+    auto detached = std::move(m_originalPending);
+    m_originalPending.clear();
+    return detached;
+  });
   if (dispatcher) {
     for (const auto &input : pending)
       if (input.preparation)
@@ -1215,7 +1227,9 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(2 * options->size());
     for (auto [optionId, optionValue] : *options) {
-      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff)
+      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff ||
+          optionId == kOptionMappedInputCutoff || optionId == kOptionSealedInputCutoff ||
+          optionId == kOptionBatchedInputCutoff || optionId == kOptionInputPreparation)
         continue; // Reserved for the live capture route, never configuration.
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
@@ -1228,7 +1242,9 @@ void Server::sendOptions(BaseClientProxy *client) const
     // convert options to a more convenient form for sending
     optionsList.reserve(optionsList.size() + 2 * options->size());
     for (auto [optionId, optionValue] : *options) {
-      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff)
+      if (optionId == kOptionInputSequenceTrace || optionId == kOptionInputCutoff ||
+          optionId == kOptionMappedInputCutoff || optionId == kOptionSealedInputCutoff ||
+          optionId == kOptionBatchedInputCutoff || optionId == kOptionInputPreparation)
         continue;
       optionsList.push_back(optionId);
       optionsList.push_back(static_cast<uint32_t>(optionValue));
@@ -1243,8 +1259,12 @@ void Server::sendOptions(BaseClientProxy *client) const
       optionsList.push_back(kOptionInputSequenceTrace);
       optionsList.push_back(*generation);
     }
-    if (const auto generation = client->requestInputCutoffCapability()) {
-      optionsList.push_back(kOptionInputCutoff);
+    if (const auto generation = client->requestBatchedInputCutoffCapability()) {
+      optionsList.push_back(kOptionBatchedInputCutoff);
+      optionsList.push_back(*generation);
+    }
+    if (const auto generation = client->requestInputPreparationCapability()) {
+      optionsList.push_back(kOptionInputPreparation);
       optionsList.push_back(*generation);
     }
   }
@@ -1803,6 +1823,143 @@ bool Server::setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher>
   return true;
 }
 
+deskflow::windowshare::OriginalInputBackend Server::originalInputBackend()
+{
+  using namespace deskflow::windowshare;
+  const auto lifetime = m_originalLifetime;
+  const auto recipient = [this, lifetime](const SelectedPeer &selected) -> BaseClientProxy * {
+    if (!*lifetime || m_selectionShutdown || m_originalDispatchTerminal || !selected.live() || !m_selectedPeer ||
+        !m_selectedPeer->sameSelection(selected))
+      return nullptr;
+    return inputRecipient(selected.recipient());
+  };
+  const auto cleanupRecipient = [this, lifetime](const SelectedPeer &selected) -> BaseClientProxy * {
+    // Cleanup survives a selection change, but can only address the exact
+    // retained TLS connection. A reused recipient or a new connection cannot
+    // receive the old owner's resume.
+    if (!*lifetime || !selected.ticket().live())
+      return nullptr;
+    auto *client = inputRecipient(selected.recipient());
+    const auto *stream = client ? client->getStream() : nullptr;
+    const auto ticket = stream ? stream->authenticatedPeerTicket() : std::nullopt;
+    return ticket && ticket->live() && ticket->incarnation() == selected.ticket().incarnation() &&
+                   ticket->fingerprint() == selected.ticket().fingerprint()
+               ? client
+               : nullptr;
+  };
+  return {
+      [recipient](const SelectedPeer &selected) -> std::optional<std::uint32_t> {
+        auto *client = recipient(selected);
+        return client && client->inputPreparationCapabilityReady() ? client->requestInputPreparationCapability()
+                                                                   : std::nullopt;
+      },
+      [recipient](
+          const SelectedPeer &selected, OriginalInputStamp stamp, InputCutoffPoint point,
+          InputCutoffClock::time_point deadline
+      ) {
+        auto *client = recipient(selected);
+        return client ? client->startInputPreparation(stamp, point, deadline) : std::nullopt;
+      },
+      [recipient](const SelectedPeer &selected, InputPreparationBinding binding) {
+        auto *client = recipient(selected);
+        return client ? client->preparedInputFocus(binding) : std::nullopt;
+      },
+      [cleanupRecipient](const SelectedPeer &selected, InputPreparationBinding binding) {
+        auto *client = cleanupRecipient(selected);
+        return client ? client->inputPreparationState(binding) : InputPreparationState::Failed;
+      },
+      [cleanupRecipient](const SelectedPeer &selected, InputPreparationBinding binding) {
+        auto *client = cleanupRecipient(selected);
+        return client ? client->inputPreparationOutcome(binding) : InputPreparationOutcome::Failed;
+      },
+      [recipient](
+          const SelectedPeer &selected, const PreparedInputFocus &prepared, const KeyboardRouteBinding &forwarding,
+          InputCutoffClock::time_point deadline
+      ) {
+        auto *client = recipient(selected);
+        return client ? client->promoteInputPreparation(prepared, forwarding, deadline) : std::nullopt;
+      },
+      [cleanupRecipient](
+          const SelectedPeer &selected, InputPreparationBinding binding, InputCutoffClock::time_point deadline
+      ) {
+        auto *client = cleanupRecipient(selected);
+        return client && client->cancelInputPreparation(binding, deadline);
+      },
+      [this, lifetime, recipient](const SelectedPeer &selected, const OriginalInputRouteDecision &route, bool release) {
+        if (!recipient(selected) || !route.pointKnown || route.recipient != selected.recipient() ||
+            route.server != selected.serverIncarnation())
+          return false;
+        if (release) {
+          // Retire ownership before any callback. A racing physical repeat/up
+          // sees a tombstone; it cannot move to the newly prepared Mac owner.
+          auto detached = m_inputRoutes.releaseRecipient(selected.recipient());
+          for (const auto &press : detached.presses) {
+            auto *client = recipient(selected);
+            if (!client)
+              return false;
+            switch (press.control.kind) {
+            case InputRoutes::Kind::Key:
+              client->keyUp(press.key, 0, static_cast<KeyButton>(press.button));
+              break;
+            case InputRoutes::Kind::Button:
+              client->mouseUp(static_cast<ButtonID>(press.button));
+              break;
+            case InputRoutes::Kind::ModifierCommand:
+              detached.modifiers |= press.mask;
+              break;
+            }
+            if (!*lifetime)
+              return false;
+          }
+          if (detached.modifiers) {
+            auto *client = recipient(selected);
+            if (!client)
+              return false;
+            client->keyDown(kKeyClearModifiers, detached.modifiers, 0, {});
+          }
+        }
+        auto *client = recipient(selected);
+        if (!client)
+          return false;
+        if (route.kind == OriginalInputRouteKind::Motion)
+          client->mouseMove(route.x, route.y);
+        return recipient(selected) != nullptr;
+      },
+      [recipient](
+          const SelectedPeer &selected, OriginalInputStamp stamp, KeyboardRouteBinding binding, std::uint64_t viewer,
+          InputCutoffPoint point, InputCutoffClock::time_point deadline
+      ) {
+        auto *client = recipient(selected);
+        return client ? client->startSealedInputCutoff(stamp, binding, viewer, point, deadline) : std::nullopt;
+      },
+      [recipient](
+          const SelectedPeer &selected, const InputCutoffSeal &seal, OriginalInputStamp stamp, InputCutoffPoint point,
+          InputCutoffClock::time_point deadline, bool presentCursor
+      ) {
+        auto *client = recipient(selected);
+        return client ? client->refreshMappedInputCutoff(seal, stamp, point, deadline, presentCursor) : std::nullopt;
+      },
+      [recipient](
+          const SelectedPeer &selected, const InputCutoffSeal &seal, const std::vector<InputCutoffMapItem> &items
+      ) {
+        auto *client = recipient(selected);
+        return client ? client->startMappedInputBatch(seal, items) : std::nullopt;
+      },
+      [recipient](const SelectedPeer &selected, InputCutoffBinding binding) {
+        auto *client = recipient(selected);
+        return client ? client->inputCutoffObservation(binding) : std::nullopt;
+      },
+      [cleanupRecipient](const SelectedPeer &selected, InputCutoffBinding binding) {
+        auto *client = cleanupRecipient(selected);
+        return client ? client->inputCutoffState(binding) : InputCutoffState::Denied;
+      },
+      [cleanupRecipient](const SelectedPeer &selected, InputCutoffBinding binding) {
+        auto *client = cleanupRecipient(selected);
+        return client && client->resumeInputCutoff(binding);
+      }
+  };
+}
+
 deskflow::windowshare::OriginalInputRouteDecision
 Server::originalDispatchRoute(const InputRoutes::Recipients &recipients, bool relative) const
 {
@@ -1845,8 +2002,7 @@ Server::originalDispatchRoute(const InputRoutes::Recipients &recipients, bool re
 
 bool Server::deferOriginalInput(PendingOperation operation, InputRoutes::Recipients recipients)
 {
-  if (!m_originalDispatcher || (m_originalExecuting && m_originalRouteObservation == m_originalExecutingObservation) ||
-      (m_originalDispatchTerminal && m_originalPending.empty() && !m_originalDraining))
+  if (!m_originalDispatcher || (m_originalExecuting && m_originalRouteObservation == m_originalExecutingObservation))
     return false;
   const auto *motion = std::get_if<PendingMotion>(&operation);
   PendingInput pending{
@@ -1881,7 +2037,7 @@ bool Server::deferOriginalInput(PendingOperation operation, InputRoutes::Recipie
         return true;
       while (!m_originalPending.empty()) {
         auto queued = std::move(m_originalPending.front());
-        m_originalPending.pop_front();
+        inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 0, 1, [&] { m_originalPending.pop_front(); });
         executeOriginalInput(queued, nullptr);
         if (!*lifetime)
           return true;
@@ -1894,7 +2050,9 @@ bool Server::deferOriginalInput(PendingOperation operation, InputRoutes::Recipie
     if (!*lifetime)
       return true;
   }
-  m_originalPending.push_back(std::move(pending));
+  inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 1, 0, [&] {
+    m_originalPending.push_back(std::move(pending));
+  });
   drainOriginalInput();
   return true;
 }
@@ -1968,8 +2126,22 @@ void Server::suppressOriginalInput(
     releaseRoutedModifiers(held ? held->key : key->id, key->mask);
   if (!*lifetime)
     return;
-  if (std::holds_alternative<PendingMotion>(operation))
-    executeLegacyInput(pending); // Cursor presentation is not application-input authority.
+  if (std::holds_alternative<PendingMotion>(operation)) {
+    // Ordinary motion writes implicitly resume a Core cutoff. Only the
+    // dispatcher's explicit mapped presentation may cross a live All gate.
+    auto presentation = pending;
+    presentation.recipients.clear();
+    const auto dispatcher = m_originalDispatcher;
+    for (const auto recipient : pending.recipients) {
+      const bool ready = !dispatcher || dispatcher->legacyAcquisitionReady(recipient);
+      if (!*lifetime)
+        return;
+      if (ready)
+        presentation.recipients.push_back(recipient);
+    }
+    if (!presentation.recipients.empty())
+      executeLegacyInput(presentation);
+  }
 }
 
 void Server::cancelInFlightOriginal()
@@ -2002,7 +2174,7 @@ void Server::flushOriginalBeforeSelection()
   // press still reaches its frozen legacy recipient before that client leaves.
   while (!m_originalPending.empty()) {
     auto pending = std::move(m_originalPending.front());
-    m_originalPending.pop_front();
+    inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 0, 1, [&] { m_originalPending.pop_front(); });
     try {
       executeOriginalInput(pending, nullptr);
     } catch (...) {
@@ -2018,6 +2190,7 @@ void Server::flushOriginalBeforeSelection()
 
 void Server::cancelOriginalDispatch() noexcept
 {
+  deskflow::windowshare::inputEvidenceInvalidate(deskflow::windowshare::InputEvidenceLoss::PipelineRevoked);
   m_originalDispatchTerminal = true;
   const auto owners = m_originalOwners;
   for (auto owner : owners)
@@ -2092,6 +2265,10 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
   m_originalDraining = true;
   const auto lifetime = m_originalLifetime;
   const auto dispatcher = m_originalDispatcher;
+  if (dispatcher)
+    dispatcher->maintain();
+  if (!*lifetime)
+    return;
   if (m_selectedPeer && !m_selectedPeer->live())
     invalidateSelectedPeer();
   if (!*lifetime)
@@ -2115,7 +2292,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
         continue;
       }
       auto retired = std::move(first->second);
-      m_originalCompleted.erase(first);
+      inputEvidenceApply(InputEvidenceQueue::ServerCompleted, this, 0, 1, [&] { m_originalCompleted.erase(first); });
       if (!retired.upResolved)
         retireOriginalCapture(retired.captured);
       if (!*lifetime)
@@ -2123,6 +2300,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     }
     {
       const auto &record = captured->input.record;
+      InputEvidenceMutation evidence(InputEvidenceQueue::ServerCompleted, this, 1, 0);
       m_originalCompleted.emplace(
           std::pair{record.epoch, record.sequence},
           CompletedInput{std::move(*captured), now + originalDispatchTimeout, now}
@@ -2139,6 +2317,84 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
         revokeOriginalOwner(owner);
     }
   }
+  // Keep hover latency bounded without changing any reserved native event or
+  // press/drag/scroll sequence. Each absolute Server point already includes
+  // every translated delta. Only the final captured record is delivered;
+  // superseded records keep an explicit diagnostic outcome and raw history.
+  const bool coalesceHover = dispatcher && m_inputRoutes.size() == 0 && dispatcher->canCoalesceHoverMotion();
+  if (!*lifetime)
+    return;
+  if (coalesceHover) {
+    const auto hover = [&](const PendingInput &pending) -> const OriginalInputCaptured * {
+      const auto *motion = std::get_if<PendingMotion>(&pending.operation);
+      if (!motion || motion->relative || pending.preparation || pending.captureResolved || !pending.selected ||
+          !pending.selected->live() || !pending.route.pointKnown ||
+          pending.route.outcome != OriginalInputRouteOutcome::Dispatched || pending.route.stamp.part != 1)
+        return nullptr;
+      const auto found = m_originalCompleted.find({pending.route.stamp.epoch, pending.route.stamp.sequence});
+      if (found == m_originalCompleted.end() || found->second.receivedAt > pending.deadline)
+        return nullptr;
+      const auto &captured = found->second.captured;
+      const auto *raw = std::get_if<OriginalInputMotion>(&captured.input.record.payload);
+      return captured.input.live() && captured.translation.parts == 1 && !captured.translation.uncertain && raw &&
+                     raw->dragButton == originalInputButtonCount
+                 ? &captured
+                 : nullptr;
+    };
+    for (auto first = m_originalPending.begin(); first != m_originalPending.end();) {
+      const auto next = std::next(first);
+      if (next == m_originalPending.end())
+        break;
+      const auto *a = hover(*first), *b = hover(*next);
+      if (a && b && first->selected->sameSelection(*next->selected) && a->input.epoch.sameEpoch(b->input.epoch) &&
+          a->input.record.sequence != UINT64_MAX && b->input.record.sequence == a->input.record.sequence + 1 &&
+          a->input.record.flags == b->input.record.flags) {
+        auto decision = first->route;
+        decision.outcome = OriginalInputRouteOutcome::Coalesced;
+        if (!m_originalInputRoutes->publish(std::move(decision))) {
+          cancelOriginalDispatch();
+          break;
+        }
+        if (auto *evidence = inputEvidence())
+          evidence->hover(a->input.record.epoch, a->input.record.sequence, b->input.record.sequence);
+        first = inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 0, 1, [&] {
+          return m_originalPending.erase(first);
+        });
+      } else {
+        ++first;
+      }
+    }
+  }
+  if (dispatcher && !m_originalDispatchTerminal) {
+    std::vector<OriginalInputDispatcher::Preview> preview;
+    preview.reserve(inputCutoffMaximumBatch);
+    for (const auto &pending : m_originalPending) {
+      if (preview.size() == inputCutoffMaximumBatch || !pending.selected || !pending.selected->live() ||
+          !pending.route.pointKnown || pending.route.outcome != OriginalInputRouteOutcome::Dispatched ||
+          pending.route.stamp.part != 1)
+        break;
+      const auto found = m_originalCompleted.find({pending.route.stamp.epoch, pending.route.stamp.sequence});
+      const auto *captured = pending.captured ? &*pending.captured
+                             : found != m_originalCompleted.end() && found->second.receivedAt <= pending.deadline
+                                 ? &found->second.captured
+                                 : nullptr;
+      if (!captured || !captured->input.live() || captured->translation.parts != 1 || captured->translation.uncertain)
+        break;
+      preview.push_back(
+          {*captured, pending.route, *pending.selected,
+           pending.preparation ? pending.preparationDeadline : now + originalPreparationTimeout}
+      );
+    }
+    try {
+      dispatcher->preview(preview);
+    } catch (...) {
+      if (!*lifetime)
+        return;
+      cancelOriginalDispatch();
+    }
+    if (!*lifetime)
+      return;
+  }
   while (!m_originalPending.empty()) {
     const auto stamp = m_originalPending.front().route.stamp;
     // The core event queue preserves native part order. A completed older up
@@ -2147,7 +2403,9 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     while (!m_originalCompleted.empty() && stamp &&
            m_originalCompleted.begin()->first < std::pair{stamp.epoch, stamp.sequence}) {
       auto retired = std::move(m_originalCompleted.begin()->second);
-      m_originalCompleted.erase(m_originalCompleted.begin());
+      inputEvidenceApply(InputEvidenceQueue::ServerCompleted, this, 0, 1, [&] {
+        m_originalCompleted.erase(m_originalCompleted.begin());
+      });
       if (!retired.upResolved)
         retireOriginalCapture(retired.captured);
       if (!*lifetime)
@@ -2180,7 +2438,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
       }
     }
     auto pending = std::move(m_originalPending.front());
-    m_originalPending.pop_front();
+    inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 0, 1, [&] { m_originalPending.pop_front(); });
     bool complete = true;
     try {
       complete = executeOriginalInput(pending, pending.captured ? &*pending.captured : nullptr, now);
@@ -2192,7 +2450,9 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     if (!*lifetime)
       return;
     if (!complete) {
-      m_originalPending.push_front(std::move(pending));
+      inputEvidenceApply(InputEvidenceQueue::ServerPending, this, 1, 0, [&] {
+        m_originalPending.push_front(std::move(pending));
+      });
       break; // No later operation, including a release, can pass this frozen input.
     }
   }
@@ -2207,7 +2467,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
     if (found == m_originalCompleted.end())
       break;
     auto retired = std::move(found->second);
-    m_originalCompleted.erase(found);
+    inputEvidenceApply(InputEvidenceQueue::ServerCompleted, this, 0, 1, [&] { m_originalCompleted.erase(found); });
     if (!retired.upResolved)
       retireOriginalCapture(retired.captured);
     if (!*lifetime)
@@ -2297,6 +2557,7 @@ bool Server::executeOriginalInput(
 )
 {
   using namespace deskflow::windowshare;
+  InputEvidenceExecution evidence(this);
   using State = OriginalInputDispatcher::State;
   const auto lifetime = m_originalLifetime;
   const auto dispatcher = m_originalDispatcher;
@@ -2445,6 +2706,51 @@ bool Server::executeOriginalInput(
   }
   const auto reservation = result.reservation;
   if (!reservation) {
+    // A terminal Refused explicitly certifies that its handoff has completed
+    // cleanup. Ineligible records never went through that protocol: missing,
+    // expanded, configured, relative or uncertain input cannot silently reopen
+    // a still-owned recipient's independent All forwarding gate.
+    const bool releasedFallback = eligible && result.state == State::Refused;
+    const bool legacyRelease =
+        (up && held && !held->originalOwner) || (modifierCommand && key->id == kKeyClearModifiers);
+    if (!releasedFallback && !legacyRelease && dispatcher) {
+      const auto &recipients = held && !held->originalOwner ? held->recipients : pending.recipients;
+      InputRoutes::Recipients available;
+      bool blocked = false;
+      for (const auto recipient : recipients) {
+        bool ready;
+        {
+          OriginalReservationScope inFlight(*this, flight);
+          ready = dispatcher->legacyAcquisitionReady(recipient);
+        }
+        if (!*lifetime)
+          return true;
+        if (flight.cancelled) {
+          observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+          return true;
+        }
+        if (ready)
+          available.push_back(recipient);
+        else
+          blocked = true;
+      }
+      if (blocked) {
+        const auto owners = m_originalOwners;
+        for (const auto owner : owners)
+          revokeOriginalOwner(owner);
+        if (!available.empty() && !held) {
+          // Preserve unrelated recipients of an explicit broadcast. The
+          // resulting press owns only the recipients that actually received it.
+          auto legacy = pending;
+          legacy.recipients = std::move(available);
+          executeLegacyInput(legacy);
+        } else {
+          suppress(); // New controls become tombstones until physical up.
+        }
+        observation.decision.outcome = OriginalInputRouteOutcome::Failed;
+        return true;
+      }
+    }
     if (existingOwner)
       revokeOriginalOwner(existingOwner);
     executeLegacyInput(pending);
@@ -2514,7 +2820,7 @@ bool Server::executeOriginalInput(
   try {
     // The reserved forwarding fence suppresses app forwarding while the real
     // Linux cursor still receives its frozen absolute desktop position.
-    if (motion)
+    if (motion && !dispatcher->presentsCursor())
       executeLegacyInput(pending);
     if (!*lifetime) {
       dispatcher->cancel(*reservation);

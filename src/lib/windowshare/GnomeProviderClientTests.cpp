@@ -34,6 +34,7 @@ using deskflow::windowshare::GnomeProviderClient;
 using deskflow::windowshare::GnomeProviderConfig;
 using namespace deskflow::windowshare;
 using namespace std::chrono_literals;
+using Clock = InputCutoffClock;
 
 namespace {
 constexpr auto serviceName = "org.deskflow.Seamless.Gnome50";
@@ -62,10 +63,19 @@ constexpr auto introspection = R"xml(
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
       <arg type="a{sv}" direction="out"/>
     </method>
+    <method name="GetViewerWithAssociation">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="a{sv}" direction="out"/>
+    </method>
     <method name="ValidateRoutedPoint">
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
       <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
       <arg type="a{sv}" direction="out"/>
+    </method>
+    <method name="ValidateRoutedPoints">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="s" direction="in"/><arg type="a(ssudd)" direction="in"/>
+      <arg type="u" direction="in"/><arg type="a{sv}" direction="out"/>
     </method>
     <method name="ObserveStageFrames">
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
@@ -83,6 +93,71 @@ constexpr auto introspection = R"xml(
       <arg type="a{sv}" direction="in"/><arg type="u" direction="in"/>
       <arg type="a{sv}" direction="out"/>
     </method>
+<method name="SelectInputPreparation">
+      <arg name="session" type="s" direction="in" />
+      <arg name="generation" type="u" direction="in" />
+      <arg name="viewer" type="s" direction="in" />
+      <arg name="request" type="s" direction="in" />
+      <arg name="x" type="d" direction="in" />
+      <arg name="y" type="d" direction="in" />
+      <arg name="associations" type="as" direction="in" />
+      <arg name="binding" type="a{sv}" direction="in" />
+      <arg name="budgetMs" type="u" direction="in" />
+      <arg name="result" type="a{sv}" direction="out" />
+    </method>
+
+<method name="QueryInputPreparation">
+      <arg name="session" type="s" direction="in" />
+      <arg name="generation" type="u" direction="in" />
+      <arg name="viewer" type="s" direction="in" />
+      <arg name="request" type="s" direction="in" />
+      <arg name="x" type="d" direction="in" />
+      <arg name="y" type="d" direction="in" />
+      <arg name="revision" type="u" direction="in" />
+      <arg name="binding" type="a{sv}" direction="in" />
+      <arg name="cleanup" type="b" direction="in" />
+      <arg name="result" type="a{sv}" direction="out" />
+    </method>
+
+<method name="ActivateInputPreparation">
+      <arg name="session" type="s" direction="in" />
+      <arg name="generation" type="u" direction="in" />
+      <arg name="viewer" type="s" direction="in" />
+      <arg name="request" type="s" direction="in" />
+      <arg name="x" type="d" direction="in" />
+      <arg name="y" type="d" direction="in" />
+      <arg name="revision" type="u" direction="in" />
+      <arg name="binding" type="a{sv}" direction="in" />
+      <arg name="budgetMs" type="u" direction="in" />
+      <arg name="result" type="a{sv}" direction="out" />
+    </method>
+
+<method name="DrainInputPreparation">
+      <arg name="session" type="s" direction="in" />
+      <arg name="generation" type="u" direction="in" />
+      <arg name="viewer" type="s" direction="in" />
+      <arg name="request" type="s" direction="in" />
+      <arg name="x" type="d" direction="in" />
+      <arg name="y" type="d" direction="in" />
+      <arg name="revision" type="u" direction="in" />
+      <arg name="binding" type="a{sv}" direction="in" />
+      <arg name="budgetMs" type="u" direction="in" />
+      <arg name="cleanup" type="b" direction="in" />
+      <arg name="result" type="a{sv}" direction="out" />
+    </method>
+
+<method name="FinishInputPreparation">
+      <arg name="session" type="s" direction="in" />
+      <arg name="generation" type="u" direction="in" />
+      <arg name="viewer" type="s" direction="in" />
+      <arg name="request" type="s" direction="in" />
+      <arg name="x" type="d" direction="in" />
+      <arg name="y" type="d" direction="in" />
+      <arg name="revision" type="u" direction="in" />
+      <arg name="binding" type="a{sv}" direction="in" />
+      <arg name="budgetMs" type="u" direction="in" />
+    </method>
+
     <method name="CloseSession">
       <arg type="s" direction="in"/><arg type="u" direction="in"/>
     </method>
@@ -298,8 +373,23 @@ struct Service
   bool duplicateStageField = false, substituteStageField = false, wrongStageFieldType = false;
   unsigned stageRequests = 0;
   bool advertiseDrain = false, wrongDrainBinding = false, duplicateDrainField = false, unknownDrainMethod = false;
+  bool advertisePreparation = false, wrongPreparationBinding = false, noPreparationTarget = false;
+  bool nativePrepared = false, nativeActivated = false, qtPreparationGate = false, qtPreparationConsumed = false;
+  bool denyPreparationCleanup = false, delayPreparationFocus = false, invalidateFinalPreparation = false;
+  bool activationRestackBeforeReply = false, invalidateAfterActivation = false;
+  unsigned preparationPostActivationQueries = 0;
+  unsigned preparationFocusDelayMs = 150;
+  unsigned preparationDrains = 0, preparationQtDrains = 0, preparationActivations = 0, preparationCleanups = 0;
+  std::vector<std::string> preparationSteps;
+  std::optional<InputPreparationBinding> preparationBinding;
   bool delayDrain = false, invalidateDuringDrain = false, wrongQtDrainBinding = false;
+  std::string orderingContract;
+  bool wrongOrderingContract = false, duplicateOrderingCapability = false;
   unsigned drainRequests = 0, qtDrainRequests = 0;
+  unsigned qtMapRequests = 0;
+  unsigned nativeBatchQueries = 0, qtBatchRequests = 0;
+  bool advertiseBatch = true, wrongBatchEcho = false, denyQtBatch = false, driftAfterBatch = false;
+  std::optional<InputCutoffBinding> qtSeal;
   std::uint64_t qtGateGeneration = 6;
   guint lastDrainBudget = 0;
   GDBusMethodInvocation *pendingDrain = nullptr;
@@ -310,6 +400,29 @@ struct Service
   std::string caller, failure;
   unsigned capabilities = 0, creates = 0, launches = 0, closes = 0;
   bool callerGone = false;
+  bool missingAssociationCapability = false, wrongWindowAssociation = false, duplicateWindowAssociation = false;
+
+  GnomeViewportState preparationPaint() const
+  {
+    GnomeViewportState state;
+    state.connection = 1;
+    state.session = 11;
+    state.epoch = 12;
+    state.geometry = 3;
+    state.focusRequest = 4;
+    state.focusRevision = 5;
+    state.surfaceIncarnation = 1;
+    state.viewportRevision = 2;
+    state.peerFingerprint = QString(64, wrongPeer ? 'b' : 'a');
+    state.windowAssociation = QStringLiteral("org.deskflow.window.") + QString(64, 'b');
+    state.nativeSurface = 9;
+    state.clientWidth = state.surfaceWidth = state.videoWidth = 800;
+    state.clientHeight = state.surfaceHeight = state.videoHeight = 600;
+    state.sourceWidth = state.imageWidth = 640;
+    state.sourceHeight = state.imageHeight = 480;
+    state.dpr = state.logicalScale = 1;
+    return state;
+  }
 
   Service(const PrivateBus &bus, Mode mode = Mode::Normal) : mode(mode)
   {
@@ -457,13 +570,23 @@ struct Service
     sendViewport(reply);
     paintSnapshot = 0;
   }
-  void invalidateNative()
+  void invalidateSeal()
+  {
+    check(bool(qtSeal), "No fixture prefix seal to invalidate");
+    GnomeViewportReply reply;
+    reply.operation = GnomeViewportOperation::SealInvalidated;
+    reply.cutoff = *qtSeal;
+    reply.reason = "fixture-All-fence-resumed";
+    qtSeal.reset();
+    sendViewport(reply);
+  }
+  void invalidateNative(const char *reason = "fixture-focus-changed")
   {
     Error error;
     check(
         g_dbus_connection_emit_signal(
             connection, caller.c_str(), objectPath, serviceName, "Invalidated",
-            g_variant_new("(suus)", sessionId, generation, ++revision, "fixture-focus-changed"), &error.value
+            g_variant_new("(suus)", sessionId, generation, ++revision, reason), &error.value
         ),
         "Cannot invalidate fixture native observation"
     );
@@ -495,7 +618,61 @@ struct Service
       reply.operation = request.operation;
       reply.request = request.request;
       reply.ok = true;
-      if (request.operation == GnomeViewportOperation::Snapshot) {
+      reply.cutoff = request.cutoff;
+      reply.seal = request.seal;
+      if (isGnomePreparationOperation(request.operation)) {
+        reply.preparation = request.preparation;
+        reply.target = request.target;
+        const auto state = preparationPaint();
+        const GnomePreparationTarget target{
+            state.session,          state.epoch, state.geometry, state.surfaceIncarnation, 1, state.nativeSurface,
+            state.windowAssociation
+        };
+        if (request.operation == GnomeViewportOperation::PreparationInventory) {
+          check(!qtPreparationGate && request.budgetMs <= 500, "Preparation inventory replaced an active gate");
+          qtPreparationGate = true;
+          preparationBinding = request.preparation;
+          preparationSteps.push_back("qt-gate");
+          reply.inventory = {state.connection, state.peerFingerprint, {target}};
+        } else {
+          check(
+              qtPreparationGate && preparationBinding == request.preparation && request.target == target,
+              "Preparation private call lost its exact gate/paint"
+          );
+          if (request.operation == GnomeViewportOperation::PreparationMap) {
+            reply.x = request.x * .8;
+            reply.y = request.y * .8;
+          } else if (request.operation == GnomeViewportOperation::PreparationDrain) {
+            check(preparationDrains == 1, "Qt preparation drain preceded native prefix drain");
+            ++preparationQtDrains;
+            preparationSteps.push_back("qt-drain");
+          } else if (request.operation == GnomeViewportOperation::PreparationFocus) {
+            check(nativeActivated, "Qt focus preceded exact native activation");
+            preparationSteps.push_back("qt-focus");
+            reply.state = state;
+            if (invalidateAfterActivation)
+              invalidateNative("restacked");
+            if (std::exchange(delayPreparationFocus, false)) {
+              delayedReply = gnomeViewportFrame(gnomeViewportJson(reply));
+              delayedUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(preparationFocusDelayMs);
+              continue;
+            }
+          } else if (request.operation == GnomeViewportOperation::PreparationPromote) {
+            check(request.cutoff.forwarding.generation == qtGateGeneration, "Preparation promoted without genuine All");
+            qtPreparationConsumed = true;
+            preparationSteps.push_back("qt-consumed");
+          } else if (request.operation == GnomeViewportOperation::PreparationCleanup) {
+            check(preparationDrains >= 1, "Preparation cleanup preceded native drain");
+            ++preparationCleanups;
+            preparationSteps.push_back("qt-cleanup");
+            if (denyPreparationCleanup) {
+              reply.ok = false;
+              reply.reason = "fixture-cleanup-unavailable";
+            } else
+              qtPreparationGate = false;
+          }
+        }
+      } else if (request.operation == GnomeViewportOperation::Snapshot) {
         paintSnapshot = request.request;
         auto &state = reply.state;
         state.connection = 1;
@@ -507,6 +684,7 @@ struct Service
         state.surfaceIncarnation = 1;
         state.viewportRevision = 2;
         state.peerFingerprint = QString(64, wrongPeer ? 'b' : 'a');
+        state.windowAssociation = QStringLiteral("org.deskflow.window.") + QString(64, 'b');
         state.nativeSurface = 9;
         state.clientWidth = state.surfaceWidth = state.videoWidth = 800;
         state.clientHeight = state.surfaceHeight = state.videoHeight = 600;
@@ -523,9 +701,28 @@ struct Service
         if (request.snapshot != paintSnapshot) {
           reply.ok = false;
           reply.reason = "fixture-stale-snapshot";
-        } else if (request.operation == GnomeViewportOperation::Map) {
+        } else if (request.operation == GnomeViewportOperation::Map ||
+                   request.operation == GnomeViewportOperation::InputMap) {
           reply.x = request.x * 0.8;
           reply.y = request.y * 0.8;
+          if (request.operation == GnomeViewportOperation::InputMap) {
+            ++qtMapRequests;
+            if (!qtSeal || request.seal != qtSeal->request || !continuesInputCutoffSeal(*qtSeal, request.cutoff) ||
+                request.cutoff.forwarding.generation != qtGateGeneration) {
+              reply.ok = false;
+              reply.reason = "fixture-prefix-seal-not-held";
+            }
+          }
+        } else if (request.operation == GnomeViewportOperation::InputMapBatch) {
+          ++qtBatchRequests;
+          if (!qtSeal || *qtSeal != request.cutoff || request.cutoff.forwarding.generation != qtGateGeneration ||
+              denyQtBatch) {
+            reply.ok = false;
+            reply.reason = "fixture-prefix-batch-denied";
+          } else {
+            for (const auto &point : request.points)
+              reply.points.push_back({point.cutoff, point.x * 0.8, point.y * 0.8});
+          }
         } else if (request.operation == GnomeViewportOperation::Check) {
           // A synchronous Qt Check acknowledgement is not evidence that
           // GNOME remained stable while the Qt default queue was processed.
@@ -534,7 +731,8 @@ struct Service
             ++revision; // Deliberately emit NO native invalidation signal.
           if (std::exchange(invalidateOnCheck, false))
             invalidatePaint();
-        } else if (request.operation == GnomeViewportOperation::InputDrain) {
+        } else if (request.operation == GnomeViewportOperation::InputDrain ||
+                   request.operation == GnomeViewportOperation::InputSeal) {
           ++qtDrainRequests;
           reply.cutoff = request.cutoff;
           if (wrongQtDrainBinding)
@@ -545,6 +743,8 @@ struct Service
           }
           if (std::exchange(invalidateOnCheck, false))
             invalidatePaint();
+          if (reply.ok && request.operation == GnomeViewportOperation::InputSeal)
+            qtSeal = request.cutoff;
         }
       }
       sendViewport(reply);
@@ -559,16 +759,28 @@ struct Service
       g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
       for (const auto *key : {"exactWaylandClientBinding", "eisSessionOwned", "nativeHitTesting", "viewportChannel"})
         g_variant_builder_add(&values, "{sv}", key, g_variant_new_boolean(true));
+      if (!missingAssociationCapability)
+        g_variant_builder_add(&values, "{sv}", "perWindowAssociation", g_variant_new_boolean(true));
       if (advertiseRoutedPoint)
         g_variant_builder_add(&values, "{sv}", "routedPointObservation", g_variant_new_boolean(true));
+      if (advertiseBatch)
+        g_variant_builder_add(&values, "{sv}", "routedPointsObservation", g_variant_new_boolean(true));
       if (advertiseStage)
         g_variant_builder_add(&values, "{sv}", "stageUpdateSequence", g_variant_new_boolean(true));
       if (advertiseDrain) {
         g_variant_builder_add(&values, "{sv}", "inputDrainSegment", g_variant_new_boolean(true));
         g_variant_builder_add(
-            &values, "{sv}", "inputDrainOrderingLimit", g_variant_new_string("mutter-eis-sync-build-unverified")
+            &values, "{sv}", "inputDrainOrderingLimit",
+            g_variant_new_string(orderingContract.empty() ? "mutter-eis-sync-build-unverified" : "")
         );
+        g_variant_builder_add(
+            &values, "{sv}", "inputDrainOrderingContract", g_variant_new_string(orderingContract.c_str())
+        );
+        if (duplicateOrderingCapability)
+          g_variant_builder_add(&values, "{sv}", "inputDrainOrderingContract", g_variant_new_string(""));
       }
+      if (advertisePreparation)
+        g_variant_builder_add(&values, "{sv}", "inputPreparation", g_variant_new_boolean(true));
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
@@ -632,22 +844,120 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
-    } else if (!std::strcmp(name, "DrainInputPrefix")) {
+    } else if (!std::strcmp(name, "SelectInputPreparation") || !std::strcmp(name, "QueryInputPreparation") ||
+               !std::strcmp(name, "ActivateInputPreparation") || !std::strcmp(name, "FinishInputPreparation")) {
+      check(
+          advertisePreparation && caller == g_dbus_method_invocation_get_sender(invocation),
+          "Preparation native call changed private owner or capability"
+      );
+      auto *binding = g_variant_get_child_value(parameters, 7);
+      const auto getString = [&](unsigned index) {
+        auto *value = g_variant_get_child_value(parameters, index);
+        const std::string result = g_variant_get_string(value, nullptr);
+        g_variant_unref(value);
+        return result;
+      };
+      const auto getDouble = [&](unsigned index) {
+        auto *value = g_variant_get_child_value(parameters, index);
+        const auto result = g_variant_get_double(value);
+        g_variant_unref(value);
+        return result;
+      };
+      const auto request = getString(3);
+      const double x = getDouble(4), y = getDouble(5);
+      check(
+          getString(0) == sessionId && getString(2) == viewerId &&
+              (qtPreparationGate || !std::strcmp(name, "FinishInputPreparation")) && g_variant_n_children(binding) == 5,
+          "Preparation fabricated an All or lost its closed gate"
+      );
+      if (!std::strcmp(name, "SelectInputPreparation")) {
+        check(!nativePrepared, "Preparation selected two native lifetimes");
+        nativePrepared = true;
+        preparationSteps.push_back("native-select");
+      } else if (!std::strcmp(name, "ActivateInputPreparation")) {
+        check(
+            nativePrepared && preparationDrains == 1 && preparationQtDrains == 1,
+            "Native activation bypassed the full ordered preparation drain"
+        );
+        nativeActivated = true;
+        ++preparationActivations;
+        preparationSteps.push_back("native-activate");
+        // The native adapter must complete its bounded activation frames
+        // before replying. A queued restack belongs before that boundary,
+        // not after it; the client may retain only the completed revision.
+        if (activationRestackBeforeReply)
+          invalidateNative("restacked");
+      } else if (!std::strcmp(name, "FinishInputPreparation")) {
+        check(nativePrepared && !qtPreparationGate, "Native preparation retired before Qt gate cleanup");
+        nativePrepared = false;
+        g_variant_unref(binding);
+        g_dbus_method_invocation_return_value(invocation, g_variant_new("()"));
+        return;
+      }
+      if (wrongPreparationBinding) {
+        GVariantDict changed;
+        g_variant_dict_init(&changed, binding);
+        g_variant_dict_insert(&changed, "preparationRequest", "s", "999");
+        g_variant_unref(binding);
+        binding = g_variant_ref_sink(g_variant_dict_end(&changed));
+      }
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
+      const bool available = !noPreparationTarget || std::strcmp(name, "SelectInputPreparation");
+      add("available", g_variant_new_boolean(available));
+      add("reason", g_variant_new_string(available ? "" : "preparation-no-target"));
+      add("session", g_variant_new_string(sessionId));
+      add("generation", g_variant_new_uint32(generation));
+      add("viewer", g_variant_new_string(viewerId));
+      add("request", g_variant_new_string(request.c_str()));
+      add("binding", binding);
+      g_variant_unref(binding);
+      add("association", g_variant_new_string(("org.deskflow.window." + std::string(64, 'b')).c_str()));
+      add("window", g_variant_new_string("fixture-window"));
+      add("surface", g_variant_new_string("fixture-surface"));
+      add("revision", g_variant_new_uint32(revision));
+      add("stageX", g_variant_new_double(x));
+      add("stageY", g_variant_new_double(y));
+      add("localX", g_variant_new_double(x - 100));
+      add("localY", g_variant_new_double(y - 100));
+      add("focused", g_variant_new_boolean(nativeActivated));
+      add("orderingContract", g_variant_new_string(orderingContract.c_str()));
+      // The final exact reply may already be on its way when focus/layout
+      // invalidates. The client must consume this signal before publication,
+      // not discard it just because the public state remains Preparing.
+      if (!std::strcmp(name, "QueryInputPreparation") && nativeActivated && ++preparationPostActivationQueries == 2 &&
+          invalidateFinalPreparation)
+        invalidateNative();
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
+    } else if (!std::strcmp(name, "DrainInputPrefix") || !std::strcmp(name, "DrainInputPreparation")) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Drain request changed private caller");
       const char *sessionKey = nullptr, *token = nullptr, *request = nullptr;
       guint g = 0, requestedRevision = 0, budget = 0;
       double x = 0, y = 0;
       GVariant *binding = nullptr;
-      g_variant_get(
-          parameters, "(&su&s&sddu@a{sv}u)", &sessionKey, &g, &token, &request, &x, &y, &requestedRevision, &binding,
-          &budget
-      );
+      const bool preparing = !std::strcmp(name, "DrainInputPreparation");
+      gboolean cleanup = false;
+      if (preparing)
+        g_variant_get(
+            parameters, "(&su&s&sddu@a{sv}ub)", &sessionKey, &g, &token, &request, &x, &y, &requestedRevision, &binding,
+            &budget, &cleanup
+        );
+      else
+        g_variant_get(
+            parameters, "(&su&s&sddu@a{sv}u)", &sessionKey, &g, &token, &request, &x, &y, &requestedRevision, &binding,
+            &budget
+        );
       check(
           !std::strcmp(sessionKey, sessionId) && g == generation && !std::strcmp(token, viewerId) && request &&
               *request && advertiseDrain && budget > 0 && budget <= 120,
           "Drain request changed native binding or inherited budget"
       );
       ++drainRequests;
+      if (preparing) {
+        ++preparationDrains;
+        preparationSteps.push_back(cleanup ? "native-cleanup" : "native-drain");
+      }
       lastDrainBudget = budget;
       if (unknownDrainMethod) {
         g_variant_unref(binding);
@@ -679,7 +989,9 @@ struct Service
       add("binding", binding);
       g_variant_unref(binding);
       add("segment", g_variant_new_string("clutter-queue-and-stage"));
-      add("orderingLimit", g_variant_new_string("mutter-eis-sync-build-unverified"));
+      add("orderingLimit", g_variant_new_string(orderingContract.empty() ? "mutter-eis-sync-build-unverified" : ""));
+      add("orderingContract",
+          g_variant_new_string(wrongOrderingContract ? "sha256:substituted" : orderingContract.c_str()));
       auto *reply = g_variant_new("(a{sv})", &values);
       if (invalidateDuringDrain)
         invalidateNative();
@@ -733,10 +1045,50 @@ struct Service
       add("stageX", g_variant_new_double(wrongStagePoint ? stageX + 1 : stageX));
       add("stageY", g_variant_new_double(stageY));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
-    } else if (!std::strcmp(name, "GetViewer") || !std::strcmp(name, "ValidateCurrentHit") ||
+    } else if (!std::strcmp(name, "ValidateRoutedPoints")) {
+      ++nativeBatchQueries;
+      const char *id = nullptr, *token = nullptr, *request = nullptr, *epoch = nullptr;
+      guint value = 0, expectedRevision = 0;
+      GVariant *points = nullptr;
+      g_variant_get(
+          parameters, "(&su&s&s&s@a(ssudd)u)", &id, &value, &token, &request, &epoch, &points, &expectedRevision
+      );
+      check(
+          caller == g_dbus_method_invocation_get_sender(invocation) && std::strcmp(id, sessionId) == 0 &&
+              value == generation && std::strcmp(token, viewerId) == 0,
+          "Batch query changed provider binding"
+      );
+      GVariantBuilder values, mapped;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      g_variant_builder_init(&mapped, G_VARIANT_TYPE("a(ssudddd)"));
+      GVariantIter iterator;
+      g_variant_iter_init(&iterator, points);
+      const char *cutoff = nullptr, *sequence = nullptr;
+      guint part = 0;
+      double x = 0, y = 0;
+      while (g_variant_iter_next(&iterator, "(&s&sudd)", &cutoff, &sequence, &part, &x, &y))
+        g_variant_builder_add(
+            &mapped, "(ssudddd)", cutoff, sequence, part, x + (wrongBatchEcho ? 1 : 0), y,
+            x - 100 + (driftAfterBatch && qtBatchRequests ? 1 : 0), y - 100
+        );
+      g_variant_unref(points);
+      const auto add = [&](const char *key, GVariant *item) { g_variant_builder_add(&values, "{sv}", key, item); };
+      add("session", g_variant_new_string(sessionId));
+      add("viewer", g_variant_new_string(viewerId));
+      add("generation", g_variant_new_uint32(generation));
+      add("revision", g_variant_new_uint32(revision));
+      add("request", g_variant_new_string(request));
+      add("captureEpoch", g_variant_new_string(epoch));
+      add("window", g_variant_new_string("fixture-window"));
+      add("surface", g_variant_new_string("fixture-surface"));
+      add("available", g_variant_new_boolean(expectedRevision == revision));
+      add("reason", g_variant_new_string(""));
+      add("points", g_variant_builder_end(&mapped));
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
+    } else if (!std::strcmp(name, "GetViewerWithAssociation") || !std::strcmp(name, "ValidateCurrentHit") ||
                !std::strcmp(name, "ValidateRoutedPoint")) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Viewport query changed private caller");
-      const char *id = nullptr, *token = nullptr, *request = nullptr;
+      const char *id = nullptr, *token = nullptr, *request = nullptr, *association = nullptr;
       guint value = 0, expectedRevision = revision;
       double x = 400, y = 300;
       const bool routed = !std::strcmp(name, "ValidateRoutedPoint");
@@ -744,8 +1096,13 @@ struct Service
       if (hit) {
         ++nativeHitQueries;
         g_variant_get(parameters, "(&su&s&sddu)", &id, &value, &token, &request, &x, &y, &expectedRevision);
-      } else
-        g_variant_get(parameters, "(&su&s)", &id, &value, &token);
+      } else {
+        g_variant_get(parameters, "(&su&s&s)", &id, &value, &token, &association);
+        check(
+            std::string(association) == "org.deskflow.window." + std::string(64, 'b'),
+            "Provider queried another native role association"
+        );
+      }
       check(
           id && token && std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(token, viewerId) == 0,
           "Native viewport query changed binding"
@@ -755,6 +1112,10 @@ struct Service
       const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
       add("session", g_variant_new_string(sessionId));
       add("viewer", g_variant_new_string(viewerId));
+      add("windowAssociation",
+          g_variant_new_string(("org.deskflow.window." + std::string(64, wrongWindowAssociation ? 'c' : 'b')).c_str()));
+      if (duplicateWindowAssociation)
+        add("windowAssociation", g_variant_new_string(("org.deskflow.window." + std::string(64, 'b')).c_str()));
       add("generation", g_variant_new_uint32(generation));
       add("revision", g_variant_new_uint32(revision));
       add("window", g_variant_new_string("fixture-window"));
@@ -1048,7 +1409,8 @@ void inputDrainBindingAndRevocation(const PrivateBus &bus)
       result.segment->binding() == wanted.cutoff && result.segment->snapshot().routedPoint == wanted.point &&
           result.segment->snapshot().desktopX == 425 && service.drainRequests == 1 && service.qtDrainRequests == 1 &&
           service.stageRequests == 0 && !service.afterQtCheck && !client.takeViewportUpdate() &&
-          std::string(result.segment->orderingLimitation()) == "mutter-eis-sync-build-unverified",
+          std::string(result.segment->orderingLimitation()) == "mutter-eis-sync-build-unverified" &&
+          !result.segment->senderOrdering(),
       "Input drain lost correlation or used generic observation as a drain"
   );
   check(!client.requestInputDrain(wanted), "A retired cutoff request was reused");
@@ -1087,9 +1449,10 @@ void inputDrainBindingAndRevocation(const PrivateBus &bus)
 }
 void inputDrainMalformedAndInvalidated(const PrivateBus &bus)
 {
-  for (int mode = 0; mode < 4; ++mode) {
+  for (int mode = 0; mode < 5; ++mode) {
     Service service(bus);
     service.advertiseDrain = true;
+    service.wrongOrderingContract = mode == 4;
     service.duplicateDrainField = mode == 0;
     service.wrongDrainBinding = mode == 1;
     service.wrongQtDrainBinding = mode == 2;
@@ -1105,7 +1468,7 @@ void inputDrainMalformedAndInvalidated(const PrivateBus &bus)
     check(!result.segment && !result.error.empty(), "Malformed or invalidated drain granted a segment");
     if (mode != 2)
       check(service.qtDrainRequests == 0, "Invalid provider segment reached Qt drain");
-    if (mode < 3)
+    if (mode < 3 || mode == 4)
       waitUntil([&] { return !client.live(); }, "Substituted drain reply did not retire the private channel");
     else
       check(client.live(), "Ordinary native invalidation became a protocol failure");
@@ -1164,6 +1527,407 @@ void inputDrainDeadlineAndCapabilities(const PrivateBus &bus)
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Deadline drain fixture did not close");
     check(service.failure.empty(), "Deadline drain fixture failed");
+  }
+}
+void inputDrainOrderingAndExactCancellation(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.advertiseDrain = true;
+  service.orderingContract = "sha256:" + std::string(64, 'a');
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  const auto request = client.requestInputDrain(inputDrainRequest());
+  const auto result = inputDrainResult(client, request);
+  check(
+      result.segment && result.segment->senderOrdering() && result.segment->senderOrdering()->live(),
+      "Verified exact provider contract did not retain independently live evidence"
+  );
+  const auto proof = *result.segment->senderOrdering();
+  check(
+      proof.contract() == service.orderingContract && std::string(result.segment->orderingLimitation()).empty(),
+      "Sender-ordering proof changed the negotiated contract"
+  );
+  check(!client.cancelInputDrain(request + 1) && proof.live(), "Wrong cancellation revoked an exact live receipt");
+  check(
+      client.cancelInputDrain(request) && !result.segment->live() && !proof.live() && !client.takeInputDrainUpdate() &&
+          !client.cancelInputDrain(request),
+      "Cancellation did not revoke copied evidence and retire its result exactly once"
+  );
+  service.delayDrain = true;
+  const auto delayed = client.requestInputDrain(inputDrainRequest(2));
+  check(delayed != 0, "Fresh drain was blocked after completed cancellation");
+  waitUntil([&] { return service.pendingDrain != nullptr; }, "Native cancellation did not reach its pending call");
+  check(client.cancelInputDrain(delayed) && !client.takeInputDrainUpdate(), "Pending drain was not canceled");
+  g_dbus_method_invocation_return_value(service.pendingDrain, service.pendingDrainReply);
+  g_object_unref(std::exchange(service.pendingDrain, nullptr));
+  g_variant_unref(std::exchange(service.pendingDrainReply, nullptr));
+  std::uint64_t fresh = 0;
+  waitUntil(
+      [&] {
+        fresh = client.requestInputDrain(inputDrainRequest(3));
+        return fresh != 0;
+      },
+      "Canceled bounded native call never released its slot"
+  );
+  const auto next = inputDrainResult(client, fresh);
+  check(
+      next.segment && next.segment->binding().request == 3 && next.segment->senderOrdering() &&
+          next.segment->senderOrdering()->live() && service.qtDrainRequests == 2 && !client.cancelInputDrain(delayed),
+      "Late canceled native reply contaminated fresh sender evidence"
+  );
+  const auto nextProof = *next.segment->senderOrdering();
+  service.invalidatePaint();
+  waitUntil(
+      [&] { return !nextProof.live(); }, "Gate invalidation did not independently revoke copied ordering evidence"
+  );
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Ordering/cancellation fixture did not close");
+  check(service.failure.empty(), "Ordering/cancellation fixture failed");
+}
+
+void retainedPrefixMaps(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.advertiseDrain = true;
+  service.orderingContract = "sha256:" + std::string(64, 'a');
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  auto initial = inputDrainRequest(10);
+  initial.retainPrefix = true;
+  const auto firstRequest = client.requestInputDrain(initial);
+  check(firstRequest != 0, "Supported retained prefix request was refused");
+  const auto first = inputDrainResult(client, firstRequest);
+  check(
+      first.segment && first.segment->live() && first.segment->seal() && first.segment->seal()->live(),
+      "Initial full drain did not return a distinct live prefix seal"
+  );
+  const auto seal = *first.segment->seal();
+  check(
+      seal.binding() == initial.cutoff && seal.contract() == service.orderingContract,
+      "Prefix seal lost its exact origin or build contract"
+  );
+  waitUntil([&] { return !first.segment->live(); }, "Initial stamped point did not expire");
+  check(
+      seal.live() && !first.segment->senderOrdering()->live(),
+      "Historical prefix seal renewed an old point or expired with it"
+  );
+  auto mapping = inputDrainRequest(11);
+  ++mapping.cutoff.capture.sequence;
+  ++mapping.point.sequence;
+  const auto mappedRequest = client.requestInputMap(seal, mapping);
+  check(mappedRequest != 0, "Fresh point under retained prefix was refused");
+  auto awaitMap = [&](std::uint64_t id) {
+    std::optional<GnomeProviderClient::InputDrainUpdate> result;
+    waitUntil(
+        [&] {
+          if (auto update = client.takeInputMapUpdate(); update && update->request == id)
+            result = std::move(update);
+          return result.has_value();
+        },
+        "Fresh sealed map did not complete"
+    );
+    return std::move(*result);
+  };
+  const auto mapped = awaitMap(mappedRequest);
+  check(
+      mapped.segment && mapped.segment->live() && mapped.segment->seal() && mapped.segment->seal()->live() &&
+          mapped.segment->binding() == mapping.cutoff && mapped.segment->snapshot().routedPoint == mapping.point &&
+          service.drainRequests == 1 && service.qtDrainRequests == 1 && service.qtMapRequests == 1,
+      "Fresh exact point repeated the old-prefix drain or lost capture association"
+  );
+  check(client.requestInputMap(seal, mapping) == 0, "Repeated capture acquired another sealed map");
+  auto changed = inputDrainRequest(12);
+  changed.cutoff.capture.sequence += 2;
+  changed.point.sequence += 2;
+  ++changed.cutoff.forwarding.generation;
+  check(client.requestInputMap(seal, changed) == 0, "A new All generation reused an old prefix seal");
+  --changed.cutoff.forwarding.generation;
+  check(
+      !client.requestInputMap(GnomeProviderClient::InputDrainSeal{}, changed), "Default seal acquired native mapping"
+  );
+  check(
+      client.cancelInputDrain(firstRequest) && !seal.live() && !mapped.segment->live() &&
+          !mapped.segment->senderOrdering()->live() && client.live(),
+      "Canceling the original seal did not revoke copied maps while preserving the provider"
+  );
+  check(!client.requestInputMap(seal, changed), "Canceled prefix seal admitted another map");
+  auto next = inputDrainRequest(13);
+  next.retainPrefix = true;
+  const auto nextRequest = client.requestInputDrain(next);
+  check(nextRequest, "Fresh retained prefix was blocked after cancellation");
+  const auto nextResult = inputDrainResult(client, nextRequest);
+  check(nextResult.segment && nextResult.segment->seal(), "Fresh prefix failed after cancellation");
+  const auto nextSeal = *nextResult.segment->seal();
+  service.invalidateSeal();
+  waitUntil([&] { return !nextSeal.live(); }, "Exact Qt seal invalidation did not revoke copied historical evidence");
+  check(!nextResult.segment->live(), "Qt prefix revocation left its associated point live");
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Retained prefix fixture did not close");
+  check(service.failure.empty(), "Retained prefix fixture service failed");
+}
+void retainedPrefixBatches(const PrivateBus &bus)
+{
+  for (unsigned mode = 0; mode < 5; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = true;
+    service.orderingContract = "sha256:" + std::string(64, 'a');
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    auto initial = inputDrainRequest(10);
+    initial.retainPrefix = true;
+    const auto initialRequest = client.requestInputDrain(initial);
+    check(initialRequest, "Batch initial seal refused");
+    const auto first = inputDrainResult(client, initialRequest);
+    check(first.segment && first.segment->seal(), "Batch initial prefix did not seal");
+    const auto seal = *first.segment->seal();
+    std::vector<GnomeProviderClient::InputDrainRequest> points;
+    for (unsigned i = 0; i < 16; ++i) {
+      auto item = inputDrainRequest(11 + i);
+      item.cutoff.capture.sequence += i + 1;
+      item.point.sequence = item.cutoff.capture.sequence;
+      item.point.desktopX += i;
+      points.push_back(item);
+    }
+    check(!client.requestInputMapBatch(seal, {}), "Empty batch reached native calls");
+    auto bad = points;
+    bad.push_back(bad.back());
+    check(!client.requestInputMapBatch(seal, bad), "Oversized batch reached native calls");
+    bad = points;
+    bad[4].cutoff = bad[3].cutoff;
+    check(!client.requestInputMapBatch(seal, bad), "Repeated batch stamp reached native calls");
+    bad = points;
+    ++bad.back().cutoff.forwarding.generation;
+    check(!client.requestInputMapBatch(seal, bad), "Mixed-fence batch reached native calls");
+    service.wrongBatchEcho = mode == 1;
+    service.denyQtBatch = mode == 2;
+    service.driftAfterBatch = mode == 3;
+    service.delaySnapshot = mode == 4;
+    if (mode == 4)
+      points.front().deadline = std::chrono::steady_clock::now() + 25ms;
+    const auto request = client.requestInputMapBatch(seal, points);
+    check(request, "Valid sealed batch refused admission");
+    std::optional<GnomeProviderClient::InputMapBatchUpdate> result;
+    waitUntil(
+        [&] {
+          if (auto update = client.takeInputMapBatchUpdate(); update && update->request == request)
+            result = std::move(update);
+          return result.has_value();
+        },
+        "Sealed point batch did not complete"
+    );
+    if (mode == 0) {
+      check(
+          result->error.empty() && result->segments.size() == 16 && service.nativeBatchQueries == 2 &&
+              service.qtBatchRequests == 1 && service.drainRequests == 1 && service.qtDrainRequests == 1,
+          "Point batch did not use one native/Qt/native chain"
+      );
+      for (std::size_t i = 0; i < points.size(); ++i) {
+        const auto &segment = result->segments[i];
+        check(
+            segment.live() && segment.seal() && segment.seal()->binding() == initial.cutoff &&
+                segment.binding() == points[i].cutoff && segment.snapshot().routedPoint == points[i].point &&
+                segment.snapshot().sourceX == (points[i].point.desktopX - 100) * 0.8,
+            "Batch lost independent exact capture or mapping"
+        );
+      }
+      check(client.cancelInputDrain(initialRequest) && !seal.live(), "Batch cancellation left seal live");
+      for (const auto &segment : result->segments)
+        check(!segment.live() && !segment.senderOrdering()->live(), "Batch cancellation left one item live");
+    } else
+      check(
+          result->segments.empty() && !result->error.empty(), "Failed native/Qt/deadline batch published partial points"
+      );
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Batch fixture did not close");
+    check(service.failure.empty(), "Batch fixture service failed");
+  }
+}
+void exactWindowAssociation(const PrivateBus &bus)
+{
+  for (unsigned mode = 0; mode < 3; ++mode) {
+    Service service(bus);
+    service.missingAssociationCapability = mode == 0;
+    service.wrongWindowAssociation = mode == 1;
+    service.duplicateWindowAssociation = mode == 2;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    if (mode == 0) {
+      check(ready.closed && !ready.ready && !service.creates, "Missing per-window role capability created a session");
+    } else {
+      check(ready.ready, "Association fixture failed setup");
+      const auto request = client.requestViewportObservation();
+      check(request, "Association fixture refused observation");
+      const auto result = viewportResult(client, request);
+      check(!result.observation && !result.error.empty(), "Substituted/duplicate native role token acquired mapping");
+    }
+    client.stop();
+    if (mode != 0)
+      waitUntil([&] { return service.callerGone; }, "Association fixture did not close");
+    check(service.failure.empty(), "Association fixture service failed");
+  }
+}
+void inputPreparationFocusPromotionAndCleanup(const PrivateBus &bus)
+{
+  for (unsigned mode = 0; mode < 9; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = service.advertisePreparation = true;
+    service.orderingContract = "sha256:" + std::string(64, 'a');
+    service.noPreparationTarget = mode == 1;
+    service.wrongPreparationBinding = mode == 2;
+    service.delayPreparationFocus = mode == 3 || mode == 4;
+    service.preparationFocusDelayMs = mode == 4 ? 275 : 150;
+    service.denyPreparationCleanup = mode == 5;
+    service.invalidateFinalPreparation = mode == 6;
+    service.activationRestackBeforeReply = mode == 7;
+    service.invalidateAfterActivation = mode == 8;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Preparation fixture did not become ready");
+    const auto initial = inputDrainRequest(10);
+    GnomeProviderClient::InputPreparationRequest request{
+        {10, 7, initial.cutoff.capture}, initial.point, Clock::now() + (mode == 3 ? 80ms : 500ms)
+    };
+    const auto origin = client.requestInputPreparation(request);
+    check(origin && !client.requestInputPreparation(request), "Preparation did not retain one exact slot");
+    std::optional<GnomeProviderClient::InputPreparationUpdate> prepared;
+    waitUntil(
+        [&] {
+          prepared = client.takeInputPreparationUpdate();
+          return prepared.has_value();
+        },
+        "Preparation focus update timed out"
+    );
+    check(prepared->request == origin, "Preparation update changed its local request");
+    if (mode == 2) {
+      check(!prepared->focus && !prepared->error.empty(), "Substituted preparation binding was accepted");
+      waitUntil([&] { return !client.live() && service.callerGone; }, "Malformed preparation did not fail closed");
+      check(!client.takeInputPreparationCleanupUpdate(), "Malformed native reply manufactured cleanup proof");
+      check(service.failure.empty(), "Malformed preparation fixture failed");
+      continue;
+    }
+    std::optional<GnomeProviderClient::InputDrainSeal> seal;
+    if (mode == 1 || mode == 3 || mode == 6 || mode == 8) {
+      check(!prepared->focus && !prepared->error.empty(), "Refused/late preparation granted focus");
+      if (mode == 6)
+        check(
+            prepared->error == "GNOME preparation invalidated before focus publication" &&
+                service.preparationPostActivationQueries == 2 && service.qtPreparationGate,
+            "Final native invalidation was discarded before prepared focus publication"
+        );
+      if (mode == 8)
+        check(
+            prepared->error == "GNOME preparation focus changed before publication" && service.qtPreparationGate,
+            "A restack after completed activation silently renewed the prepared revision"
+        );
+      if (mode == 1)
+        check(
+            prepared->outcome == InputPreparationOutcome::NoTarget && !service.preparationActivations,
+            "No-target preparation activated or lost its explicit outcome"
+        );
+    } else {
+      check(
+          prepared->focus && prepared->focus->live() && prepared->focus->binding() == request.binding &&
+              prepared->outcome == InputPreparationOutcome::None && prepared->focus->snapshot().paint.connection == 1 &&
+              prepared->focus->snapshot().sourceX == 260 &&
+              prepared->focus->snapshot().nativeRevision == service.revision && service.preparationActivations == 1,
+          "Ordered preparation failed to return its fresh focus-only receipt"
+      );
+      const std::vector<std::string> expected{"qt-gate",  "native-select",   "native-drain",
+                                              "qt-drain", "native-activate", "qt-focus"};
+      check(service.preparationSteps == expected, "Preparation reordered its native/Qt/focus chain");
+      auto promotion = inputDrainRequest(11);
+      promotion.retainPrefix = true;
+      auto wrong = promotion;
+      ++wrong.cutoff.viewerConnection;
+      check(!client.promoteInputPreparation(*prepared->focus, wrong), "Promotion substituted actual Viewer connection");
+      const auto promoted = client.promoteInputPreparation(*prepared->focus, promotion);
+      check(promoted && prepared->focus->live(), "Promotion prematurely revoked prepared continuity");
+      const auto result = inputDrainResult(client, promoted);
+      check(
+          result.segment && result.segment->live() && result.segment->seal() && service.qtPreparationGate &&
+              service.qtPreparationConsumed && prepared->focus->live(),
+          "Promotion removed prep gate or failed to return the genuine All seal"
+      );
+      seal = *result.segment->seal();
+      if (mode == 4) {
+        waitUntil([&] { return Clock::now() > request.deadline + 20ms; }, "Preparation clock did not expire");
+        check(
+            !prepared->focus->live() && seal->live(), "Old focus TTL extended or revoked the independent prefix seal"
+        );
+      }
+      service.qtGateGeneration = 0; // Host resumed All before Core cleanup.
+    }
+    check(!client.cancelInputPreparation(origin + 100, Clock::now() + 250ms), "Wrong preparation canceled the slot");
+    check(client.cancelInputPreparation(origin, Clock::now() + 250ms), "Exact linked preparation cleanup was refused");
+    check(!prepared->focus || !prepared->focus->live(), "Cancellation left copied prepared focus live");
+    check(!seal || !seal->live(), "Cancellation left the linked prefix seal live");
+    std::optional<GnomeProviderClient::InputPreparationCleanupUpdate> cleanup;
+    waitUntil(
+        [&] {
+          cleanup = client.takeInputPreparationCleanupUpdate();
+          return cleanup.has_value();
+        },
+        "Preparation cleanup did not settle"
+    );
+    check(
+        cleanup->request == origin && cleanup->released == (mode != 5),
+        "Preparation cleanup changed origin or manufactured a release"
+    );
+    if (mode != 5)
+      check(
+          cleanup->error.empty() && !service.qtPreparationGate && !service.nativePrepared &&
+              service.preparationCleanups == 1,
+          "Preparation cleanup omitted native/Qt gate retirement"
+      );
+    else
+      check(
+          !cleanup->error.empty() && service.qtPreparationGate,
+          "Failed cleanup reopened preparation or claimed Released"
+      );
+    if (mode == 3) {
+      waitUntil([&] { return service.delayedReply.isEmpty(); }, "Late focus fixture did not send its stale reply");
+      check(!client.takeInputPreparationUpdate(), "Late focus reply revived a canceled preparation");
+    }
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Preparation fixture did not close");
+    check(service.failure.empty(), "Preparation fixture service failed");
+  }
+}
+void inputDrainOrderingCapabilityRefusal(const PrivateBus &bus)
+{
+  for (int mode = 0; mode < 3; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = true;
+    service.orderingContract = mode == 0 ? "Shell-50.1" : "sha256:" + std::string(64, 'a');
+    service.duplicateOrderingCapability = mode == 1;
+    if (mode == 2)
+      service.orderingContract += "\n";
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(
+        !ready.ready && ready.closed && !client.live() && !service.creates,
+        "Malformed or duplicate sender contract admitted a provider session"
+    );
+    client.stop();
+    check(service.failure.empty(), "Ordering capability refusal fixture failed");
   }
 }
 void viewportJoinAndRevocation(const PrivateBus &bus)
@@ -1598,6 +2362,19 @@ int main(int argc, char **argv)
     std::puts("PASS: malformed, substituted and invalidated drain replies cannot publish a segment");
     inputDrainDeadlineAndCapabilities(bus);
     std::puts("PASS: missing drain capability, inherited deadline and late replies preserve the finite request");
+    inputDrainOrderingAndExactCancellation(bus);
+    std::puts(
+        "PASS: sender build evidence is exact, independently revocable, and late canceled calls cannot revive it"
+    );
+    retainedPrefixMaps(bus);
+    retainedPrefixBatches(bus);
+    exactWindowAssociation(bus);
+    inputPreparationFocusPromotionAndCleanup(bus);
+    std::puts(
+        "PASS: one retained prefix drain supports fresh stamped maps without extending old points or surviving resume"
+    );
+    inputDrainOrderingCapabilityRefusal(bus);
+    std::puts("PASS: malformed and duplicate sender build capabilities fail before session creation");
     viewportWrongAuthenticatedPeer(bus);
     std::puts("PASS: wrong authenticated viewer peer ends the viewport session");
     return 0;

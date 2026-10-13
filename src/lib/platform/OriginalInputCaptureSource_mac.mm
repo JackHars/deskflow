@@ -6,8 +6,14 @@
 #include "OriginalKeyboard_mac.h"
 
 #include <limits>
+#include <utility>
 
 namespace deskflow::windowshare {
+
+OriginalInputCaptureSource::OriginalInputCaptureSource()
+{
+  inputEvidenceInitialize(InputEvidenceQueue::Translation, this, OriginalInputStream::capacity);
+}
 
 OriginalInputCaptureSource::~OriginalInputCaptureSource()
 {
@@ -24,6 +30,7 @@ bool OriginalInputCaptureSource::start() noexcept
 
 OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CGEventRef event) noexcept
 {
+  InputEvidenceCaptureActivity evidenceActivity;
   if (m_state.load(std::memory_order_acquire) != State::Running)
     return {};
   // Recognize the escape chord even after overflow/revocation and even when
@@ -51,7 +58,12 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
   case OriginalInputCapture::Status::Ignored:
     return {};
   case OriginalInputCapture::Status::Captured:
+    // Preserve the source identity before the first production queue can lose it.
+    if (result.record)
+      if (auto *evidence = inputEvidence())
+        evidence->source(*result.record);
     if (result.record && m_stream.push(*result.record)) {
+      m_openTransition = classifyTransition(*result.record);
       ++m_sequence;
       m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
       return m_openStamp;
@@ -80,8 +92,10 @@ void OriginalInputCaptureSource::completeCapture(OriginalInputTranslation transl
     m_stream.revoke(OriginalInputRevocation::Overflow);
     return;
   }
-  m_completed[written % m_completed.size()] = translation;
+  InputEvidenceMutation evidence(InputEvidenceQueue::Translation, this, 1, 0);
+  m_completed[written % m_completed.size()] = {translation, m_openTransition};
   m_openStamp = {};
+  m_openTransition = {};
   m_completedWritten.store(written + 1, std::memory_order_release);
 }
 void OriginalInputCaptureSource::capture(CGEventType type, CGEventRef event) noexcept
@@ -109,6 +123,56 @@ bool OriginalInputCaptureSource::checkpoint(std::uint64_t timestampNs, std::uint
   return m_stream.epoch().live();
 }
 
+OriginalInputTransitionEvidence
+OriginalInputCaptureSource::classifyTransition(const OriginalInputRecord &record) noexcept
+{
+  using Kind = OriginalInputTransitionEvidence::Kind;
+  if (const auto *key = std::get_if<OriginalInputKey>(&record.payload)) {
+    auto &released = m_releasedKeys[key->code];
+    if (key->transition == OriginalKeyTransition::Up) {
+      released = record.sequence;
+      return {};
+    }
+    const auto previous = std::exchange(released, 0);
+    // Repeats, duplicate downs and direction-ambiguous Caps toggles cannot
+    // acquire, even if legacy filtering later emits a different transition.
+    if (previous && key->transition == OriginalKeyTransition::Down && !key->repeat)
+      return {m_stream.epoch(), record, Kind::KeyDown, previous};
+    return {};
+  }
+  if (const auto *button = std::get_if<OriginalInputButton>(&record.payload)) {
+    auto &released = m_releasedButtons[button->button];
+    if (!button->down) {
+      released = record.sequence;
+      return {};
+    }
+    const auto previous = std::exchange(released, 0);
+    return previous ? OriginalInputTransitionEvidence(m_stream.epoch(), record, Kind::ButtonDown, previous)
+                    : OriginalInputTransitionEvidence{};
+  }
+  if (const auto *scroll = std::get_if<OriginalInputScroll>(&record.payload)) {
+    if (!scroll->continuous)
+      return {m_stream.epoch(), record, Kind::DiscreteScroll};
+    if (scroll->phase == OriginalScrollPhase::Began && scroll->momentum == OriginalMomentumPhase::None) {
+      const bool fresh = m_scroll == OriginalScrollState::Unknown || m_scroll == OriginalScrollState::Idle;
+      m_scroll = OriginalScrollState::Gesture;
+      return fresh ? OriginalInputTransitionEvidence(m_stream.epoch(), record, Kind::ScrollBegin)
+                   : OriginalInputTransitionEvidence{};
+    }
+    if (scroll->phase == OriginalScrollPhase::Cancelled || scroll->momentum == OriginalMomentumPhase::Ended)
+      m_scroll = OriginalScrollState::Idle;
+    else if (scroll->momentum == OriginalMomentumPhase::Began || scroll->momentum == OriginalMomentumPhase::Continued)
+      m_scroll = OriginalScrollState::Momentum;
+    else if (scroll->phase == OriginalScrollPhase::Ended)
+      m_scroll = OriginalScrollState::PendingMomentum;
+    else if (scroll->phase == OriginalScrollPhase::Changed)
+      m_scroll = OriginalScrollState::Gesture;
+  }
+  // Motion never creates a button owner. A named drag must resolve through
+  // the exact press ledger, including an old-owner tombstone.
+  return {};
+}
+
 std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() noexcept
 {
   if (!m_stream.epoch().live())
@@ -116,16 +180,20 @@ std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() n
   const auto read = m_completedRead.load(std::memory_order_relaxed);
   if (read == m_completedWritten.load(std::memory_order_acquire))
     return {};
-  const auto translation = m_completed[read % m_completed.size()];
+  const auto completed = m_completed[read % m_completed.size()];
+  const auto &translation = completed.translation;
   const auto input = m_stream.pop();
-  m_completedRead.store(read + 1, std::memory_order_release);
+  {
+    InputEvidenceMutation evidence(InputEvidenceQueue::Translation, this, 0, 1);
+    m_completedRead.store(read + 1, std::memory_order_release);
+  }
   if (!input)
     return {};
   if (translation.stamp != OriginalInputStamp{input->record.epoch, input->record.sequence, 0}) {
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return {};
   }
-  return OriginalInputCaptured{*input, translation};
+  return OriginalInputCaptured{*input, translation, completed.transition};
 }
 std::optional<OriginalInputDelivery> OriginalInputCaptureSource::pop() noexcept
 {

@@ -31,3 +31,15 @@ create_test(
   SOURCE ClientProxyTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/server"
 )
+
+if(BUILD_WINDOWSHARE AND TARGET windowshare-local-input)
+  create_test(
+    NAME OriginalInputCoordinatorTests
+    DEPENDS server
+    LIBS base arch io mt net platform app windowshare-local-input ${extra_libs}
+    SOURCE OriginalInputCoordinatorTests.cpp
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/server"
+  )
+  target_compile_features(OriginalInputCoordinatorTests PRIVATE cxx_std_20)
+  set_tests_properties(OriginalInputCoordinatorTests PROPERTIES TIMEOUT 60)
+endif()

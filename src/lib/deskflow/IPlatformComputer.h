@@ -16,6 +16,7 @@
 #include "deskflow/OptionTypes.h"
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputCutoff.h"
+#include "windowshare/InputPreparation.h"
 #endif
 
 class IClipboard;
@@ -157,9 +158,87 @@ public:
   }
   // Owner-thread asynchronous sender-prefix observation. Default unsupported;
   // no compositor/application drain or original-input authority is returned.
+  virtual bool beginInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  virtual deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return deskflow::windowshare::InputPreparationState::Failed;
+  }
+  virtual deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return deskflow::windowshare::InputPreparationOutcome::Unsupported;
+  }
+  virtual std::optional<deskflow::windowshare::PreparedInputFocusResult>
+  preparedInputFocusResult(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return std::nullopt;
+  }
+  virtual bool promoteInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  virtual bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  // Transport teardown cannot claim a drain. Permanently disable this owned
+  // backend session if asynchronous preparation cleanup cannot be retained.
+  virtual void abortInputPreparation(const deskflow::windowshare::InputPreparationBinding &) noexcept
+  {
+  }
+
   virtual bool beginInputCutoff(
       const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffClock::time_point
   )
+  {
+    return false;
+  }
+  virtual bool beginMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffMappedResult>
+  mappedInputCutoffResult(const deskflow::windowshare::InputCutoffBinding &)
+  {
+    return std::nullopt;
+  }
+  virtual bool beginSealedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+  virtual bool refreshMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffBinding &, const deskflow::windowshare::InputCutoffBinding &,
+      deskflow::windowshare::InputCutoffPoint, deskflow::windowshare::InputCutoffClock::time_point, bool
+  )
+  {
+    return false;
+  }
+  virtual bool beginMappedInputBatch(
+      const deskflow::windowshare::InputCutoffBinding &,
+      const std::vector<deskflow::windowshare::InputCutoffBatchItem> &
+  )
+  {
+    return false;
+  }
+  virtual bool inputCutoffSealLive(const deskflow::windowshare::InputCutoffBinding &)
   {
     return false;
   }

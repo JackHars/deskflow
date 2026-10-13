@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputChannel.h"
+#include "InputEvidence.h"
 #include <QFile>
 #include <QPointer>
 #include <QThread>
 #include <QUuid>
 #include <algorithm>
+#include <bit>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -268,7 +270,8 @@ OriginalInputRecord decodeOriginal(Reader &in, std::uint64_t epoch)
 }
 bool validCapabilities(std::uint64_t value)
 {
-  return (value & localInputKeyboardCapability) && !(value & ~localInputKnownCapabilities);
+  return (value & localInputKeyboardCapability) && !(value & ~localInputKnownCapabilities) &&
+         (!(value & localInputMappedCapability) || (value & localInputFullCapability));
 }
 bool scopeAllows(ForwardingScope scope, const OriginalInputRecord &record)
 {
@@ -431,7 +434,10 @@ enum class LocalInputChannel::Type : std::uint8_t
   Offer,
   Candidate,
   Quiesced,
-  CancelOffer
+  CancelOffer,
+  InputTarget,
+  MappedOriginal,
+  Released
 };
 
 LocalInputChannel::LocalInputChannel(
@@ -441,6 +447,22 @@ LocalInputChannel::LocalInputChannel(
       m_peer(peer),
       m_limits(limits)
 {
+  inputEvidenceInitialize(InputEvidenceQueue::PrivateOutput, this, maxQueueBytes);
+  inputEvidenceInitialize(InputEvidenceQueue::PrivateBufferedInput, this, 4 * (headerBytes + maxPayloadBytes));
+  inputEvidenceInitialize(InputEvidenceQueue::PrivateIncoming, this, headerBytes + maxPayloadBytes);
+  inputEvidenceInitialize(InputEvidenceQueue::PrivateDispatch, this, 256);
+  connect(
+      &m_socket, &QLocalSocket::bytesWritten, this,
+      [this](qint64 bytes) {
+        if (bytes <= 0 || static_cast<std::uint64_t>(bytes) > m_evidencePendingBytes) {
+          inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
+          return;
+        }
+        InputEvidenceMutation evidence(InputEvidenceQueue::PrivateOutput, this, 0, static_cast<std::uint64_t>(bytes));
+        m_evidencePendingBytes -= static_cast<std::uint64_t>(bytes);
+      },
+      Qt::DirectConnection
+  );
   Descriptor owned{descriptor};
   const auto self = currentLocalInputProcess();
   require(
@@ -459,6 +481,10 @@ LocalInputChannel::LocalInputChannel(
   require(m_socket.setSocketDescriptor(descriptor, QLocalSocket::ConnectedState), "Cannot adopt local input socket");
   owned.value = -1;
   m_socket.setReadBufferSize(4 * (headerBytes + maxPayloadBytes));
+  // Qt emits readyRead after adding received bytes. Observe that addition
+  // synchronously, before our deliberately queued protocol dispatcher runs.
+  connect(&m_socket, &QLocalSocket::readyRead, this, [this] { observeBufferedInput(); }, Qt::DirectConnection);
+  observeBufferedInput();
   // A notification may destroy this channel and its by-value socket/timer.
   // Dispatch after those senders have unwound their Qt signal/event stacks.
   connect(&m_socket, &QLocalSocket::readyRead, this, [this] { read(); }, Qt::QueuedConnection);
@@ -516,6 +542,10 @@ std::optional<LocalInputAuthenticatedIdentity> LocalInputChannel::authenticatedI
   if (QThread::currentThread() != thread() || !authenticated() || currentLocalInputProcess() != m_self)
     return std::nullopt;
   return LocalInputAuthenticatedIdentity{m_role, m_self, m_peer, m_coreIncarnation, m_hostIncarnation, m_capabilities};
+}
+bool LocalInputChannel::supportsMappedInput() const
+{
+  return supports(ForwardingScope::All) && (m_capabilities & localInputMappedCapability);
 }
 LocalInputPhase LocalInputChannel::phase() const
 {
@@ -605,14 +635,33 @@ bool LocalInputChannel::send(Type type, const QByteArray &payload)
   out.fixed(m_coreIncarnation);
   out.fixed(m_hostIncarnation);
   out.data += payload;
-  const auto written = m_socket.write(out.data);
+  qint64 written;
+  {
+    InputEvidenceMutation evidence(InputEvidenceQueue::PrivateOutput, this, out.data.size(), 0);
+    m_evidencePendingBytes += out.data.size();
+    written = m_socket.write(out.data);
+  }
   if (!alive)
     return false;
   if (written != out.data.size()) {
+    inputEvidenceInvalidate(InputEvidenceLoss::Output);
     close("Cannot queue local input frame");
     return false;
   }
   return !m_closed;
+}
+void LocalInputChannel::observeBufferedInput()
+{
+  const auto available = m_socket.bytesAvailable();
+  if (available < 0 || static_cast<std::uint64_t>(available) < m_evidenceBufferedBytes) {
+    inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
+    return;
+  }
+  const auto count = static_cast<std::uint64_t>(available);
+  if (count != m_evidenceBufferedBytes) {
+    InputEvidenceMutation evidence(InputEvidenceQueue::PrivateBufferedInput, this, count - m_evidenceBufferedBytes, 0);
+    m_evidenceBufferedBytes = count;
+  }
 }
 void LocalInputChannel::read()
 {
@@ -625,17 +674,29 @@ void LocalInputChannel::read()
         return;
       const auto missing = m_expected - m_incoming.size();
       if (missing > 0) {
-        const auto bytes = m_socket.read(missing);
+        observeBufferedInput();
+        QByteArray bytes;
+        {
+          InputEvidenceMutation evidence(InputEvidenceQueue::PrivateBufferedInput, this, 0, 0);
+          bytes = m_socket.read(missing);
+          evidence.removed(bytes.size());
+          if (!alive)
+            return;
+          if (static_cast<std::uint64_t>(bytes.size()) > m_evidenceBufferedBytes)
+            inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
+          else
+            m_evidenceBufferedBytes -= static_cast<std::uint64_t>(bytes.size());
+        }
         if (!alive || !fresh())
           return;
-        m_incoming += bytes;
+        inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, bytes.size(), 0, [&] { m_incoming += bytes; });
       }
       if (m_incoming.size() < m_expected)
         break;
       Reader header{m_incoming};
       require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
       const auto typeNumber = header.number(1);
-      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::CancelOffer), "Unknown local input message");
+      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::Released), "Unknown local input message");
       const auto type = static_cast<Type>(typeNumber);
       require(
           header.number(1) ==
@@ -661,8 +722,9 @@ void LocalInputChannel::read()
       }
       require(core == m_coreIncarnation && host == m_hostIncarnation, "Stale local input process incarnation");
       require(peerAlive(), "Local input peer process identity lost");
+      InputEvidenceExecution evidence(this, InputEvidenceQueue::PrivateDispatch);
       const auto payload = m_incoming.mid(headerBytes);
-      m_incoming.clear();
+      inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, 0, m_incoming.size(), [&] { m_incoming.clear(); });
       m_expected = headerBytes;
       m_received = sequence;
       if (!m_authenticated)
@@ -745,6 +807,21 @@ bool LocalInputChannel::quiesced(LocalInputLease lease)
   return fresh() && authenticated() && m_role == LocalInputRole::Host && validLocalInputLease(lease) &&
          supports(lease.scope) && send(Type::Quiesced, encodeLease(lease));
 }
+bool LocalInputChannel::sendInputTarget(LocalInputLease lease, LocalInputTarget target)
+{
+  if (!fresh() || !authenticated() || m_role != LocalInputRole::Host || !supportsMappedInput() ||
+      lease.scope != ForwardingScope::All || !validLocalInputLease(lease) || !validLocalInputTarget(target))
+    return false;
+  Writer out{encodeLease(lease)};
+  out.number(target.viewerConnection, 8);
+  out.fixed(target.viewerPeerFingerprint);
+  return send(Type::InputTarget, out.data);
+}
+bool LocalInputChannel::sendReleased(LocalInputOffer offer)
+{
+  return fresh() && authenticated() && m_role == LocalInputRole::Host && supportsMappedInput() &&
+         validLocalInputOffer(offer) && offer.scope == ForwardingScope::All && send(Type::Released, encodeOffer(offer));
+}
 bool LocalInputChannel::cancelOffer(LocalInputOffer offer, LocalInputRevocation reason)
 {
   const auto value = static_cast<unsigned>(reason);
@@ -785,8 +862,22 @@ bool LocalInputChannel::commit(LocalInputLease lease)
 }
 bool LocalInputChannel::sendOriginal(LocalInputLease lease, OriginalInputRecord record)
 {
+  return sendOriginalRecord(std::move(lease), std::move(record), {});
+}
+bool LocalInputChannel::sendMappedOriginal(
+    LocalInputLease lease, OriginalInputRecord record, LocalInputMappedPoint point
+)
+{
+  return sendOriginalRecord(std::move(lease), std::move(record), point);
+}
+bool LocalInputChannel::sendOriginalRecord(
+    LocalInputLease lease, OriginalInputRecord record, std::optional<LocalInputMappedPoint> point
+)
+{
   const QPointer<LocalInputChannel> alive(this);
   if (!fresh() || m_role != LocalInputRole::Core || m_phase != LocalInputPhase::Active || m_lease != lease)
+    return false;
+  if (point && (!supportsMappedInput() || lease.scope != ForwardingScope::All || !liveLocalInputMappedPoint(*point)))
     return false;
   if (!validOriginalInputRecord(record) || !scopeAllows(lease.scope, record) || record.epoch != lease.captureEpoch ||
       record.epoch != m_captureEpoch) {
@@ -807,10 +898,21 @@ bool LocalInputChannel::sendOriginal(LocalInputLease lease, OriginalInputRecord 
     close("Invalid original input capture ordering");
     return false;
   }
-  const auto payload = encodeOriginal(lease, record);
+  auto payload = encodeOriginal(lease, record);
+  if (point) {
+    // Authorization can reenter or take time. Never send an expired mapping or
+    // convert a failed mapped delivery to an unmapped original event.
+    if (!liveLocalInputMappedPoint(*point))
+      return false;
+    Writer mapping;
+    for (const auto value : {point->x, point->y, point->width, point->height})
+      mapping.number(std::bit_cast<std::uint64_t>(value), 8);
+    mapping.number(point->deadlineNs, 8);
+    payload.insert(leasePayloadBytes, mapping.data);
+  }
   m_originalSequence = record.sequence;
   m_originalTimestamp = record.sourceTimestampNs;
-  return send(Type::Original, payload);
+  return send(point ? Type::MappedOriginal : Type::Original, payload);
 }
 void LocalInputChannel::receive(Type type, const QByteArray &payload)
 {
@@ -821,6 +923,16 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     return;
   }
   Reader in{payload};
+  if (type == Type::Released) {
+    require(
+        m_role == LocalInputRole::Core && supportsMappedInput(), "Invalid mapped input release sender or capability"
+    );
+    const auto offer = decodeOffer(in);
+    require(offer.scope == ForwardingScope::All, "Invalid mapped input release scope");
+    in.end();
+    notify(this, onReleased, offer);
+    return;
+  }
   if (type == Type::Offer || type == Type::CancelOffer) {
     require(type == Type::CancelOffer || m_role == LocalInputRole::Host, "Invalid local input offer sender role");
     const auto offer = decodeOffer(in);
@@ -841,6 +953,19 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
   }
   auto lease = decodeLease(in);
   require(supports(lease.scope), "Unnegotiated local input lease scope");
+  if (type == Type::InputTarget) {
+    require(
+        m_role == LocalInputRole::Core && supportsMappedInput() && lease.scope == ForwardingScope::All,
+        "Invalid mapped input target sender or capability"
+    );
+    LocalInputTarget target;
+    target.viewerConnection = in.number(8);
+    target.viewerPeerFingerprint = in.fixed<32>();
+    in.end();
+    require(validLocalInputTarget(target), "Invalid mapped input target");
+    notify(this, onInputTarget, lease, target);
+    return;
+  }
   if (type == Type::Candidate || type == Type::Quiesced) {
     require(m_role == LocalInputRole::Core, "Invalid local input candidate sender role");
     in.end();
@@ -896,8 +1021,19 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     in.end();
     return;
   }
-  if (type == Type::Original) {
+  if (type == Type::Original || type == Type::MappedOriginal) {
     require(m_role == LocalInputRole::Host, "Invalid original input sender role");
+    std::optional<LocalInputMappedPoint> point;
+    if (type == Type::MappedOriginal) {
+      require(supportsMappedInput() && lease.scope == ForwardingScope::All, "Unnegotiated mapped original input");
+      point.emplace();
+      point->x = std::bit_cast<double>(in.number(8));
+      point->y = std::bit_cast<double>(in.number(8));
+      point->width = std::bit_cast<double>(in.number(8));
+      point->height = std::bit_cast<double>(in.number(8));
+      point->deadlineNs = in.number(8);
+      require(validLocalInputMappedPoint(*point), "Invalid original input mapping");
+    }
     const auto record = decodeOriginal(in, lease.captureEpoch);
     require(scopeAllows(lease.scope, record), "Original input exceeded its private lease scope");
     require(
@@ -923,7 +1059,11 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     m_originalTimestamp = record.sourceTimestampNs;
     if (retired)
       return; // Valid in-flight input retires its capture sequence, never delivers to a new owner.
-    notify(this, onOriginal, lease, record);
+    if (point) {
+      require(liveLocalInputMappedPoint(*point) && onMappedOriginal, "Original input mapping expired or unavailable");
+      notify(this, onMappedOriginal, lease, record, *point);
+    } else
+      notify(this, onOriginal, lease, record);
     return;
   }
   require(m_lease == lease, "Stale local input lease binding");
@@ -951,6 +1091,29 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     );
     m_phase = LocalInputPhase::Active;
   }
+  if (auto *evidence = inputEvidence(); evidence && lease.scope == ForwardingScope::All) {
+    InputEvidenceOwner owner;
+    owner.values = {
+        lease.routeGeneration,
+        lease.coreServerIncarnation,
+        lease.coreRecipient,
+        lease.coreSelectionGeneration,
+        lease.captureEpoch,
+        lease.session,
+        lease.epoch,
+        lease.focusRequest,
+        lease.focusRevision,
+        lease.geometryRevision,
+        lease.keyboardRouteGeneration
+    };
+    auto position = owner.identity.begin();
+    position = std::copy(lease.deskflowClientIncarnation.begin(), lease.deskflowClientIncarnation.end(), position);
+    position =
+        std::copy(lease.windowShareClientIncarnation.begin(), lease.windowShareClientIncarnation.end(), position);
+    position = std::copy(lease.deskflowPeerPin.begin(), lease.deskflowPeerPin.end(), position);
+    std::copy(lease.windowSharePeerPin.begin(), lease.windowSharePeerPin.end(), position);
+    evidence->bindOwner(owner);
+  }
   notify(this, onActivated, lease);
 }
 void LocalInputChannel::revoked(LocalInputRevocation reason)
@@ -961,6 +1124,8 @@ void LocalInputChannel::revoked(LocalInputRevocation reason)
   if (m_authorizing)
     m_authorityInvalidated = true;
   if (previous) {
+    if (auto *evidence = inputEvidence())
+      evidence->revokeOwner();
     m_lastRevoked = previous;
     notify(this, onRevoked, *previous, reason);
   }
@@ -1004,7 +1169,17 @@ void LocalInputChannel::close(const QString &reason)
   m_closed = true;
   m_authenticated = false;
   m_timer.stop();
-  m_socket.abort();
+  observeBufferedInput();
+  {
+    if (m_evidencePendingBytes)
+      inputEvidenceInvalidate(InputEvidenceLoss::Output);
+    InputEvidenceMutation evidence(InputEvidenceQueue::PrivateOutput, this, 0, m_evidencePendingBytes);
+    InputEvidenceMutation incomingEvidence(InputEvidenceQueue::PrivateBufferedInput, this, 0, m_evidenceBufferedBytes);
+    m_evidencePendingBytes = 0;
+    m_evidenceBufferedBytes = 0;
+    m_socket.abort();
+  }
+  inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, 0, m_incoming.size(), [&] { m_incoming.clear(); });
   revoked(LocalInputRevocation::TransportLost);
   if (alive)
     notify(this, onClosed, why);

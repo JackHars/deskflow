@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 #ifdef WINDOWSHARE_X11
 #include <QAbstractNativeEventFilter>
 #endif
@@ -60,6 +61,7 @@ public:
     auto *connection = native ? native->connection() : nullptr;
     if (connection) {
       m_observer = std::make_unique<X11DisplayObserver>(connection);
+      m_coordinates = std::make_unique<X11CoordinateEndpoint>(*m_observer);
       qApp->installNativeEventFilter(this);
       m_timer.setInterval(10);
       QObject::connect(&m_timer, &QTimer::timeout, &viewer, [this] { poll(); });
@@ -72,19 +74,99 @@ public:
     m_timer.stop();
     if (qApp)
       qApp->removeNativeEventFilter(this);
+    if (m_coordinates)
+      m_coordinates->close();
     if (m_observer)
       m_observer->close();
   }
   bool nativeEventFilter(const QByteArray &type, void *message, qintptr *) override
   {
-    if (m_observer && type == "xcb_generic_event_t" && message)
+    if (m_observer && type == "xcb_generic_event_t" && message) {
       m_observer->handleEvent(*static_cast<const xcb_generic_event_t *>(message));
+      m_coordinates->handleEvent(*static_cast<const xcb_generic_event_t *>(message));
+    }
     return false;
   }
   void invalidate()
   {
+    if (m_coordinates)
+      m_coordinates->invalidate();
     if (m_observer)
       m_observer->invalidate();
+  }
+  void fenceChanged()
+  {
+    if (m_coordinates && m_pointRequest)
+      m_coordinates->cancel(m_pointRequest);
+    m_pointRequest = 0;
+    m_pointFence.reset();
+  }
+  bool read(X11WitnessLocator locator, X11CoordinateClock::time_point deadline)
+  {
+    const auto viewport = m_viewer.viewportObservation();
+    if (!m_coordinates || !viewport || !m_coordinates->read(locator, deadline))
+      return false;
+    m_pendingViewport = viewport;
+    return true;
+  }
+  bool validatePoint(X11PointRequest request, const KeyboardRouteBinding &fence)
+  {
+    const auto viewport = m_viewer.viewportObservation();
+    if (!m_coordinates || !viewport || !m_viewer.allForwardingFenced(fence) || !m_coordinates->validatePoint(request))
+      return false;
+    m_pendingViewport = viewport;
+    m_pointRequest = request.request;
+    m_pointFence = fence;
+    return true;
+  }
+  std::optional<ViewerCoordinateUpdate> takeUpdate()
+  {
+    auto update = m_coordinates ? m_coordinates->takeUpdate() : std::nullopt;
+    if (!update)
+      return {};
+    ViewerCoordinateUpdate result{std::move(*update), std::exchange(m_pendingViewport, {}), {}};
+    const auto refuse = [&](const char *reason) {
+      m_coordinates->cancel(result.native.request);
+      result.native.error = reason;
+      result.native.witness.reset();
+      result.native.point.reset();
+      result.viewport.reset();
+    };
+    if (!result.native.error.empty())
+      result.viewport.reset();
+    else if (!result.viewport || !result.viewport->live())
+      refuse("X11 painted viewport changed during the coordinate request");
+    else if (result.native.point) {
+      if (!m_pointFence || !m_viewer.allForwardingFenced(*m_pointFence) || !result.native.point->live())
+        refuse("X11 full forwarding fence changed during the point request");
+      else {
+        const auto &point = result.native.point->snapshot();
+        const auto &painted = result.viewport->snapshot();
+        const auto mapped = mapPoint(
+            {point.clientX / painted.devicePixelRatio, point.clientY / painted.devicePixelRatio},
+            {painted.videoLogical.x(), painted.videoLogical.y(), painted.videoLogical.width(),
+             painted.videoLogical.height()},
+            {0, 0, painted.sourceLogical.width(), painted.sourceLogical.height()}, false
+        );
+        if (!mapped)
+          refuse("X11 routed point is outside the last-painted video rectangle");
+        else
+          result.source = QPointF(mapped->x, mapped->y);
+      }
+    } else if (!result.native.witness || !result.native.witness->live())
+      refuse("X11 namespace witness expired or was revoked");
+    return result;
+  }
+  bool cancel(std::uint64_t request)
+  {
+    const bool canceled = m_coordinates && m_coordinates->cancel(request);
+    if (canceled)
+      m_pendingViewport.reset();
+    if (request == m_pointRequest) {
+      m_pointRequest = 0;
+      m_pointFence.reset();
+    }
+    return canceled;
   }
   std::optional<X11DisplayObservation> observe() const
   {
@@ -117,11 +199,16 @@ private:
       ++m_viewer.m_surfaceIncarnation;
     }
     m_observer->poll();
+    m_coordinates->poll();
     if (!m_observer->pending())
       m_observer->refresh(static_cast<std::uint32_t>(surface));
   }
   Viewer &m_viewer;
   std::unique_ptr<X11DisplayObserver> m_observer;
+  std::unique_ptr<X11CoordinateEndpoint> m_coordinates;
+  std::optional<ViewerViewportObservation> m_pendingViewport;
+  std::optional<KeyboardRouteBinding> m_pointFence;
+  std::uint64_t m_pointRequest = 0;
   QTimer m_timer;
   WId m_lastSurface = 0;
 };
@@ -177,7 +264,118 @@ std::optional<ViewerViewportObservation> Viewer::viewportObservation() const
   result.m_revoked = m_viewportRevoked;
   return result.live() ? std::optional{std::move(result)} : std::nullopt;
 }
+
+bool Viewer::readX11Witness(X11WitnessLocator locator, X11CoordinateClock::time_point deadline)
+{
+  return m_x11Observer && m_x11Observer->read(locator, deadline);
+}
+
+bool Viewer::validateX11Point(X11PointRequest request, const KeyboardRouteBinding &fence)
+{
+  return m_x11Observer && m_x11Observer->validatePoint(request, fence);
+}
+
+std::optional<ViewerCoordinateUpdate> Viewer::takeX11CoordinateUpdate()
+{
+  return m_x11Observer ? m_x11Observer->takeUpdate() : std::nullopt;
+}
+
+bool Viewer::cancelX11Coordinate(std::uint64_t request)
+{
+  return m_x11Observer && m_x11Observer->cancel(request);
+}
 #endif
+
+std::optional<GnomePreparationTarget> Viewer::waylandPreparationTarget() const
+{
+  if (m_viewportClosed || !m_connected || m_failed || m_returned || m_waitingRecoveryPaint || m_videoRecovering ||
+      m_videoPaused || !m_readySent || !m_committed || m_resizing || isMinimized() || !isVisible() ||
+      !m_error.isEmpty() || m_paintedGeometry != m_geometry || !m_paintedWayland || m_paintedClient != size() ||
+      m_paintedDpr != devicePixelRatioF() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty() ||
+      !m_waylandAssociation)
+    return {};
+  const auto native = readWaylandViewport(windowHandle());
+  if (!native || native != m_paintedWayland ||
+      !currentWaylandAssociation(windowHandle(), *native, *m_waylandAssociation))
+    return {};
+  return GnomePreparationTarget{
+      m_session,
+      m_epoch,
+      m_geometry,
+      m_waylandSurfaceIncarnation,
+      m_waylandPaintRevision,
+      native->resource,
+      m_waylandAssociation->token
+  };
+}
+std::optional<QPointF> Viewer::mapPreparationTarget(const GnomePreparationTarget &expected, QPointF point) const
+{
+  if (waylandPreparationTarget() != std::optional(expected) || !m_paintedWayland)
+    return {};
+  const auto local = mapWaylandViewport(windowHandle(), *m_paintedWayland, point);
+  if (!local)
+    return {};
+  const auto mapped = mapPoint(
+      {local->x(), local->y()},
+      {m_paintedVideo.x(), m_paintedVideo.y(), m_paintedVideo.width(), m_paintedVideo.height()},
+      {0, 0, m_source.width(), m_source.height()}, false
+  );
+  return mapped && waylandPreparationTarget() == std::optional(expected) ? std::optional(QPointF(mapped->x, mapped->y))
+                                                                         : std::nullopt;
+}
+bool Viewer::beginInputPreparation(const InputPreparationBinding &binding)
+{
+  if (!validInputPreparationBinding(binding) || !m_connected || m_failed || m_returned || m_keyboardBinding ||
+      (m_inputPreparation && m_inputPreparation != binding) || m_preparationSerial == UINT64_MAX)
+    return false;
+  if (m_inputPreparation == binding)
+    return true;
+  m_inputPreparation = binding; // Close before callbacks or detached pending-input flushes.
+  ++m_preparationSerial;
+  m_requireFocusIntent = true;
+  const QPointer<Viewer> guard(this);
+  releaseInput();
+  return guard && inputPreparationFenced(binding);
+}
+bool Viewer::inputPreparationFenced(const InputPreparationBinding &binding) const
+{
+  return m_connected && !m_failed && !m_returned && m_inputPreparation == binding;
+}
+bool Viewer::finishInputPreparation(
+    const InputPreparationBinding &binding, const std::optional<KeyboardRouteBinding> &all
+)
+{
+  if (!inputPreparationFenced(binding) || (all && !allForwardingFenced(*all)))
+    return false;
+  m_inputPreparation.reset(); // The genuine All gate, if supplied, remains closed.
+  const QPointer<Viewer> guard(this);
+  forwardingFenceChanged();
+  return guard && m_connected && (!all || allForwardingFenced(*all));
+}
+std::optional<GnomeViewportState>
+Viewer::requestPreparedFocus(const InputPreparationBinding &binding, const GnomePreparationTarget &target)
+{
+  if (!inputPreparationFenced(binding) || waylandPreparationTarget() != std::optional(target) || !m_localActive ||
+      !isActiveWindow())
+    return {};
+  // The provider has already activated this exact native role. This requests
+  // focus control only; no synthetic key/button enters queueInput or the Host.
+  const QPointer<Viewer> guard(this);
+  if (!requestInputPreparationFocus(binding))
+    return {};
+  if (!guard || !inputPreparationFenced(binding) || waylandPreparationTarget() != std::optional(target))
+    return {};
+  return waylandViewportState();
+}
+bool Viewer::requestInputPreparationFocus(const InputPreparationBinding &binding)
+{
+  if (!inputPreparationFenced(binding) || !m_localActive || !isActiveWindow())
+    return false;
+  m_requireFocusIntent = false;
+  const QPointer<Viewer> guard(this);
+  requestFocus();
+  return guard && inputPreparationFenced(binding);
+}
 
 std::optional<GnomeViewportState> Viewer::waylandViewportState() const
 {
@@ -186,7 +384,8 @@ std::optional<GnomeViewportState> Viewer::waylandViewportState() const
       m_paintedDpr != devicePixelRatioF() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty())
     return {};
   const auto native = readWaylandViewport(windowHandle());
-  if (!native || native != m_paintedWayland)
+  if (!native || native != m_paintedWayland || !m_waylandAssociation ||
+      !currentWaylandAssociation(windowHandle(), *native, *m_waylandAssociation))
     return {};
   GnomeViewportState state;
   state.session = m_session;
@@ -197,6 +396,7 @@ std::optional<GnomeViewportState> Viewer::waylandViewportState() const
   state.surfaceIncarnation = m_waylandSurfaceIncarnation;
   state.viewportRevision = m_viewportRevision;
   state.nativeSurface = native->resource;
+  state.windowAssociation = m_waylandAssociation->token;
   state.clientWidth = m_paintedClient.width();
   state.clientHeight = m_paintedClient.height();
   state.sourceWidth = m_source.width();
@@ -635,6 +835,7 @@ void Viewer::focusAcknowledged(std::uint64_t lease, std::uint64_t request)
   m_focusRevision = lease;
   m_focusTimeout.stop();
   const auto keyboardFence = m_keyboardFencedGeneration, pointerFence = m_pointerFencedGeneration;
+  const auto preparationFence = m_preparationSerial;
   auto inputs = std::move(m_pendingInputs);
   m_pendingInputs.clear();
   for (auto &input : inputs) {
@@ -644,12 +845,31 @@ void Viewer::focusAcknowledged(std::uint64_t lease, std::uint64_t request)
     // A send callback may complete both quiescence and resume. A current-state
     // check alone would then replay old entries detached from m_pendingInputs.
     const bool key = input.value(QStringLiteral("kind")) == QStringLiteral("key");
-    if (fencesInput(input) ||
+    if (fencesInput(input) || preparationFence != m_preparationSerial ||
         (key ? keyboardFence != m_keyboardFencedGeneration : pointerFence != m_pointerFencedGeneration))
       continue;
     if (!sendInput(std::move(input)))
       break;
   }
+}
+
+std::optional<ClipboardFocusObservation> Viewer::clipboardFocus() const
+{
+  if (QThread::currentThread() != thread() || m_viewportClosed || !acceptsLocalInput() || !isVisible() ||
+      !m_visibility || !hasFocus() || !isActiveWindow() || !windowHandle() || !windowHandle()->isExposed() ||
+      m_applyingMetadata || m_focusPending || !m_focusRequest || !m_focusRevision || !m_error.isEmpty() ||
+      m_paintedClient != size() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty() ||
+      m_paintedDpr != devicePixelRatioF())
+    return {};
+  const ClipboardFocusBinding binding{{m_session, m_epoch}, m_focusRequest, m_focusRevision, m_geometry};
+  const QPointer<const Viewer> alive(this);
+  const auto revoked = m_viewportRevoked;
+  return ClipboardFocusObservation{binding, [alive, revoked, binding] {
+                                     if (!alive || revoked->load() || QThread::currentThread() != alive->thread())
+                                       return false;
+                                     const auto fresh = alive->clipboardFocus();
+                                     return fresh && fresh->binding == binding;
+                                   }};
 }
 
 bool Viewer::currentKeyboardRoute(const KeyboardRouteBinding &binding) const
@@ -666,13 +886,14 @@ bool Viewer::allForwardingFenced(const KeyboardRouteBinding &binding) const
 
 bool Viewer::fencesPointer() const
 {
-  return (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All) || !m_suppressedButtons.isEmpty();
+  return m_inputPreparation || (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All) ||
+         !m_suppressedButtons.isEmpty();
 }
 
 bool Viewer::fencesInput(const QJsonObject &input) const
 {
   const auto kind = input.value(QStringLiteral("kind")).toString();
-  return (m_keyboardBinding && kind == QStringLiteral("key")) ||
+  return ((m_inputPreparation || m_keyboardBinding) && kind == QStringLiteral("key")) ||
          (fencesPointer() &&
           (kind == QStringLiteral("button") || kind == QStringLiteral("move") || kind == QStringLiteral("scroll")));
 }
@@ -726,9 +947,7 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
     reply.result = KeyboardRouteResult::Ready;
     const QPointer<Viewer> guard(this);
     m_keyboardBindingValid = false;
-    const auto changed = onForwardingFenceChanged;
-    if (changed)
-      changed();
+    forwardingFenceChanged();
     if (!guard)
       return;
     // The acknowledgement precedes any newly forwarded input on the same stream.
@@ -761,9 +980,7 @@ void Viewer::handleKeyboardRoute(const KeyboardRouteControl &control)
     // callback. Pending pointer events cannot escape a full-input handoff.
     m_keyboardBinding = binding;
     m_keyboardBindingValid = true;
-    const auto changed = onForwardingFenceChanged;
-    if (changed)
-      changed();
+    forwardingFenceChanged();
     if (!guard)
       return;
     quiesceKeyboard();
@@ -815,15 +1032,24 @@ void Viewer::invalidateKeyboardRoute(KeyboardRouteReason reason)
   const auto binding = *m_keyboardBinding;
   m_keyboardBindingValid = false;
   const QPointer<Viewer> guard(this);
-  const auto changed = onForwardingFenceChanged;
-  if (changed)
-    changed();
+  forwardingFenceChanged();
   if (!guard)
     return;
   if (m_connected)
     sendKeyboardRoute(
         {binding, KeyboardRouteAction::Withdraw, KeyboardRouteMode::Original, KeyboardRouteResult::None, reason}
     );
+}
+
+void Viewer::forwardingFenceChanged()
+{
+#ifdef WINDOWSHARE_X11
+  if (m_x11Observer)
+    m_x11Observer->fenceChanged();
+#endif
+  const auto changed = onForwardingFenceChanged;
+  if (changed)
+    changed();
 }
 
 void Viewer::disconnected()
@@ -987,9 +1213,20 @@ void Viewer::paintEvent(QPaintEvent *)
     painter.setRenderHint(QPainter::SmoothPixmapTransform);
     painter.drawImage(videoRect(), m_image);
     const auto wayland = readWaylandViewport(windowHandle());
-    if (m_paintedGeometry != m_frameGeometry || m_paintedClient != size() || m_paintedImage != m_image.size() ||
-        m_paintedVideo != videoRect() || m_paintedDpr != devicePixelRatioF() || m_paintedWayland != wayland)
+    if (wayland &&
+        (!m_waylandAssociation || !currentWaylandAssociation(windowHandle(), *wayland, *m_waylandAssociation))) {
       invalidateViewport();
+      m_waylandAssociation = associateWaylandWindow(windowHandle(), *wayland);
+    } else if (!wayland)
+      m_waylandAssociation.reset();
+    if (m_paintedGeometry != m_frameGeometry || m_paintedClient != size() || m_paintedImage != m_image.size() ||
+        m_paintedVideo != videoRect() || m_paintedDpr != devicePixelRatioF() || m_paintedWayland != wayland) {
+      if (m_waylandPaintRevision == UINT64_MAX)
+        m_viewportClosed = true;
+      else
+        ++m_waylandPaintRevision;
+      invalidateViewport();
+    }
     if (wayland && (!m_paintedWayland || wayland->surface != m_paintedWayland->surface ||
                     wayland->resource != m_paintedWayland->resource)) {
       if (m_waylandSurfaceIncarnation == std::numeric_limits<std::uint64_t>::max())
@@ -1178,10 +1415,10 @@ void Viewer::releaseInput(KeyboardRouteReason reason)
   m_deliveredKeys.clear();
   m_deliveredButtons.clear();
   m_pendingInputs.clear();
-  if (m_keyboardBinding)
+  if (m_inputPreparation || m_keyboardBinding)
     for (auto held = m_heldKeys.cbegin(); held != m_heldKeys.cend(); ++held)
       m_suppressedKeys.insert(held.key());
-  if (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All)
+  if (m_inputPreparation || (m_keyboardBinding && m_keyboardBinding->scope == ForwardingScope::All))
     for (auto held = m_heldButtons.cbegin(); held != m_heldButtons.cend(); ++held)
       m_suppressedButtons.insert(held.key());
   m_heldKeys.clear();
@@ -1249,7 +1486,7 @@ void Viewer::keyPressEvent(QKeyEvent *event)
   event->accept();
   if (event->key() == Qt::Key_unknown)
     return;
-  if (m_keyboardBinding || m_suppressedKeys.contains(event->key())) {
+  if (m_inputPreparation || m_keyboardBinding || m_suppressedKeys.contains(event->key())) {
     m_suppressedKeys.insert(event->key());
     return;
   }

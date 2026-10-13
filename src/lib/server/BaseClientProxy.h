@@ -7,6 +7,7 @@
 
 #pragma once
 #include "windowshare/InputCutoff.h"
+#include "windowshare/InputPreparation.h"
 
 #include "deskflow/IClient.h"
 
@@ -56,11 +57,104 @@ public:
 
   // A programmatic opt-in, never a configured computer name or an input grant.
   // Only the current protocol's authenticated remote proxy implements it.
+  virtual bool inputPreparationCapabilityReady() const
+  {
+    return false;
+  }
+  virtual std::optional<std::uint32_t> requestInputPreparationCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputPreparationBinding> startInputPreparation(
+      deskflow::windowshare::OriginalInputStamp, deskflow::windowshare::InputCutoffPoint,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::PreparedInputFocus>
+  preparedInputFocus(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return std::nullopt;
+  }
+  virtual deskflow::windowshare::InputPreparationState
+  inputPreparationState(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return deskflow::windowshare::InputPreparationState::Failed;
+  }
+  virtual deskflow::windowshare::InputPreparationOutcome
+  inputPreparationOutcome(const deskflow::windowshare::InputPreparationBinding &)
+  {
+    return deskflow::windowshare::InputPreparationOutcome::Failed;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffBinding> promoteInputPreparation(
+      const deskflow::windowshare::PreparedInputFocus &, const deskflow::windowshare::KeyboardRouteBinding &,
+      deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return std::nullopt;
+  }
+  virtual bool cancelInputPreparation(
+      const deskflow::windowshare::InputPreparationBinding &, deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return false;
+  }
+
   virtual std::optional<std::uint32_t> requestInputSequenceTrace()
   {
     return std::nullopt;
   }
   virtual std::optional<std::uint32_t> requestInputCutoffCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<std::uint32_t> requestMappedInputCutoffCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<std::uint32_t> requestBatchedInputCutoffCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<std::vector<deskflow::windowshare::InputCutoffBinding>> startMappedInputBatch(
+      const deskflow::windowshare::InputCutoffSeal &, const std::vector<deskflow::windowshare::InputCutoffMapItem> &
+  )
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<std::uint32_t> requestSealedInputCutoffCapability()
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffBinding> startSealedInputCutoff(
+      deskflow::windowshare::OriginalInputStamp, const deskflow::windowshare::KeyboardRouteBinding &, std::uint64_t,
+      deskflow::windowshare::InputCutoffPoint, deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffBinding> refreshMappedInputCutoff(
+      const deskflow::windowshare::InputCutoffSeal &, deskflow::windowshare::OriginalInputStamp,
+      deskflow::windowshare::InputCutoffPoint, deskflow::windowshare::InputCutoffClock::time_point, bool
+  )
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffSeal>
+  inputCutoffSeal(const deskflow::windowshare::InputCutoffBinding &)
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffBinding> startMappedInputCutoff(
+      deskflow::windowshare::OriginalInputStamp, const deskflow::windowshare::KeyboardRouteBinding &, std::uint64_t,
+      deskflow::windowshare::InputCutoffPoint, deskflow::windowshare::InputCutoffClock::time_point
+  )
+  {
+    return std::nullopt;
+  }
+  virtual std::optional<deskflow::windowshare::InputCutoffObservation>
+  inputCutoffObservation(const deskflow::windowshare::InputCutoffBinding &)
   {
     return std::nullopt;
   }

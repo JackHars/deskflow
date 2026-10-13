@@ -76,6 +76,9 @@ struct KeyboardRouteControl
   KeyboardRouteMode mode = KeyboardRouteMode::Original;
   KeyboardRouteResult result = KeyboardRouteResult::None;
   KeyboardRouteReason reason = KeyboardRouteReason::None;
+  // Optional negotiated metadata on a ready full-input acknowledgement.
+  // This is the sending Viewer's connection counter, never the Host's counter.
+  std::uint64_t viewerConnection = 0;
   bool operator==(const KeyboardRouteControl &) const = default;
 };
 

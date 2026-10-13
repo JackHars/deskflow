@@ -23,6 +23,7 @@
 namespace {
 QVector<std::uint32_t> exportedWindows;
 QVector<std::pair<std::uint64_t, std::uint64_t>> keyframeRequests;
+QVector<std::array<std::uint64_t, 3>> nativePaintedReady;
 std::function<void(NativeHost &, std::uint64_t, std::uint64_t)> keyframeReply;
 bool automaticNative = false;
 int nativeRefreshes = 0, nativeReleases = 0, nativeRestores = 0;
@@ -34,6 +35,12 @@ std::function<void()> nativeQuiesceObserver;
 std::function<void()> nativeCandidateObserver;
 std::function<void()> nativeConstructObserver, nativeReleaseObserver, nativeRestoreObserver;
 bool nativeResumeSucceeds = true;
+struct ClipboardFixtureData
+{
+  QString text;
+  unsigned reads = 0, writes = 0;
+  std::function<void()> onWrite;
+};
 } // namespace
 
 namespace deskflow::windowshare {
@@ -41,6 +48,7 @@ struct NativeHost::Impl
 {
   std::optional<KeyboardRouteBinding> focus;
   NativeKeyboardAdmission keyboard;
+  unsigned captureRate = defaultCaptureRate;
 };
 NativeHost::NativeHost(QString, QObject *parent) : QObject(parent), m_impl(std::make_unique<Impl>())
 {
@@ -63,6 +71,17 @@ bool NativeHost::recover()
 void NativeHost::setHoldingDisplayEnabled(bool)
 {
 }
+bool NativeHost::setCaptureFrameRate(unsigned rate)
+{
+  if (!validCaptureRate(rate))
+    return false;
+  m_impl->captureRate = rate;
+  return true;
+}
+unsigned NativeHost::captureFrameRate() const
+{
+  return m_impl->captureRate;
+}
 // Enumeration completes only when the test invokes onCatalog.
 void NativeHost::refresh()
 {
@@ -74,8 +93,9 @@ void NativeHost::exportWindow(std::uint32_t id)
 {
   exportedWindows.push_back(id);
 }
-void NativeHost::ready(std::uint64_t session, std::uint64_t epoch)
+void NativeHost::ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
 {
+  nativePaintedReady.push_back({session, epoch, paintedGeometry});
   if (automaticNative && onCommitted)
     onCommitted(session, epoch);
 }
@@ -181,6 +201,18 @@ void NativeHost::releaseAll()
   if (observer)
     observer();
 }
+std::optional<ClipboardFocusObservation> NativeHost::clipboardFocus() const
+{
+  if (!m_impl->focus)
+    return {};
+  const auto focus = *m_impl->focus;
+  const ClipboardFocusBinding binding{focus.owner, focus.focusRequest, focus.focusRevision, focus.geometry};
+  const QPointer<const NativeHost> alive(this);
+  return ClipboardFocusObservation{binding, [alive, focus] { return alive && alive->m_impl->focus == focus; }};
+}
+void NativeHost::setClipboardTextMonitoring(bool)
+{
+}
 struct ChannelTestAccess
 {
   static qint64 plaintext(const Channel &channel)
@@ -210,6 +242,53 @@ struct ChannelTestAccess
 namespace {
 struct BridgeTestAccess
 {
+  static unsigned captureRate(const Bridge &bridge)
+  {
+    return bridge.m_native ? bridge.m_native->captureFrameRate() : 0;
+  }
+  static void fakeClipboard(Bridge &bridge, ClipboardFixtureData &data)
+  {
+    const bool enabled = bridge.m_clipboard->enabled();
+    const QPointer<Bridge> alive(&bridge);
+    FocusedClipboard::Callbacks callbacks;
+    callbacks.focus = [alive] { return alive ? alive->clipboardFocus() : std::nullopt; };
+    callbacks.readText = [&data] {
+      ++data.reads;
+      return std::optional(data.text);
+    };
+    callbacks.writeText = [&data](const QString &text) {
+      ++data.writes;
+      data.text = text;
+      const auto callback = data.onWrite;
+      if (callback)
+        callback();
+      return true;
+    };
+    callbacks.send = [alive](const ClipboardTextMessage &message) {
+      return alive && alive->send(
+                          MessageType::ClipboardText, encodeClipboardText(message), message.focus.owner.session,
+                          message.focus.owner.epoch
+                      );
+    };
+    bridge.m_clipboard = std::make_unique<FocusedClipboard>(bridge.m_clipboardPolicy, std::move(callbacks));
+    bridge.m_clipboard->setNegotiated(enabled);
+  }
+  static bool clipboardEnabled(const Bridge &bridge)
+  {
+    return bridge.m_clipboard->enabled();
+  }
+  static bool clipboardChanged(Bridge &bridge)
+  {
+    return bridge.m_clipboard->localChanged();
+  }
+  static std::optional<ClipboardFocusObservation> clipboardFocus(const Bridge &bridge)
+  {
+    return bridge.clipboardFocus();
+  }
+  static QString firstCatalogTitle(const Bridge &bridge)
+  {
+    return bridge.m_catalog->count() ? bridge.m_catalog->item(0)->text() : QString{};
+  }
   static bool stopped(const Bridge &bridge)
   {
     return bridge.m_shutdownComplete;
@@ -279,6 +358,15 @@ struct BridgeTestAccess
   static void receive(Bridge &bridge, const Packet &packet)
   {
     bridge.receiveViewer(packet);
+  }
+  static void receiveHost(Bridge &bridge, const Packet &packet)
+  {
+    bridge.receiveHost(packet);
+  }
+  static void hostSession(Bridge &bridge, std::uint64_t session, std::uint64_t epoch, std::uint64_t geometry)
+  {
+    bridge.m_hostSessions[session] = epoch;
+    bridge.m_hostGeometries[session] = geometry;
   }
   static Viewer *viewer(Bridge &bridge, std::uint64_t session)
   {
@@ -554,6 +642,44 @@ void delayedViewerCleanup()
   check(!replacement && BridgeTestAccess::count(bridge) == 0, "Replacement viewer was not cleaned up");
 }
 
+void paintedReadyBinding()
+{
+  nativePaintedReady.clear();
+  Bridge host(true, Identity{QSslCertificate{}, QSslKey{}}, QByteArray(32, '\0'), QString{}, 0, 0, false);
+  BridgeTestAccess::hostSession(host, 91, 2, 7);
+  BridgeTestAccess::hostSession(host, 92, 3, 8);
+  const auto ready = [&](std::uint64_t session, std::uint64_t epoch, QJsonObject payload) {
+    BridgeTestAccess::receiveHost(host, {MessageType::Ready, session, epoch, 1, jsonBytes(payload)});
+  };
+  ready(91, 2, {{"geometry", 6}});
+  ready(91, 1, {{"geometry", 7}});
+  ready(93, 2, {{"geometry", 7}});
+  ready(91, 2, {{"geometry", 8}});
+  check(nativePaintedReady.isEmpty(), "Stale or cross-session painted acknowledgement reached native relocation");
+  ready(91, 2, {{"geometry", 7}});
+  ready(92, 3, {{"geometry", 8}});
+  check(
+      nativePaintedReady == QVector<std::array<std::uint64_t, 3>>{{91, 2, 7}, {92, 3, 8}},
+      "Bridge did not forward the exact painted geometry independently for each session"
+  );
+  BridgeTestAccess::hostSession(host, 91, 2, 9);
+  ready(91, 2, {{"geometry", 7}});
+  check(nativePaintedReady.size() == 2, "Late first paint hid a source with newer native geometry");
+  for (const auto &payload :
+       {QJsonObject{}, QJsonObject{{"geometry", 0}}, QJsonObject{{"geometry", 9}, {"unexpected", true}}}) {
+    bool rejected = false;
+    try {
+      ready(91, 2, payload);
+    } catch (const std::exception &) {
+      rejected = true;
+    }
+    check(
+        rejected && nativePaintedReady.size() == 2,
+        "Malformed painted acknowledgement was admitted or fabricated a native revision"
+    );
+  }
+}
+
 void initialExportWaitsForCatalog(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   // Both command-line initial exports must wait until asynchronous enumeration
@@ -779,12 +905,11 @@ void congestionRecovery(const Identity &hostIdentity, const Identity &viewerIden
   }
   keyframeReply = {};
   check(
-      recoveryOrder == QVector<std::uint64_t>{41, 42, 41} &&
-          BridgeTestAccess::pendingKeyframes(host) == 0 && !BridgeTestAccess::retryActive(host) &&
+      recoveryOrder == QVector<std::uint64_t>{41, 42, 41} && BridgeTestAccess::pendingKeyframes(host) == 0 &&
+          !BridgeTestAccess::retryActive(host) &&
           keyframeRequests == QVector<std::pair<std::uint64_t, std::uint64_t>>{{41, 7}, {41, 7}, {42, 9}, {41, 7}},
       "Repeated keyframe failure starved a different session or lost recovery ownership"
   );
-
 
   check(
       waitUntil(
@@ -822,9 +947,10 @@ void negotiatedMediaRecovery(const Identity &hostIdentity, const Identity &viewe
   peer.onAuthenticated = [&] {
     check(
         peer.send(
-            MessageType::Hello,
-            {{"version", static_cast<int>(protocolVersion)}, {"role", "viewer"}, {"codec", "h264"},
-             {"capabilities", keyboardRouteCapabilities(true, true)}}
+            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
+                                 {"role", "viewer"},
+                                 {"codec", "h264"},
+                                 {"capabilities", keyboardRouteCapabilities(true, true)}}
         ),
         "Cannot send media recovery capability negotiation"
     );
@@ -839,40 +965,60 @@ void negotiatedMediaRecovery(const Identity &hostIdentity, const Identity &viewe
   };
   check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for media recovery fixture");
   peer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
-  check(waitUntil([&] { return negotiated && BridgeTestAccess::mediaCapable(host); }),
-        "Media capability did not bind to the authenticated connection");
+  check(
+      waitUntil([&] { return negotiated && BridgeTestAccess::mediaCapable(host); }),
+      "Media capability did not bind to the authenticated connection"
+  );
   BridgeTestAccess::opened(host, 815, 8);
   check(waitUntil([&] { return opened == 1; }), "Host did not publish the bound media session");
   auto recovery = [&](std::uint64_t request, std::uint64_t geometry = 1, std::uint64_t session = 815,
                       std::uint64_t epoch = 8) {
-    return peer.send(MessageType::Input,
-                     {{"kind", "video-recovery"}, {"geometry", number(geometry)}, {"request", number(request)}},
-                     session, epoch);
+    return peer.send(
+        MessageType::Input, {{"kind", "video-recovery"}, {"geometry", number(geometry)}, {"request", number(request)}},
+        session, epoch
+    );
   };
   check(recovery(1), "Cannot send a session-bound video recovery request");
-  check(waitUntil([&] { return keyframeRequests.size() == 1; }),
-        "Bounded authenticated media recovery did not reach the real native callback");
-  check(keyframeRequests[0] == std::pair<std::uint64_t, std::uint64_t>{815, 8},
-        "Video recovery selected another session or epoch");
-  check(recovery(1) && recovery(2, 999) && recovery(3, 1, 9999),
-        "Cannot send duplicate/stale/wrong-session recovery variants");
+  check(
+      waitUntil([&] { return keyframeRequests.size() == 1; }),
+      "Bounded authenticated media recovery did not reach the real native callback"
+  );
+  check(
+      keyframeRequests[0] == std::pair<std::uint64_t, std::uint64_t>{815, 8},
+      "Video recovery selected another session or epoch"
+  );
+  check(
+      recovery(1) && recovery(2, 999) && recovery(3, 1, 9999),
+      "Cannot send duplicate/stale/wrong-session recovery variants"
+  );
   QEventLoop settle;
   QTimer::singleShot(130, &settle, &QEventLoop::quit);
   settle.exec();
-  check(keyframeRequests.size() == 1 && BridgeTestAccess::established(host),
-        "Duplicate, stale geometry or foreign owner restarted the native encoder");
+  check(
+      keyframeRequests.size() == 1 && BridgeTestAccess::established(host),
+      "Duplicate, stale geometry or foreign owner restarted the native encoder"
+  );
   // An ordinary replay/refusal must not consume the next valid request ID.
   check(recovery(2), "Cannot send next valid recovery request");
-  check(waitUntil([&] { return keyframeRequests.size() == 2; }),
-        "A new monotonic media request did not restart its own stream");
+  check(
+      waitUntil([&] { return keyframeRequests.size() == 2; }),
+      "A new monotonic media request did not restart its own stream"
+  );
   check(BridgeTestAccess::established(host), "Media recovery request closed a live peer");
-  check(peer.send(MessageType::Input,
-                  {{"kind", "video-recovery"}, {"geometry", 1}, {"request", 3}, {"nativeCode", 777}}, 815, 8),
-        "Cannot send malformed recovery envelope");
-  check(waitUntil([&] { return !BridgeTestAccess::established(host); }),
-        "Malformed media control envelope did not fail the authenticated channel closed");
-  check(keyframeRequests.size() == 2 && BridgeTestAccess::pendingKeyframes(host) == 0,
-        "Malformed control or terminal connection retained video recovery work");
+  check(
+      peer.send(
+          MessageType::Input, {{"kind", "video-recovery"}, {"geometry", 1}, {"request", 3}, {"nativeCode", 777}}, 815, 8
+      ),
+      "Cannot send malformed recovery envelope"
+  );
+  check(
+      waitUntil([&] { return !BridgeTestAccess::established(host); }),
+      "Malformed media control envelope did not fail the authenticated channel closed"
+  );
+  check(
+      keyframeRequests.size() == 2 && BridgeTestAccess::pendingKeyframes(host) == 0,
+      "Malformed control or terminal connection retained video recovery work"
+  );
 }
 
 void reconnectRefusedThenAvailable(const Identity &hostIdentity, const Identity &viewerIdentity)
@@ -1024,9 +1170,9 @@ struct KeyboardFixture
   bool original = false, releaseSucceeds = true;
   QVector<KeyboardRouteReason> reasons;
 
-  KeyboardFixture(const Identity &hostIdentity, const Identity &viewerIdentity)
-      : host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false),
-        viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false)
+  KeyboardFixture(const Identity &hostIdentity, const Identity &viewerIdentity, bool clipboard = false)
+      : host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false, clipboard),
+        viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false, clipboard)
   {
     host.revokeOriginalKeyboard = [this](const auto &, auto reason) {
       ++revokes;
@@ -1109,6 +1255,111 @@ struct KeyboardFixture
   }
 };
 
+void focusedClipboardPolicies(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  for (const auto policies : {std::pair{false, false}, std::pair{true, false}, std::pair{false, true}}) {
+    AutomaticNative native;
+    Bridge host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), {}, 0, 0, false, policies.first);
+    Bridge viewer(
+        false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), {}, 0, 0, false, policies.second
+    );
+    ClipboardFixtureData source{QStringLiteral("never read source")}, destination{QStringLiteral("never read viewer")};
+    BridgeTestAccess::fakeClipboard(host, source);
+    BridgeTestAccess::fakeClipboard(viewer, destination);
+    check(host.listen(QHostAddress::LocalHost, 0), "Cannot listen for clipboard policy fixture");
+    viewer.connectTo("127.0.0.1", BridgeTestAccess::port(host));
+    check(
+        waitUntil([&] { return BridgeTestAccess::established(host) && BridgeTestAccess::established(viewer); }),
+        "Clipboard policy fixture did not negotiate TLS"
+    );
+    check(
+        !BridgeTestAccess::clipboardEnabled(host) && !BridgeTestAccess::clipboardEnabled(viewer) &&
+            !BridgeTestAccess::clipboardChanged(host) && !BridgeTestAccess::clipboardChanged(viewer) && !source.reads &&
+            !source.writes && !destination.reads && !destination.writes,
+        "default/one-sided policy cannot touch either private clipboard through the real Bridge"
+    );
+    const ClipboardTextMessage unsolicited{{{91, 2}, 1, 1, 1}, 1, QStringLiteral("unsolicited")};
+    check(
+        BridgeTestAccess::channel(viewer)->send(MessageType::ClipboardText, encodeClipboardText(unsolicited), 91, 2),
+        "Cannot submit unnegotiated clipboard rejection fixture"
+    );
+    check(
+        waitUntil([&] { return !BridgeTestAccess::established(host); }) && !source.writes,
+        "an unnegotiated clipboard packet closes the protocol without applying text"
+    );
+  }
+}
+void focusedClipboardRoundTrip(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  ClipboardFixtureData source{QStringLiteral("Mac source text")}, destination{QStringLiteral("Ubuntu viewer text")};
+  KeyboardFixture fixture(hostIdentity, viewerIdentity, true);
+  auto &host = fixture.host;
+  auto &viewer = fixture.viewer;
+  fixture.window->activateWindow();
+  fixture.window->setFocus(Qt::OtherFocusReason);
+  BridgeTestAccess::fakeClipboard(host, source);
+  BridgeTestAccess::fakeClipboard(viewer, destination);
+  check(
+      waitUntil([&] {
+        const auto local = BridgeTestAccess::clipboardFocus(host), remote = BridgeTestAccess::clipboardFocus(viewer);
+        return local && remote && local->live() && remote->live() && local->binding == remote->binding;
+      }),
+      "real Bridge clipboard endpoints lack matching focused painted identity"
+  );
+  check(
+      !source.reads && !destination.reads && !source.writes && !destination.writes,
+      "focus and negotiation do not read preexisting clipboard text"
+  );
+  destination.onWrite = [&] {
+    check(!BridgeTestAccess::clipboardChanged(viewer), "Viewer reentrant clipboard signal echoed to host");
+  };
+  source.onWrite = [&] {
+    check(!BridgeTestAccess::clipboardChanged(host), "Host reentrant clipboard signal echoed to viewer");
+  };
+  check(BridgeTestAccess::clipboardChanged(host), "Host fresh text failed to publish over authenticated TLS");
+  check(
+      waitUntil([&] { return destination.writes == 1; }) && destination.text == QStringLiteral("Mac source text"),
+      "focused Viewer did not apply exact authenticated text"
+  );
+  check(
+      !BridgeTestAccess::clipboardChanged(viewer) && !source.writes,
+      "delayed clipboard notification did not preserve echo suppression"
+  );
+  destination.text = QStringLiteral("New viewer text — café");
+  check(BridgeTestAccess::clipboardChanged(viewer), "Viewer fresh text failed to publish over authenticated TLS");
+  check(
+      waitUntil([&] { return source.writes == 1; }) && source.text == destination.text,
+      "focused native source did not apply the viewer's exact text"
+  );
+
+  const auto old = BridgeTestAccess::clipboardFocus(viewer);
+  check(old.has_value(), "clipboard stale-focus fixture lost focus early");
+  fixture.window->hide();
+  check(!old->live() && !BridgeTestAccess::clipboardFocus(viewer), "hidden viewer retained clipboard authority");
+  const ClipboardTextMessage stale{old->binding, 2, QStringLiteral("must not replace hidden clipboard")};
+  check(
+      BridgeTestAccess::channel(host)->send(MessageType::ClipboardText, encodeClipboardText(stale), 91, 2),
+      "Cannot submit exact old clipboard focus through TLS"
+  );
+  // A following focus-independent catalog response proves the previous packet
+  // was processed; no quiet interval is used to establish non-delivery.
+  BridgeTestAccess::catalog(host, {{124, QStringLiteral("clipboard ordered marker")}});
+  check(
+      waitUntil([&] {
+        return BridgeTestAccess::firstCatalogTitle(viewer) == QStringLiteral("clipboard ordered marker");
+      }),
+      "ordered clipboard marker was not delivered after the stale packet"
+  );
+  check(destination.writes == 1, "stale hidden-viewer clipboard update was applied");
+  const auto reads = source.reads + destination.reads;
+  host.stopSharing();
+  check(
+      !BridgeTestAccess::clipboardEnabled(host) && !BridgeTestAccess::clipboardChanged(host) &&
+          source.reads + destination.reads == reads,
+      "terminal sharing shutdown prevents further clipboard reads"
+  );
+}
+
 void keyboardFenceRoundTrip(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   KeyboardFixture fixture(hostIdentity, viewerIdentity);
@@ -1188,6 +1439,13 @@ void fullInputFenceRoundTrip(const Identity &hostIdentity, const Identity &viewe
       "Full-input handoff could not start"
   );
   check(waitUntil([&] { return fixture.grants == 1; }), "Full-input handoff did not complete");
+  const auto target = host.originalInputTarget(*binding);
+  const auto viewerPeer = fixture.viewer.authenticatedPeerObservation();
+  check(
+      target && viewerPeer && target->viewerConnection == viewerPeer->ticket().incarnation() &&
+          target->viewerPeerFingerprint == viewerPeer->ticket().fingerprint(),
+      "Full-input target did not bind the actual Viewer endpoint and its Mac peer"
+  );
   check(nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty(), "Full-input grant preceded owner releases");
   const auto before = nativeInputs.size();
   fixture.key(QEvent::KeyPress, Qt::Key_B);
@@ -2162,6 +2420,39 @@ void terminalShutdownOrdering(const Identity &hostIdentity, const Identity &view
   }
 }
 
+void captureRateConfiguration()
+{
+  const auto option = [](const QStringList &arguments) {
+    QCommandLineParser parser;
+    parser.addOption({"capture-fps", "Capture rate", "fps", "30"});
+    check(parser.parse(QStringList{"fixture"} + arguments), "Capture rate fixture arguments did not parse");
+    return captureRateOption(parser);
+  };
+  check(
+      option({}) == 30 && option({"--capture-fps", "30"}) == 30 && option({"--capture-fps=60"}) == 60,
+      "CLI capture rate lost default or explicit setting"
+  );
+  for (const auto &arguments : QList<QStringList>{
+           {"--capture-fps=0"},
+           {"--capture-fps=45"},
+           {"--capture-fps=060"},
+           {"--capture-fps=+60"},
+           {"--capture-fps=60.0"},
+           {"--capture-fps=30", "--capture-fps=60"}
+       }) {
+    bool denied = false;
+    try {
+      (void)option(arguments);
+    } catch (const std::exception &) {
+      denied = true;
+    }
+    check(denied, "Malformed or duplicate capture rate was accepted");
+  }
+  for (const auto rate : {30U, 60U}) {
+    Bridge host(true, Identity{QSslCertificate{}, QSslKey{}}, QByteArray(32, '\0'), {}, 0, 0, false, false, rate);
+    check(BridgeTestAccess::captureRate(host) == rate, "Bridge did not apply the selected native capture rate");
+  }
+}
 void shutdownSupersedesDeferredCleanup(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   KeyboardFixture fixture(hostIdentity, viewerIdentity);
@@ -2209,6 +2500,8 @@ int main(int argc, char **argv)
     QTextStream(stdout) << "TLS backend: " << QSslSocket::activeBackend() << "; Qt " << qVersion() << '\n';
     boundedPresentation();
     delayedViewerCleanup();
+    paintedReadyBinding();
+    captureRateConfiguration();
     QTemporaryDir directory;
     check(directory.isValid(), "Cannot create TLS identity fixture directory");
     initializeIdentity(directory.filePath("host"));
@@ -2218,6 +2511,8 @@ int main(int argc, char **argv)
     shutdownBeforeExec();
     startupShutdownLifetime(hostIdentity, viewerIdentity);
     initialExportWaitsForCatalog(hostIdentity, viewerIdentity);
+    focusedClipboardPolicies(hostIdentity, viewerIdentity);
+    focusedClipboardRoundTrip(hostIdentity, viewerIdentity);
     congestionRecovery(hostIdentity, viewerIdentity);
     negotiatedMediaRecovery(hostIdentity, viewerIdentity);
     reconnectRefusedThenAvailable(hostIdentity, viewerIdentity);

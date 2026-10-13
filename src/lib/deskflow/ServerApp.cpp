@@ -91,6 +91,13 @@ void ServerApp::setOriginalInputCapture(std::shared_ptr<deskflow::windowshare::O
     throw std::logic_error("Original input capture must be configured once before core startup");
   m_originalInputCapture = std::move(capture);
 }
+void ServerApp::setOriginalInputDispatcherFactory(OriginalDispatcherFactory factory)
+{
+  if (!factory || m_originalDispatcherFactory || m_serverState != ServerState::Uninitialized ||
+      thread() != QThread::currentThread())
+    throw std::logic_error("Original input dispatcher must be configured once before core startup");
+  m_originalDispatcherFactory = std::move(factory);
+}
 #endif
 
 void ServerApp::setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::SelectedPeerMailbox> mailbox)
@@ -545,24 +552,24 @@ ClientListener *ServerApp::openClientListener(const NetworkAddress &address)
 
 Server *ServerApp::openServer(ServerConfig &config, PrimaryClient *primaryClient)
 {
-  auto *server = new Server(config, primaryClient, m_serverComputer, getEvents());
-  try {
+  auto server = std::make_unique<Server>(config, primaryClient, m_serverComputer, getEvents());
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE && defined(Q_OS_MACOS)
-    if (m_originalInputCapture) {
-      server->setOriginalInputRoutes(m_originalInputCapture->routes());
-      server->setOriginalInputCapturedInbox(m_originalInputCapture->completedInput());
+  if (m_originalInputCapture) {
+    if (!server->setOriginalInputRoutes(m_originalInputCapture->routes()) ||
+        !server->setOriginalInputCapturedInbox(m_originalInputCapture->completedInput()))
+      throw std::runtime_error("Original input capture could not bind its server route");
+    if (m_originalDispatcherFactory) {
+      auto dispatcher = m_originalDispatcherFactory(server->originalInputBackend());
+      if (!dispatcher || !server->setOriginalInputDispatcher(std::move(dispatcher)))
+        throw std::runtime_error("Original input dispatcher could not bind its capture route");
     }
-#endif
-    getEvents()->addHandler(EventTypes::ServerComputerSwitched, server, [this](const auto &) {
-      handleComputerSwitched();
-    });
-
-  } catch (std::bad_alloc &ba) {
-    delete server;
-    throw ba;
   }
+#endif
+  getEvents()->addHandler(EventTypes::ServerComputerSwitched, server.get(), [this](const auto &) {
+    handleComputerSwitched();
+  });
 
-  return server;
+  return server.release();
 }
 
 void ServerApp::handleComputerSwitched() const

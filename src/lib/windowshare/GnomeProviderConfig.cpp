@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "GnomeProviderConfig.h"
+#include "CaptureRate.h"
 #include "UniqueJson.h"
 
 #include <QFile>
@@ -62,8 +63,10 @@ GnomeProviderConfig GnomeProviderConfig::load(const QString &path)
   );
   requireUniqueJsonKeys(bytes);
   const auto object = document.object();
-  static const QSet<QString> fields{"version",  "viewerExecutable", "connect", "port",
-                                    "identity", "peerPin",          "screen",  "exportWindow"};
+  static const QSet<QString> fields{"version",   "viewerExecutable", "connect",
+                                    "port",      "identity",         "peerPin",
+                                    "screen",    "exportWindow",     "shareClipboardText",
+                                    "captureFps"};
   for (auto it = object.begin(); it != object.end(); ++it)
     require(fields.contains(it.key()), "Unknown GNOME provider configuration field");
   require(integer(object, "version", 0, 1, 1) == 1, "GNOME provider configuration requires version 1");
@@ -116,6 +119,17 @@ GnomeProviderConfig GnomeProviderConfig::load(const QString &path)
         "GNOME exportWindow must be a canonical nonzero uint32 string"
     );
     result.m_arguments.append({"--export-window", QString::number(id)});
+  }
+  if (object.contains("shareClipboardText")) {
+    require(object["shareClipboardText"].isBool(), "GNOME text clipboard policy must be an explicit boolean");
+    if (object["shareClipboardText"].toBool())
+      result.m_arguments.append("--share-clipboard-text");
+  }
+  if (object.contains("captureFps")) {
+    const auto rate = integer(object, "captureFps", defaultCaptureRate, 30, 60);
+    require(validCaptureRate(static_cast<unsigned>(rate)), "GNOME captureFps must be 30 or 60");
+    // Accepted local app option; a Viewer cannot change its peer's host policy.
+    result.m_arguments.append({"--capture-fps", QString::number(rate)});
   }
   return result;
 }

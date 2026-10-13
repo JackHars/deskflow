@@ -43,6 +43,7 @@ HEADER = struct.Struct(">4sIHHQQQI")
 INPUT_ROUTE = 18
 FORWARDING_CAPABILITIES = ["keyboard-route-v1", "input-route-v1"]
 INPUT_KINDS = {"key", "button", "move", "scroll"}
+FOCUS_RECOVERY_MODES = ("prepared-first-click", "ordinary-click")
 
 
 class TlsHost:
@@ -217,6 +218,8 @@ class TlsHost:
                             self.send_frame(session)
                         elif operation == "second-window":
                             self.opened(session)
+                        elif operation == "close-window":
+                            self.send(10, {}, session, 1)
                         elif operation == "input-route":
                             require(self.input_route_negotiated and self.pending_route is None,
                                     "Concurrent or unnegotiated forwarding-fence request")
@@ -295,7 +298,7 @@ class Driver:
                 data = os.read(self.child.stdout.fileno(), 4096)
                 require(data, f"Production client exited before {expected}: {self.child.poll()}")
                 self.buffer += data
-                require(len(self.buffer) <= 32768, "Production fixture output exceeded bound")
+                require(len(self.buffer) <= 65536, "Production fixture output exceeded bound")
                 continue
             line, self.buffer = self.buffer.split(b"\n", 1)
             self.transcript.write(line.decode() + "\n")
@@ -309,10 +312,15 @@ class Driver:
         command = {"id": self.request, "op": operation, **values}
         self.child.stdin.write((json.dumps(command) + "\n").encode())
         self.child.stdin.flush()
-        expected = {"observe": "observed", "drain": "drained", "drain-retained": "drain-retained", "retained": "retained",
-                    "stop": "stopped"}.get(operation, "synced")
+        expected = {"observe": "observed", "drain": "drained", "seal": "drained", "map": "mapped",
+                    "map-batch": "batch-mapped", "drain-retained": "drain-retained", "retained": "retained",
+                    "idle-state": "idle-state", "prepare": "prepared", "promote": "drained",
+                    "preparation-retained": "preparation-retained",
+                    "preparation-cleanup": "preparation-cleaned", "stop": "stopped"}.get(operation, "synced")
         reply = self.event(expected)
         require(reply.get("id") == self.request, "Wrong fixture request reply")
+        if operation == "map-batch":
+            self.request += values["count"] - 1
         return reply
 
 
@@ -511,18 +519,36 @@ def forwarding_fence_acceptance(processes, host, driver, initial, desktop):
             "closedInterval": closing, "reopened": reopened, "sourceTolerance": tolerance}
 
 
-def input_drain_receipt(reply, request, initial):
+SUPPORTED_ORDERING_CONTRACTS = (
+    "sha256:fec9023139ac8eff93fcc1af90413613cdb526e7f02389dc9d8fe90f7abc81e5",
+    "sha256:4d7ece1588279dbd3b66de3a28d1bf1098e7905b705d8e44743192b925d66b83",
+)
+
+
+def input_drain_receipt(reply, request, initial, expected_ordering_contract="", *, capture=None):
     """Verify a native segment receipt without treating it as a route permit."""
     require(reply.get("live") is True and not reply.get("error") and type(reply.get("id")) is int
             and reply["id"] > 0 and reply.get("originalDeliveryAuthority") is False,
             f"Exact fenced input drain did not complete: {reply}")
-    require(reply.get("orderingLimitation") == "mutter-eis-sync-build-unverified",
-            "Native segment receipt hid its sender-ordering limitation")
+    if expected_ordering_contract:
+        require(expected_ordering_contract in SUPPORTED_ORDERING_CONTRACTS,
+                "Native test expected an unreviewed sender-ordering contract")
+        ordering = reply.get("senderOrdering")
+        require(reply.get("orderingLimitation") == "" and isinstance(ordering, dict)
+                and ordering.keys() == {"live", "contract"} and ordering.get("live") is True
+                and ordering.get("contract") == expected_ordering_contract,
+                "Native segment lacked the exact live supported sender-ordering contract")
+    else:
+        require(reply.get("orderingLimitation") == "mutter-eis-sync-build-unverified"
+                and "senderOrdering" in reply and reply["senderOrdering"] is None,
+                "Unverified native segment claimed sender ordering")
     expected = {"request": str(reply["id"]), "coreConnectionGeneration": 1,
                 "captureEpoch": "1", "captureSequence": str(reply["id"]), "capturePart": 1,
                 "viewerConnection": initial["paint"]["connection"],
                 "session": str(request["session"]), "epoch": str(request["epoch"]),
                 "scope": "all"}
+    if capture is not None:
+        expected.update({name: capture[name] for name in ("captureEpoch", "captureSequence", "capturePart")})
     expected.update({field: str(request["payload"][field])
                      for field in ("generation", "focusRequest", "focusRevision", "geometry")})
     binding = reply.get("cutoff")
@@ -548,11 +574,64 @@ def input_drain_denial(reply, description):
     return reply["error"]
 
 
-def native_input_drain_acceptance(processes, host, driver, initial):
+def input_seal_receipt(reply, origin, expected_contract):
+    seal = reply.get("seal")
+    actual_origin = seal.get("origin") if isinstance(seal, dict) else None
+    require(expected_contract in SUPPORTED_ORDERING_CONTRACTS and isinstance(seal, dict)
+            and seal.keys() == {"live", "origin", "contract"} and seal.get("live") is True
+            and seal.get("contract") == expected_contract and isinstance(actual_origin, dict)
+            and actual_origin.keys() == origin.keys()
+            and all(type(actual_origin[field]) is type(value) and actual_origin[field] == value
+                    for field, value in origin.items()),
+            "Native map did not retain the exact live prefix seal")
+    return seal
+
+
+def input_batch_receipt(reply, count, request, initial, sealed, expected_contract):
+    require(not reply.get("error") and reply.get("originalDeliveryAuthority") is False
+            and type(reply.get("id")) is int and isinstance(reply.get("segments"), list)
+            and len(reply["segments"]) == count and 1 <= count <= 16
+            and reply.get("requestedPings") == sealed.get("requestedPings")
+            and reply.get("requestedDrains") == sealed.get("requestedDrains"),
+            "Native point batch repeated drain or returned a partial result")
+    for index, item in enumerate(reply["segments"]):
+        point = {**initial, "desktopX": initial["desktopX"] + index % 4,
+                 "desktopY": initial["desktopY"] + index // 4}
+        input_drain_receipt({**item, "id": reply["id"] + index}, request, point, expected_contract)
+        input_seal_receipt(item, sealed["cutoff"], expected_contract)
+    return reply
+
+
+def locate_focused_viewer(processes, driver, session, region):
+    # A new GNOME toplevel need not cover the previous window's center. A
+    # click there can select that old window again. Move within the known EIS
+    # region and accept only the real provider/Qt exact focused-hit receipt.
+    x, y, width, height = region
+    points = [(round(x + width * fx), round(y + height * fy))
+              for fy in (.5, .3, .7, .1, .9) for fx in (.5, .3, .7, .1, .9)]
+    cursor = 0
+
+    def observed():
+        nonlocal cursor
+        point = points[cursor % len(points)]
+        cursor += 1
+        driver.command("move", x=point[0], y=point[1])
+        result = driver.command("observe")
+        if not result.get("live"):
+            denied(result, "Focused-window point search")
+            return None
+        return result if result["snapshot"]["paint"]["session"] == str(session) else None
+
+    return common.wait_for(processes, observed, f"explicit window {session} native association",
+                           timeout=5, retry_errors=False)["snapshot"]
+
+
+def native_input_drain_acceptance(processes, host, driver, initial, expected_ordering_contract):
     """Real PONG -> Clutter segment -> exact-All Qt completion on owned GNOME.
 
     The fixture supplies synthetic Core correlation. Production Core cutoff and
-    Mutter's compiled EIS SYNC barrier are separate prerequisites for authority.
+    authenticated sender association are separate prerequisites for authority.
+    A verified mapped Mutter build proves only the named local prerequisite.
     """
     paint = initial["paint"]
     request = forwarding_request(initial, 3, "original")
@@ -568,7 +647,7 @@ def native_input_drain_acceptance(processes, host, driver, initial):
                                            ("wrongConnection", 3, int(paint["connection"]) + 1)):
         reply = drain(generation, connection)
         denials[reason] = input_drain_denial(reply, reason)
-    completed = input_drain_receipt(drain(3), request, initial)
+    completed = input_drain_receipt(drain(3), request, initial, expected_ordering_contract)
     resumed_request = {**request, "payload": {**request["payload"], "mode": "viewer"}}
     resumed = request_forwarding(processes, host, resumed_request)
     forwarding_receipts(host.events()[:resumed["index"] + 1], request, [], entered["index"] + 1, [0, 0])
@@ -577,7 +656,11 @@ def native_input_drain_acceptance(processes, host, driver, initial):
         retained = driver.command("drain-retained")
         require(type(retained.get("remainingMs")) is int and retained["remainingMs"] > 0,
                 "Retained drain expired before its gate revocation could be verified")
-        return retained if retained.get("live") is False else None
+        if retained.get("live") is False:
+            require(retained.get("senderOrderingLive") is False,
+                    "Gate revocation left sender-ordering evidence live")
+            return retained
+        return None
 
     revoked = common.wait_for(processes, revoked_before_expiry, "retained native drain revocation before expiry",
                               timeout=.25, retry_errors=False)
@@ -586,17 +669,228 @@ def native_input_drain_acceptance(processes, host, driver, initial):
 
     fresh_request = forwarding_request(initial, 4, "original")
     fresh_entered = request_forwarding(processes, host, fresh_request)
-    fresh = input_drain_receipt(drain(4), fresh_request, initial)
+    fresh = input_drain_receipt(drain(4), fresh_request, initial, expected_ordering_contract)
     require(fresh["id"] > completed["id"], "Native drain reused a completed cutoff request")
     fresh_resume = {**fresh_request, "payload": {**fresh_request["payload"], "mode": "viewer"}}
     fresh_resumed = request_forwarding(processes, host, fresh_resume)
     forwarding_receipts(host.events()[:fresh_resumed["index"] + 1], fresh_request, [],
                         fresh_entered["index"] + 1, [0, 0])
+    prefix_seal = None
+    if expected_ordering_contract:
+        seal_request = forwarding_request(initial, 5, "original")
+        seal_entered = request_forwarding(processes, host, seal_request)
+        sealed = input_drain_receipt(driver.command("seal", generation=5, connection=int(paint["connection"])),
+                                     seal_request, initial, expected_ordering_contract)
+        input_seal_receipt(sealed, sealed["cutoff"], expected_ordering_contract)
+        time.sleep(.3)
+        idle = driver.command("drain-retained")
+        require(idle.get("live") is False and idle.get("senderOrderingLive") is False
+                and idle.get("sealLive") is True and idle.get("remainingMs", 1) < 0,
+                "Idle point expiry renewed a point or incorrectly lost the historical prefix seal")
+        maps = []
+        for index in range(12):
+            started = time.monotonic()
+            mapped = input_drain_receipt(driver.command("map", generation=5, connection=int(paint["connection"])),
+                                         seal_request, initial, expected_ordering_contract)
+            elapsed = (time.monotonic() - started) * 1000
+            input_seal_receipt(mapped, sealed["cutoff"], expected_ordering_contract)
+            require(mapped.get("requestedPings") == sealed.get("requestedPings")
+                    and mapped.get("requestedDrains") == sealed.get("requestedDrains")
+                    and mapped.get("requestedMaps") == sealed.get("requestedMaps") + index + 1,
+                    "Fresh point mapping repeated the old-prefix ping or drain")
+            maps.append({"receipt": mapped, "elapsedMs": elapsed})
+        batches = []
+        for index in range(8):
+            started = time.monotonic()
+            batch = input_batch_receipt(driver.command("map-batch", generation=5,
+                                         connection=int(paint["connection"]), count=16),
+                                        16, seal_request, initial, sealed, expected_ordering_contract)
+            elapsed = (time.monotonic() - started) * 1000
+            require(batch.get("requestedBatches") == sealed.get("requestedBatches", 0) + index + 1,
+                    "Native batch request was lost or duplicated")
+            batches.append({"receipt": batch, "elapsedMs": elapsed, "pointsPerSecond": 16000 / elapsed})
+        seal_resume = {**seal_request, "payload": {**seal_request["payload"], "mode": "viewer"}}
+        seal_resumed = request_forwarding(processes, host, seal_resume)
+        forwarding_receipts(host.events()[:seal_resumed["index"] + 1], seal_request, [],
+                            seal_entered["index"] + 1, [0, 0])
+
+        def seal_revoked():
+            result = driver.command("drain-retained")
+            return result if (result.get("sealLive") is False and result.get("live") is False
+                              and result.get("batchLive") == [False] * 16) else None
+
+        sealed_revoked = common.wait_for(processes, seal_revoked, "retained prefix seal revocation", timeout=.25,
+                                        retry_errors=False)
+        prefix_seal = {"initial": sealed, "idlePointExpired": idle, "maps": maps, "batches": batches,
+                       "resumed": seal_resumed, "revoked": sealed_revoked}
     return {"scope": "owned-pong-compositor-segment-exact-fenced-qt-completion",
             "originalDeliveryAuthority": False, "productionCoreCutoff": False,
-            "senderOrderingBuildVerified": False, "entered": entered, "prefixPongs": prefix,
+            "senderOrderingBuildVerified": bool(expected_ordering_contract),
+            "senderOrderingContract": expected_ordering_contract, "entered": entered, "prefixPongs": prefix,
             "completed": completed, "resumed": resumed, "revokedBeforeExpiry": revoked, "denials": denials,
-            "freshCompleted": fresh, "freshResumed": fresh_resumed}
+            "freshCompleted": fresh, "freshResumed": fresh_resumed, "retainedPrefix": prefix_seal}
+
+
+def prepared_focus_receipt(reply, initial, point, expected_contract, host_pin):
+    require(expected_contract in SUPPORTED_ORDERING_CONTRACTS and reply.get("live") is True
+            and not reply.get("error") and reply.get("outcome") == "none"
+            and reply.get("originalDeliveryAuthority") is False and reply.get("contract") == expected_contract
+            and type(reply.get("id")) is int and reply["id"] > 0,
+            f"Exact pre-All focus preparation did not complete: {reply}")
+    expected = {"request": str(reply["id"]), "coreConnectionGeneration": 1,
+                "captureEpoch": "1", "captureSequence": str(reply["id"]), "capturePart": 1}
+    binding = reply.get("binding")
+    require(isinstance(binding, dict) and binding.keys() == expected.keys()
+            and all(type(binding[key]) is type(value) and binding[key] == value for key, value in expected.items()),
+            "Preparation forged an All binding or changed its exact capture")
+    observed = reply.get("snapshot", {})
+    paint = observed.get("paint", {})
+    require(observed.get("window") == initial["window"] and observed.get("surface") == initial["surface"]
+            and all(paint.get(key) == initial["paint"][key]
+                    for key in ("session", "epoch", "geometry", "nativeSurface", "windowAssociation", "connection"))
+            and paint.get("peerFingerprint") == host_pin
+            and int(paint.get("focusRequest", "0")) > int(initial["paint"]["focusRequest"])
+            and int(paint.get("focusRevision", "0")) > int(initial["paint"]["focusRevision"]),
+            "Prepared focus did not retain the exact owned target and fresh Host acknowledgement")
+    require(all(type(observed.get(key)) in (int, float) and math.isfinite(observed[key])
+                and abs(observed[key] - value) <= 1 / 256
+                for key, value in zip(("desktopX", "desktopY"), point)),
+            "Prepared focus changed its frozen routed point")
+    return reply
+
+
+def preparation_input_receipts(messages, begin, end):
+    """A preparation activation is focus-only; no source acquisition can escape."""
+    require(type(begin) is int and type(end) is int and 0 <= begin <= end <= len(messages),
+            "Invalid preparation evidence interval")
+    forwarded = [message for message in messages[begin:end]
+                 if message["direction"] == "viewer" and message["kind"] == 7
+                 and message["payload"].get("kind") in INPUT_KINDS]
+    require(not forwarded, f"Preparation gate forwarded source input: {forwarded}")
+    return {"begin": begin, "end": end, "forwardedInput": forwarded}
+
+
+def preparation_retained_receipt(reply, prepared):
+    """A completed PONG stops its timer without extending the original 500 ms."""
+    age, remaining = reply.get("ageMs"), reply.get("remainingMs")
+    require(reply.get("live") is True and reply.get("prefixPending") is False
+            and reply.get("originalDeliveryAuthority") is False
+            and reply.get("clientRequest") == prepared.get("clientRequest")
+            and type(age) is int and type(remaining) is int and age >= 250 and 0 < remaining <= 250
+            and 499 <= age + remaining <= 500,
+            "Completed preparation prefix retained its PONG timer or renewed its original deadline")
+    return reply
+
+
+def native_first_click_acceptance(processes, host, driver, initial, focus, focus_path, expected_contract):
+    """Real idle EI restart + distinct prep drain/activation + genuine All + cleanup.
+
+    The driver uses synthetic Core capture correlation and a disposable TLS
+    Host. The real provider, compositor and Qt gates run unchanged. Activation
+    must not inject the withheld click; later test strokes probe the closed gate.
+    """
+    paint = initial["paint"]
+    # The independent 360x180 focus owner's center covers the old center point.
+    # Choose an interior video corner; the provider must still prove exact hit.
+    point = (initial["desktopX"] - initial["surfaceX"] + paint["contentX"] +
+             (paint["videoX"] + .12 * paint["videoWidth"]) * paint["logicalScale"],
+             initial["desktopY"] - initial["surfaceY"] + paint["contentY"] +
+             (paint["videoY"] + .12 * paint["videoHeight"]) * paint["logicalScale"])
+    # EI uses floats; freeze their exact represented values before comparing.
+    point = tuple(struct.unpack("f", struct.pack("f", value))[0] for value in point)
+    driver.command("move", x=point[0], y=point[1])
+    before_focus = current_focus(focus_path, focus)
+    require(before_focus, "Independent focus owner was not current before preparation")
+    time.sleep(4.2)
+    processes.check()
+    idle = driver.command("idle-state")
+    require(idle.get("emulating") is False and idle.get("idleStops", 0) >= 1
+            and idle.get("idleMs", 0) >= 4000,
+            "Real libei sender did not stop emulating after four seconds idle")
+    require(current_focus(focus_path, focus) == before_focus, "Focus changed during the idle prerequisite")
+    begin = len(host.events())
+    preparation_started = time.monotonic()
+    prepared = driver.command("prepare", x=point[0], y=point[1])
+    if not expected_contract:
+        require(prepared.get("live") is False and prepared.get("outcome") == "unsupported"
+                and prepared.get("originalDeliveryAuthority") is False and "snapshot" not in prepared
+                and "binding" not in prepared and "contract" not in prepared,
+                "Unsupported preparation claimed native focus or a gate")
+        require(current_focus(focus_path, focus) == before_focus,
+                "Unsupported ordering build changed native focus")
+        return {"supported": False, "idle": idle, "denied": prepared,
+                "originalDeliveryAuthority": False}
+    prepared_focus_receipt(prepared, initial, point, expected_contract, host.host_pin)
+    require(prepared.get("idleStops") == idle["idleStops"]
+            and prepared.get("emulationRestarts") == idle["emulationRestarts"] + 1,
+            "Preparation did not restart the exact idle libei devices once")
+    focus_ack = [message for message in host.events()[begin:]
+                 if message["direction"] == "host" and message["kind"] == 14
+                 and message["session"] == int(paint["session"])
+                 and message["payload"] == {"request": int(prepared["snapshot"]["paint"]["focusRequest"]),
+                                           "focusRevision": int(prepared["snapshot"]["paint"]["focusRevision"])}]
+    require(len(focus_ack) == 1, "Preparation lacked exactly one matching actual TLS Host focus acknowledgement")
+    activation = preparation_input_receipts(host.events(), begin, len(host.events()))
+    # Cross the now-completed prefix's 250 ms wait limit before promotion.
+    # This is inside the unchanged 500 ms preparation lifetime, not a retry
+    # or extension; slow/expired preparation still fails the exact live check.
+    time.sleep(max(0, preparation_started + .300 - time.monotonic()))
+    prefix_retired = preparation_retained_receipt(driver.command("preparation-retained"), prepared)
+    request = forwarding_request(prepared["snapshot"], 6, "original")
+    entered = request_forwarding(processes, host, request)
+    promoted = input_drain_receipt(driver.command("promote", generation=6,
+                                      connection=int(prepared["snapshot"]["paint"]["connection"])),
+                                   request, prepared["snapshot"], expected_contract, capture=prepared["binding"])
+    input_seal_receipt(promoted, promoted["cutoff"], expected_contract)
+    resumed_request = {**request, "payload": {**request["payload"], "mode": "viewer"}}
+    resumed = request_forwarding(processes, host, resumed_request)
+    # Host All can disappear before cleanup. Each complete stroke must still
+    # be discarded by the connection preparation gate, including pointer input.
+    probes = [driver.command("move", x=point[0] + 2, y=point[1] + 2), driver.command("key", code=67),
+              driver.command("scroll", dx=120, dy=120), driver.command("click")]
+    cleaned = driver.command("preparation-cleanup")
+    require(cleaned.get("released") is True and not cleaned.get("error")
+            and cleaned.get("preparedLive") is False and cleaned.get("sealLive") is False
+            and cleaned.get("originalDeliveryAuthority") is False
+            and cleaned.get("clientRequest") == prepared.get("clientRequest"),
+            f"Exact asynchronous preparation cleanup did not release: {cleaned}")
+    closed = preparation_input_receipts(host.events(), begin, len(host.events()))
+    # Confirm the gate actually reopened by requiring a fresh legacy packet.
+    driver.command("key", code=68)
+    expected = [{"kind": "key", "code": 16777273, "down": down, "repeat": False} for down in (True, False)]
+    reopened = common.wait_for(
+        processes, lambda: forwarding_receipts(host.events(), request, expected, begin, [0, 0]),
+        "fresh key pair after exact preparation cleanup", timeout=3, retry_errors=False)
+    closing_request = forwarding_request(prepared["snapshot"], 7, "original")
+    closing = request_forwarding(processes, host, closing_request)
+    final_receipts = forwarding_receipts(host.events()[:closing["index"] + 1], request, expected, begin, [0, 0])
+    require(final_receipts is not None, "Preparation interval lacked its complete fresh key pair")
+    closing_resume = {**closing_request, "payload": {**closing_request["payload"], "mode": "viewer"}}
+    final_resume = request_forwarding(processes, host, closing_resume)
+    return {"supported": True, "scope": "real-provider-pre-All-focus-promotion-cleanup",
+            "productionCoreCutoff": False, "productionEiComputer": False, "originalDeliveryAuthority": False,
+            "idle": idle, "prepared": prepared, "focusAck": focus_ack[0], "activationWithoutClick": activation,
+            "completedPrefixTimerRetired": prefix_retired,
+            "entered": entered, "promoted": promoted, "hostResumedBeforeCleanup": resumed,
+            "closedGateProbePongs": probes, "cleanup": cleaned, "closedInterval": closed,
+            "freshAfterCleanup": reopened, "closedPositiveInterval": closing,
+            "finalReceipts": final_receipts, "finalResume": final_resume}
+
+
+def recover_independent_focus(processes, host, driver, initial, focus, focus_path, expected_contract,
+                              center, initially_ready, report, mode="prepared-first-click"):
+    """Compare the old transition without retrying or delaying a failed native operation."""
+    require(mode in FOCUS_RECOVERY_MODES, "Unknown diagnostic focus recovery mode")
+    if mode == "prepared-first-click":
+        report["firstClickPreparation"] = native_first_click_acceptance(
+            processes, host, driver, initial, focus, focus_path, expected_contract)
+    focus.terminate()
+    focus.wait(timeout=5)
+    driver.command("move", x=center[0], y=center[1])
+    if mode == "ordinary-click" or not expected_contract:
+        driver.command("click")
+    common.wait_for(processes, initially_ready, "original viewer focus recovery", timeout=5,
+                    retry_errors=False)
 
 
 class FocusState:
@@ -677,6 +971,7 @@ def run(arguments):
     arguments.output.mkdir(parents=True, exist_ok=False)
     report = {"schema": 1, "status": "failed", "scope": "actual-qtwayland-painted-viewport-observation",
               "scale": arguments.scale, "scaleSource": "QT_SCALE_FACTOR",
+              "focusRecovery": arguments.focus_recovery,
               "compositorMonitorScalingTested": False,
               "originalDeliveryAuthority": False, "userDesktopUsed": False}
     processes = None
@@ -778,7 +1073,8 @@ def run(arguments):
                 processes, host, driver, fence_initial["snapshot"], desktop)
             drain_initial = driver.command("observe")
             require(drain_initial.get("live") is True, "Native drain requires current painted focus")
-            report["inputDrain"] = native_input_drain_acceptance(processes, host, driver, drain_initial["snapshot"])
+            report["inputDrain"] = native_input_drain_acceptance(
+                processes, host, driver, drain_initial["snapshot"], arguments.expected_ordering_contract)
             report["denials"] = {}
             for label, point in (
                 ("letterbox", desktop(paint["videoX"] / 2, paint["clientHeight"] / 2)),
@@ -797,12 +1093,9 @@ def run(arguments):
                                                           "--focus-child", str(focus_log)])
             report["independentFocus"] = independent_focus_denial(processes, driver, focus, focus_log)
             report["denials"]["focusLost"] = report["independentFocus"]["reason"]
-            focus.terminate()
-            focus.wait(timeout=5)
-            driver.command("move", x=center[0], y=center[1])
-            driver.command("click")
-            common.wait_for(processes, initially_ready, "original viewer focus recovery", timeout=5,
-                            retry_errors=False)
+            recover_independent_focus(
+                processes, host, driver, drain_initial["snapshot"], focus, focus_log,
+                arguments.expected_ordering_contract, center, initially_ready, report, arguments.focus_recovery)
             before = len(host.events())
             host.commands.put_nowait(("advance-without-frame", 1))
             common.wait_for(processes, lambda: any(m["direction"] == "viewer" and m["kind"] == 7
@@ -816,7 +1109,27 @@ def run(arguments):
             common.wait_for(processes, lambda: any(m["direction"] == "viewer" and m["kind"] == 16
                                                    and m["session"] == 2 for m in host.events()),
                             "second actual Qt toplevel painted", timeout=5, retry_errors=False)
-            report["denials"]["secondWindow"] = denied(driver.command("observe"), "second actual viewer window")
+            common.wait_for(processes, lambda: any(m["direction"] == "host" and m["kind"] == 14
+                                                   and m["session"] == 2 for m in host.events()),
+                            "second actual Qt focus acknowledgement", timeout=5, retry_errors=False)
+            second = locate_focused_viewer(processes, driver, 2, ready["region"])
+            require(second["window"] != initial["window"] and second["surface"] != initial["surface"]
+                    and second["paint"]["windowAssociation"] != initial["paint"]["windowAssociation"]
+                    and second["paint"]["nativeSurface"] != initial["paint"]["nativeSurface"],
+                    "Two real Qt top-levels reused one native role association")
+            report["multiWindow"] = {"firstAssociation": initial["paint"]["windowAssociation"],
+                                      "secondSnapshot": second,
+                                      "secondInputDrain": native_input_drain_acceptance(
+                                          processes, host, driver, second, arguments.expected_ordering_contract)}
+            host.commands.put_nowait(("close-window", 2))
+            common.wait_for(processes, lambda: any(m["direction"] == "host" and m["kind"] == 10
+                                                   and m["session"] == 2 for m in host.events()),
+                            "second Viewer close sent", timeout=3, retry_errors=False)
+            returned = locate_focused_viewer(processes, driver, 1, ready["region"])
+            require(returned["paint"]["session"] == "1"
+                    and returned["paint"]["windowAssociation"] == initial["paint"]["windowAssociation"],
+                    "Closing another top-level lost the original exact association")
+            report["multiWindow"]["returnedToFirst"] = returned
             host.expected_disconnect = True
             require(driver.command("stop").get("live") is False, "Stopped production client stayed live")
             require(driver.child.wait(timeout=5) == 0, "Production client fixture did not exit cleanly")
@@ -843,14 +1156,20 @@ def run(arguments):
     return 0 if report["status"] == "passed" else 1
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--viewer", type=lambda s: Path(s).resolve(strict=True))
     parser.add_argument("--fixture", type=lambda s: Path(s).resolve(strict=True))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--scale", type=float, choices=(1, 1.25), default=1)
+    parser.add_argument("--focus-recovery", choices=FOCUS_RECOVERY_MODES, default="prepared-first-click",
+                        help="Diagnostic transition before the two-window checks; ordinary-click reproduces the "
+                             "old focus recovery without running first-click preparation")
+    parser.add_argument("--expected-ordering-contract", choices=("", *SUPPORTED_ORDERING_CONTRACTS),
+                        default=SUPPORTED_ORDERING_CONTRACTS[1],
+                        help="Expected mapped build for this isolated fixture; empty tests unverified no-authority branch")
     parser.add_argument("--focus-child", type=Path, help=argparse.SUPPRESS)
-    arguments = parser.parse_args()
+    arguments = parser.parse_args(argv)
     if arguments.focus_child:
         return focus_child(arguments.focus_child)
     if not all((arguments.viewer, arguments.fixture, arguments.output)):

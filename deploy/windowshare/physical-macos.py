@@ -336,13 +336,13 @@ class Driver:
         return reply
 
 
-def stop_owned(process, name, output, report):
+def stop_owned(process, name, output, report, grace=8):
     if process is None:
         return None
     if process.poll() is None:
         process.terminate()
         try:
-            process.wait(timeout=8)
+            process.wait(timeout=grace)
         except subprocess.TimeoutExpired:
             report[name + "TerminationTimedOut"] = True
             if name == "host" and sys.platform == "darwin":
@@ -367,10 +367,20 @@ def private_path(value, base):
     return path
 
 
-def validate_plans(mac, plan, base):
-    require(mac.get("version") == 1 and mac.get("preparedOnly") is True, "Wrong Mac preparation plan")
-    require(plan.get("version") == 2 and plan.get("controlProtocol") == 2, "Use a fresh version 2 Linux plan")
-    require(mac.get("originalInputEnabled") is False and mac.get("holdingDisplayEnabled") is False and
+def original_support():
+    spec = importlib.util.spec_from_file_location("production_physical", Path(__file__).with_name("original-input-physical.py"))
+    support = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(support)
+    return support
+
+
+def validate_plans(mac, plan, base, production=False, source=None, holding=False):
+    require(mac.get("version") == (2 if production else 1) and mac.get("preparedOnly") is True,
+            "Wrong Mac preparation plan")
+    require(plan.get("version") == (3 if production else 2) and plan.get("controlProtocol") == (3 if production else 2),
+            "Use a fresh Linux plan for the explicitly selected route mode")
+    require((not holding or production) and mac.get("originalInputEnabled") is production and
+            mac.get("holdingDisplayEnabled") is holding and
             plan.get("syntheticStartupInput") is False, "Wrong test route mode")
     for field in ("macCorePin", "macViewerPin", "corePin", "viewerPin"):
         require(isinstance(plan.get(field), str) and re.fullmatch("[0-9a-f]{64}", plan[field]),
@@ -418,21 +428,54 @@ def validate_plans(mac, plan, base):
                            ("AltGr", "altgr"), ("Meta", "meta"), ("Super", "super")):
             require(config.get("computer_" + screen, "modifier" + key, fallback="") == value,
                     "Physical test requires identity modifier maps")
+    if production:
+        support = original_support()
+        require(support.certificate_pin(config["security"]["certificate"]) == mac["coreFingerprint"],
+                "Prepared Core certificate differs from the explicit pin")
+        return support.validate(mac, plan, base, private_path, source, holding)
+    require("routeMode" not in plan and "macOriginalInputConfigured" not in plan,
+            "Legacy physical mode cannot consume a production plan")
+    return None
 
 
 def run(arguments):
     os.umask(0o077)
     base = arguments.mac_plan.parent.resolve(strict=True)
     mac, plan = read_json(arguments.mac_plan), read_json(arguments.linux_plan)
-    validate_plans(mac, plan, base)
+    production = getattr(arguments, "production_original_input", False)
+    holding = getattr(arguments, "holding_display", False)
+    artifacts = validate_plans(mac, plan, base, production, arguments.source, holding)
+    original = original_support() if production else None
     output = arguments.output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"version": 1, "status": "failed", "physicalAcceptance": "not-assessed",
               "syntheticInputSent": False, "holdingDisplayTested": False,
               "twoPhysicalMonitorsTested": False, "planSha256": digest(arguments.linux_plan),
               "macPlanSha256": digest(arguments.mac_plan)}
+    if production:
+        report.update({"version": 2, "routeMode": "production-original-input", "originalInputPolicyConfigured": True,
+                       "originalDeliveryVerified": False, "frozenArtifacts": artifacts,
+                       "holdingDisplayConfigured": holding, "holdingDisplayAcceptance": "not-assessed",
+                       "hostOwnership": "authenticated direct packaged Core companion"})
     atomic_json(output / "linux-plan.json", plan)
     atomic_json(output / "mac-plan.json", mac)
+    if getattr(arguments, "validate_only", False):
+        report.update({"status": "plan-validated-native-not-run", "nativeProcessesStarted": False,
+                       "physicalAcceptance": "not-assessed"})
+        if production:
+            prospective = original.EvidenceSession(output / "evidence", atomic_json)
+            configuration = output / "production-host.json"
+            atomic_json(configuration, original.host_configuration(mac, plan, output / "restore.json", prospective))
+            report["prospectiveCoreArgv"] = original.core_arguments(mac, configuration)
+            report["prospectiveSourceArgv"] = [artifacts["source"]["path"], "Deskflow original input physical test",
+                                               str(output / "source.json"), "--manual-status",
+                                               str(output / "manual-status.json"), "--input-evidence-config",
+                                               str(prospective.configs["native"]), "--record-request",
+                                               str(prospective.record_request)] + (["--separate-controls"] if holding else [])
+            report["predeclaredRecordingSeconds"] = 30
+        atomic_json(output / "result.json", report)
+        print(json.dumps(report, allow_nan=False), flush=True)
+        return 0
     ssh = ["ssh", "-F", "/dev/null", "-T", "-i", str(arguments.ssh_key), "-o", "BatchMode=yes",
            "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
@@ -443,11 +486,14 @@ def run(arguments):
     environment["QT_QPA_PLATFORM"] = "cocoa"
     source_path, journal = output / "source.json", output / "restore.json"
     source_executable = arguments.source or Path(mac["sourceExecutable"])
-    title = "Deskflow physical input test"
+    title = "Deskflow original input physical test" if production else "Deskflow physical input test"
     streams, owned, socket_identities, cleanup_errors = [], {}, {}, []
-    collector = publisher = driver = None
+    collector = publisher = driver = evidence = None
     linux_stopped = False
     started = False
+    inspector = original.ProcessInspector() if production else None
+    core_identity = companion_identity = None
+    initial = None
 
     def emit(value):
         print(json.dumps(value, allow_nan=False), flush=True)
@@ -474,10 +520,19 @@ def run(arguments):
             if name == "linux" and linux_stopped:
                 continue
             require(process.poll() is None, name + " exited early: " + str(process.returncode))
+        if inspector and companion_identity:
+            require(inspector.live(core_identity) and inspector.live(companion_identity),
+                    "Exact Core or authenticated companion process changed")
         if publisher:
             require(publisher.error is None, "Manual status publisher failed")
+        if evidence:
+            evidence.poll()
         if collector:
             state = collector.snapshot()
+            if production and initial and state["receipt"]:
+                original.source_identity(state["receipt"], initial, holding)
+                if holding and state["receipt"].get("frame") != initial["frame"]:
+                    report["sourceRelocationObserved"] = True
             if not allow_stop and state["receipt"] and state["receipt"]["manual"]["request"] == "stop":
                 raise Cancelled("Source requested Stop in the test window")
             return state["receipt"]
@@ -516,15 +571,30 @@ def run(arguments):
         for endpoint in plan["remoteSockets"].values():
             remote(["test", "!", "-e", endpoint])
         publisher = StatusPublisher(output / "manual-status.json")
-        source = launch("source", [str(source_executable), title, str(source_path),
-                                  "--manual-status", str(publisher.path)], env=environment)
+        source_argv = [str(source_executable), title, str(source_path), "--manual-status", str(publisher.path)]
+        if production:
+            evidence = original.EvidenceSession(output / "evidence", atomic_json)
+            report["predeclaredRecordingSeconds"] = 30
+            source_argv += ["--input-evidence-config", str(evidence.configs["native"]),
+                           "--record-request", str(evidence.record_request)]
+            if holding:
+                source_argv += ["--separate-controls"]
+        source = launch("source", source_argv, env=environment)
         collector = Collector(source_path, source.pid, title, output / "receipts.jsonl")
         def own_window():
             data = collector.snapshot()["receipt"]
-            return data if data and data.get("ready") is True and data.get("windowId", 0) > 0 and \
-                data.get("frame") and data["frame"] == data.get("originalFrame") else None
+            if not data or data.get("ready") is not True or data.get("windowId", 0) <= 0 or \
+                    not data.get("frame") or data["frame"] != data.get("originalFrame"):
+                return None
+            if holding and (data.get("controlVisible") is not True or not data.get("controlFrame") or
+                            data["controlFrame"] != data.get("controlOriginalFrame")):
+                return None
+            return data
 
         initial = wait(own_window, "stable visible source readiness")
+        if production:
+            original.source_identity(initial, holding=holding)
+            evidence.bind("native", source.pid, initial["sourceWindowId"])
         report["initialReceipt"] = initial
         argv = [str(initial["windowId"]) if arg == "{windowId}" else arg for arg in plan["runArgv"]]
         require(all("{" not in arg and "}" not in arg for arg in argv), "Unresolved Linux plan argument")
@@ -533,35 +603,78 @@ def run(arguments):
         streams.append(transcript)
         driver = Driver(linux, transcript, check)
         report["prepared"] = driver.event("prepared", timeout=30)
+        if production:
+            require(report["prepared"].get("controlProtocol") == 3 and
+                    report["prepared"].get("routeMode") == "production-original-input" and
+                    report["prepared"].get("macOriginalInputConfigured") is True and
+                    report["prepared"].get("windowId") == initial["windowId"],
+                    "Linux did not prepare the exact production route and disposable source")
         publisher.set("ready")
         emit({"event": "waiting-for-start", "title": title, "routingStarted": False})
         wait(lambda: collector.snapshot()["receipt"]["manual"]["request"] == "start",
-             "the visible Start button", seconds=300)
+             "the visible Start button", seconds=90 if production else 300)
+        if evidence:
+            evidence.start_boundary()
         publisher.set("preparing")
         started = True
         no_other_primary()
-        trust = private_path(str(Path(mac["environmentOverrides"]["XDG_CONFIG_HOME"]) /
-                                 "Deskflow/tls/trusted-clients"), base)
+        trust_parent = (Path(mac["coreArgv"][4]).parent if production else
+                        Path(mac["environmentOverrides"]["XDG_CONFIG_HOME"]) / "Deskflow")
+        trust = private_path(str(trust_parent / "tls/trusted-clients"), base)
         temporary = trust.with_name(trust.name + ".physical-next")
         with temporary.open("x") as stream:
             stream.write("v2:sha256:" + plan["corePin"] + "\n")
         temporary.replace(trust)
         host_identity = private_path(mac["hostArgv"][mac["hostArgv"].index("--identity") + 1], base)
-        host = launch("host", [host_executable, "--enable-seamless", "--headless", "--listen", "127.0.0.1",
-                              "--port", str(mac["hostPort"]), "--identity", str(host_identity),
-                              "--peer-pin", plan["viewerPin"], "--journal", str(journal),
-                              "--quit-after", "300"], env=environment)
-        wait(lambda: "Listening on 127.0.0.1:" + str(mac["hostPort"]) in
-             (output / "host.log").read_text(), "Mac host listener")
-        launch("core", mac["coreArgv"], env=environment)
+        if production:
+            # Recheck the frozen roles after the human Start wait. A validated
+            # plan is not runtime admission, and no standalone Host can obtain
+            # the genuine inherited private input channel.
+            validate_plans(mac, plan, base, True, source_executable, holding)
+            host_configuration = output / "production-host.json"
+            atomic_json(host_configuration, original.host_configuration(mac, plan, journal, evidence))
+            report["productionHostConfigSha256"] = digest(host_configuration)
+            argv = original.core_arguments(mac, host_configuration)
+            report["productionCoreArgv"] = argv
+            core = launch("core", argv, env=environment)
+            core_identity = inspector.snapshot(core.pid)
+            require(core_identity and core_identity["executable"] == artifacts["core"]["path"],
+                    "Launched Core differs from its frozen role")
+            def discover_companion():
+                nonlocal companion_identity
+                companion_identity = inspector.child(core_identity, host_executable)
+                return companion_identity
+            report["companionIdentity"] = wait(discover_companion, "exact packaged Host child", 15)
+            report["coreIdentity"] = core_identity
+            evidence.bind("core", core.pid)
+            evidence.bind("host", companion_identity["pid"])
+        else:
+            launch("host", [host_executable, "--enable-seamless", "--headless", "--listen", "127.0.0.1",
+                            "--port", str(mac["hostPort"]), "--identity", str(host_identity),
+                            "--peer-pin", plan["viewerPin"], "--journal", str(journal),
+                            "--quit-after", "300"], env=environment)
+            wait(lambda: "Listening on 127.0.0.1:" + str(mac["hostPort"]) in
+                 (output / "host.log").read_text(), "Mac host listener")
+            launch("core", mac["coreArgv"], env=environment)
 
         def core_ready():
             text = (output / "core.log").read_text()
+            if production:
+                require("window sharing code admission unavailable:" not in text and
+                        "experimental window host stopped:" not in text,
+                        "Production companion or exact library admission was refused")
+                if "trusted window host connected;" not in text or \
+                        "window sharing exact library admission verified;" not in text:
+                    return False
             return Path(mac["coreIpcExpectedPath"]).is_socket() and all(
                 re.search(r"registered hotkey .*macKey=" + str(key) + r" macMask=1a00\)", text)
                 for key in (123, 124))
 
         wait(core_ready, "fixed Option hotkeys and private Mac core IPC")
+        if production:
+            report["productionBootstrap"] = {"privateCompanionAuthenticated": True,
+                                             "exactLibraryAdmissionObserved": True,
+                                             "perRecordNativeAuthority": "not-assessed"}
         tunnel_argv = [*ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=no"]
         for name, key in (("core", "corePort"), ("viewer", "hostPort")):
             tunnel_argv += ["-R", plan["remoteSockets"][name] + ":127.0.0.1:" + str(mac[key])]
@@ -582,15 +695,44 @@ def run(arguments):
         require(report["linuxReady"]["windowId"] == initial["windowId"] and
                 report["linuxReady"]["originalInputAuthorityGranted"] is False and
                 report["linuxReady"]["maximumRemainingSeconds"] >= 135, "Wrong or expired physical route")
+        if production:
+            require(report["linuxReady"].get("controlProtocol") == 3 and
+                    report["linuxReady"].get("routeMode") == "production-original-input" and
+                    report["linuxReady"].get("macOriginalInputConfigured") is True and
+                    report["linuxReady"].get("productionPrerequisites", {}).get("inputPreparation") is True,
+                    "Linux native production prerequisites were not observed")
         report["baseline"] = {"source": collector.snapshot(), "linux": driver.command("baseline")}
         publisher.set("active", 120)
         emit({"event": "active", "secondsRemaining": 120, "title": title})
         deadline, next_status = time.monotonic() + 120, time.monotonic() + 5
+        evidence_deadline = evidence_arm_deadline = None
+        if evidence:
+            emit({"event": "evidence-priming", "runId": evidence.run_id,
+                  "physicalAcceptance": "not-assessed"})
         while time.monotonic() < deadline:
             receipt = check(allow_stop=True)
             if receipt["manual"]["request"] == "stop":
                 report["sourceRequestedStop"] = True
                 break
+            if evidence and not evidence.stopped:
+                if not evidence.attempted:
+                    require(time.monotonic() + 35 < deadline,
+                            "No visible Record request with enough time for recording and safe return")
+                if evidence.try_arm():
+                    evidence_arm_deadline = time.monotonic() + 2
+                    emit({"event": "evidence-arm-requested", "runId": evidence.run_id})
+                require(evidence.armed or evidence_arm_deadline is None or time.monotonic() < evidence_arm_deadline,
+                        "Not every evidence recorder acknowledged its one-shot arm")
+                if evidence.armed and evidence_deadline is None:
+                    evidence_deadline = min(time.monotonic() + 30, deadline - 5)
+                    emit({"event": "evidence-recording", "seconds": 30, "runId": evidence.run_id})
+                if evidence_deadline is not None and time.monotonic() >= evidence_deadline:
+                    evidence.stop()
+                    wait(lambda: all(reader.end for reader in evidence.readers.values()),
+                         "terminal evidence before returning to the Mac", 2, allow_stop=True)
+                    report["inputEvidence"] = evidence.finish()
+                    emit({"event": "evidence-complete", "returnAndStop": True,
+                          "physicalAcceptance": "not-assessed"})
             if time.monotonic() >= next_status:
                 report["lastLinuxStatus"] = driver.command("status")
                 next_status = time.monotonic() + 5
@@ -598,6 +740,11 @@ def run(arguments):
         else:
             report["autoStoppedAtDeadline"] = True
         publisher.set("stopped")
+        if evidence:
+            evidence.stop()
+            wait(lambda: all(reader.end for reader in evidence.readers.values()),
+                 "bounded evidence end before route cleanup", 2, allow_stop=True)
+            report["inputEvidence"] = evidence.finish()
         report["beforeStop"] = collector.snapshot()
         report["linuxStop"] = driver.command("stop", check=False)
         linux_stopped = True
@@ -621,6 +768,9 @@ def run(arguments):
         report["disconnectRestoration"] = wait(
             restored_on_disconnect, "source restoration before host termination", allow_stop=True)
         report["disconnectRestoredWhileHostAlive"] = True
+        if holding:
+            require(report.get("sourceRelocationObserved") is True, "Holding was configured but source relocation was not observed")
+            report["holdingLifecycleObserved"] = True
         require(not collector.snapshot()["gaps"], "Input receipt history has gaps")
         report["status"] = "session-recorded-awaiting-human-and-receipt-review"
     except Cancelled as error:
@@ -633,6 +783,14 @@ def run(arguments):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if publisher:
             publisher.set("stopped")
+        if evidence:
+            try:
+                evidence.stop()
+                CROSS.wait_for(lambda: (evidence.poll(), all(reader.end for reader in evidence.readers.values()))[1],
+                               "evidence recorder stop", timeout=2)
+                report["inputEvidence"] = evidence.finish()
+            except Exception as error:
+                cleanup_errors.append("Input evidence: " + str(error))
         if driver and not linux_stopped and owned["linux"].poll() is None:
             try:
                 report["cleanupLinuxStop"] = driver.command("stop", check=False)
@@ -640,13 +798,29 @@ def run(arguments):
                 cleanup_errors.append("Linux stop: " + str(error))
         for name in ("linux", "core", "host", "tunnel"):
             try:
-                report[name + "Exit"] = stop_owned(owned.get(name), name, output, report)
+                if production and name == "core" and owned.get(name) and owned[name].poll() is None:
+                    original.stop_core(owned[name], Path(mac["coreIpcExpectedPath"]), inspector, core_identity)
+                    report["coreStoppedByPrivateIpc"] = True
+                report[name + "Exit"] = stop_owned(owned.get(name), name, output, report,
+                                                   grace=12 if production and name == "core" else 8)
+                if production and name == "core" and owned.get(name):
+                    require(report[name + "Exit"] == 0, "Packaged Core/Host did not drain successfully")
+                    require(companion_identity is not None, "Companion identity was not recorded; cleanup is unverified")
+                    CROSS.wait_for(lambda: not inspector.live(companion_identity),
+                                   "exact Core-owned Host exit", timeout=3)
+                    report["companionStopped"] = True
                 if name == "host" and owned.get(name) and report[name + "Exit"] != 0:
                     cleanup_errors.append("Mac host did not exit gracefully")
                 if report.get(name + "TerminationTimedOut"):
                     cleanup_errors.append(name + " exceeded the termination deadline")
             except Exception as error:
                 cleanup_errors.append(name + ": " + str(error))
+                # Failed graceful stop remains a failure, but still stop only
+                # this retained child/process group before leaving the run.
+                try:
+                    report[name + "FallbackExit"] = stop_owned(owned.get(name), name, output, report)
+                except Exception as fallback:
+                    cleanup_errors.append(name + " fallback: " + str(fallback))
         for endpoint, expected in socket_identities.items():
             try:
                 cleanup = ("import json,os,stat,sys; p=sys.argv[1]; expected=json.loads(sys.argv[2]);\n"
@@ -656,6 +830,12 @@ def run(arguments):
                 remote(["python3", "-c", cleanup, endpoint, json.dumps(expected)])
             except Exception as error:
                 cleanup_errors.append("Owned socket: " + str(error))
+        if production and companion_identity:
+            try:
+                require(not inspector.live(companion_identity), "The exact Core-owned Host remains live")
+                report["companionStopped"] = True
+            except Exception as error:
+                cleanup_errors.append("Companion cleanup: " + str(error))
         try:
             report["remoteCleanup"] = remote(plan["cleanupArgv"], 35)
         except Exception as error:
@@ -674,6 +854,8 @@ def run(arguments):
                 report["finalSource"] = final
                 if started and final["receipt"]:
                     data = final["receipt"]
+                    if production:
+                        original.source_identity(data, report["initialReceipt"], holding)
                     require(not final["gaps"], "Source receipt history has gaps")
                     require(data["heldKeys"] == 0 and data["heldButtons"] == 0 and
                             data["frame"] == report["initialReceipt"]["frame"],
@@ -688,6 +870,11 @@ def run(arguments):
             except Exception as error:
                 cleanup_errors.append("Receipt collector cleanup: " + str(error))
         try:
+            if evidence and owned.get("source") and owned["source"].poll() is None:
+                require(evidence.readers["native"].end is not None,
+                        "Native fixture has no terminal evidence for graceful close")
+                atomic_json(evidence.controls["native"], {"version": 1, "runId": evidence.run_id, "command": "close"})
+                require(owned["source"].wait(timeout=3) == 0, "Native fixture failed its explicit graceful close")
             report["sourceExit"] = stop_owned(owned.get("source"), "source", output, report)
             if report.get("sourceTerminationTimedOut"):
                 cleanup_errors.append("Source exceeded the termination deadline")
@@ -696,6 +883,10 @@ def run(arguments):
                     "Ordinary Mac configuration changed")
         except Exception as error:
             cleanup_errors.append("Mac cleanup: " + str(error))
+            try:
+                report["sourceFallbackExit"] = stop_owned(owned.get("source"), "source", output, report)
+            except Exception as fallback:
+                cleanup_errors.append("Source fallback: " + str(fallback))
         if publisher:
             try:
                 publisher.close()
@@ -724,15 +915,24 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mac-plan", type=lambda value: Path(value).resolve(strict=True), required=True)
     parser.add_argument("--linux-plan", type=lambda value: Path(value).resolve(strict=True), required=True)
-    parser.add_argument("--ssh-target", required=True)
-    parser.add_argument("--ssh-key", type=lambda value: Path(value).resolve(strict=True), required=True)
+    parser.add_argument("--ssh-target")
+    parser.add_argument("--ssh-key", type=lambda value: Path(value).resolve(strict=True))
     parser.add_argument("--source", type=lambda value: Path(value).resolve(strict=True))
     parser.add_argument("--ordinary-mac-config", action="append", default=[],
                         type=lambda value: Path(value).resolve(strict=True), required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--production-original-input", action="store_true",
+                        help="Explicit v2 Mac/v3 Linux production mode using Core's authenticated Host companion")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Validate plans/frozen artifacts and write a report without apps, SSH or input hooks")
+    parser.add_argument("--holding-display", action="store_true",
+                        help="Production H06 only: require an explicit holding plan and separate persistent local controls")
     arguments = parser.parse_args()
-    require(sys.platform == "darwin", "This coordinator must run on the Mac")
-    require(not arguments.ssh_target.startswith("-"), "Invalid SSH target")
+    require(sys.platform == "darwin" or arguments.validate_only, "This coordinator must run on the Mac")
+    if arguments.validate_only:
+        return run(arguments)
+    require(arguments.ssh_target and not arguments.ssh_target.startswith("-") and arguments.ssh_key,
+            "A live physical session requires an explicit SSH target and existing key")
 
     def interrupted(signum, _frame):
         raise Cancelled("Coordinator interrupted by signal " + str(signum))

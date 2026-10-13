@@ -2,7 +2,10 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "CaptureRate.h"
+#include "ClipboardText.h"
 #include "KeyboardRouteProtocol.h"
+#include "LocalInputMapping.h"
 #if defined(__APPLE__) && !defined(WINDOWSHARE_BRIDGE_TEST)
 #include "RecoveryWatchdog.h"
 #endif
@@ -13,11 +16,13 @@
 #include "ViewerViewportEndpoint.h"
 #endif
 #if defined(WINDOWSHARE_LOCAL_INPUT) && !defined(WINDOWSHARE_BRIDGE_TEST)
+#include "InputEvidenceRuntime.h"
 #include "LocalInputBootstrap.h"
 #include "LocalInputCodeAdmission.h"
 #include "LocalInputSession.h"
 #endif
 #include <QApplication>
+#include <QClipboard>
 #include <QCloseEvent>
 #include <QCommandLineParser>
 #include <QDeadlineTimer>
@@ -29,6 +34,7 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QLockFile>
+#include <QMimeData>
 #include <QPointer>
 #include <QPushButton>
 #include <QScopeGuard>
@@ -57,6 +63,14 @@ void require(bool value, const char *error)
 {
   if (!value)
     throw std::runtime_error(error);
+}
+unsigned captureRateOption(const QCommandLineParser &parser)
+{
+  const auto values = parser.values("capture-fps");
+  require(values.size() == 1, "Use --capture-fps once with exactly 30 or 60");
+  const auto rate = parseCaptureRate(values.front().toStdString());
+  require(rate.has_value(), "Use --capture-fps once with exactly 30 or 60");
+  return *rate;
 }
 std::uint64_t integer(const QJsonObject &object, const char *name, std::uint64_t maximum = 9007199254740991ULL)
 {
@@ -124,14 +138,16 @@ class Bridge final : public QWidget
 public:
   Bridge(
       bool hosting, Identity identity, QByteArray pin, QString journal, int screen, std::uint32_t initialWindow,
-      bool holding
+      bool holding, bool clipboardText = false, unsigned captureRate = defaultCaptureRate
   )
       : m_hosting(hosting),
+        m_clipboardPolicy(clipboardText),
         m_identity(std::move(identity)),
         m_pin(std::move(pin)),
         m_screen(screen),
         m_initialWindow(initialWindow)
   {
+    require(validCaptureRate(captureRate), "Capture frame rate must be 30 or 60");
     setWindowTitle(hosting ? "Deskflow Window Share — Mac host" : "Deskflow Window Share — viewer");
     auto *layout = new QVBoxLayout(this);
     auto *explanation = new QLabel(
@@ -197,6 +213,7 @@ public:
     if (m_hosting) {
       m_native = std::make_unique<NativeHost>(std::move(journal));
       m_native->setHoldingDisplayEnabled(holding);
+      require(m_native->setCaptureFrameRate(captureRate), "Cannot configure native capture frame rate");
       m_native->onError = [this](QString error) {
         status(error);
         send(MessageType::Error, {{"message", error.left(2048)}});
@@ -278,6 +295,7 @@ public:
       };
       m_native->refresh();
     }
+    initializeClipboard();
     updateControls();
   }
   std::function<void()> onQuitRequested;
@@ -321,6 +339,8 @@ public:
         return false;
       const auto found = alive->m_viewers.find(expected.session);
       return found != alive->m_viewers.end() && found->second.window &&
+             (!alive->m_preparationRoute || (alive->m_preparationRoute->consumed &&
+                                             sameInputCutoffLifetime(*alive->m_preparationRoute->consumed, cutoff))) &&
              found->second.window->allForwardingFenced(cutoff.forwarding);
     };
     endpoint.onInputDrainCheck = exactFence;
@@ -341,6 +361,134 @@ public:
           std::move(finished)
       );
     };
+    endpoint.onPreparationInventory =
+        [alive](const InputPreparationBinding &binding) -> std::optional<GnomePreparationInventory> {
+      const auto *app = dynamic_cast<ViewerApplication *>(qApp);
+      if (!alive || alive->m_hosting || alive->m_shuttingDown || alive->m_cleaning || !alive->m_established ||
+          !alive->m_channel || !alive->m_inputCapable || alive->m_preparationRoute || !app ||
+          !app->ownsInputDrainDispatch() || !app->inputDispatchIdle())
+        return {};
+      const auto peer = alive->m_channel->authenticatedPeerObservation();
+      if (!peer || !peer->live())
+        return {};
+      GnomePreparationInventory result;
+      result.connection = peer->ticket().incarnation();
+      const auto &pin = peer->ticket().fingerprint();
+      result.peerFingerprint =
+          QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(pin.data()), pin.size()).toHex());
+      std::vector<QPointer<Viewer>> viewers;
+      for (const auto &[session, view] : alive->m_viewers) {
+        if (!view.window)
+          continue;
+        viewers.push_back(view.window);
+        if (const auto target = view.window->waylandPreparationTarget())
+          result.targets.push_back(*target);
+      }
+      if (result.targets.empty())
+        return result; // No gate was installed; this refusal needs no release.
+      alive->m_preparationRoute = PreparationRoute{binding, result.connection, {}, {}};
+      // Install the connection gate before any callback can deliver more input
+      // or create another Viewer. Partial installation is terminal to the owned
+      // endpoint; it is never interpreted as a completed cleanup.
+      for (const auto &viewer : viewers) {
+        if (!alive || !viewer || !viewer->beginInputPreparation(binding))
+          return {};
+      }
+      if (!alive || !peer->live())
+        return {};
+      return result;
+    };
+    const auto preparationFence =
+        [alive](const InputPreparationBinding &binding, const GnomePreparationTarget &target) {
+          const auto *app = dynamic_cast<ViewerApplication *>(qApp);
+          if (!alive || alive->m_shuttingDown || alive->m_cleaning || !alive->m_established || !alive->m_channel ||
+              !alive->m_preparationRoute || alive->m_preparationRoute->binding != binding || !app ||
+              !app->ownsInputDrainDispatch() || !app->inputDispatchIdle())
+            return false;
+          const auto peer = alive->m_channel->authenticatedPeerObservation();
+          if (!peer || !peer->live() || peer->ticket().incarnation() != alive->m_preparationRoute->connection)
+            return false;
+          for (const auto &[session, view] : alive->m_viewers)
+            if (view.window && !view.window->inputPreparationFenced(binding))
+              return false;
+          const auto found = alive->m_viewers.find(target.session);
+          return found != alive->m_viewers.end() && found->second.window &&
+                 found->second.window->waylandPreparationTarget() == std::optional(target);
+        };
+    endpoint.onPreparationCheck = preparationFence;
+    endpoint.onPreparationMap = [alive, preparationFence](
+                                    const InputPreparationBinding &binding, const GnomePreparationTarget &target,
+                                    QPointF point
+                                ) -> std::optional<QPointF> {
+      if (!preparationFence(binding, target))
+        return {};
+      const auto mapped = alive->m_viewers.at(target.session).window->mapPreparationTarget(target, point);
+      return preparationFence(binding, target) ? mapped : std::nullopt;
+    };
+    endpoint.onPreparationDrain = [alive, ownedEndpoint, preparationFence](
+                                      const InputPreparationBinding &binding, const GnomePreparationTarget &target,
+                                      QDeadlineTimer deadline, std::function<void(bool)> finished
+                                  ) {
+      if (!ownedEndpoint || !preparationFence(binding, target))
+        return false;
+      auto *window = alive->m_viewers.at(target.session).window->windowHandle();
+      const auto geometry = readWaylandViewport(window);
+      if (!geometry || !preparationFence(binding, target))
+        return false;
+      // Cleanup uses the preparation gate itself. Host All may already have
+      // resumed; that neither opens this gate nor invalidates this witness.
+      return ownedEndpoint->startWaylandInputDrain(
+          window, *geometry, deadline,
+          [preparationFence, binding, target] { return preparationFence(binding, target); }, std::move(finished)
+      );
+    };
+    endpoint.onPreparationFocus = [alive, preparationFence](
+                                      const InputPreparationBinding &binding, const GnomePreparationTarget &target
+                                  ) -> std::optional<GnomeViewportState> {
+      if (!preparationFence(binding, target))
+        return {};
+      alive->m_preparationRoute->focusIntent = Owner{target.session, target.epoch};
+      const auto state = alive->m_viewers.at(target.session).window->requestPreparedFocus(binding, target);
+      if (alive && alive->m_preparationRoute && alive->m_preparationRoute->binding == binding)
+        alive->m_preparationRoute->focusIntent.reset();
+      if (!state || !preparationFence(binding, target))
+        return {};
+      return alive->viewportState(); // Adds the actual retained TLS connection and pin.
+    };
+    endpoint.onPreparationFinish = [alive, preparationFence](
+                                       const InputPreparationBinding &binding, const GnomePreparationTarget &target,
+                                       const std::optional<InputCutoffBinding> &all
+                                   ) {
+      if (!preparationFence(binding, target))
+        return false;
+      if (all) {
+        const auto state = alive->viewportState();
+        const auto &route = all->forwarding;
+        if (!validInputCutoffBinding(*all) || !state || all->viewerConnection != state->connection ||
+            route.owner != Owner{state->session, state->epoch} || route.geometry != state->geometry ||
+            route.focusRequest != state->focusRequest || route.focusRevision != state->focusRevision ||
+            !alive->m_viewers.at(target.session).window->allForwardingFenced(route))
+          return false;
+        // Promotion consumes the preparation association, not its gate. An
+        // independent Host All timeout cannot expose queued legacy input.
+        alive->m_preparationRoute->consumed = *all;
+        return true;
+      }
+      std::vector<QPointer<Viewer>> viewers;
+      for (const auto &[session, view] : alive->m_viewers)
+        if (view.window)
+          viewers.push_back(view.window);
+      for (const auto &viewer : viewers)
+        if (!alive || !viewer || !viewer->finishInputPreparation(binding, std::nullopt))
+          return false;
+      if (!alive)
+        return false;
+      for (const auto &[session, view] : alive->m_viewers)
+        if (view.window && view.window->inputPreparationFenced(binding))
+          return false; // A reentrant new Viewer keeps the connection closed.
+      alive->m_preparationRoute.reset();
+      return true;
+    };
   }
 #endif
   // A local controller must revoke its private original-input authority before
@@ -352,6 +500,22 @@ public:
   // transport/native callback stack and revalidated immediately before delivery.
   std::function<bool(const KeyboardRouteBinding &, KeyboardRouteReason)> revokeOriginalKeyboard;
   std::function<void(const KeyboardRouteBinding &)> onKeyboardQuiesced;
+  std::function<void(const KeyboardRouteBinding &)> onKeyboardResumed;
+  std::optional<LocalInputTarget> originalInputTarget(const KeyboardRouteBinding &binding) const
+  {
+    if (!m_mappedInputCapable || binding.scope != ForwardingScope::All || !m_keyboardRoute ||
+        !m_keyboardRoute->viewerConnection ||
+        (!keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced) &&
+         !keyboardAttemptCurrent(binding, KeyboardPhase::Active)))
+      return {};
+    const auto bytes = QByteArray::fromHex(m_identity.fingerprint().toLatin1());
+    if (bytes.size() != 32)
+      return {};
+    LocalInputTarget target;
+    target.viewerConnection = m_keyboardRoute->viewerConnection;
+    std::copy_n(reinterpret_cast<const std::uint8_t *>(bytes.constData()), 32, target.viewerPeerFingerprint.begin());
+    return validLocalInputTarget(target) ? std::optional(target) : std::nullopt;
+  }
   std::optional<AuthenticatedPeerObservation> authenticatedPeerObservation() const
   {
     if (!m_established || !m_keyboardCapable || !m_channel || m_cleaning || m_shuttingDown)
@@ -404,18 +568,37 @@ public:
   {
     return reserveOriginalKeyboard(session, epoch, ForwardingScope::All);
   }
-  std::optional<KeyboardRouteBinding> reserveOriginalKeyboard()
+  std::optional<KeyboardRouteBinding> reserveOriginalKeyboard(ForwardingScope scope = ForwardingScope::Keyboard)
   {
     // The catalog is bounded; NativeHost admits only the actual focused owner.
     // A value copy also survives a callback that clears exported sessions.
     const QPointer<Bridge> alive(this);
     const auto sessions = m_hostSessions;
     for (const auto &[session, epoch] : sessions) {
-      const auto binding = reserveOriginalKeyboard(session, epoch);
+      const auto binding = reserveOriginalKeyboard(session, epoch, scope);
       if (!alive || binding)
         return binding;
     }
     return std::nullopt;
+  }
+  bool establishNativeOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch)
+  {
+    return m_native && originalKeyboardActive(binding) && m_native->establishOriginalInput(binding, captureEpoch);
+  }
+  bool nativeOriginalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+  {
+    return m_native && originalKeyboardActive(binding) && m_native->originalInputCurrent(binding, captureEpoch);
+  }
+  bool deliverNativeOriginalInput(
+      const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
+  )
+  {
+    return m_native && originalKeyboardActive(binding) && m_native->deliverOriginalInput(binding, record, point);
+  }
+  void releaseNativeOriginalInput(const KeyboardRouteBinding &binding)
+  {
+    if (m_native)
+      m_native->revokeOriginalInput(binding);
   }
   bool startOriginalKeyboard(KeyboardRouteBinding binding)
   {
@@ -571,6 +754,9 @@ public:
       }
       if (!m_keyboardRoute->viewerRequested) {
         retireKeyboardRoute();
+        const auto resumed = onKeyboardResumed;
+        if (resumed)
+          resumed(binding);
         return;
       }
       if (!m_native->resumeKeyboard(binding) && m_keyboardRoute->quiesced) {
@@ -604,6 +790,7 @@ public:
       m_native->onFocused = {};
       m_native->onKeyboardRouteInvalidated = {};
       m_native->onClosed = {};
+      m_native->onClipboardTextChanged = {};
     }
   }
   // Terminal for this controller. This blocks admission synchronously even
@@ -617,6 +804,7 @@ public:
       return;
     }
     m_shuttingDown = true;
+    updateClipboard(false);
     m_established = false;
     m_negotiating = false;
     m_reconnectEnabled = false;
@@ -684,6 +872,111 @@ protected:
   }
 
 private:
+  std::optional<ClipboardFocusObservation> clipboardFocus() const
+  {
+    if (!m_clipboard || !m_clipboard->enabled() || !m_established || !m_channel || !m_channel->authenticated() ||
+        m_shuttingDown || m_cleaning)
+      return {};
+    const QPointer<const Bridge> alive(this);
+    const auto channel = m_channel;
+    const auto generation = m_connectionGeneration;
+    std::optional<ClipboardFocusObservation> local;
+    QPointer<Viewer> selected;
+    if (m_native) {
+      local = m_native->clipboardFocus();
+      if (!alive)
+        return {};
+    } else {
+      for (const auto &[session, view] : m_viewers) {
+        (void)session;
+        const auto focus = view.window ? view.window->clipboardFocus() : std::nullopt;
+        if (!focus)
+          continue;
+        if (local)
+          return {}; // No arbitrary choice when focus is ambiguous.
+        local = focus;
+        selected = view.window;
+      }
+    }
+    if (!local)
+      return {};
+    const auto binding = local->binding;
+    return ClipboardFocusObservation{
+        binding, [alive, channel, generation, local = *local, selected, binding] {
+          const auto connected = [&] {
+            if (!alive || !channel || alive->m_channel != channel || alive->m_connectionGeneration != generation ||
+                !alive->m_established || alive->m_shuttingDown || alive->m_cleaning || !alive->m_clipboard ||
+                !alive->m_clipboard->enabled() || !channel->authenticated())
+              return false;
+            if (alive->m_hosting) {
+              const auto found = alive->m_hostSessions.find(binding.owner.session);
+              return found != alive->m_hostSessions.end() && found->second == binding.owner.epoch;
+            }
+            return selected && alive->currentViewer(binding.owner.session, binding.owner.epoch, selected, generation);
+          };
+          return connected() && local.live() && connected();
+        }
+    };
+  }
+  void initializeClipboard()
+  {
+    const QPointer<Bridge> alive(this);
+    FocusedClipboard::Callbacks callbacks;
+    callbacks.focus = [alive] { return alive ? alive->clipboardFocus() : std::nullopt; };
+    callbacks.send = [alive](const ClipboardTextMessage &message) {
+      return alive && alive->send(
+                          MessageType::ClipboardText, encodeClipboardText(message), message.focus.owner.session,
+                          message.focus.owner.epoch
+                      );
+    };
+#ifndef WINDOWSHARE_BRIDGE_TEST
+    callbacks.readText = []() -> std::optional<QString> {
+      const QPointer<const QMimeData> mime(QApplication::clipboard()->mimeData(QClipboard::Clipboard));
+      if (!mime || !mime->hasFormat(QStringLiteral("text/plain")) || !mime || mime->hasUrls() || !mime)
+        return {};
+      const auto text = mime->text();
+      return validClipboardText(text) ? std::optional(text) : std::nullopt;
+    };
+    callbacks.writeText = [](const QString &text) {
+      QApplication::clipboard()->setText(text, QClipboard::Clipboard);
+      return true;
+    };
+#endif
+    m_clipboard = std::make_unique<FocusedClipboard>(m_clipboardPolicy, std::move(callbacks));
+    if (m_native) {
+      m_native->onClipboardTextChanged = [alive](const ClipboardFocusObservation &observation) {
+        if (alive && alive->m_clipboard)
+          alive->m_clipboard->localChanged(observation);
+      };
+    }
+  }
+  void updateClipboard(bool negotiated)
+  {
+    if (!m_clipboard)
+      return;
+    m_clipboard->setNegotiated(negotiated && m_clipboardCapable);
+    QObject::disconnect(m_clipboardConnection);
+    m_clipboardConnection = {};
+    const QPointer<Bridge> alive(this);
+    if (m_native)
+      m_native->setClipboardTextMonitoring(m_clipboard->enabled());
+    if (!alive)
+      return;
+#ifndef WINDOWSHARE_BRIDGE_TEST
+    // Neither construction, one-sided policy nor negotiation reads a clipboard.
+    // Native Cocoa clipboard signals are activation-driven and could expose a
+    // change from before source focus. Native hosts use the metadata/focus
+    // sampler exclusively; Viewer peers use future local dataChanged signals.
+    if (!m_native && m_clipboard->enabled()) {
+      const QPointer<FocusedClipboard> clipboard(m_clipboard.get());
+      m_clipboardConnection =
+          connect(QApplication::clipboard(), &QClipboard::dataChanged, m_clipboard.get(), [clipboard] {
+            if (clipboard)
+              clipboard->localChanged();
+          });
+    }
+#endif
+  }
   void notifyQuit()
   {
     if (!m_shutdownComplete || !m_quitAfterShutdown || m_quitNotified)
@@ -696,15 +989,22 @@ private:
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
   std::optional<GnomeViewportState> viewportState() const
   {
-    if (m_hosting || m_shuttingDown || m_cleaning || !m_established || !m_channel || m_viewers.size() != 1)
+    if (m_hosting || m_shuttingDown || m_cleaning || !m_established || !m_channel)
       return {};
     const auto peer = m_channel->authenticatedPeerObservation();
     if (!peer || !peer->live())
       return {};
-    const auto &view = m_viewers.begin()->second;
-    if (!view.window)
-      return {};
-    auto state = view.window->waylandViewportState();
+    std::optional<GnomeViewportState> state;
+    for (const auto &[session, view] : m_viewers) {
+      if (!view.window)
+        continue;
+      auto candidate = view.window->waylandViewportState();
+      if (!candidate)
+        continue;
+      if (state)
+        return {}; // Two simultaneously eligible focused Viewers are ambiguous.
+      state = std::move(candidate);
+    }
     if (!state)
       return {};
     state->connection = peer->ticket().incarnation();
@@ -775,6 +1075,7 @@ private:
     bool revoked = false, quiesced = false, viewerRequested = false;
     bool resumeViewer = true;
     QDeadlineTimer deadline{QDeadlineTimer::Forever};
+    std::uint64_t viewerConnection = 0;
   };
   bool keyboardAttemptCurrent(const KeyboardRouteBinding &binding, KeyboardPhase phase) const
   {
@@ -785,8 +1086,16 @@ private:
            found->second == binding.owner.epoch && authenticatedPeerObservation().has_value() &&
            (binding.scope != ForwardingScope::All || m_inputCapable);
   }
-  bool sendKeyboardRoute(const KeyboardRouteControl &control)
+  bool sendKeyboardRoute(KeyboardRouteControl control)
   {
+    if (!m_hosting && m_mappedInputCapable && control.binding.scope == ForwardingScope::All &&
+        control.action == KeyboardRouteAction::Acknowledge && control.mode == KeyboardRouteMode::Original &&
+        control.result == KeyboardRouteResult::Ready) {
+      const auto peer = authenticatedPeerObservation();
+      if (!peer)
+        return false;
+      control.viewerConnection = peer->ticket().incarnation();
+    }
     return m_keyboardCapable && (control.binding.scope != ForwardingScope::All || m_inputCapable) &&
            send(
                forwardingRouteMessageType(control.binding), encodeKeyboardRouteControl(control),
@@ -807,6 +1116,9 @@ private:
     require(m_keyboardCapable, "Keyboard route capability was not negotiated");
     require(packet.type != MessageType::InputRoute || m_inputCapable, "Full input route capability was not negotiated");
     const auto control = parseKeyboardRouteControl(packet);
+    require(
+        !control.viewerConnection || (m_hosting && m_mappedInputCapable), "Unnegotiated viewer connection attestation"
+    );
     if (!m_hosting) {
       require(control.action == KeyboardRouteAction::Request, "Invalid keyboard route direction");
       const auto found = m_viewers.find(packet.session);
@@ -841,6 +1153,10 @@ private:
         withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost, false);
         return;
       }
+      if (m_mappedInputCapable && control.binding.scope == ForwardingScope::All && !control.viewerConnection) {
+        withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+        return;
+      }
       const QPointer<Bridge> alive(this);
       const bool quiesced = keyboardAttemptCurrent(control.binding, KeyboardPhase::AwaitQuiescence) &&
                             m_native->quiesceKeyboard(control.binding);
@@ -852,6 +1168,7 @@ private:
         return;
       }
       m_keyboardRoute->quiesced = true;
+      m_keyboardRoute->viewerConnection = control.viewerConnection;
       if (m_keyboardRoute->deadline.hasExpired()) {
         withdrawOriginalKeyboard(KeyboardRouteReason::Timeout);
         return;
@@ -893,6 +1210,9 @@ private:
           "Viewer did not resume the revoked keyboard route"
       );
       retireKeyboardRoute();
+      const auto resumed = onKeyboardResumed;
+      if (resumed)
+        resumed(control.binding);
     }
     // An old Original ack may cross cancellation and the Viewer request. It
     // never reactivates a quiesced or revoked attempt.
@@ -971,6 +1291,12 @@ private:
   }
   bool send(MessageType type, const QJsonObject &object = {}, std::uint64_t session = 0, std::uint64_t epoch = 0)
   {
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+    if (m_preparationRoute && type == MessageType::Input && object.value("kind") != QStringLiteral("release") &&
+        !(object.contains("down") && object.value("down").isBool() && !object.value("down").toBool()) &&
+        !(object.value("kind") == QStringLiteral("focus") && m_preparationRoute->focusIntent == Owner{session, epoch}))
+      return true; // Connection gate also covers reentrant Viewer creation/retirement.
+#endif
     return !m_shuttingDown && m_established && m_channel && m_channel->send(type, object, session, epoch);
   }
   void clearKeyframeRetries()
@@ -1012,11 +1338,14 @@ private:
   }
   void prepareChannel()
   {
+    updateClipboard(false);
     m_established = false;
     m_negotiating = false;
     m_keyboardCapable = false;
     m_inputCapable = false;
+    m_mappedInputCapable = false;
     m_mediaRecoveryCapable = false;
+    m_clipboardCapable = false;
     m_stableTimer.stop();
     clearKeyframeRetries();
     clearCatalog();
@@ -1029,10 +1358,12 @@ private:
       m_negotiating = true;
       if (!m_hosting)
         channel->send(
-            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
-                                 {"role", "viewer"},
-                                 {"codec", "h264"},
-                                 {"capabilities", keyboardRouteCapabilities(true, true)}}
+            MessageType::Hello,
+            {{"version", static_cast<int>(protocolVersion)},
+             {"role", "viewer"},
+             {"codec", "h264"},
+             {"capabilities",
+              clipboardTextCapabilities(keyboardRouteCapabilities(true, true, true), m_clipboardPolicy)}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1067,6 +1398,7 @@ private:
       if (m_established)
         m_initialWindow = 0;
       m_established = false;
+      updateClipboard(false);
       m_negotiating = false;
       m_channel = nullptr;
       m_stableTimer.stop();
@@ -1116,7 +1448,9 @@ private:
       );
       m_keyboardCapable = peerSupportsKeyboardRoute(object);
       m_inputCapable = peerSupportsInputRoute(object);
+      m_mappedInputCapable = peerSupportsMappedInput(object);
       m_mediaRecoveryCapable = peerSupportsMediaRecovery(object);
+      m_clipboardCapable = m_clipboardPolicy && peerSupportsClipboardText(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
@@ -1126,7 +1460,12 @@ private:
                  {"role", "host"},
                  {"codec", "h264"},
                  {"capabilities",
-                  m_keyboardCapable ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable) : QJsonArray{}}}
+                  clipboardTextCapabilities(
+                      m_keyboardCapable
+                          ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable)
+                          : QJsonArray{},
+                      m_clipboardCapable
+                  )}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -1139,8 +1478,14 @@ private:
         m_established = true;
       }
       m_negotiating = false;
+      updateClipboard(true);
       updateControls();
       status("Connected to approved peer — window sharing enabled");
+      return;
+    }
+    if (packet.type == MessageType::ClipboardText) {
+      require(m_clipboard && m_clipboard->enabled(), "Focused text clipboard policy was not negotiated");
+      m_clipboard->receive(parseClipboardText(packet));
       return;
     }
     if (packet.type == MessageType::KeyboardRoute || packet.type == MessageType::InputRoute) {
@@ -1202,9 +1547,15 @@ private:
       return;
     }
     switch (packet.type) {
-    case MessageType::Ready:
-      m_native->ready(packet.session, packet.epoch);
+    case MessageType::Ready: {
+      require(object.size() == 1, "Unexpected painted-frame acknowledgement fields");
+      const auto geometry = integer(object, "geometry");
+      require(geometry != 0, "Missing painted-frame geometry");
+      const auto current = m_hostGeometries.find(packet.session);
+      if (current != m_hostGeometries.end() && current->second == geometry)
+        m_native->ready(packet.session, packet.epoch, geometry);
       break;
+    }
     case MessageType::Input:
       m_native->input(packet.session, packet.epoch, object);
       break;
@@ -1288,6 +1639,11 @@ private:
       });
       m_viewers.emplace(id, View{packet.epoch, viewer, viewer});
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_preparationRoute && !viewer->beginInputPreparation(m_preparationRoute->binding)) {
+        if (m_viewportEndpoint)
+          m_viewportEndpoint->close();
+        return;
+      }
       if (m_viewportEndpoint)
         m_viewportEndpoint->invalidate(QStringLiteral("viewer-set-changed"));
       if (m_shuttingDown)
@@ -1426,6 +1782,7 @@ private:
     const Viewer *identity;
   };
   bool m_hosting, m_established = false, m_cleaning = false, m_catalogReady = false;
+  const bool m_clipboardPolicy;
   bool m_negotiating = false, m_reconnectEnabled = false, m_retryRequested = false, m_shuttingDown = false;
   bool m_shutdownFinishing = false, m_shutdownComplete = false, m_quitAfterShutdown = false, m_quitNotified = false;
   std::function<void()> m_onSharingStopped;
@@ -1440,6 +1797,14 @@ private:
   QPointer<Channel> m_channel;
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
   QPointer<ViewerViewportEndpoint> m_viewportEndpoint;
+  struct PreparationRoute
+  {
+    InputPreparationBinding binding;
+    std::uint64_t connection = 0;
+    std::optional<InputCutoffBinding> consumed;
+    std::optional<Owner> focusIntent;
+  };
+  std::optional<PreparationRoute> m_preparationRoute;
 #endif
   QTimer m_keyframeRetry;
   QTimer m_reconnectTimer, m_stableTimer;
@@ -1447,7 +1812,11 @@ private:
   int m_keyboardTimeoutMs = 3000;
   bool m_keyboardCapable = false;
   bool m_inputCapable = false;
+  bool m_mappedInputCapable = false;
   bool m_mediaRecoveryCapable = false;
+  bool m_clipboardCapable = false;
+  std::unique_ptr<FocusedClipboard> m_clipboard;
+  QMetaObject::Connection m_clipboardConnection;
   bool m_reservingKeyboard = false;
   std::uint64_t m_keyboardGeneration = 0;
   std::optional<KeyboardAttempt> m_keyboardRoute;
@@ -1568,6 +1937,10 @@ int main(int argc, char **argv)
     parser.addOptions(
         {{"enable-seamless", "Explicitly enable experimental window sharing."},
          {"holding-display", "Enable the experimental private virtual holding display on the Mac."},
+         {"share-clipboard-text",
+          "Share new plain-text clipboard changes only for the focused exported window; both peers must opt in."},
+         {"capture-fps", "Mac host foreground capture rate, 30 or 60; viewers do not override their peer.", "fps",
+          "30"},
          {"listen", "Listen on this Mac interface address.", "address"},
          {"connect", "Connect to the approved Mac host.", "host"},
          {"port", "Separate TLS control/media port.", "port", "24810"},
@@ -1597,10 +1970,14 @@ int main(int argc, char **argv)
     QCommandLineOption inputDescriptor("core-input-fd", "Inherited private descriptor.", "descriptor");
     QCommandLineOption inputProbe("core-input-probe", "Private handshake diagnostic.");
     QCommandLineOption inputPeerPairs("core-input-peer-pairs", "Configured private input peer pairs.", "json");
+    QCommandLineOption inputEvidenceOption(
+        "input-evidence-config", "Explicit private bounded test evidence config.", "file"
+    );
+    inputEvidenceOption.setFlags(QCommandLineOption::HiddenFromHelp);
     inputDescriptor.setFlags(QCommandLineOption::HiddenFromHelp);
     inputProbe.setFlags(QCommandLineOption::HiddenFromHelp);
     inputPeerPairs.setFlags(QCommandLineOption::HiddenFromHelp);
-    parser.addOptions({inputDescriptor, inputProbe, inputPeerPairs});
+    parser.addOptions({inputDescriptor, inputProbe, inputPeerPairs, inputEvidenceOption});
     // Validate inherited-mode combinations before help/version or any identity,
     // recovery, permission, network, or NativeHost action can run.
     if (!parser.parse(app.arguments()))
@@ -1609,11 +1986,15 @@ int main(int argc, char **argv)
     // inputBootstrap retains the trusted core's immutable explicit peer map.
     // An absent/empty map denies every pair; no controller or input authorizer
     // is installed until all real capture/delivery/admission providers exist.
+    std::unique_ptr<InputEvidenceRuntime> inputEvidenceRuntime;
     std::unique_ptr<LocalInputChannel> coreInput;
     std::unique_ptr<LocalInputCodeAdmission> inputAdmission;
     QTimer inputAdmissionTimer;
     if (inputBootstrap.inherited()) {
-      coreInput = inputBootstrap.adopt();
+      coreInput = inputBootstrap.adopt([&] {
+        if (parser.isSet(inputEvidenceOption))
+          inputEvidenceRuntime = InputEvidenceRuntime::open(parser.value(inputEvidenceOption), InputEvidenceRole::Host);
+      });
       if (inputBootstrap.probe())
         return localInputHostProbe(std::move(coreInput));
       coreInput->onClosed = [&shutdown](const QString &) { shutdown.request(); };
@@ -1634,7 +2015,8 @@ int main(int argc, char **argv)
             return;
           inputAdmissionTimer.stop();
           if (state == LocalInputCodeAdmission::State::Ready)
-            QTextStream(stderr) << "Window sharing exact library admission verified; original input remains disabled\n";
+            QTextStream(stderr) << "Window sharing exact library admission verified; original input requires an "
+                                   "authenticated mapped route\n";
           else
             QTextStream(stderr) << "Window sharing code admission unavailable: " << inputAdmission->error() << '\n';
         });
@@ -1647,6 +2029,7 @@ int main(int argc, char **argv)
     viewportBootstrap.validateOptions(parser.optionNames());
 #endif
     parser.process(app);
+    const auto captureRate = captureRateOption(parser);
     if (parser.isSet("init-identity"))
       initializeIdentity(parser.value("identity"));
     if (parser.isSet("init-identity") || parser.isSet("fingerprint")) {
@@ -1718,10 +2101,108 @@ int main(int argc, char **argv)
 #endif
     Bridge bridge(
         hosting, Identity::load(parser.value("identity")), parseFingerprint(parser.value("peer-pin")),
-        parser.value("journal"), screen, window, parser.isSet("holding-display")
+        parser.value("journal"), screen, window, parser.isSet("holding-display"), parser.isSet("share-clipboard-text"),
+        captureRate
     );
     configureApplicationLifetime(app, bridge, [&shutdown] { shutdown.request(); });
     shutdown.attach(bridge);
+#ifdef WINDOWSHARE_LOCAL_INPUT
+    std::unique_ptr<LocalInputPreflight> inputPreflight;
+    std::optional<LocalInputLease> retiringInput;
+    const auto inputBinding = [](const LocalInputLease &lease) {
+      return KeyboardRouteBinding{{lease.session, lease.epoch}, lease.keyboardRouteGeneration, lease.focusRequest,
+                                  lease.focusRevision,          lease.geometryRevision,        lease.scope};
+    };
+    if (coreInput && hosting && !inputBootstrap.peerPolicy().empty()) {
+      LocalInputPreflight::Checks checks;
+      checks.codeAdmission = [&](const LocalInputLease &) {
+        const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
+        return proof && proof->live();
+      };
+      checks.deliveryReady = [&](const LocalInputLease &lease) {
+        const auto binding = inputBinding(lease);
+        return bridge.nativeOriginalInputCurrent(binding, lease.captureEpoch) ||
+               bridge.originalKeyboardQuiesced(binding);
+      };
+      // Core independently proves the captured fresh transition. The host
+      // proves its own old delivered owners are released under the exact All
+      // gate; neither endpoint pretends this is a global physical snapshot.
+      checks.acquisitionBoundary = [&](const LocalInputLease &lease) {
+        return lease.scope == ForwardingScope::All && bridge.originalKeyboardQuiesced(inputBinding(lease));
+      };
+      checks.release = [&](const LocalInputLease &lease, LocalInputRevocation) {
+        retiringInput = lease;
+        bridge.releaseNativeOriginalInput(inputBinding(lease));
+        bridge.withdrawOriginalKeyboard(KeyboardRouteReason::AuthorityLost);
+        return true; // Bridge keeps the Viewer fenced if native cleanup failed.
+      };
+      LocalInputPreflight::Host host;
+      host.connection = [&] { return bridge.authenticatedPeerObservation(); };
+      host.reserve = [&](ForwardingScope scope) {
+        return scope == ForwardingScope::All && coreInput->supportsMappedInput() ? bridge.reserveOriginalKeyboard(scope)
+                                                                                 : std::nullopt;
+      };
+      host.startQuiescence = [&](const auto &binding) { return bridge.startOriginalKeyboard(binding); };
+      host.isQuiesced = [&](const auto &binding) { return bridge.originalKeyboardQuiesced(binding); };
+      host.activate = [&](const auto &binding) {
+        const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;
+        return lease && inputBinding(*lease) == binding && bridge.activateOriginalKeyboard(binding) &&
+               bridge.establishNativeOriginalInput(binding, lease->captureEpoch);
+      };
+      host.isActive = [&](const auto &binding) {
+        const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;
+        return lease && inputBinding(*lease) == binding &&
+               bridge.nativeOriginalInputCurrent(binding, lease->captureEpoch);
+      };
+      inputPreflight =
+          LocalInputPreflight::host(*coreInput, inputBootstrap.peerPolicy(), std::move(host), std::move(checks));
+      bridge.revokeOriginalKeyboard = [&](const auto &binding, auto) {
+        bridge.releaseNativeOriginalInput(binding);
+        if (inputPreflight)
+          inputPreflight->cancel(LocalInputRevocation::AuthorityLost);
+        return true;
+      };
+      bridge.onKeyboardResumed = [&](const auto &binding) {
+        if (!retiringInput || inputBinding(*retiringInput) != binding)
+          return;
+        const auto lease = std::exchange(retiringInput, {});
+        if (!coreInput->sendReleased(*lease))
+          coreInput->close("Completed native input release could not be acknowledged");
+      };
+      bridge.onKeyboardQuiesced = [&](const auto &binding) {
+        const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;
+        const auto target = bridge.originalInputTarget(binding);
+        if (!lease || inputBinding(*lease) != binding || !target || !coreInput->sendInputTarget(*lease, *target)) {
+          if (inputPreflight)
+            inputPreflight->cancel(LocalInputRevocation::AuthorityLost);
+          return;
+        }
+        inputPreflight->quiesced(binding);
+      };
+      coreInput->onOriginal = [&](const auto &, const auto &) {
+        coreInput->close("Production original input requires an exact mapped receipt");
+      };
+      coreInput->onMappedOriginal = [&](const auto &lease, const auto &record, const auto &point) {
+        if (!inputPreflight || inputPreflight->phase() != LocalInputPreflight::Phase::Active ||
+            inputPreflight->lease() != lease ||
+            !bridge.deliverNativeOriginalInput(inputBinding(lease), record, point)) {
+          if (inputPreflight)
+            inputPreflight->cancel(LocalInputRevocation::AuthorityLost);
+        }
+      };
+    }
+    const auto stopInput = qScopeGuard([&] {
+      if (inputPreflight)
+        inputPreflight->stop();
+      bridge.revokeOriginalKeyboard = {};
+      bridge.onKeyboardQuiesced = {};
+      bridge.onKeyboardResumed = {};
+      if (coreInput) {
+        coreInput->onOriginal = {};
+        coreInput->onMappedOriginal = {};
+      }
+    });
+#endif
 #ifdef __APPLE__
     QTimer watchdogHealth;
     if (watchdog) {

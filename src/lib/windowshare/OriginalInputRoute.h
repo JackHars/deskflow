@@ -6,6 +6,7 @@
 
 #include "OriginalInput.h"
 #include "OriginalInputStamp.h"
+#include "OriginalInputTransition.h"
 #include "io/AuthenticatedPeerTicket.h"
 #include <chrono>
 #include <limits>
@@ -16,6 +17,7 @@ struct OriginalInputCaptured
 {
   OriginalInputDelivery input;
   OriginalInputTranslation translation;
+  OriginalInputTransitionEvidence transition{};
 };
 
 enum class OriginalInputRouteKind : std::uint8_t
@@ -41,7 +43,10 @@ enum class OriginalInputRouteOutcome : std::uint8_t
   Failed,
   // The local dispatcher committed its reserved original output. Historical
   // routing evidence only; this is not proof of native application consumption.
-  Original
+  Original,
+  // Superseded, unreserved absolute hover motion. Its final native record was
+  // not sent; a later adjacent record retains the accumulated Server position.
+  Coalesced
 };
 
 // A historical core routing decision, not a current selection or permission to

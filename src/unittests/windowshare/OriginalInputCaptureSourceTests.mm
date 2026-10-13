@@ -53,7 +53,220 @@ struct EventFixture
     CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, 0);
     CGEventSetFlags(event, flags);
   }
+  void button(std::uint8_t button, bool down)
+  {
+    CGEventSetFlags(event, 0);
+    CGEventSetType(
+        event, button == 0   ? (down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp)
+               : button == 1 ? (down ? kCGEventRightMouseDown : kCGEventRightMouseUp)
+                             : (down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp)
+    );
+    CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, button);
+    CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1);
+    CGEventSetIntegerValueField(event, kCGMouseEventSubtype, kCGEventMouseSubtypeDefault);
+  }
+  void scroll(
+      OriginalScrollPhase phase, OriginalMomentumPhase momentum = OriginalMomentumPhase::None, bool continuous = true
+  )
+  {
+    CGEventSetType(event, kCGEventScrollWheel);
+    CGEventSetFlags(event, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventIsContinuous, continuous);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventScrollPhase, static_cast<unsigned>(phase));
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventMomentumPhase, static_cast<unsigned>(momentum));
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventDeltaAxis1, 1);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventDeltaAxis2, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventDeltaAxis3, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventPointDeltaAxis1, 3);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventPointDeltaAxis2, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventPointDeltaAxis3, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1, 0x10000);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis2, 0);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis3, 0);
+  }
 };
+
+OriginalInputCaptured captureCompleted(
+    OriginalInputCaptureSource &source, EventFixture &event, std::uint16_t parts = 1, bool uncertain = false
+)
+{
+  const auto stamp = source.beginCapture(CGEventGetType(event.event), event.event);
+  check(bool(stamp) && !source.popCaptured(), "transition waits for existing translation completion");
+  source.completeCapture({stamp, parts, uncertain});
+  auto captured = source.popCaptured();
+  check(bool(captured), "completed transition delivered");
+  check(
+      captured->translation.parts == parts && captured->translation.uncertain == uncertain,
+      "transition classifier preserves translation disposition"
+  );
+  return *captured;
+}
+
+bool acquires(const OriginalInputCaptured &captured)
+{
+  return captured.transition.permitsAcquisition(captured.input);
+}
+
+void transitionKeyOwnership()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "key transition source start");
+  event.key(0);
+  check(!acquires(captureCompleted(source, event)), "first observed down has unknown prior ownership");
+  CGEventSetIntegerValueField(event.event, kCGKeyboardEventAutorepeat, 1);
+  check(!acquires(captureCompleted(source, event)), "repeat cannot acquire an unknown key");
+
+  event.key(0);
+  CGEventSetType(event.event, kCGEventKeyUp);
+  const auto release = captureCompleted(source, event, 0);
+  check(!acquires(release), "zero-translation physical up establishes no acquisition");
+  event.key(0);
+  const auto down = captureCompleted(source, event);
+  check(
+      acquires(down) && down.transition.kind() == OriginalInputTransitionEvidence::Kind::KeyDown &&
+          down.transition.precedingReleaseSequence() == release.input.record.sequence,
+      "captured up establishes only the next fresh logical down"
+  );
+  check(!acquires(captureCompleted(source, event)), "duplicate nonrepeat down cannot acquire again");
+  CGEventSetIntegerValueField(event.event, kCGKeyboardEventAutorepeat, 1);
+  check(!acquires(captureCompleted(source, event)), "owned repeat still requires exact existing owner");
+  event.key(0);
+  CGEventSetType(event.event, kCGEventKeyUp);
+  captureCompleted(source, event, 2, true);
+  event.key(0);
+  const auto afterExpandedUp = captureCompleted(source, event, 0);
+  check(acquires(afterExpandedUp), "raw release survives uncertain expansion before the next untranslated down");
+
+  const OriginalInputCaptured fixtureDefault{down.input, down.translation};
+  check(!acquires(fixtureDefault), "aggregate fixture defaults cannot mint source transition evidence");
+  auto changed = down.input;
+  ++changed.record.sequence;
+  check(!down.transition.permitsAcquisition(changed), "transition cannot move to another capture sequence");
+  changed = down.input;
+  ++changed.record.sourceTimestampNs;
+  check(!down.transition.permitsAcquisition(changed), "transition cannot move to another source time");
+  changed = down.input;
+  changed.record.flags = originalKey::capsLockFlag;
+  check(!down.transition.permitsAcquisition(changed), "transition cannot replace captured flags");
+  changed = down.input;
+  std::get<OriginalInputKey>(changed.record.payload).code = 1;
+  check(!down.transition.permitsAcquisition(changed), "transition cannot acquire another key");
+  changed = down.input;
+  ++std::get<OriginalInputKey>(changed.record.payload).keyboardType;
+  check(!down.transition.permitsAcquisition(changed), "transition retains captured keyboard type");
+  OriginalInputCaptureSource other;
+  check(other.start(), "other capture epoch start");
+  changed = down.input;
+  changed.epoch = other.epoch();
+  changed.record.epoch = changed.epoch.id();
+  check(!down.transition.permitsAcquisition(changed), "transition cannot move to another live epoch");
+
+  const auto inbox = source.completedInput();
+  check(inbox->bind(17) && inbox->publish(afterExpandedUp), "existing Session copy path accepts capture evidence");
+  const auto copied = inbox->pop();
+  check(copied && acquires(*copied), "existing Server inbox preserves exact source evidence");
+  source.stop();
+  check(!acquires(down) && !acquires(*copied), "stop revokes all retained and copied source evidence");
+}
+
+void transitionModifiersAndButtons()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "modifier transition source start");
+  const auto right = originalKey::shiftFlag | originalKey::rightShiftFlag;
+  event.key(originalKey::leftShift, right | originalKey::leftShiftFlag);
+  CGEventSetType(event.event, kCGEventFlagsChanged);
+  check(!acquires(captureCompleted(source, event)), "first side-flag down has unknown prior ownership");
+  CGEventSetFlags(event.event, right);
+  captureCompleted(source, event);
+  CGEventSetFlags(event.event, right | originalKey::leftShiftFlag);
+  const auto left = captureCompleted(source, event);
+  check(
+      acquires(left) && left.input.record.flags == (right | originalKey::leftShiftFlag),
+      "left release/down qualifies only left while preserving independently checked right flags"
+  );
+  event.key(originalKey::rightShift, right | originalKey::leftShiftFlag);
+  CGEventSetType(event.event, kCGEventFlagsChanged);
+  check(!acquires(captureCompleted(source, event)), "another side is not released by aggregate or opposite up");
+  event.key(originalKey::capsLock, originalKey::capsLockFlag);
+  CGEventSetType(event.event, kCGEventFlagsChanged);
+  check(!acquires(captureCompleted(source, event)), "ambiguous Caps toggle cannot acquire a physical press");
+  CGEventSetFlags(event.event, 0);
+  check(!acquires(captureCompleted(source, event)), "opposite Caps toggle is still not a physical up");
+
+  for (const std::uint8_t button : {0, 31}) {
+    event.button(button, true);
+    check(!acquires(captureCompleted(source, event)), "unknown button down cannot acquire");
+    event.button(button, false);
+    const auto release = captureCompleted(source, event, 0);
+    event.button(button, true);
+    const auto down = captureCompleted(source, event);
+    check(
+        acquires(down) && down.transition.kind() == OriginalInputTransitionEvidence::Kind::ButtonDown &&
+            down.transition.precedingReleaseSequence() == release.input.record.sequence,
+        "button zero and highest supported button need their own captured release"
+    );
+    check(!acquires(captureCompleted(source, event)), "duplicate button down cannot acquire");
+    CGEventSetType(event.event, button == 0 ? kCGEventLeftMouseDragged : kCGEventOtherMouseDragged);
+    check(!acquires(captureCompleted(source, event)), "drag must resolve an exact existing button owner");
+  }
+  CGEventSetType(event.event, kCGEventMouseMoved);
+  check(!acquires(captureCompleted(source, event)), "ordinary cursor motion is not acquisition evidence");
+  check(source.checkpoint(101, 0), "logical checkpoint captured");
+  const auto checkpoint = source.popCaptured();
+  check(checkpoint && !acquires(*checkpoint), "checkpoint cannot mint transition or physical-neutral evidence");
+}
+
+void transitionScrollOwnership()
+{
+  for (const auto initial : {OriginalScrollPhase::Changed, OriginalScrollPhase::None}) {
+    OriginalInputCaptureSource source;
+    EventFixture event;
+    check(source.start(), "unknown scroll transition source start");
+    event.scroll(
+        initial, initial == OriginalScrollPhase::None ? OriginalMomentumPhase::Continued : OriginalMomentumPhase::None
+    );
+    check(!acquires(captureCompleted(source, event)), "unknown gesture or momentum cannot acquire");
+    event.scroll(OriginalScrollPhase::Began);
+    check(!acquires(captureCompleted(source, event)), "fresh marker cannot erase an unresolved gesture or momentum");
+    event.scroll(OriginalScrollPhase::Cancelled);
+    check(!acquires(captureCompleted(source, event)), "cancellation only ends logical sequence");
+    event.scroll(OriginalScrollPhase::Began);
+    check(acquires(captureCompleted(source, event)), "explicitly ended sequence permits the next Began");
+  }
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "fresh scroll transition source start");
+  event.scroll(OriginalScrollPhase::MayBegin);
+  check(!acquires(captureCompleted(source, event)), "MayBegin cannot acquire");
+  event.scroll(OriginalScrollPhase::Began);
+  const auto begin = captureCompleted(source, event);
+  check(
+      acquires(begin) && begin.transition.kind() == OriginalInputTransitionEvidence::Kind::ScrollBegin,
+      "explicit first Began names a fresh logical gesture"
+  );
+  check(!acquires(captureCompleted(source, event)), "duplicate Began cannot acquire");
+  event.scroll(OriginalScrollPhase::Ended);
+  check(!acquires(captureCompleted(source, event)), "gesture end reserves possibility of momentum");
+  event.scroll(OriginalScrollPhase::Began);
+  check(!acquires(captureCompleted(source, event)), "unresolved momentum possibility cannot be silently replaced");
+  event.scroll(OriginalScrollPhase::None, OriginalMomentumPhase::Began);
+  check(!acquires(captureCompleted(source, event)), "momentum continuation needs original gesture owner");
+  event.scroll(OriginalScrollPhase::None, OriginalMomentumPhase::Ended);
+  check(!acquires(captureCompleted(source, event)), "momentum end only closes sequence");
+  event.scroll(OriginalScrollPhase::Began);
+  check(acquires(captureCompleted(source, event)), "completed momentum allows a new logical gesture");
+  event.scroll(OriginalScrollPhase::None, OriginalMomentumPhase::None, false);
+  const auto discrete = captureCompleted(source, event);
+  check(
+      acquires(discrete) && discrete.transition.kind() == OriginalInputTransitionEvidence::Kind::DiscreteScroll,
+      "discrete wheel record has its own acquisition boundary"
+  );
+  source.capture(kCGEventTapDisabledByTimeout, nullptr);
+  check(!acquires(begin) && !acquires(discrete), "tap discontinuity revokes retained scroll evidence");
+}
 
 void lifecycleAndOrdering()
 {
@@ -329,6 +542,9 @@ int main()
   try {
     lifecycleAndOrdering();
     translationCompletion();
+    transitionKeyOwnership();
+    transitionModifiersAndButtons();
+    transitionScrollOwnership();
     discontinuitiesAndEmergency();
     emergencyRecognition();
     concurrentStartStop();
