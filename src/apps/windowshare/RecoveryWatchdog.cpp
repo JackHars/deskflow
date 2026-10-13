@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <spawn.h>
 #include <string>
+#include <sys/proc.h>
 #include <sys/proc_info.h>
 #include <sys/wait.h>
 #include <thread>
@@ -82,9 +83,15 @@ std::uint64_t birthMicros(pid_t pid)
 
 bool originalParentAlive(pid_t pid, std::uint64_t born)
 {
-  const auto observed = birthMicros(pid);
-  if (observed)
-    return observed == born;
+  proc_bsdinfo info{};
+  // A nonzero PROC_PIDTBSDINFO argument includes exited, unreaped processes.
+  // Their PID still answers kill(pid, 0), but no longer owns open journal or
+  // window resources. Keep the birth check when identifying this zombie.
+  if (pid > 0 && proc_pidinfo(pid, PROC_PIDTBSDINFO, 1, &info, sizeof(info)) == sizeof(info) &&
+      info.pbi_start_tvsec > 0) {
+    const auto observed = std::uint64_t(info.pbi_start_tvsec) * 1000000 + info.pbi_start_tvusec;
+    return observed == born && info.pbi_status != SZOMB;
+  }
   // A temporarily inaccessible kernel identity is NOT proof that the parent
   // died. On macOS PID reuse cannot authorize recovery while a live process
   // might still own the journal lock.

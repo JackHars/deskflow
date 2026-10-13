@@ -7,10 +7,16 @@
 #include <cerrno>
 #include <cstdlib>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <libproc.h>
+#include <poll.h>
+#include <signal.h>
+#include <stdexcept>
 #include <string>
+#include <sys/proc_info.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <thread>
@@ -24,6 +30,165 @@ void check(bool good, const char *what)
     std::fprintf(stderr, "FAIL: %s\n", what);
     std::exit(1);
   }
+}
+
+void requireFixture(bool good, const char *what)
+{
+  if (!good)
+    throw std::runtime_error(what);
+}
+
+struct Descriptor
+{
+  int fd = -1;
+  Descriptor() = default;
+  explicit Descriptor(int value) : fd(value)
+  {
+  }
+  Descriptor(const Descriptor &) = delete;
+  Descriptor &operator=(const Descriptor &) = delete;
+  ~Descriptor()
+  {
+    reset();
+  }
+  void reset()
+  {
+    if (fd >= 0)
+      close(fd);
+    fd = -1;
+  }
+};
+
+struct Pipe
+{
+  Descriptor reader, writer;
+  Pipe()
+  {
+    int descriptors[2];
+    requireFixture(pipe(descriptors) == 0, "create isolated watchdog fixture pipe");
+    Descriptor readEnd(descriptors[0]), writeEnd(descriptors[1]);
+    // Do not collide with the watchdog's fixed descriptor slots 3 and 4.
+    reader.fd = fcntl(readEnd.fd, F_DUPFD_CLOEXEC, 16);
+    writer.fd = fcntl(writeEnd.fd, F_DUPFD_CLOEXEC, 16);
+    requireFixture(reader.fd >= 0 && writer.fd >= 0, "retain isolated watchdog fixture pipe");
+  }
+};
+
+struct Child
+{
+  pid_t pid = -1;
+  ~Child()
+  {
+    if (pid <= 0)
+      return;
+    // All observations use WNOWAIT. This direct child still belongs to us,
+    // including after exit, so its numeric PID cannot have been reused.
+    kill(pid, SIGKILL);
+    while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {
+    }
+  }
+};
+
+bool awaitExitWithoutReaping(pid_t pid, siginfo_t &status)
+{
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+  do {
+    status = {};
+    if (waitid(P_PID, static_cast<id_t>(pid), &status, WEXITED | WNOHANG | WNOWAIT) == 0) {
+      if (status.si_pid == pid)
+        return true;
+    } else if (errno != EINTR) {
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  } while (std::chrono::steady_clock::now() < deadline);
+  return false;
+}
+
+void unreapedHostRecovery(const char *executable, const char *path)
+{
+  struct MarkerCleanup
+  {
+    const char *path;
+    ~MarkerCleanup()
+    {
+      unlink(path);
+    }
+  } marker{path};
+  Pipe death, ready;
+  Child host, watcher;
+  host.pid = fork();
+  requireFixture(host.pid >= 0, "fork isolated host for unreaped-exit regression");
+  if (host.pid == 0) {
+    death.reader.reset();
+    ready.reader.reset();
+    ready.writer.reset();
+    // Only this host owns the lifetime pipe's writer. SIGKILL closes it without
+    // running a destructor, while our parent deliberately keeps us unreaped.
+    for (;;)
+      pause();
+  }
+  death.writer.reset();
+  proc_bsdinfo identity{};
+  requireFixture(
+      proc_pidinfo(host.pid, PROC_PIDTBSDINFO, 0, &identity, sizeof(identity)) == sizeof(identity) &&
+          identity.pbi_start_tvsec > 0,
+      "read exact isolated host process birth"
+  );
+  const std::string pidArgument = std::to_string(host.pid);
+  const std::string birthArgument =
+      std::to_string(std::uint64_t(identity.pbi_start_tvsec) * 1000000 + identity.pbi_start_tvusec);
+  watcher.pid = fork();
+  requireFixture(watcher.pid >= 0, "fork directly owned recovery watcher");
+  if (watcher.pid == 0) {
+    if (dup2(death.reader.fd, 3) < 0 || dup2(ready.writer.fd, 4) < 0)
+      _exit(10);
+    death.reader.reset();
+    ready.reader.reset();
+    ready.writer.reset();
+    char *arguments[] = {
+        const_cast<char *>(executable), const_cast<char *>("--recovery-watchdog-private"),
+        const_cast<char *>(pidArgument.c_str()), const_cast<char *>(birthArgument.c_str()),
+        const_cast<char *>(path), nullptr};
+    // This private mode execs only this test binary's marker-writing branch.
+    // _exit avoids running copied parent cleanup if the mode refuses startup.
+    _exit(runRecoveryWatchdog(5, arguments));
+  }
+  death.reader.reset();
+  ready.writer.reset();
+  pollfd acknowledgement{ready.reader.fd, POLLIN | POLLHUP, 0};
+  int polled;
+  do {
+    polled = poll(&acknowledgement, 1, 3000);
+  } while (polled < 0 && errno == EINTR);
+  char received = 0;
+  requireFixture(
+      polled > 0 && (acknowledgement.revents & POLLIN) && read(ready.reader.fd, &received, 1) == 1 && received == 'R',
+      "isolated watcher acknowledges the live host before its exit"
+  );
+  requireFixture(access(path, F_OK) != 0, "live isolated host cannot trigger recovery");
+  requireFixture(kill(host.pid, SIGKILL) == 0, "terminate only the isolated host");
+  siginfo_t hostStatus{};
+  requireFixture(
+      awaitExitWithoutReaping(host.pid, hostStatus) && hostStatus.si_code == CLD_KILLED &&
+          hostStatus.si_status == SIGKILL,
+      "observe isolated host death while retaining its zombie identity"
+  );
+  siginfo_t watcherStatus{};
+  requireFixture(
+      awaitExitWithoutReaping(watcher.pid, watcherStatus),
+      "watchdog must recover an exited host before its parent reaps it"
+  );
+  requireFixture(
+      watcherStatus.si_code == CLD_EXITED && watcherStatus.si_status == 0,
+      "unreaped-host recovery exits successfully"
+  );
+  Descriptor result(open(path, O_RDONLY));
+  char contents[10]{};
+  requireFixture(
+      result.fd >= 0 && read(result.fd, contents, 9) == 9 && std::strcmp(contents, "recovered") == 0,
+      "unreaped-host recovery writes the exact private marker"
+  );
 }
 } // namespace
 int main(int argc, char **argv)
@@ -51,6 +216,13 @@ int main(int argc, char **argv)
   std::string error;
   RecoveryWatchdog missing("/definitely/not/a/deskflow/binary", path, &error);
   check(!missing.armed() && !error.empty(), "invalid watchdog binary refuses export");
+  try {
+    // Run before the existing grandchild happy path. A regression failure
+    // kills and reaps both directly owned children before check() exits.
+    unreapedHostRecovery(argv[0], path);
+  } catch (const std::exception &failure) {
+    check(false, failure.what());
+  }
   const auto pid = fork();
   check(pid >= 0, "fork simulated host");
   if (pid == 0) {
