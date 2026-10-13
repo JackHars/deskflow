@@ -18,6 +18,7 @@
 #include <fcntl.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -59,6 +60,11 @@ constexpr auto introspection = R"xml(
     </method>
     <method name="GetViewer">
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
+    <method name="ValidateRoutedPoint">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="d" direction="in"/><arg type="d" direction="in"/><arg type="u" direction="in"/>
       <arg type="a{sv}" direction="out"/>
     </method>
     <method name="ValidateCurrentHit">
@@ -269,7 +275,8 @@ struct Service
   Descriptor peer, viewportPeer;
   GnomeViewportDecoder viewportDecoder;
   std::uint64_t paintSnapshot = 0;
-  bool delaySnapshot = false, wrongPeer = false, invalidateOnCheck = false;
+  bool delaySnapshot = false, wrongPeer = false, invalidateOnCheck = false, wrongRoutedEcho = false;
+  bool advertiseRoutedPoint = true;
   QByteArray delayedReply;
   std::chrono::steady_clock::time_point delayedUntil;
   Mode mode;
@@ -508,6 +515,8 @@ struct Service
       g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
       for (const auto *key : {"exactWaylandClientBinding", "eisSessionOwned", "nativeHitTesting", "viewportChannel"})
         g_variant_builder_add(&values, "{sv}", key, g_variant_new_boolean(true));
+      if (advertiseRoutedPoint)
+        g_variant_builder_add(&values, "{sv}", "routedPointObservation", g_variant_new_boolean(true));
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
@@ -571,12 +580,14 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
-    } else if (!std::strcmp(name, "GetViewer") || !std::strcmp(name, "ValidateCurrentHit")) {
+    } else if (!std::strcmp(name, "GetViewer") || !std::strcmp(name, "ValidateCurrentHit") ||
+               !std::strcmp(name, "ValidateRoutedPoint")) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Viewport query changed private caller");
       const char *id = nullptr, *token = nullptr, *request = nullptr;
       guint value = 0, expectedRevision = revision;
       double x = 400, y = 300;
-      const bool hit = !std::strcmp(name, "ValidateCurrentHit");
+      const bool routed = !std::strcmp(name, "ValidateRoutedPoint");
+      const bool hit = routed || !std::strcmp(name, "ValidateCurrentHit");
       if (hit)
         g_variant_get(parameters, "(&su&s&sddu)", &id, &value, &token, &request, &x, &y, &expectedRevision);
       else
@@ -595,7 +606,10 @@ struct Service
       add("window", g_variant_new_string("fixture-window"));
       add("surface", g_variant_new_string("fixture-surface"));
       add("focused", g_variant_new_boolean(true));
-      add("available", g_variant_new_boolean(expectedRevision == revision && x == 400 && y == 300));
+      add("available", g_variant_new_boolean(
+                           expectedRevision == revision &&
+                           (routed ? x >= 400 && x <= 450 && y >= 300 && y <= 350 : x == 400 && y == 300)
+                       ));
       add("reason", g_variant_new_string("fixture-native-denied"));
       add("observationOnly", g_variant_new_boolean(true));
       add("deliveryReady", g_variant_new_boolean(false));
@@ -603,8 +617,12 @@ struct Service
       add("pointerY", g_variant_new_double(300));
       if (hit) {
         add("request", g_variant_new_string(request));
-        add("localX", g_variant_new_double(300));
-        add("localY", g_variant_new_double(200));
+        add("localX", g_variant_new_double(routed ? x - 100 : 300));
+        add("localY", g_variant_new_double(routed ? y - 100 : 200));
+        if (routed) {
+          add("routedX", g_variant_new_double(wrongRoutedEcho ? x + 1 : x));
+          add("routedY", g_variant_new_double(y));
+        }
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
     } else if (!std::strcmp(name, "CloseSession")) {
@@ -860,6 +878,91 @@ void viewportJoinAndRevocation(const PrivateBus &bus)
   waitUntil([&] { return service.callerGone; }, "Viewport stop did not retire its provider caller");
   check(service.failure.empty(), "Viewport service failed");
 }
+void routedPointUsesFrozenCoordinate(const PrivateBus &bus)
+{
+  Service service(bus);
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  check(ready.ready && descriptor.value >= 0, "Routed point fixture did not become Ready");
+  check(
+      client.requestRoutedPointObservation({0, 4, 425, 325}) == 0 &&
+          client.requestRoutedPointObservation({3, 0, 425, 325}) == 0 &&
+          client.requestRoutedPointObservation({3, 4, std::numeric_limits<double>::infinity(), 325}) == 0 &&
+          client.requestRoutedPointObservation({3, 4, 10000001, 325}) == 0 &&
+          client.requestRoutedPointObservation({3, 4, 0.1, 325}) == 0,
+      "Invalid routed point acquired a provider request"
+  );
+  const GnomeProviderClient::RoutedPoint route{3, 4, 425, 325};
+  const auto request = client.requestRoutedPointObservation(route);
+  check(request != 0, "Exact routed point was refused");
+  check(
+      client.requestViewportObservation() == 0 && client.requestRoutedPointObservation(route) == 0,
+      "Routed-point preparation failed to reserve the single outstanding slot"
+  );
+  const auto result = viewportResult(client, request);
+  check(result.observation && result.observation->live(), "Exact routed-point join failed");
+  const auto &snapshot = result.observation->snapshot();
+  check(
+      snapshot.routedPoint == route && snapshot.desktopX == route.desktopX && snapshot.desktopY == route.desktopY &&
+          snapshot.surfaceX == 325 && snapshot.surfaceY == 225 && snapshot.sourceX == 260 &&
+          snapshot.sourceY == 180 && snapshot.nativeRevision == service.revision,
+      "Provider substituted its current cursor for the frozen Server point"
+  );
+  check(
+      snapshot.desktopX != 400 && snapshot.desktopY != 300,
+      "Provider reported the diagnostic cursor as routed coordinates"
+  );
+  const auto deniedId = client.requestRoutedPointObservation({3, 5, 900, 900});
+  check(deniedId != 0 && !result.observation->live(), "New request did not revoke old routed observation");
+  const auto denied = viewportResult(client, deniedId);
+  check(!denied.observation && denied.error == "fixture-native-denied" && client.live(),
+        "Point outside the native viewer hit was accepted or unexpectedly ended its session");
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Routed-point fixture did not retire provider caller");
+  check(service.failure.empty(), "Routed-point fixture service failed");
+}
+void routedPointCapabilityIsRequired(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.advertiseRoutedPoint = false;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  check(ready.ready && descriptor.value >= 0, "Old provider fixture did not become Ready");
+  check(
+      client.requestRoutedPointObservation({3, 4, 425, 325}) == 0,
+      "Old provider silently negotiated exact routed-point observations"
+  );
+  check(observed(client).live(), "Optional routed capability denied ordinary current-pointer observation");
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Old provider fixture did not retire caller");
+  check(service.failure.empty(), "Old provider fixture service failed");
+}
+void routedPointWrongEchoIsTerminal(const PrivateBus &bus)
+{
+  Service service(bus);
+  service.wrongRoutedEcho = true;
+  Configuration configuration;
+  Wake wake;
+  GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+  const auto ready = wake.next(client);
+  Descriptor descriptor(ready.descriptor);
+  check(ready.ready && descriptor.value >= 0, "Wrong-echo fixture did not become Ready");
+  const auto request = client.requestRoutedPointObservation({7, 8, 425, 325});
+  check(request != 0, "Wrong-echo fixture did not send a request");
+  const auto denied = viewportResult(client, request);
+  check(!denied.observation && denied.error.find("substituted") != std::string::npos,
+        "Mismatched native point echo became a viewport observation");
+  waitUntil([&] { return !client.live(); }, "Malformed native reply did not close the provider session");
+  client.stop();
+  waitUntil([&] { return service.callerGone; }, "Wrong-echo fixture did not retire caller");
+  check(service.failure.empty(), "Wrong-echo fixture service failed");
+}
 void viewportTimeoutAndLateReply(const PrivateBus &bus)
 {
   Service service(bus);
@@ -949,6 +1052,12 @@ int main(int argc, char **argv)
     std::puts("PASS: delayed setup cancellation closes the caller and ignores a late descriptor reply");
     viewportJoinAndRevocation(bus);
     std::puts("PASS: native/painted viewport join retains exact identities and revokes on native/child/stop changes");
+    routedPointUsesFrozenCoordinate(bus);
+    std::puts("PASS: exact routed GNOME stage point, not the latest pointer, retains sequence and native identity");
+    routedPointCapabilityIsRequired(bus);
+    std::puts("PASS: old providers retain cursor diagnostics without exact-point admission");
+    routedPointWrongEchoIsTerminal(bus);
+    std::puts("PASS: substituted point echo retires the native observation channel");
     viewportTimeoutAndLateReply(bus);
     std::puts("PASS: request deadline and late-reply retirement cannot renew or revive a viewport");
     viewportInvalidatedBeforePublication(bus);

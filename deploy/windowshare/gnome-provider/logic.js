@@ -36,6 +36,13 @@ export function validRequest(request, x, y, revision) {
         Number.isInteger(revision) && revision > 0 && revision <= UINT32_MAX;
 }
 
+// Native Clutter hit/transform APIs use float stage coordinates. Reject a
+// non-representable double instead of silently validating its rounded neighbor.
+export function validRoutedPointRequest(request, x, y, revision) {
+    return validRequest(request, x, y, revision) && Math.abs(x) <= 10000000 &&
+        Math.abs(y) <= 10000000 && Math.fround(x) === x && Math.fround(y) === y;
+}
+
 export function validRect(rect) {
     return rect && ['x', 'y', 'width', 'height'].every(k =>
         Number.isFinite(rect[k]) && Math.abs(rect[k]) <= MAX_COORDINATE) &&

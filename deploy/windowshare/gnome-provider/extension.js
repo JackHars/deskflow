@@ -13,7 +13,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
-    validRequest,
+    validRequest, validRoutedPointRequest,
 } from './logic.js';
 import {closeDescriptorList, withViewerLauncher} from './launcher.js';
 
@@ -186,7 +186,8 @@ class Provider {
             providerApi: ['u', 1], backend: ['s', this._backend],
             nativeHitTesting: ['b', this._native], exactWaylandClientBinding: ['b', true],
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
-            viewportChannel: ['b', true], viewportSocketValidated: ['b', false],
+            viewportChannel: ['b', true], routedPointObservation: ['b', true],
+            viewportSocketValidated: ['b', false],
             syncFenceVerified: ['b', false], pointerDeviceAttribution: ['b', false],
             qtViewportMapping: ['b', false], deliveryReady: ['b', false],
         })]));
@@ -442,24 +443,38 @@ class Provider {
         }
     }
 
-    ValidateCurrentHitAsync([id, generation, token, request, x, y, revision], invocation) {
+    ValidateCurrentHitAsync(args, invocation) {
+        this._validateHit(args, invocation, true);
+    }
+
+    ValidateRoutedPointAsync(args, invocation) {
+        this._validateHit(args, invocation, false);
+    }
+
+    // Both operations are read-only. A routed point is a requested stage
+    // coordinate, never the last sampled pointer position. This validates
+    // only the live native hit/identity; it does not order EIS or Qt queues,
+    // prove the source coordinate namespace or authorize input delivery.
+    _validateHit([id, generation, token, request, x, y, revision], invocation, currentPointer) {
         try {
             const session = this._lookup(invocation, id, generation);
-            if (!validRequest(request, x, y, revision))
-                throw new Error('Malformed current-hit request');
+            if (!(currentPointer ? validRequest(request, x, y, revision) :
+                    validRoutedPointRequest(request, x, y, revision)))
+                throw new Error('Malformed native-hit request');
             const observed = this._observe(session, token);
             const {values, surface, pointerX, pointerY} = observed;
             values.request = ['s', request];
+            if (!currentPointer) {
+                values.routedX = ['d', x];
+                values.routedY = ['d', y];
+            }
             let reason = values.reason[1];
             if (revision !== session.revision)
                 reason = 'stale-revision';
-            if (!reason && !samePointerPosition(x, y, pointerX, pointerY))
+            if (!reason && currentPointer && !samePointerPosition(x, y, pointerX, pointerY))
                 reason = 'pointer-mismatch';
-            if (!reason) {
-                const picked = global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y);
-                if (picked !== surface)
-                    reason = 'not-viewer-surface';
-            }
+            if (!reason && global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== surface)
+                reason = 'not-viewer-surface';
             if (!reason) {
                 const [ok, localX, localY] = surface.transform_stage_point(x, y);
                 if (!ok || !Number.isFinite(localX) || !Number.isFinite(localY)) {
@@ -469,11 +484,14 @@ class Provider {
                     values.localY = ['d', localY];
                 }
             }
-            // A native call can synchronously emit a geometry signal; the
-            // cursor also has an independent input thread. Recheck at use.
+            // A native call can emit geometry/focus signals synchronously.
+            // Recheck identity and the actual input hit after that call; a
+            // previously hidden or newly occluded Viewer must not validate.
             const fresh = this._observe(session, token);
             if (session.revision !== revision || fresh.surface !== surface ||
-                fresh.values.reason[1] || !samePointerPosition(x, y, fresh.pointerX, fresh.pointerY))
+                fresh.values.reason[1] ||
+                (currentPointer && !samePointerPosition(x, y, fresh.pointerX, fresh.pointerY)) ||
+                (!reason && global.stage.get_actor_at_pos(Clutter.PickMode.REACTIVE, x, y) !== surface))
                 reason ||= 'state-changed-during-query';
             values.revision = ['u', session.revision];
             values.sampledAtUsec = fresh.values.sampledAtUsec;

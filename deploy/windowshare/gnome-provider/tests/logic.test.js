@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
-    unavailableReason, validLaunch, validRect, validRequest, validViewportHandle,
+    unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validViewportHandle,
 } from '../logic.js';
 
 test('only stable Shell 50 is supported', () => {
@@ -44,6 +44,14 @@ test('requests reject NaN, Infinity, absent revisions and oversized tokens', () 
         assert.equal(validRequest('request', 0, 0, revision), false);
     assert.equal(validRequest('x'.repeat(65), 0, 0, 1), false);
     assert.equal(validRequest('request\n', 0, 0, 1), false);
+});
+
+test('exact routed point refuses float aliases, oversized bounds and invalid revisions', () => {
+    assert.equal(validRoutedPointRequest('p_4', 425.25, -325.5, 1), true);
+    for (const x of [0.1, 10000001, Infinity, NaN])
+        assert.equal(validRoutedPointRequest('p_4', x, 300, 1), false);
+    assert.equal(validRoutedPointRequest('p_4', 425, 0.1, 1), false);
+    assert.equal(validRoutedPointRequest('p_4', 425, 325, 0), false);
 });
 
 test('fractional native readback compares exact Graphene float coordinates', () => {

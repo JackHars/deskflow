@@ -37,6 +37,17 @@
       <arg name="viewer" type="s" direction="in"/>
       <arg name="observation" type="a{sv}" direction="out"/>
     </method>
+    <!-- Read-only exact compositor-stage point; no EIS drain or delivery permit. -->
+    <method name="ValidateRoutedPoint">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="request" type="s" direction="in"/>
+      <arg name="x" type="d" direction="in"/>
+      <arg name="y" type="d" direction="in"/>
+      <arg name="expectedRevision" type="u" direction="in"/>
+      <arg name="observation" type="a{sv}" direction="out"/>
+    </method>
     <method name="ValidateCurrentHit">
       <arg name="session" type="s" direction="in"/>
       <arg name="generation" type="u" direction="in"/>

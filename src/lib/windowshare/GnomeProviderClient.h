@@ -24,6 +24,15 @@ class GnomeProviderClient final
   struct Impl;
 
 public:
+  // Exact compositor-stage point from a separately retained, authenticated
+  // Server capture decision. This value is evidence only: no unverified EIS
+  // region-to-stage conversion or native delivery permission is inferred.
+  struct RoutedPoint
+  {
+    std::uint64_t captureEpoch = 0, sequence = 0;
+    double desktopX = 0, desktopY = 0;
+    bool operator==(const RoutedPoint &) const = default;
+  };
   struct ViewportSnapshot
   {
     std::uint64_t request = 0;
@@ -32,6 +41,7 @@ public:
     double desktopX = 0, desktopY = 0, surfaceX = 0, surfaceY = 0;
     double sourceX = 0, sourceY = 0;
     GnomeViewportState paint;
+    std::optional<RoutedPoint> routedPoint;
   };
   // A bounded join of native current-hit and last-painted Qt observations.
   // This does not attribute an input device/event, fence legacy input, prove
@@ -78,6 +88,10 @@ public:
   // Nonblocking, one request/result at a time. Zero means busy/unavailable.
   // The 250ms budget starts here, before worker dispatch or any native call.
   std::uint64_t requestViewportObservation();
+  // Read-only validation of an exact frozen compositor-stage point (not the
+  // provider's current cursor). Capability-negotiated, single outstanding
+  // request, 250ms absolute budget. No native drain or injection is performed.
+  std::uint64_t requestRoutedPointObservation(RoutedPoint point);
   // Consume both update kinds after a wake; neither stores native descriptors
   // or borrowed Qt objects in the cross-thread notification.
   std::optional<ViewportUpdate> takeViewportUpdate();

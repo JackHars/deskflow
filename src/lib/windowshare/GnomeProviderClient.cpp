@@ -94,7 +94,7 @@ struct GnomeProviderClient::Impl
 {
   GnomeProviderConfig configuration;
   std::function<void()> changed;
-  std::atomic<bool> stopping = false, alive = false;
+  std::atomic<bool> stopping = false, alive = false, routedPointSupported = false;
   std::mutex mutex;
   Update update;
   std::optional<ViewportUpdate> viewportUpdate;
@@ -102,6 +102,7 @@ struct GnomeProviderClient::Impl
   {
     std::uint64_t id;
     Clock::time_point deadline;
+    std::optional<RoutedPoint> routedPoint;
   };
   std::optional<Request> viewportRequest;
   std::shared_ptr<std::atomic_bool> viewportRevoked;
@@ -310,6 +311,7 @@ struct GnomeProviderClient::Impl
         !boolean(values, "viewportChannel") || !g_variant_lookup(values, "backend", "&s", &backend) ||
         std::strcmp(backend, "MetaBackendNative"))
       throw std::runtime_error("Unsupported GNOME provider capabilities or Shell version");
+    routedPointSupported.store(boolean(values, "routedPointObservation"), std::memory_order_release);
     DescriptorList descriptors;
     Variant created(g_dbus_connection_call_with_unix_fd_list_sync(
         bus, owner.c_str(), object, interface, "CreateSession", nullptr, G_VARIANT_TYPE("(suh)"),
@@ -553,20 +555,28 @@ struct GnomeProviderClient::Impl
     double x = 0, y = 0, localX = 0, localY = 0;
   };
   NativeViewport
-  nativeViewport(Clock::time_point deadline, const NativeViewport *expected = nullptr, std::uint64_t request = 0)
+  nativeViewport(
+      Clock::time_point deadline, const NativeViewport *expected = nullptr, std::uint64_t request = 0,
+      const RoutedPoint *routedPoint = nullptr
+  )
   {
+    if (routedPoint && !expected)
+      throw ChannelError("Routed point is missing its native session binding");
     const auto requestText = std::to_string(request);
     const auto timeout = remainingMs(deadline);
+    const double x = routedPoint ? routedPoint->desktopX : expected ? expected->x : 0;
+    const double y = routedPoint ? routedPoint->desktopY : expected ? expected->y : 0;
     Variant parameters(g_variant_ref_sink(
         expected ? g_variant_new(
-                       "(sussddu)", session.c_str(), generation, viewer.c_str(), requestText.c_str(), expected->x,
-                       expected->y, expected->revision
+                       "(sussddu)", session.c_str(), generation, viewer.c_str(), requestText.c_str(), x, y,
+                       expected->revision
                    )
                  : g_variant_new("(sus)", session.c_str(), generation, viewer.c_str())
     ));
     Error error;
     Variant reply(g_dbus_connection_call_sync(
-        bus, owner.c_str(), object, interface, expected ? "ValidateCurrentHit" : "GetViewer", parameters.value,
+        bus, owner.c_str(), object, interface,
+        expected ? routedPoint ? "ValidateRoutedPoint" : "ValidateCurrentHit" : "GetViewer", parameters.value,
         G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, timeout, cancel, &error.value
     ));
     checkpoint(deadline);
@@ -607,13 +617,37 @@ struct GnomeProviderClient::Impl
     result.x = number("pointerX");
     result.y = number("pointerY");
     if (expected) {
+      if (routedPoint) {
+        // Echoes are part of the exact-point contract. PointerX/Y remain
+        // diagnostic cursor samples and are never substituted for this point.
+        if (number("routedX") != routedPoint->desktopX || number("routedY") != routedPoint->desktopY)
+          throw ChannelError("GNOME native viewport substituted the routed point");
+        result.x = routedPoint->desktopX;
+        result.y = routedPoint->desktopY;
+      }
       result.localX = number("localX");
       result.localY = number("localY");
       if (result.window != expected->window || result.surface != expected->surface ||
-          result.revision != expected->revision || result.x != expected->x || result.y != expected->y)
+          result.revision != expected->revision ||
+          (!routedPoint && (result.x != expected->x || result.y != expected->y)))
         throw std::runtime_error("GNOME native viewport changed during observation");
     }
     return result;
+  }
+  std::uint64_t scheduleViewport(std::optional<RoutedPoint> routedPoint)
+  {
+    const auto requestedAt = Clock::now();
+    const std::unique_lock lock(mutex, std::try_to_lock);
+    if (!lock.owns_lock() || !alive.load(std::memory_order_acquire) || stopping.load() ||
+        (routedPoint && !routedPointSupported.load(std::memory_order_acquire)) || viewportBusy || viewportUpdate ||
+        nextViewportRequest == std::numeric_limits<std::uint64_t>::max())
+      return 0;
+    if (viewportRevoked)
+      viewportRevoked->store(true, std::memory_order_release);
+    const auto id = ++nextViewportRequest;
+    viewportRequest = Request{id, requestedAt + std::chrono::milliseconds(gnomeViewportLifetimeMs), routedPoint};
+    viewportBusy = true;
+    return id;
   }
   void observePendingViewport()
   {
@@ -634,13 +668,14 @@ struct GnomeProviderClient::Impl
       activeSnapshot = painted.request;
       if (painted.state.peerFingerprint != configuration.peerFingerprint())
         throw ChannelError("GNOME viewer reported a different authenticated peer");
-      const auto hit = nativeViewport(request->deadline, &native, request->id);
+      const auto *routed = request->routedPoint ? &*request->routedPoint : nullptr;
+      const auto hit = nativeViewport(request->deadline, &native, request->id, routed);
       const auto mapped =
           viewportCall(GnomeViewportOperation::Map, request->deadline, activeSnapshot, hit.localX, hit.localY);
       if (mapped.x < 0 || mapped.y < 0 || mapped.x >= painted.state.sourceWidth ||
           mapped.y >= painted.state.sourceHeight)
         throw ChannelError("GNOME viewport mapped outside its source");
-      const auto fresh = nativeViewport(request->deadline, &native, request->id);
+      const auto fresh = nativeViewport(request->deadline, &native, request->id, routed);
       if (fresh.localX != hit.localX || fresh.localY != hit.localY)
         throw std::runtime_error("GNOME native surface transform changed");
       viewportCall(GnomeViewportOperation::Check, request->deadline, activeSnapshot);
@@ -657,8 +692,9 @@ struct GnomeProviderClient::Impl
       snapshot->window = native.window;
       snapshot->surface = native.surface;
       snapshot->nativeRevision = native.revision;
-      snapshot->desktopX = native.x;
-      snapshot->desktopY = native.y;
+      snapshot->desktopX = hit.x;
+      snapshot->desktopY = hit.y;
+      snapshot->routedPoint = request->routedPoint;
       snapshot->surfaceX = hit.localX;
       snapshot->surfaceY = hit.localY;
       snapshot->sourceX = mapped.x;
@@ -793,18 +829,21 @@ GnomeProviderClient::Update GnomeProviderClient::takeUpdate()
 }
 std::uint64_t GnomeProviderClient::requestViewportObservation()
 {
-  const auto requestedAt = Clock::now();
-  const std::unique_lock lock(m_impl->mutex, std::try_to_lock);
-  if (!lock.owns_lock() || !m_impl->alive.load(std::memory_order_acquire) || m_impl->stopping.load() ||
-      m_impl->viewportBusy || m_impl->viewportUpdate ||
-      m_impl->nextViewportRequest == std::numeric_limits<std::uint64_t>::max())
+  return m_impl->scheduleViewport(std::nullopt);
+}
+std::uint64_t GnomeProviderClient::requestRoutedPointObservation(RoutedPoint point)
+{
+  // Invalid/absent source identity or unbounded native coordinates never
+  // enter the worker queue or replace a valid retained observation.
+  const auto exactStageCoordinate = [](double value) {
+    constexpr double maximumCoordinate = 10000000.0;
+    return std::isfinite(value) && std::abs(value) <= maximumCoordinate &&
+           static_cast<double>(static_cast<float>(value)) == value;
+  };
+  if (!point.captureEpoch || !point.sequence || !exactStageCoordinate(point.desktopX) ||
+      !exactStageCoordinate(point.desktopY))
     return 0;
-  if (m_impl->viewportRevoked)
-    m_impl->viewportRevoked->store(true, std::memory_order_release);
-  const auto id = ++m_impl->nextViewportRequest;
-  m_impl->viewportRequest = Impl::Request{id, requestedAt + std::chrono::milliseconds(gnomeViewportLifetimeMs)};
-  m_impl->viewportBusy = true;
-  return id;
+  return m_impl->scheduleViewport(point);
 }
 std::optional<GnomeProviderClient::ViewportUpdate> GnomeProviderClient::takeViewportUpdate()
 {
