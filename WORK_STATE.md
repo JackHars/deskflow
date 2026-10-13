@@ -3,6 +3,75 @@
 Branch: `feature/seamless-windows` in `JackHars/deskflow`.
 Starting milestone: `4070e8a57885dfac5739f88456c63efbc4521cbf`.
 
+## Original input before legacy dispatch (2026-10-12)
+
+Implementation `eda21b39b19004af9f4abfaacb707bb9b380f6f8` and portable linkage
+fix `ef51456659edae1acf06a6c03b730bcaf66f2f8b` are pushed to the feature branch.
+The Server can now decide original ownership before writing legacy input or
+changing its press ledger. The production launcher connects the completed-capture
+inbox but does not install the original dispatcher. Ordinary delivery retains
+its existing timing. The contract is in
+`deploy/windowshare/original-input-dispatch.md`.
+
+A bounded capture inbox separates the Session's raw-stream consumer from the
+Server event thread. An installed dispatcher receives only exact, authenticated,
+single-part captures with their frozen recipient and routed point. Reservation
+precedes delivery; accepting a reservation prevents a later legacy acquisition.
+Keys, repeats, buttons, drag motion and physical releases retain exact ownership.
+Selection changes flush older work before leave/enter controls; disconnected
+recipients are detached first. Deferred diagnostic decisions retain source
+order. Missing capture expires after 100 milliseconds, and queue/owner limits
+terminate original eligibility while preserving legacy and release accounting.
+
+Review and sanitizer runs exposed nested-disconnect double deletion, key-up
+work after destruction, and stale raw-release bookkeeping. The final tests
+cover those paths, callback reentry, nonreused press incarnations and untranslated
+physical releases. The earlier failing logs remain preserved. The first Ubuntu
+candidate also found missing portable input linkage in the actual Linux core;
+the final CMake dependency is explicit on every supported platform and remains
+absent when window sharing is disabled.
+
+All nine targeted Mac suites pass, including five real core suites with 161 Qt
+entries and no failures or skips. Five sanitizer suites pass; the scoped Server
+run instruments modified Server/filter/key/test code, not its prebuilt dependency
+archives. After the CMake fix, the actual Mac core and all five core suites were
+rebuilt and passed again. Formatting, diff checks and REUSE lint pass. Evidence
+is under `build/pre-dispatch-20261012/mac/`, including `linkage-followup/`.
+No new Mac native input session or package installation was run.
+
+Home Ubuntu built the actual core with window sharing enabled and disabled.
+The enabled build passes eight suites: five core suites with 161 Qt entries,
+zero failures/skips, and three original-input/route foundation suites. The
+disabled build passes three compatibility suites with 30 Qt entries and 29
+explicit feature-disabled trace skips. Actual `Server` and `EiComputer` compiler
+flags are verified for both modes. All seven phases and the child/container
+exit are zero. No native session was started.
+
+All 1,031 frozen source entries match `ef5145665` Git blob bytes and modes. The
+parent independently verified 39 copied artifacts, parsed test totals, checked
+production flags and compared ordinary process/settings/container inventories.
+The owned container and both supervisors are absent; ordinary Deskflow and the
+two unrelated containers are unchanged. Ubuntu evidence is
+`build/pre-dispatch-20261012/ubuntu/candidate-2/evidence.json`, SHA-256
+`cd6c72e5ee4133ad8455fc99d8939ab5248708730157f805b3846911f1600b7a`;
+the independent audit is `independent-verification.json` beside it. Candidate 1's
+link failure and clean teardown remain available separately.
+
+All six CI jobs pass for the final code revision in
+[run 38323926279](https://github.com/JackHars/deskflow/actions/runs/38323926279).
+Native compositor/Qt queue draining, exact routed-point validation and the
+production coordinator remain unfinished. Original-input delivery is still
+disabled. Physical acceptance and the requested Mac App Management permission
+remain open; the overall roadmap estimate is approximately 50%.
+
+The user is transferring implementation to a cloud coding environment without
+access to the actual machines. `CHATGPT_HANDOFF.md` defines the remaining
+implementation sequence and runtime boundaries; `TESTING.md` is the required
+cloud-results and local-verification hand-back. Cloud work must implement and
+test what its environment supports, leaving physical acceptance explicitly
+unrun. This local chat will verify the returned candidate on the actual machines.
+The local development goal is paused for the handoff.
+
 ## Full viewer input forwarding fence (2026-10-12)
 
 Commit `d879b781b06f004e9694b8b894c26ad140fa55cc` is pushed to the feature

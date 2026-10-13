@@ -12,10 +12,15 @@ synthetic test. The next acceptance milestone is the physical Mac keyboard and
 trackpad flow, including input ownership and window return. The percentage is
 an engineering estimate, not the fraction of tests that pass.
 
+For cloud implementation, use [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md).
+The cloud implementer records available automated results and the procedures
+for this local chat in [`TESTING.md`](../TESTING.md); hardware acceptance stays
+pending until the returned code is tested on the actual machines.
+
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Captured stamps follow actual Server packets to backend submission receipts. A negotiated viewer/host gate now fences keys and pointers together. GNOME hit observations join painted source geometry. Delivery remains disabled. | Connect pre-dispatch ownership, compositor/Qt queue draining, exact routed-point validation and the production coordinator. |
+| Original input integration | Captured stamps follow actual Server packets to backend submission receipts. The Server now selects ownership before legacy dispatch, and a negotiated viewer/host gate fences keys and pointers together. GNOME hit observations join painted source geometry. Production original delivery remains disabled. | Connect compositor/Qt queue draining, exact routed-point validation and the production coordinator. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Independent sessions and the holding helper exist; normal helper creation/removal has run live. | Verify focus changes, overlapping windows, both monitors and restoration after helper/host failure. |
 | Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
@@ -80,6 +85,17 @@ input or compositor monitor scaling. Source and cleanup evidence are recorded
 in `WORK_STATE.md`. All six CI jobs pass for this code revision in
 [run 38318502915](https://github.com/JackHars/deskflow/actions/runs/38318502915);
 original-input delivery remains disabled.
+
+The subsequent Server ownership milestone `ef5145665` passes 161 core Qt entries
+on both Mac and home Ubuntu. Ubuntu additionally passes three original-input
+foundation suites and a fresh feature-disabled actual-core build with three
+compatibility suites. The Server can reserve original output before any legacy
+acquisition, preserve per-press ownership and resolve deferred work on selection
+changes. The production launcher has no original dispatcher yet. See
+[`original-input-dispatch.md`](../deploy/windowshare/original-input-dispatch.md)
+for the contract and `WORK_STATE.md` for evidence and the remaining native handoff.
+All six CI jobs pass for this implementation in
+[run 38323926279](https://github.com/JackHars/deskflow/actions/runs/38323926279).
 
 ### Actual two-machine synthetic acceptance
 
