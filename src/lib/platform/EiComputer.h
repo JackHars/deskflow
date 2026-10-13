@@ -237,7 +237,7 @@ private:
   // Only a bounded sender-EIS event-batch diagnostic, NEVER native/Qt drain
   // authority. Owned by the same core event thread that calls ei_dispatch.
   windowshare::EiPrefixProbe m_gnomePrefixProbe;
-  ei_ping *m_gnomePrefixPing = nullptr;
+  struct ei_ping *m_gnomePrefixPing = nullptr;
   EventQueueTimer *m_gnomePrefixTimer = nullptr;
 #endif
 

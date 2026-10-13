@@ -1138,7 +1138,7 @@ void EiComputer::beginGnomeEiPrefixObservation()
   if (!m_gnomeProviderEnabled || m_gnomeProviderStopped || !m_gnomeProvider || !m_gnomeProvider->live() ||
       m_isPrimary || !ei_is_sender(m_ei) || m_gnomePrefixProbe.state() != windowshare::EiPrefixProbe::State::Idle)
     return;
-  ei_ping *ping = ei_new_ping(m_ei);
+  struct ei_ping *ping = ei_new_ping(m_ei);
   if (!ping)
     return;
   const auto id = ei_ping_get_id(ping);
