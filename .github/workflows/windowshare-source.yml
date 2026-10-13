@@ -4,7 +4,14 @@ name: Window sharing source bundle
 on:
   push:
     branches: [feature/seamless-windows]
-    paths: ['.github/workflows/windowshare-source.yml']
+    paths:
+      - '.github/workflows/windowshare*.yml'
+      - 'src/**'
+      - 'deploy/windowshare/**'
+      - 'docs/seamless-windows*'
+      - 'CHATGPT_HANDOFF.md'
+      - 'TESTING.md'
+      - 'WORK_STATE.md'
   workflow_dispatch:
     inputs:
       offline_dependencies:
@@ -21,7 +28,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Archive all tracked files, including export-ignored CI metadata
+      - name: Archive all tracked files and exact Git provenance
         shell: bash
         run: |
           set -euo pipefail
@@ -32,6 +39,11 @@ jobs:
             --mtime="@$(git show -s --format=%ct HEAD)" --owner=0 --group=0 \
             --numeric-owner --transform='s,^,deskflow/,' -cf - | \
             gzip -n > "$RUNNER_TEMP/windowshare-source/deskflow-source.tar.gz"
+          # Raw, credential-free Git values allow an offline verifier to
+          # reconstruct the exact tree and shallow commit, not a lookalike
+          # checkout with a synthetic commit identity. Never archive .git/config.
+          git ls-files --stage -z > "$RUNNER_TEMP/windowshare-source/source-index.z"
+          git cat-file commit HEAD > "$RUNNER_TEMP/windowshare-source/commit.txt"
           {
             printf 'commit=%s\n' "$(git rev-parse HEAD)"
             printf 'tree=%s\n' "$(git rev-parse HEAD^{tree})"
@@ -39,7 +51,7 @@ jobs:
             printf 'tracked_files=%s\n' "$(git ls-files -z | tr -cd '\0' | wc -c)"
           } > "$RUNNER_TEMP/windowshare-source/provenance.txt"
           cd "$RUNNER_TEMP/windowshare-source"
-          sha256sum deskflow-source.tar.gz provenance.txt > SHA256SUMS
+          sha256sum deskflow-source.tar.gz source-index.z commit.txt provenance.txt > SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
           name: windowshare-source-${{ github.sha }}
@@ -48,7 +60,9 @@ jobs:
           retention-days: 7
           compression-level: 0
   offline-linux:
-    if: github.event_name == 'push' || inputs.offline_dependencies
+    # Source checkpoints should not repeatedly download a full toolchain.
+    # Request a new dependency closure explicitly through workflow_dispatch.
+    if: github.event_name == 'workflow_dispatch' && inputs.offline_dependencies
     runs-on: ubuntu-24.04
     container: debian:trixie
     timeout-minutes: 15
