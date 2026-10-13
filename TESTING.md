@@ -4,6 +4,50 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 independent Mac recovery watchdog (commit `5cc1b760`; H10 NOT_RUN)
+
+**Runtime code:** The experimental Mac host creates a separate process-group
+watchdog before opening any exported window. Its fixed, CLOEXEC-backed private
+pipe carries a startup acknowledgement, not control or input events; a missing
+acknowledgement or dead watcher refuses/terminates the hosting session. The
+watcher records the original Mac host's **kernel process-birth identity**, observes
+the pipe and waits for that exact process to exit rather than trusting a PID
+number (which can be reused). It then re-execs the **existing** offscreen
+`--recover --journal <absolute-path>` path. That routine enforces exclusive
+journal locking and saved AX/CG identities and preserves unresolved recovery
+entries. The watcher does not bypass native code admission, alter standard
+Deskflow, implement input forwarding or grant a remote window-control API.
+
+**Executed checks for implementation SHA
+[`5cc1b760`](https://github.com/JackHars/deskflow/commit/5cc1b760d744bddad21b0cabd327e2495df6264f):**
+
+- Hosted GitHub [Window sharing checks **38343504035**](https://github.com/JackHars/deskflow/actions/runs/38343504035):
+  **PASS, six of six jobs** (Mac application/integrated core, Linux
+  application, native headless GNOME, transport, GCC and Clang sanitizers).
+  The Mac application CTest includes the new `windowshare-recovery-watchdog`
+  subprocess regression. Mac experimental package/handshake jobs succeeded.
+- Hosted [source bundle **38343504082**](https://github.com/JackHars/deskflow/actions/runs/38343504082):
+  **PASS**.
+- Independent local GNU and Clang sanitizer portable suites **11/11 PASS**
+  each; cross-platform simulator for the Mac-only watcher was compiled against
+  a test-only `libproc` shim and passed child-ready → host-exit → recover-exec,
+  premature-recovery refusal and missing-executable denial. The shim was
+  **not** committed/packaged; the native Mac Actions CTest is the real Mac build.
+- Repeatable hosted verification:
+  `cmake --build build/app --parallel 3 && ctest --test-dir build/app
+  --output-on-failure` with `BUILD_WINDOWSHARE=ON` on macOS via
+  `.github/workflows/windowshare-foundation.yml`; the watchdog regression is
+  `ctest --test-dir build/app -R windowshare-recovery-watchdog
+  --output-on-failure`.
+
+**Not done/limits:** Mac SIGKILL during a truly relocated AX window, app
+revocation, TCC denial, multi-monitor host recovery, helper crash, native
+kernel/Qt scheduling, sleep/wake, abnormal `--recover` failure diagnostics,
+and prolonged soak/H10/H11. All relevant physical acceptance remains **NOT_RUN**.
+The watcher is a P7 recovery slice, **not** completion of P1–P8. The desktop's
+original-input path stays fail-closed pending authoritative EI/Clutter/Qt drain
+and source-bound delivery permits.
+
 ## P4 physical-display restore safety (commit `91dba759`, no hardware claims)
 
 Mac host `recoverFrame` now calls a portable `recoveryRect` selector for both
@@ -60,8 +104,8 @@ application, GNOME provider and transport; source bundle
   proof and release drain, exact source-stage coordinate authority, native
   P2 permit, P3 enabled trusted original-input coordinator/delivery, P4
   multi-window/multi-monitor native ownership, P5 bidirectional edge drag,
-  P6 popups/clipboard/Unicode IME, and remaining P7 watchdog, crash, soak and
-  latency targets. All H01–H12 remain **NOT_RUN**. No test above demonstrates
+  P6 popups/clipboard/Unicode IME, and remaining P7 native recovery,
+  fault injection, soak and latency targets. All H01–H12 remain **NOT_RUN**. No test above demonstrates
   original Mac input receipt or authorizes re-enabling that path.
 
 The SHA is a **verified partial code checkpoint**, *not* the final implementation

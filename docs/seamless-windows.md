@@ -1,5 +1,21 @@
 # Experimental window sharing
 
+### Independent Mac crash-recovery watchdog (verified partial P7)
+
+The experimental Mac host now requires an independent watchdog's private
+readiness acknowledgment **before** relocating any exported source. Its
+separate process group survives a host crash, verifies the original host's
+kernel process-birth identity, and calls the existing journal-locked, exact
+window-identity `--recover` mode after that host exits. If the watchdog
+cannot start or dies, hosting fails closed or terminates and begins normal
+restoration. The watcher cannot receive or authorize remote native input.
+
+Implementation `5cc1b760`: GitHub hosted CI **6/6 jobs passed**, including
+the macOS native build, watchdog subprocess regression and experimental
+packaging; source bundle passed. Physical kill/holding-display acceptance
+H10, hardware sleep/wake and real TCC are **NOT_RUN**. Original input remains
+disabled. See `TESTING.md` for exact evidence and commands.
+
 ### Recent P4 monitor-restore improvement (cloud candidate)
 
 Mac restore and journal recovery use the same physical-output selector:
