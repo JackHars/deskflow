@@ -1,5 +1,25 @@
 # Seamless Windows work state
 
+## P2 connected QtWayland queue checkpoint (2026-10-13)
+
+Implementation [`d0b8e8a3`](https://github.com/JackHars/deskflow/commit/d0b8e8a3181dc70fd2ea462e261e3a3685704a70)
+runs two serial `wl_display_sync` callbacks on the real QtWayland GUI/default
+queue as part of the existing GNOME private final painted-viewport `Check`.
+The second callback processes queued Qt QPA window events and rechecks the
+exact focus/surface/painted revision before reporting the read-only result.
+The 200ms native budget is inside the existing 250ms snapshot lifetime;
+revocation, unsupported builds, reentrancy, loss and pipelining fail closed.
+
+Hosted [CI 38383713813](https://github.com/JackHars/deskflow/actions/runs/38383713813)
+**PASS all 6** (GCC/Clang sanitizer 12 suites each, Mac and Linux app/core,
+transport and true private headless GNOME/QtWayland 6.10.2); separate
+[source bundle 38383713764](https://github.com/JackHars/deskflow/actions/runs/38383713764)
+**PASS**. No local user hardware tested. **This is not native old-input
+draining**: the specific EIS prefix → Mutter Clutter stage event consumption
+proof and delivery ownership remain missing. Original-input routing is still
+disabled, and P2/P3/H03–H05 are incomplete or NOT_RUN.
+See the newest `TESTING.md` checkpoint.
+
 ## Latest P4 output-mode/identity recovery checkpoint (2026-10-13)
 
 Implementation `ec2fd2f83fa6a308f1702036eb0bf4f3ff6dc079` introduces

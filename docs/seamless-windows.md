@@ -1,5 +1,25 @@
 # Experimental window sharing
 
+### P2 QtWayland default-queue checkpoint (verified code, original input still disabled)
+
+The GNOME private, authenticated Viewer viewport endpoint now routes final
+`Check` through an asynchronous `QtWaylandQueueWitness`: two serial
+`wl_display_sync` callbacks on the existing QtWayland *default* GUI event
+queue, followed by a QPA pending-event dispatch and exact native/painted/focus
+revalidation. Unsupported Qt builds, stale sessions/surfaces, callback reentry,
+deadline, disconnect and destruction deny. The endpoint never opens a new
+Wayland connection or native-input endpoint, and a QPA send result does not
+claim application consumption.
+
+Implementation [`d0b8e8a3`](https://github.com/JackHars/deskflow/commit/d0b8e8a3181dc70fd2ea462e261e3a3685704a70)
+passed all six hosted CI jobs including native GNOME/QtWayland 6.10.2, Mac
+and Linux application/core, and sanitizer foundations
+([run 38383713813](https://github.com/JackHars/deskflow/actions/runs/38383713813)).
+The [source bundle](https://github.com/JackHars/deskflow/actions/runs/38383713764)
+also passed. The old libei → Mutter/Clutter → Qt source-bound drain still lacks
+an authoritative compositor-side boundary and original input remains disabled.
+Physical H03–H05: **NOT_RUN**. See `TESTING.md` for reproducibility.
+
 ### P4 local Mac monitor-topology safety (verified partial; not H05/H06 acceptance)
 
 The experimental Mac host now records physical display identity, logical
