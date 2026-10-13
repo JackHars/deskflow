@@ -112,6 +112,56 @@ std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDi
   }
   return chosen ? std::optional<Rect>(fitInside(original, *chosen)) : std::nullopt;
 }
+bool decoderSyncAccessUnit(std::span<const std::uint8_t> bytes) noexcept
+{
+  if (bytes.size() < 15 || bytes.size() > maxPayload)
+    return false;
+  const auto prefix = [bytes](std::size_t at) -> std::size_t {
+    if (at + 3 > bytes.size() || bytes[at] || bytes[at + 1])
+      return 0;
+    if (at + 4 <= bytes.size() && !bytes[at + 2] && bytes[at + 3] == 1)
+      return 4;
+    return bytes[at + 2] == 1 ? 3 : 0;
+  };
+  std::size_t at = 0;
+  bool sps = false, pps = false, idr = false;
+  while (at < bytes.size()) {
+    const auto length = prefix(at);
+    if (!length || at + length + 2 > bytes.size())
+      return false;
+    const auto header = bytes[at + length];
+    const auto type = header & 0x1f;
+    if ((header & 0x80) || type == 0 || type > 12)
+      return false;
+    const auto start = at + length + 1;
+    std::size_t end = start;
+    while (end < bytes.size() && !prefix(end))
+      ++end;
+    // An empty NAL must never count as SPS/PPS/IDR.
+    if (end == start || (end == bytes.size() && bytes[end - 1] == 0))
+      return false;
+    if (type == 7) {
+      if (idr)
+        return false;
+      sps = true;
+      pps = false;
+    } else if (type == 8) {
+      if (!sps || idr)
+        return false;
+      pps = true;
+    } else if (type == 5) {
+      if (!sps || !pps)
+        return false;
+      idr = true;
+    } else if (type == 1) {
+      // An inter-frame slice makes this unit dependent on previous decoder
+      // state even if SPS/PPS happened to appear in the same packet.
+      return false;
+    }
+    at = end;
+  }
+  return idr;
+}
 std::vector<std::uint8_t> encode(const Packet &p)
 {
   require(validType(static_cast<unsigned>(p.type)), "unknown packet type");

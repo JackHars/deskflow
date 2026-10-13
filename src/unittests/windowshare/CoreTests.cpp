@@ -67,6 +67,29 @@ int main()
     check(!recoveryRect({0, 0, 200, 200}, invalid), "invalid only output rejected");
     const std::array<Rect, 2> mixed{{invalid[0], outputs[0]}};
     check(recoveryRect({-400, 30, 100, 80}, mixed).has_value(), "malformed output is ignored");
+    const auto sync = [](std::initializer_list<unsigned> data) {
+      std::vector<std::uint8_t> bytes;
+      for (auto value : data)
+        bytes.push_back(std::uint8_t(value));
+      return decoderSyncAccessUnit(bytes);
+    };
+    check(sync({0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1e, 0, 0, 1, 0x68, 0xce,
+                0, 0, 0, 1, 0x65, 0x88}), "SPS/PPS/IDR with mixed Annex B prefixes");
+    check(!sync({0, 0, 0, 1, 0x41, 0x33, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce,
+                 0, 0, 1, 0x65, 0x88}), "dependent video slice must not restart a decoder");
+    check(!sync({0, 0, 1, 0x65, 0x88, 0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce}),
+          "IDR without preceding parameter sets denied");
+    check(!sync({0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x41, 0x11}),
+          "SPS and PPS cannot make P frame decoder-safe");
+    check(!sync({0, 0, 1, 0xe7, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x65, 0x88}),
+          "forbidden H.264 header bit denied");
+    check(!sync({0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x65}),
+          "header-only NAL is not decoder-safe");
+    check(!sync({0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x65, 0x88, 0, 0, 1}),
+          "trailing empty NAL must be denied");
+    check(!sync({0, 0, 1, 0x67, 0x42, 0, 0, 1, 0x68, 0xce, 0, 0, 1, 0x65, 0x88, 0, 0, 0}),
+          "trailing unframed bytes denied");
+    check(!decoderSyncAccessUnit({}), "empty video cannot restart decoder");
     Session s;
     s.id = 42;
     rejects([&] { s.prepare(1, source, source); });
