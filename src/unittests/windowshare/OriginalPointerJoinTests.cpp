@@ -124,7 +124,7 @@ void mismatches()
     check(f.join.capture(input, f.now), "valid source before mismatched annotation");
     check(!f.join.annotate(annotation, f.now) && !f.join.live() && !f.join.pop(f.now), "changed event is never joined");
   }
-  for (const auto ids : {std::pair{0U, 0U}, std::pair{10359U, 10400U}, std::pair{0U, 10359U}}) {
+  for (const auto &ids : {std::pair{0U, 0U}, std::pair{10359U, 10400U}, std::pair{0U, 10359U}}) {
     Fixture f;
     const auto input = f.input();
     auto annotation = Fixture::annotation(input);

@@ -52,6 +52,13 @@ link failure is retained in `p5-return-sanitize-build.log`; using the same
 MacOSX15.5 SDK as the production build succeeds in
 `p5-return-sanitize-sdk-build.log`.
 
+Hosted GCC 13 exposed a copied `std::pair` loop variable rejected as a warning
+in the pointer-join fixture. Using a const reference fixes that portability issue;
+the signed Mac fixture and all 16 portable GCC 15 ASan/UBSan foundation suites
+on home Ubuntu pass (`p5-pointer-fixture-tests.json`,
+`p5-gcc-foundation-final/result.json`). Production code is unchanged by this
+follow-up. The original hosted compiler failure remains recorded.
+
 The user's latest instruction is **“Keep building; test later.”** No readiness
 question is pending, and no physical fixture or desktop input routing has been
 started. **H07 is NOT_RUN and P5 physical acceptance remains open.** Current

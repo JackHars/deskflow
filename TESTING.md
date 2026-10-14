@@ -47,6 +47,14 @@ SPDX-License-Identifier: MIT
   Both Linux runs use offline disposable image `65f389a94c05` on home Ubuntu,
   with no desktop sockets/devices or network, and remove their temporary
   directories after collecting source/binary hashes and logs.
+- **GCC fixture portability correction:** hosted GCC 13 in
+  [run 38644155477](https://github.com/JackHars/deskflow/actions/runs/38644155477)
+  rejected a copied `std::pair` loop variable in the pointer-join test under
+  `-Werror=range-loop-construct`. The fixture now uses a const reference.
+  Its signed Mac check passes (`p5-pointer-fixture-tests.json`), and all 16
+  portable foundation suites pass under GCC 15 ASan/UBSan on home Ubuntu
+  (`p5-gcc-foundation-final/result.json`, 1.13 s). The source hashes and original
+  hosted compiler log are retained; production behavior is unchanged.
 - **Current Mac ASan/UBSan checks pass:**
   `p5-return-sanitize-tests.json` records four separately signed offscreen
   suites: Bridge (including preview destruction), all 36 coordinator cases,
