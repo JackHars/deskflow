@@ -12,6 +12,7 @@
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "../deskflow/MockEventQueue.h"
 #include "../deskflow/MockKeyState.h"
+#include "base/EventQueue.h"
 #include "deskflow/AppUtil.h"
 #include "deskflow/Computer.h"
 #include "deskflow/PlatformComputer.h"
@@ -21,6 +22,7 @@
 #include "server/ClientProxy1_8.h"
 #include "server/InputFilter.h"
 #include "server/PrimaryClient.h"
+#include "windowshare/InputEvidence.h"
 
 #include <QTemporaryDir>
 #include <limits>
@@ -2702,6 +2704,77 @@ void ServerTests::inputFilter_ownedActionsAndConnectionLifetime()
   InputFilter::SwitchInDirectionAction(&events, Direction::Left).perform(input);
   InputFilter::KeyboardBroadcastAction(&events).perform(input);
   QCOMPARE(received, 3U);
+  filter.setPrimaryClient(nullptr);
+}
+
+void ServerTests::inputFilter_actualQueueObservedBorrowedDispatch()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  auto recorder = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Core);
+  for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
+    const auto queue = static_cast<InputEvidenceQueue>(i);
+    if (!unboundedInputEvidenceQueue(queue))
+      recorder->initialize(queue, recorder.get(), 256);
+  }
+  InputEvidenceOwner owner;
+  owner.values.fill(1);
+  owner.values[4] = 7;
+  owner.identity.fill(7);
+  recorder->bindOwner(owner);
+  // Independent test process boundary; production never resets this marker.
+  deskflow::eventInputQueueConstructed.store(false);
+  QVERIFY(deskflow::installEventInputObserver(recorder->eventObserver()));
+  struct Reset
+  {
+    ~Reset()
+    {
+      deskflow::eventInputObserverInstalled.store(nullptr);
+    }
+  } reset;
+  EventQueue events;
+  InputFilter filter(&events);
+  filter.setPrimaryClient(&f.primary);
+  QVERIFY(recorder->arm(180000000000ULL));
+  unsigned borrowed = 0, configured = 0;
+  events.addHandler(EventTypes::ServerKeyboardBroadcast, &filter, [&](const Event &event) {
+    ++configured;
+    QVERIFY(!event.originalInputStamp());
+  });
+  events.addHandler(EventTypes::KeyStateKeyDown, &filter, [&](const Event &event) {
+    ++borrowed;
+    QVERIFY(event.getFlags() & Event::EventFlags::DontFreeData);
+    QCOMPARE(event.originalInputStamp(), (OriginalInputStamp{7, borrowed, 1}));
+    InputFilter::KeyboardBroadcastAction(&events).perform(event);
+    if (borrowed == 1) {
+      const Event nested(EventTypes::KeyStateKeyDown, f.primary.getEventTarget(), nullptr, 0, {7, 2, 1});
+      QVERIFY(events.dispatchEvent(nested));
+    }
+    recorder->stop();
+    recorder->finish();
+    QCOMPARE(recorder->state(), InputEvidenceState::Draining);
+  });
+  const Event source(EventTypes::KeyStateKeyDown, f.primary.getEventTarget(), nullptr, 0, {7, 1, 1});
+  QVERIFY(events.dispatchEvent(source));
+  QCOMPARE(borrowed, 2U);
+  QCOMPARE(configured, 2U);
+  recorder->finish();
+  QCOMPARE(recorder->state(), InputEvidenceState::Stopped);
+  QCOMPARE(recorder->loss(), InputEvidenceLoss::None);
+  std::array<std::uint64_t, 2> peaks{}, added{}, retired{};
+  while (const auto row = recorder->pop()) {
+    QVERIFY(row->kind == InputEvidenceKind::Queue); // no duplicate physical-source records
+    if (unboundedInputEvidenceQueue(row->queue)) {
+      const auto index = row->queue == InputEvidenceQueue::EventDispatch;
+      peaks[index] = std::max(peaks[index], row->depth);
+      added[index] = row->enqueued;
+      retired[index] = row->retired;
+      QCOMPARE(row->capacity, std::uint64_t{0});
+    }
+  }
+  QCOMPARE(peaks, (std::array<std::uint64_t, 2>{4, 4}));
+  QCOMPARE(added, peaks);
+  QCOMPARE(retired, peaks);
   filter.setPrimaryClient(nullptr);
 }
 

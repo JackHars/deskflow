@@ -30,6 +30,8 @@ constexpr const char *queueNames[]{
     "coordinator-operations",
     "coordinator-batch",
     "coordinator-preview",
+    "event-outstanding",
+    "event-dispatch",
     "private-output",
     "private-buffered-input",
     "private-incoming",
@@ -152,6 +154,12 @@ std::unique_ptr<InputEvidenceRuntime> InputEvidenceRuntime::open(const QString &
     throw std::runtime_error("Evidence recorder is one-shot per process");
   }
   result->m_recorder = recorder;
+  if (role == InputEvidenceRole::Core) {
+    require(
+        deskflow::installEventInputObserver(recorder->eventObserver()),
+        "Core event observer is one-shot and must precede EventQueue construction"
+    );
+  }
   result->m_run = run;
   result->m_control = control;
   result->m_duration = static_cast<std::uint64_t>(duration) * 1000000;
@@ -225,7 +233,8 @@ void InputEvidenceRuntime::drain()
       object["enqueued"] = QString::number(row->enqueued);
       object["retired"] = QString::number(row->retired);
       object["depth"] = QString::number(row->depth);
-      object["capacity"] = QString::number(row->capacity);
+      object["capacity"] = unboundedInputEvidenceQueue(row->queue) ? QJsonValue(QJsonValue::Null)
+                                                                   : QJsonValue(QString::number(row->capacity));
     } else {
       object["type"] = row->kind == InputEvidenceKind::Source   ? "source"
                        : row->kind == InputEvidenceKind::Native ? "native"

@@ -6,6 +6,7 @@
 #include "OriginalInputCapturedInbox.h"
 #include <QCoreApplication>
 #include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <cstdio>
@@ -55,7 +56,10 @@ std::unique_ptr<InputEvidenceRecorder> core(bool initialize = true)
   auto result = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Core);
   if (initialize)
     for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i)
-      result->initialize(static_cast<InputEvidenceQueue>(i), result.get(), 256);
+      result->initialize(
+          static_cast<InputEvidenceQueue>(i), result.get(),
+          unboundedInputEvidenceQueue(static_cast<InputEvidenceQueue>(i)) ? 0 : 256
+      );
   result->bindOwner(owner());
   return result;
 }
@@ -210,6 +214,43 @@ void stickyFailures()
       "bounded recorder overwrote or hid loss"
   );
 }
+void unboundedEventMetrics()
+{
+  for (const auto queue : {InputEvidenceQueue::EventOutstanding, InputEvidenceQueue::EventDispatch}) {
+    auto fabricated = core(false);
+    fabricated->initialize(queue, fabricated.get(), 256);
+    check(fabricated->loss() == InputEvidenceLoss::QueueIdentity, "unbounded event metric accepted a fake capacity");
+    auto recorder = core();
+    check(recorder->arm(1000000000), "arm failed");
+    // This is a counter fixture, not a queue allocation or claimed production
+    // limit. Depth beyond the bounded-schema ceiling must remain representable.
+    check(recorder->beginMutation(queue, recorder.get()), "event metric lock failed");
+    recorder->endMutation(queue, 65537, 0);
+    check(recorder->beginMutation(queue, recorder.get()), "event metric lock failed");
+    recorder->endMutation(queue, 0, 65537);
+    recorder->stop();
+    recorder->finish();
+    bool peak = false;
+    while (const auto row = recorder->pop())
+      if (row->queue == queue && row->depth == 65537)
+        peak = row->capacity == 0;
+    check(peak && recorder->loss() == InputEvidenceLoss::None, "unbounded accounting hid depth or invented a limit");
+    auto overflow = core();
+    check(overflow->beginMutation(queue, overflow.get()), "event metric lock failed");
+    overflow->endMutation(queue, UINT64_MAX, 0);
+    check(overflow->loss() == InputEvidenceLoss::None, "valid unbounded counter rejected");
+    check(overflow->beginMutation(queue, overflow.get()), "event metric lock failed");
+    overflow->endMutation(queue, 1, 0);
+    check(overflow->loss() == InputEvidenceLoss::QueueAccounting, "event counter overflow wrapped silently");
+    auto underflow = core();
+    check(underflow->beginMutation(queue, underflow.get()), "event metric lock failed");
+    underflow->endMutation(queue, 0, 1);
+    check(underflow->loss() == InputEvidenceLoss::QueueAccounting, "unbounded retirement bypassed accounting");
+  }
+  auto bounded = core(false);
+  bounded->initialize(InputEvidenceQueue::Capture, bounded.get(), 0);
+  check(bounded->loss() == InputEvidenceLoss::QueueIdentity, "bounded capture accepted unknown capacity");
+}
 void actualPortableQueues()
 {
   auto recorder = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Core);
@@ -226,7 +267,7 @@ void actualPortableQueues()
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
     if (queue != InputEvidenceQueue::Capture && queue != InputEvidenceQueue::Completed)
-      recorder->initialize(queue, recorder.get(), 256);
+      recorder->initialize(queue, recorder.get(), unboundedInputEvidenceQueue(queue) ? 0 : 256);
   }
   auto binding = owner();
   binding.values[4] = stream.epoch().id();
@@ -271,7 +312,7 @@ void revokeDuringDrain()
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
     if (queue != InputEvidenceQueue::Capture && queue != InputEvidenceQueue::Completed)
-      recorder->initialize(queue, recorder.get(), 256);
+      recorder->initialize(queue, recorder.get(), unboundedInputEvidenceQueue(queue) ? 0 : 256);
   }
   auto binding = owner();
   binding.values[4] = stream.epoch().id();
@@ -395,6 +436,53 @@ void privateConfiguration()
     inputEvidenceInstalled.store(nullptr);
     delete storage;
   }
+  auto coreConfig = valid;
+  coreConfig["role"] = "core";
+  coreConfig["output"] = parent + "/core-output.jsonl";
+  write(QJsonDocument(coreConfig).toJson());
+  runtime = InputEvidenceRuntime::open(configPath, InputEvidenceRole::Core);
+  storage = &runtime->recorder();
+  const auto *observer = deskflow::eventInputObserverInstalled.load();
+  check(observer == &storage->eventObserver(), "Core runtime did not install its retained event observer");
+  check(!storage->readyOwner(), "runtime invented an EventQueue baseline before construction");
+  // Serialization fixture only. Actual queue initialization/lifetimes are
+  // exercised by EventQueueTests and ServerTests with the real InputFilter.
+  observer->initialize(observer->context, storage);
+  for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
+    const auto queue = static_cast<InputEvidenceQueue>(i);
+    if (!unboundedInputEvidenceQueue(queue))
+      storage->initialize(queue, storage, 256);
+  }
+  storage->bindOwner(owner());
+  check(storage->arm(1000000000), "runtime serialization baseline failed");
+  runtime.reset();
+  check(
+      inputEvidenceInstalled.load() == storage && deskflow::eventInputObserverInstalled.load() == observer,
+      "runtime teardown freed or uninstalled a producer's retained observer"
+  );
+  QFile output(parent + "/core-output.jsonl");
+  check(output.open(QIODevice::ReadOnly), "Core evidence output missing");
+  std::size_t nullRows = 0, boundedRows = 0;
+  while (!output.atEnd()) {
+    const auto row = QJsonDocument::fromJson(output.readLine()).object();
+    if (row["type"] == "header")
+      check(row["queues"].toArray().size() == 15, "Core header lost its declared queue inventory");
+    if (row["type"] != "queue")
+      continue;
+    if (row["queue"] == "event-outstanding" || row["queue"] == "event-dispatch") {
+      check(row.contains("capacity") && row["capacity"].isNull(), "unbounded capacity was not serialized as null");
+      ++nullRows;
+    } else {
+      check(row["capacity"] == "256", "bounded capacity lost canonical integer representation");
+      ++boundedRows;
+    }
+  }
+  check(nullRows == 4 && boundedRows == 26, "runtime omitted initial/final queue boundaries");
+  // No producers survive this unit fixture; production deliberately retains
+  // both targets until process exit instead of attempting live reassignment.
+  deskflow::eventInputObserverInstalled.store(nullptr);
+  inputEvidenceInstalled.store(nullptr);
+  delete storage;
 }
 } // namespace
 int main(int argc, char **argv)
@@ -403,6 +491,7 @@ int main(int argc, char **argv)
   try {
     baselinesAndLifecycle();
     stickyFailures();
+    unboundedEventMetrics();
     actualPortableQueues();
     revokeDuringDrain();
     nativeFields();

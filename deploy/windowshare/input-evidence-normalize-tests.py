@@ -15,6 +15,9 @@ HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('input_normalizer', HERE / 'input-evidence-normalize.py')
 normalizer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(normalizer)
+spec = importlib.util.spec_from_file_location('h11_analyzer', HERE / 'h11-evidence.py')
+h11 = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(h11)
 
 
 class Fixture:
@@ -36,7 +39,8 @@ class Fixture:
                 for at, enqueued, retired in [(start, 0, 0), (start+1, 1, 0), (start+2, 1, 1), (start+100_000_000, 1, 1)]:
                     rows.append({'type': 'queue', 'timeNs': str(at), 'queue': name,
                                  'enqueued': str(enqueued), 'retired': str(retired),
-                                 'depth': str(enqueued-retired), 'capacity': str(normalizer.CAPACITIES[name])})
+                                 'depth': str(enqueued-retired), 'capacity': None if normalizer.CAPACITIES[name] is None
+                                 else str(normalizer.CAPACITIES[name])})
             for index, event_type in enumerate((10, 11)):
                 if role == 'host':
                     continue
@@ -105,6 +109,64 @@ class NormalizeTests(unittest.TestCase):
         self.assertTrue(all(path.stat().st_mode & 0o077 == 0 for path in output.iterdir()))
         with self.assertRaises(normalizer.EvidenceError):
             normalizer.write_normalized(output, journals, normalizer.normalize(*journals))
+
+    def test_complete_declared_inventory_round_trips_into_h11_analyzer(self):
+        journals = self.fixture.journals()
+        output = Path(self.temporary.name) / 'normalized'
+        result = normalizer.write_normalized(output, journals, normalizer.normalize(*journals))
+        # Consume the actual hashed artifacts/configuration emitted by the
+        # normalizer. This intentionally short fixture must never pass H11.
+        report = h11.analyze_input(h11.Bundle(output / 'normalized-input.json'), result['input'], result['run_id'])
+        self.assertEqual(len(report['queues']), 19)
+        self.assertEqual(report['status'], 'FAIL')
+        self.assertTrue(any('shorter than 120 seconds' in failure for failure in report['failures']))
+        self.assertEqual(report['capacity_certification'], 'INCOMPLETE')
+        self.assertEqual(set(report['unbounded_metrics']), h11.UNBOUNDED_METRICS)
+        for name in h11.UNBOUNDED_METRICS:
+            self.assertIsNone(report['queues'][name]['capacity'])
+            self.assertEqual(report['queues'][name]['peak_depth'], 1)
+        self.assertFalse(result['pending_queue_coverage']['full_component_eligible'])
+
+    def test_unbounded_event_metric_preserves_depth_beyond_bounded_schema(self):
+        for row in self.fixture.values['core']:
+            if row['type'] == 'queue' and row['queue'] == 'event-outstanding':
+                row['enqueued'] = str(int(row['enqueued']) * 65537)
+                row['retired'] = str(int(row['retired']) * 65537)
+                row['depth'] = str(int(row['depth']) * 65537)
+        result = self.fixture.normalize()
+        queue = next(item for item in result['queues'] if item[1] == 'event-outstanding')
+        self.assertIsNone(queue[2])
+        self.assertEqual(max(int(row['depth']) for row in queue[3]), 65537)
+
+    def test_null_is_only_valid_for_declared_unbounded_event_metrics(self):
+        original = copy.deepcopy(self.fixture.values)
+        for name, capacities in [('capture', (None, 'null', 0)),
+                                 ('event-outstanding', ('256', '0', 'null', 0, False)),
+                                 ('event-dispatch', ('65536', 'None', 0.0))]:
+            for capacity in capacities:
+                with self.subTest(name=name, capacity=capacity):
+                    self.fixture.values = copy.deepcopy(original)
+                    for row in self.fixture.values['core']:
+                        if row['type'] == 'queue' and row['queue'] == name:
+                            row['capacity'] = capacity
+                    self.rejected()
+
+    def test_unbounded_metrics_still_reject_accounting_loss_and_missing_inventory(self):
+        original = copy.deepcopy(self.fixture.values)
+        for mutation in ('aggregate', 'underflow', 'missing', 'overflow'):
+            with self.subTest(mutation=mutation):
+                self.fixture.values = copy.deepcopy(original)
+                rows = [row for row in self.fixture.values['core'] if row['type'] == 'queue' and
+                        row['queue'] == 'event-outstanding']
+                if mutation == 'aggregate':
+                    rows[1].update(enqueued='5', retired='5', depth='0')
+                elif mutation == 'underflow':
+                    rows[1].update(enqueued='0', retired='1', depth='0')
+                elif mutation == 'missing':
+                    self.fixture.row('core', 'header')['queues'].remove('event-outstanding')
+                else:
+                    rows[1].update(enqueued=str(2**64), depth=str(2**64))
+                self.rejected()
 
     def test_native_timestamp_rewrite_is_not_repaired(self):
         self.fixture.row('native', 'native')['cgTimestampNs'] = '123'

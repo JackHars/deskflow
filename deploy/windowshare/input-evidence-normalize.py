@@ -21,8 +21,11 @@ import sys
 
 QUEUES = ('capture', 'translation', 'completed', 'server-pending', 'server-completed',
           'server-executing', 'coordinator-operations', 'coordinator-batch',
-          'coordinator-preview', 'private-output', 'private-buffered-input', 'private-incoming', 'private-dispatch')
-CAPACITIES = dict(zip(QUEUES, (256, 256, 256, 256, 256, 256, 17, 16, 16, 16384, 1488, 372, 256)))
+          'coordinator-preview', 'event-outstanding', 'event-dispatch',
+          'private-output', 'private-buffered-input', 'private-incoming', 'private-dispatch')
+# None is an explicit absence of a production bound, not missing metadata or
+# the bounded recorder's capacity. Only these two EventQueue metrics use it.
+CAPACITIES = dict(zip(QUEUES, (256, 256, 256, 256, 256, 256, 17, 16, 16, None, None, 16384, 1488, 372, 256)))
 KINDS = {'key_down', 'key_up', 'key_repeat', 'button_down', 'button_up', 'drag', 'scroll', 'hover'}
 TAG = 0x445357494E503031
 MAX_BYTES = 256 * 1024 * 1024
@@ -202,12 +205,16 @@ class Journal:
 def checked_queues(journal):
     for name, rows in journal.queues.items():
         previous = (0, 0, 0)
-        capacity = None
+        capacity = CAPACITIES[name]
         for index, row in enumerate(rows):
-            added, retired, depth, limit = (integer(row[key], 'queue ' + key) for key in ('enqueued', 'retired', 'depth', 'capacity'))
-            require(limit == CAPACITIES[name] and (capacity is None or capacity == limit), 'queue capacity changed/substituted')
-            capacity = limit
-            require(added >= previous[0] and retired >= previous[1] and depth == added-retired and depth <= limit,
+            added, retired, depth = (integer(row[key], 'queue ' + key) for key in ('enqueued', 'retired', 'depth'))
+            if capacity is None:
+                require(row['capacity'] is None, 'unbounded event metric must declare capacity:null')
+            else:
+                require(integer(row['capacity'], 'queue capacity', nonzero=True) == capacity,
+                        'queue capacity changed/substituted')
+            require(added >= previous[0] and retired >= previous[1] and depth == added-retired and
+                    (capacity is None or depth <= capacity),
                     'queue accounting, overflow or reset')
             require(added == previous[0] or retired == previous[1], 'queue aggregates additions and retirements')
             if index == 0:
@@ -324,9 +331,12 @@ def write_normalized(output: Path, journals, data):
               'raw_journals': {journal.header['role']: {'path': str(journal.path), 'sha256': journal.sha256} for journal in journals},
               'capture_identities': mapping, 'input': input_config, 'latency': None,
               'pending_queue_coverage': {'status': 'INCOMPLETE', 'full_component_eligible': False,
-                  'unmeasured': ['Core generic EventQueue pending/saved translated events and dispatch path',
-                                 'platform event queues and OS/kernel buffers']},
+                  'observed_event_scope': 'original-stamped input views from admission through pending/saved/retrieved storage and dispatch completion',
+                  'unbounded_metrics': ['core-event-outstanding', 'core-event-dispatch'],
+                  'capacity_certification': 'INCOMPLETE',
+                  'unmeasured': ['unstamped/configured Core events', 'platform event queues and OS/kernel buffers']},
               'limits': ['queue inventory covers only the declared Deskflow structures; complete pending-input coverage remains unverified',
+                         'EventQueue lifetime and callback counts have no configured production capacity; their null bounds cannot certify bounded backlog',
                          'AppKit receipt is an owned app observation, not physical hardware consumption',
                          'raw capture before first queue is stream observation, not a physical-neutral assertion']}
     artifact('normalized-input.json', encoded(report) + b'\n')

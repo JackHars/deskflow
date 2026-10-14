@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include "EventInputObserver.h"
 #include "EventTypes.h"
 #include "windowshare/OriginalInputStamp.h"
 
@@ -183,13 +184,21 @@ public:
   }
   void setOriginalInputStamp(deskflow::windowshare::OriginalInputStamp stamp) noexcept
   {
+    m_inputObservation.verify(stamp);
     m_originalInputStamp = stamp;
   }
 
   //@}
 
 private:
-  static deskflow::windowshare::OriginalInputStamp inputStamp(EventTypes type) noexcept
+  friend class EventQueue;
+  void observeInput(const deskflow::EventInputObserver *observer, const void *queue) const noexcept
+  {
+    m_inputObservation.verify(m_originalInputStamp);
+    if (isInputType(m_type) && m_originalInputStamp)
+      m_inputObservation.admit(observer, queue, m_originalInputStamp);
+  }
+  static bool isInputType(EventTypes type) noexcept
   {
     using enum EventTypes;
     switch (type) {
@@ -203,10 +212,16 @@ private:
     case PrimaryComputerWheel:
     case PrimaryComputerHotkeyDown:
     case PrimaryComputerHotkeyUp:
-      return deskflow::windowshare::OriginalInputStampScope::next();
+      return true;
     default:
-      return {};
+      return false;
     }
+  }
+  static deskflow::windowshare::OriginalInputStamp inputStamp(EventTypes type) noexcept
+  {
+    if (isInputType(type))
+      return deskflow::windowshare::OriginalInputStampScope::next();
+    return {};
   }
   EventTypes m_type = EventTypes::Unknown;
   void *m_target = nullptr;
@@ -214,4 +229,5 @@ private:
   Flags m_flags = EventFlags::NoFlags;
   EventData *m_dataObject = nullptr;
   deskflow::windowshare::OriginalInputStamp m_originalInputStamp;
+  mutable deskflow::EventInputToken m_inputObservation;
 };

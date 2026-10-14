@@ -161,6 +161,7 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
       "${WS_ROOT}/LocalInputCodeAdmissionTests.cpp" "${WS_ROOT}/LocalInputCodeAdmission.cpp"
       "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/OriginalKeyboard.cpp" "${WS_ROOT}/OriginalInput.cpp")
     target_compile_features(windowshare-code-admission-tests PRIVATE cxx_std_20)
+    target_include_directories(windowshare-code-admission-tests PRIVATE "${WS_ROOT}/..")
     target_compile_definitions(windowshare-code-admission-tests PRIVATE QT_NO_KEYWORDS LOCAL_INPUT_CODE_ADMISSION_TEST_VERIFIER=1)
     target_link_libraries(windowshare-code-admission-tests PRIVATE Qt6::Core Qt6::Network Threads::Threads)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

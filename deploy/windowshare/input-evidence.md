@@ -13,10 +13,12 @@ capture epoch. No text strings are collected; raw key codes, modifier flags,
 pointer effects and timestamps are private diagnostic data.
 
 **Physical observer provenance and AppKit field preservation are NOT_RUN. Full
-pending-queue coverage is INCOMPLETE. H11 is not complete.** In particular, the
-Core generic EventQueue's pending/saved translated events and dispatch path are
-not measured by this version. Platform event queues and kernel buffers are also
-outside the declared inventory. A normalized trace cannot certify complete
+pending-queue coverage is INCOMPLETE. H11 is not complete.** Core's original-
+stamped EventQueue input views are observed through pending/saved/retrieved
+storage and dispatch completion. Their production containers have no configured
+capacity, so these metrics explicitly declare `capacity:null`. Unstamped or
+configured Core events, platform event queues and OS/kernel buffers remain
+outside that inventory. A normalized trace cannot certify complete or bounded
 queue coverage or substitute for a latency recording.
 
 ## Private configuration and lifetime
@@ -133,7 +135,8 @@ producer, but it does not keep a run armed after shutdown.
 
 Each mutation has separate cumulative enqueue/retirement counters. A row never
 combines both directions, so an intermediate peak cannot disappear. Core has
-all 13 entries; Host has the last four; Native has no input forwarding queue.
+all 15 entries; Host has the last four; Native has no input forwarding queue.
+The normalized Core/Host inventory therefore has 19 separately scoped entries.
 
 | Name | Unit/capacity | Observed structure |
 | --- | --- | --- |
@@ -146,15 +149,41 @@ all 13 entries; Host has the last four; Native has no input forwarding queue.
 | coordinator-operations | 17 records | GUI/Server coordinator operation deque |
 | coordinator-batch | 16 records | Retained mapped batch |
 | coordinator-preview | 16 records | Retained batch preview |
+| event-outstanding | Event views; no configured capacity (`null`) | Original-stamped input admitted to EventQueue until dispatch completion or abandoned lifetime; includes pending, saved and caller-retrieved storage |
+| event-dispatch | Active callbacks; no configured capacity (`null`) | Dispatch scopes for those original-stamped input views, including nested InputFilter borrowed views |
 | private-output | 16384 bytes | Accepted QLocalSocket output, retired by bytesWritten |
 | private-buffered-input | 1488 bytes | Actual QLocalSocket receive buffer, observed synchronously at readyRead and around reads/abort |
 | private-incoming | 372 bytes | Private frame assembly buffer |
 | private-dispatch | 256 active calls (diagnostic ceiling) | Private framed-message callback stack |
 
-Execution-depth ceilings bound evidence accounting; they are not invented
-production queue limits. The private-output retirement is a Qt write-buffer
-observation, not peer consumption. No full pending-input queue certification is
-available until the unmeasured generic EventQueue path is covered and reviewed.
+The two EventQueue counters count views and callbacks, not additional physical
+source records. The move-owned token follows the actual Event across storage
+transfers and remains owned by a local dispatch scope through nested callbacks,
+including a callback that destroys its Event or queue. Unhandled, dropped,
+overwritten or throwing stamped events record sticky loss. Public provenance
+mutation and a late/replaced observer also invalidate evidence. Configured and
+unstamped actions remain outside the counters; they are not relabeled as input.
+
+The optional base observer uses a process-retained function-pointer target,
+installed by Core before EventQueue construction. Event's layout and move rules
+are identical in ON/OFF builds. Added callbacks perform no allocation or wait.
+Installation is one-shot and checks a monotonic process-wide queue-construction
+marker, including already-destroyed queues whose retrieved Events may survive.
+Creating a new queue cannot conceal a missing earlier queue baseline. Replacement
+is refused, and the recorder/observer target is retained until process exit.
+Both counters participate in the same try-lock arm/terminal boundary as other
+declared queues: a retrieved event or active callback prevents an empty arm,
+and a concurrent mutation invalidates the attempted evidence boundary without
+delaying ordinary dispatch. No input routing or admission semantics change.
+
+Existing execution-depth ceilings bound evidence accounting, not production
+queue storage. The private-output retirement is a Qt write-buffer observation,
+not peer consumption. `capacity:null` is required only for the two declared
+EventQueue metrics; it is never inferred from a missing field, serialized as
+zero, or replaced with the recorder's 8192-row capacity. Accounting, growth,
+final drain and loss checks still apply. The analyzer reports their capacity
+certification as INCOMPLETE, even when all observed rows are consistent.
+Unmeasured platform/kernel buffers still prevent full pending-input coverage.
 
 ## Normalization and latency
 
@@ -196,10 +225,13 @@ Pure regression commands (no input or process launch):
 
 ```sh
 python3 deploy/windowshare/input-evidence-normalize-tests.py
+python3 deploy/windowshare/h11-evidence-tests.py
 ctest --test-dir build/mac-default -R '^windowshare-input-evidence$' --output-on-failure
+ctest --test-dir build/mac-default -R '^(EventQueueTests|ServerTests)$' --output-on-failure
 ```
 
 Use the build directory containing the frozen candidate; the C++ suite uses
 only pure recorder/queue/config fixtures and private temporary files. The
 normalizer tests are explicitly synthetic parser fixtures, never acceptance
-bundles.
+bundles. EventQueueTests also runs with WindowShare OFF; the Server regression
+uses the real InputFilter borrowed-dispatch path without a display or OS input.

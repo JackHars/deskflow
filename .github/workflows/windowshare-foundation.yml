@@ -20,6 +20,7 @@ on:
       - 'src/lib/platform/XWindowsComputer.*'
       - 'src/lib/platform/EiComputer.*'
       - 'src/lib/base/Event*'
+      - 'src/unittests/base/EventQueueTests.*'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
       - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
@@ -62,6 +63,7 @@ on:
       - 'src/lib/platform/XWindowsComputer.*'
       - 'src/lib/platform/EiComputer.*'
       - 'src/lib/base/Event*'
+      - 'src/unittests/base/EventQueueTests.*'
       - 'src/lib/platform/OriginalKeyboard_mac.*'
       - 'src/lib/platform/OriginalInput*_mac.*'
       - 'src/lib/platform/CMakeLists.txt'
@@ -168,8 +170,8 @@ jobs:
       - name: Compile the real opt-in Linux injection backend
         run: |
           cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
-          cmake --build build/integrated --target deskflow-core windowshare-core-args-tests windowshare-x11-viewport-tests EiComputerTests OriginalInputCoordinatorTests InputSequenceTests ComputerInputSequenceTests ClientProxyTests ServerProxyTests ServerTests --parallel 2
-          QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(EiComputerTests|OriginalInputCoordinatorTests|InputSequenceTests|ComputerInputSequenceTests|ClientProxyTests|ServerProxyTests|ServerTests|windowshare-(core-args|x11-viewport-.*))$' --output-on-failure
+          cmake --build build/integrated --target deskflow-core EventQueueTests windowshare-core-args-tests windowshare-x11-viewport-tests EiComputerTests OriginalInputCoordinatorTests InputSequenceTests ComputerInputSequenceTests ClientProxyTests ServerProxyTests ServerTests --parallel 2
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(EventQueueTests|EiComputerTests|OriginalInputCoordinatorTests|InputSequenceTests|ComputerInputSequenceTests|ClientProxyTests|ServerProxyTests|ServerTests|windowshare-(core-args|x11-viewport-.*))$' --output-on-failure
       - name: Verify terminal GNOME provider absence on a private bus
         run: python3 deploy/windowshare/gnome-core-smoke.py build/integrated/bin/deskflow-core
       - name: Exercise the real core observer on a private Xvfb
@@ -177,8 +179,16 @@ jobs:
       - name: Check ordinary protocol compatibility with window sharing disabled
         run: |
           cmake -S . -B build/legacy -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
-          cmake --build build/legacy --target deskflow-core EiComputerTests ServerTests ClientProxyTests ServerProxyTests --parallel 2
-          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(EiComputerTests|ServerTests|ClientProxyTests|ServerProxyTests)$' --output-on-failure
+          cmake --build build/legacy --target deskflow-core EventQueueTests EiComputerTests ServerTests ClientProxyTests ServerProxyTests --parallel 2
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(EventQueueTests|EiComputerTests|ServerTests|ClientProxyTests|ServerProxyTests)$' --output-on-failure
+      - name: Verify generic event observation lifetime with sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          cmake -S . -B build/events-sanitize -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+          cmake --build build/events-sanitize --target EventQueueTests --parallel 2
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/events-sanitize/src/unittests -R '^EventQueueTests$' --no-tests=error --output-on-failure
       - name: Package and verify inert experimental Linux binaries
         run: |
           python3 deploy/windowshare/package-linux-tests.py
@@ -245,8 +255,8 @@ jobs:
       - run: ctest --test-dir build/app --output-on-failure
       - name: Configure opt-in Deskflow integration
         run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-      - run: cmake --build build/integrated --target deskflow-core windowshare-core-args-tests OriginalInputCoordinatorTests ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
-      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(OriginalInputCoordinatorTests|ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
+      - run: cmake --build build/integrated --target deskflow-core EventQueueTests windowshare-core-args-tests OriginalInputCoordinatorTests ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
+      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(EventQueueTests|OriginalInputCoordinatorTests|ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
       - name: Verify Mac hotkey modifier mapping without posting input
         env:
           QT_QPA_PLATFORM: offscreen
@@ -254,8 +264,8 @@ jobs:
       - name: Check ordinary Core compatibility with window sharing disabled
         run: |
           cmake -S . -B build/legacy -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-          cmake --build build/legacy --target deskflow-core ServerTests ClientProxyTests ServerProxyTests --parallel 3
-          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(ServerTests|ClientProxyTests|ServerProxyTests)$' --output-on-failure
+          cmake --build build/legacy --target deskflow-core EventQueueTests ServerTests ClientProxyTests ServerProxyTests --parallel 3
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(EventQueueTests|ServerTests|ClientProxyTests|ServerProxyTests)$' --output-on-failure
       - name: Verify mixed input state, capture lifecycle and private CGEvent construction
         run: |
           cmake -S src/unittests/windowshare -B build/keyboard -DWINDOWSHARE_SANITIZERS=ON

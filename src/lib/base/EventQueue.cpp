@@ -35,9 +35,13 @@ static void interrupt(Arch::ThreadSignal, void *data)
 
 EventQueue::EventQueue() : m_readyMutex(new Mutex), m_readyCondVar(new CondVar<bool>(m_readyMutex, false))
 {
+  deskflow::eventInputQueueConstructed.store(true);
   ARCH->setSignalHandler(Arch::ThreadSignal::Interrupt, &interrupt, this);
   ARCH->setSignalHandler(Arch::ThreadSignal::Terminate, &interrupt, this);
   m_buffer = std::make_unique<SimpleEventQueueBuffer>();
+  m_inputObserver = deskflow::eventInputObserverInstalled.load();
+  if (m_inputObserver)
+    m_inputObserver->initialize(m_inputObserver->context, this);
 }
 
 EventQueue::~EventQueue()
@@ -170,9 +174,11 @@ bool EventQueue::getEvent(Event &event, double timeout)
 
 bool EventQueue::dispatchEvent(const Event &event)
 {
-#if defined(__APPLE__)
+  checkInputObserver();
+  event.observeInput(m_inputObserver, this);
+  auto observation = event.m_inputObservation.takeForDispatch();
+  observation.dispatch();
   auto dispatch = [&] {
-#endif
     void *target = event.getTarget();
     if (auto typeHandler = getHandler(event.getType(), target); typeHandler.has_value()) {
       (*typeHandler)(event);
@@ -183,10 +189,27 @@ bool EventQueue::dispatchEvent(const Event &event)
       return true;
     }
     return false;
-#if defined(__APPLE__)
   };
-  return deskflow::runInAutoReleasePool(dispatch);
+#if defined(__APPLE__)
+  const bool handled = deskflow::runInAutoReleasePool(dispatch);
+#else
+  const bool handled = dispatch();
 #endif
+  if (handled)
+    observation.complete();
+  return handled;
+}
+
+void EventQueue::checkInputObserver() const noexcept
+{
+  const auto *current = deskflow::eventInputObserverInstalled.load(std::memory_order_acquire);
+  if (current == m_inputObserver)
+    return;
+  // A late/replaced observer cannot establish an empty baseline for this
+  // already existing queue. Notify both retained lifetimes without rebinding.
+  for (const auto *observer : {current, m_inputObserver})
+    if (observer)
+      observer->observe(observer->context, this, {}, deskflow::EventInputObservation::Lost);
 }
 
 void EventQueue::addEvent(Event &&event)
@@ -201,6 +224,9 @@ void EventQueue::addEvent(Event &&event)
   default:
     break;
   }
+
+  checkInputObserver();
+  event.observeInput(m_inputObserver, this);
 
   if ((event.getFlags() & Event::EventFlags::DeliverImmediately) != 0) {
     dispatchEvent(event);

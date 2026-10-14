@@ -31,6 +31,7 @@ MAX_INPUT_GAP_NS = (2 * NS + 119) // 120
 KINDS = frozenset(('key_down', 'key_up', 'key_repeat', 'button_down', 'button_up',
                    'drag', 'scroll', 'hover'))
 REQUIRED_KINDS = KINDS - {'key_repeat'}
+UNBOUNDED_METRICS = frozenset(('core-event-outstanding', 'core-event-dispatch'))
 IDENTIFIER = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}\Z')
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 
@@ -174,7 +175,7 @@ def input_events(rows: list, event: str) -> list:
     return rows
 
 
-def queue_metrics(rows: list, first: dict, last: dict, capacity: int) -> tuple[dict, list[str]]:
+def queue_metrics(rows: list, first: dict, last: dict, capacity: int | None) -> tuple[dict, list[str]]:
     require(rows, 'queue has no observations')
     initial = {'enqueued': 0, 'retired': 0, 'depth': 0, 'deadline_revocations': 0, 'overflows': 0}
     previous = initial
@@ -184,7 +185,7 @@ def queue_metrics(rows: list, first: dict, last: dict, capacity: int) -> tuple[d
         keys(row, {'event', 'index', 't_ns'} | set(initial), 'queue record')
         require(row['event'] == 'queue', 'unexpected queue record')
         for counter in initial:
-            integer(row[counter], 'queue ' + counter)
+            integer(row[counter], 'queue ' + counter, high=2**64 - 1)
             if counter != 'depth':
                 require(row[counter] >= previous[counter], 'queue counter reset or reorder')
         require(row['depth'] == row['enqueued'] - row['retired'], 'queue accounting mismatch')
@@ -194,7 +195,7 @@ def queue_metrics(rows: list, first: dict, last: dict, capacity: int) -> tuple[d
         counts.append(row['depth'])
     require(all(rows[0][k] == v for k, v in initial.items()) and rows[0]['t_ns'] == first['t_ns'],
             'queue must begin with an observed empty zero-counter baseline')
-    if max(counts) > capacity:
+    if capacity is not None and max(counts) > capacity:
         failures.append('queue capacity exceeded')
     if rows[-1]['depth'] != 0:
         failures.append('queue did not drain')
@@ -226,7 +227,8 @@ def queue_metrics(rows: list, first: dict, last: dict, capacity: int) -> tuple[d
             failures.append('pending queue grows (positive trend or final-ten-second mean)')
     else:
         first_mean = last_mean = slope = None
-    return {'peak_depth': max(counts), 'enqueued': rows[-1]['enqueued'],
+    return {'capacity': capacity, 'capacity_certification': 'NOT_CONFIGURED' if capacity is None else 'DECLARED',
+            'peak_depth': max(counts), 'enqueued': rows[-1]['enqueued'],
             'retired': rows[-1]['retired'], 'final_depth': rows[-1]['depth'],
             'first_10s_mean': first_mean, 'last_10s_mean': last_mean,
             'linear_slope_per_second': slope,
@@ -308,19 +310,30 @@ def analyze_input(bundle: Bundle, config: dict, run: str) -> dict:
     if maximum_gap > MAX_INPUT_GAP_NS:
         failures.append('source cadence contains a gap over two 120Hz periods')
     queue_configs = config['queues']
-    require(type(queue_configs) is list and 1 <= len(queue_configs) <= 16, 'require bounded queue inventory')
+    # Bound the descriptor/parser workload, independently of each production
+    # queue's capacity. The declared Core+Host inventory currently has 19 items.
+    require(type(queue_configs) is list and 1 <= len(queue_configs) <= 32, 'require bounded queue inventory')
     queues = {}
+    unbounded = []
     for q in queue_configs:
         keys(q, {'name', 'capacity', 'clock', 'trace'}, 'queue configuration')
         name = identifier(q['name'], 'queue name')
         require(name not in queues, 'duplicate queue name')
-        capacity = integer(q['capacity'], 'queue capacity', 1, 65536)
+        if name in UNBOUNDED_METRICS:
+            require(q['capacity'] is None, 'unbounded event metric must declare capacity:null')
+            capacity = None
+            unbounded.append(name)
+        else:
+            capacity = integer(q['capacity'], 'queue capacity', 1, 65536)
         clock = identifier(q['clock'], 'queue clock')
         first, values, last = trace(bundle, q['trace'], 'deskflow-h11-queue-v1', {**identity, 'clock': clock})
         metrics, errors = queue_metrics(values, first, last, capacity)
         queues[name] = metrics
         failures.extend(name + ': ' + message for message in errors)
-    return {'status': 'FAIL' if failures else 'PASS', 'failures': failures,
+    return {'status': 'FAIL' if failures else 'INCOMPLETE' if unbounded else 'PASS', 'failures': failures,
+            'capacity_certification': 'INCOMPLETE' if unbounded else 'DECLARED',
+            'unbounded_metrics': unbounded,
+            'limitations': ['no configured bound for declared EventQueue metrics; bounded-backlog certification remains incomplete'] if unbounded else [],
             'duration_s': duration / NS, 'source_records': len(sources), 'native_receipts': len(receipts),
             'non_coalescible_records': sum(v for k, v in kinds.items() if k != 'hover'),
             'hover_captured': kinds['hover'], 'hover_compressed': len(replacements),

@@ -55,6 +55,11 @@ are distinct from bounded synthetic timestamps used to re-encode a static image.
   predeclared growth tests may require investigating noise; do not loosen them
   after seeing a run. A missing queue in the collection inventory is a review
   failure that a parser cannot discover by itself.
+  The actual Core EventQueue lifetime/dispatch metrics have no configured
+  production capacity. Their exact names require `capacity:null`; accounting,
+  observed growth and final-drain checks still run, but capacity certification
+  remains **INCOMPLETE**. A successful finite trace cannot prove a production
+  bound. Platform/kernel buffers remain outside the collector's inventory.
 * Latency uses one wired 1920×1080, 60 fps stream, at least 600 predeclared
   consecutive source frames, and at least ten seconds of observation. The
   actual stimulus/capture timestamps must also match 60 fps within the declared endpoint
@@ -188,7 +193,7 @@ Only finalized UTF-8 JSON/JSONL is accepted: no duplicate fields, NaN/infinity,
 unknown fields, booleans in integer fields, missing end marker or partial last
 line. Artifacts must be regular, non-symlink **sibling** files, each referenced
 once by `{ "path": "source.jsonl", "sha256": "64 lowercase hexadecimal digits" }`.
-There are at most 100,000 records per trace, 32 MiB per trace, 16 queues, ten
+There are at most 100,000 records per trace, 32 MiB per trace, 32 queue descriptors, ten
 minutes per trace, and 16 GiB for the single raw latency recording. Oversize
 evidence is denied rather than truncated. Split a longer soak into separately
 predeclared runs; do not extract an arbitrary passing interval afterward.
@@ -213,6 +218,18 @@ source_clock, receipt_clock: separate explicit local clock identifiers
 source, receipts, compressions: artifacts, even when no hover was compressed
 queues: [{name, capacity, clock, trace: artifact}, ...]
 ```
+
+`capacity` is a positive integer from 1 to 65536 for bounded metrics. Exactly
+`core-event-outstanding` and `core-event-dispatch` instead require JSON `null`,
+because their production EventQueue storage/callback lifetimes are unbounded.
+Finite substituted capacities for those names, null on another name, missing
+metadata, booleans or string `"null"` are rejected. These metrics are counted
+Event views/callbacks, not new captured physical events. The normalizer emits
+all 19 declared Core/Host descriptors, with exact role-scoped names and these
+two explicit nulls. The 32-descriptor parser bound is not a queue-depth limit.
+An otherwise valid input component containing either metric returns INCOMPLETE
+with the measured counts and `capacity_certification:"INCOMPLETE"`; actual
+loss, growth, insufficient workload or drain failures still return FAIL.
 
 Each trace begins with exactly
 `{event:"start", format, run_id, clock, t_ns, owner, epoch}`. Latency traces omit
@@ -241,7 +258,7 @@ privacy measure: low-entropy text can be recovered. Use a disposable known
 test pattern and omit user text entirely.
 
 Queue `enqueued`, `retired`, `deadline_revocations`, and `overflows` are cumulative
-nondecreasing counters, with `depth == enqueued - retired`. The first queue row
+nondecreasing unsigned 64-bit counters, with `depth == enqueued - retired`. The first queue row
 is an observed zero-counter/empty baseline at start. Every subsequent mutation
 is included; a retirement after failed delivery still requires its failure to
 appear in the receipt/deadline evidence. Hover `replacement` is a later source

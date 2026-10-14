@@ -7,6 +7,7 @@
 #pragma once
 
 #include "arch/Arch.h"
+#include "base/Log.h"
 
 #include <QObject>
 
@@ -19,7 +20,14 @@ private Q_SLOTS:
   void dispatchEvent_noHandler_returnsFalse();
   void dispatchEvent_noTypeHandler_dispatchesUnknownHandler();
   void dispatchEvent_handlerRemovesItself_keepsHandlerAliveUntilReturn();
+  void inputObservation_pendingSavedRetrievedAndMoves();
+  void inputObservation_dispatchAndArmBoundaries();
+  void inputObservation_nestedAndDestructiveDispatch();
+  void inputObservation_dropThrowAndAdoptBuffer();
+  void inputObservation_stampMutationAndInstallation();
+  void inputObservation_disabledAndUnstamped();
 
 private:
   Arch m_arch;
+  Log m_log;
 };

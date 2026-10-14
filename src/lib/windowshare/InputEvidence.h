@@ -5,6 +5,7 @@
 #pragma once
 
 #include "OriginalInput.h"
+#include "base/EventInputObserver.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -31,12 +32,18 @@ enum class InputEvidenceQueue : std::uint8_t
   CoordinatorOperations,
   CoordinatorBatch,
   CoordinatorPreview,
+  EventOutstanding,
+  EventDispatch,
   PrivateOutput,
   PrivateBufferedInput,
   PrivateIncoming,
   PrivateDispatch,
   Count
 };
+inline constexpr bool unboundedInputEvidenceQueue(InputEvidenceQueue queue) noexcept
+{
+  return queue == InputEvidenceQueue::EventOutstanding || queue == InputEvidenceQueue::EventDispatch;
+}
 enum class InputEvidenceLoss : std::uint8_t
 {
   None,
@@ -137,12 +144,18 @@ class InputEvidenceRecorder final
 public:
   static constexpr std::size_t capacity = 8192;
   static constexpr std::size_t queueCount = static_cast<std::size_t>(InputEvidenceQueue::Count);
-  explicit InputEvidenceRecorder(InputEvidenceRole role) : m_role(role)
+  explicit InputEvidenceRecorder(InputEvidenceRole role)
+      : m_role(role),
+        m_eventObserver{this, initializeEventQueue, observeEvent}
   {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic<InputEvidenceRecorder *>::is_always_lock_free);
   }
   InputEvidenceRecorder(const InputEvidenceRecorder &) = delete;
+  const deskflow::EventInputObserver &eventObserver() const noexcept
+  {
+    return m_eventObserver;
+  }
   InputEvidenceState state() const noexcept
   {
     return m_state.load(std::memory_order_acquire);
@@ -384,7 +397,7 @@ public:
       fail(InputEvidenceLoss::Contention);
       return;
     }
-    if (!expectedQueue(queue) || q.initialized || !identity || !limit)
+    if (q.initialized || !identity || (unboundedInputEvidenceQueue(queue) ? limit != 0 : limit == 0))
       fail(InputEvidenceLoss::QueueIdentity);
     else {
       q.identity = identity;
@@ -418,7 +431,9 @@ public:
       return;
     }
     auto &q = m_queues[static_cast<std::size_t>(queue)];
-    if ((added && removed) || removed > q.depth || added > q.capacity - q.depth || added > UINT64_MAX - q.enqueued ||
+    const auto depth = q.depth.load(std::memory_order_relaxed);
+    if ((added && removed) || removed > depth || added > UINT64_MAX - depth ||
+        (!unboundedInputEvidenceQueue(queue) && added > q.capacity - depth) || added > UINT64_MAX - q.enqueued ||
         removed > UINT64_MAX - q.retired)
       fail(InputEvidenceLoss::QueueAccounting);
     else {
@@ -534,6 +549,37 @@ public:
 
 private:
   friend struct InputEvidenceTestAccess;
+  static void initializeEventQueue(void *context, const void *queue) noexcept
+  {
+    auto &recorder = *static_cast<InputEvidenceRecorder *>(context);
+    // These are observed outstanding lifetimes/callbacks, with no configured
+    // production capacity. Zero is internal metadata; JSON emits null.
+    recorder.initialize(InputEvidenceQueue::EventOutstanding, queue, 0);
+    recorder.initialize(InputEvidenceQueue::EventDispatch, queue, 0);
+  }
+  static void observeEvent(
+      void *context, const void *queue, OriginalInputStamp stamp, deskflow::EventInputObservation action
+  ) noexcept
+  {
+    auto &recorder = *static_cast<InputEvidenceRecorder *>(context);
+    using Action = deskflow::EventInputObservation;
+    if (action == Action::Lost) {
+      recorder.fail(stamp ? InputEvidenceLoss::PipelineRevoked : InputEvidenceLoss::QueueIdentity);
+      return;
+    }
+    if (!stamp || !stamp.part || stamp.part > maximumOriginalInputParts) {
+      recorder.fail(InputEvidenceLoss::Malformed);
+      return;
+    }
+    if ((recorder.state() == InputEvidenceState::Recording || recorder.state() == InputEvidenceState::Draining) &&
+        stamp.epoch != recorder.m_captureEpoch.load(std::memory_order_acquire))
+      recorder.fail(InputEvidenceLoss::CaptureChanged);
+    const bool dispatch = action == Action::Dispatch || action == Action::Return;
+    const bool added = action == Action::Admit || action == Action::Dispatch;
+    const auto counter = dispatch ? InputEvidenceQueue::EventDispatch : InputEvidenceQueue::EventOutstanding;
+    if (recorder.beginMutation(counter, queue))
+      recorder.endMutation(counter, added ? 1 : 0, added ? 0 : 1);
+  }
   static constexpr std::uint64_t captureBoundary = 1ULL << 63;
   bool lockCaptureBoundary() noexcept
   {
@@ -578,6 +624,7 @@ private:
     InputEvidenceRow row;
   };
   const InputEvidenceRole m_role;
+  const deskflow::EventInputObserver m_eventObserver;
   std::array<Queue, queueCount> m_queues;
   std::array<Slot, capacity> m_rows;
   std::atomic<std::uint64_t> m_written{0}, m_read{0}, m_deadline{0}, m_captureEpoch{0}, m_captureGate{0}, m_stop{0},

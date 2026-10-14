@@ -20,6 +20,7 @@ private Q_SLOTS:
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   void initTestCase();
   void inputFilter_ownedActionsAndConnectionLifetime();
+  void inputFilter_actualQueueObservedBorrowedDispatch();
   void originalCapture_legacyKeyExpansion();
   void originalCapture_exactDispatchAndOwnership();
   void originalCapture_motionCrossingUsesEnterDecision();

@@ -51,6 +51,8 @@ public:
   void waitForReady() const override;
 
 private:
+  friend struct EventQueueTestAccess;
+  void checkInputObserver() const noexcept;
   std::optional<EventHandler> getHandler(EventTypes type, void *target) const;
   uint32_t saveEvent(Event &&event);
   Event removeEvent(uint32_t eventID);
@@ -122,4 +124,5 @@ private:
   Mutex *m_readyMutex = nullptr;
   CondVar<bool> *m_readyCondVar = nullptr;
   std::queue<Event> m_pending;
+  const deskflow::EventInputObserver *m_inputObserver = nullptr;
 };

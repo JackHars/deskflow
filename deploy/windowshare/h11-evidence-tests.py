@@ -160,6 +160,61 @@ class H11EvidenceTests(unittest.TestCase):
         self.assertEqual(report['input']['status'], 'NOT_RUN')
         self.assertEqual(report['latency']['status'], 'NOT_RUN')
 
+    def test_unbounded_event_metric_is_measured_but_cannot_certify_capacity(self):
+        shutil.copytree(self.base.name, self.directory.name, dirs_exist_ok=True)
+        self.f.manifest = json.loads((self.f.root / 'manifest.json').read_text())
+        queue = self.f.manifest['input']['queues'][0]
+        queue.update(name='core-event-outstanding', capacity=None)
+        result = self.f.analyze()['input']
+        self.assertEqual(result['status'], 'INCOMPLETE', result)
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(result['capacity_certification'], 'INCOMPLETE')
+        metric = result['queues']['core-event-outstanding']
+        self.assertIsNone(metric['capacity'])
+        self.assertEqual(metric['peak_depth'], 1)
+        self.assertEqual(metric['final_depth'], 0)
+
+    def test_capacity_null_and_substitutions_are_closed_schema(self):
+        queue = self.f.manifest['input']['queues'][0]
+        for name, capacity in [('fixture-pending', None), ('core-event-outstanding', 256),
+                               ('core-event-dispatch', 65536), ('core-event-dispatch', 'null'),
+                               ('core-event-dispatch', False), ('host-event-outstanding', None)]:
+            with self.subTest(name=name, capacity=capacity):
+                queue.update(name=name, capacity=capacity)
+                result = self.f.analyze()['input']
+                self.assertEqual(result['status'], 'INCOMPLETE')
+                self.assertIn('capacity', result['reason'])
+
+    def test_unbounded_metric_retains_growth_drain_and_accounting_checks(self):
+        first, last = {'t_ns': 0}, {'t_ns': 120 * NS}
+        def row(at, added, retired):
+            return {'event': 'queue', 'index': at + 1, 't_ns': at,
+                    'enqueued': added, 'retired': retired, 'depth': added-retired,
+                    'deadline_revocations': 0, 'overflows': 0}
+        values = [row(0, 0, 0), row(60 * NS, 65537, 0), row(120 * NS, 65537, 65537)]
+        metrics, failures = H11.queue_metrics(values, first, last, None)
+        self.assertEqual(metrics['peak_depth'], 65537)
+        self.assertTrue(any('grows' in value for value in failures))
+        self.assertFalse(any('capacity exceeded' in value for value in failures))
+        values[-1] = row(120 * NS, 65537, 0)
+        _, failures = H11.queue_metrics(values, first, last, None)
+        self.assertIn('queue did not drain', failures)
+        values[1]['depth'] += 1
+        with self.assertRaises(H11.EvidenceError):
+            H11.queue_metrics(values, first, last, None)
+
+    def test_unbounded_counters_preserve_full_unsigned_range(self):
+        first, last = {'t_ns': 0}, {'t_ns': 120 * NS}
+        values = [{'event': 'queue', 'index': i+1, 't_ns': at,
+                   'enqueued': added, 'retired': retired, 'depth': added-retired,
+                   'deadline_revocations': 0, 'overflows': 0}
+                  for i, (at, added, retired) in enumerate([(0, 0, 0), (1, 2**64-1, 0), (2, 2**64-1, 2**64-1)])]
+        metrics, _ = H11.queue_metrics(values, first, last, None)
+        self.assertEqual(metrics['peak_depth'], 2**64-1)
+        values[1].update(enqueued=2**64, depth=2**64)
+        with self.assertRaises(H11.EvidenceError):
+            H11.queue_metrics(values, first, last, None)
+
     def test_native_gap_duplicate_reorder_and_value_mismatch_fail(self):
         artifact = self.f.manifest['input']['receipts']
         original = (self.f.root / artifact['path']).read_bytes()
