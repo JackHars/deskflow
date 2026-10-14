@@ -323,6 +323,13 @@ void EventQueueTests::inputObservation_dropThrowAndAdoptBuffer()
       }
     }
     QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::PipelineRevoked);
+    evidence.recorder->stop();
+    evidence.recorder->finish();
+    QCOMPARE(evidence.recorder->state(), InputEvidenceState::Stopped);
+    for (const auto &count : evidence.counts()) {
+      QCOMPARE(count.depth, std::uint64_t{0});
+      QCOMPARE(count.added, count.retired);
+    }
     QVERIFY(evidence.recorder->drained());
   }
 }
@@ -345,6 +352,13 @@ void EventQueueTests::inputObservation_stampMutationAndInstallation()
       retrieved.setOriginalInputStamp({7, 2, 1});
     QVERIFY(events.dispatchEvent(retrieved));
     QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::PipelineRevoked);
+    evidence.recorder->stop();
+    evidence.recorder->finish();
+    QCOMPARE(evidence.recorder->state(), InputEvidenceState::Stopped);
+    for (const auto &count : evidence.counts()) {
+      QCOMPARE(count.depth, std::uint64_t{0});
+      QCOMPARE(count.added, count.retired);
+    }
     QVERIFY(evidence.recorder->drained());
   }
   {
