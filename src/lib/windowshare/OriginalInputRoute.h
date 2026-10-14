@@ -18,6 +18,7 @@ struct OriginalInputCaptured
   OriginalInputDelivery input;
   OriginalInputTranslation translation;
   OriginalInputTransitionEvidence transition{};
+  std::optional<OriginalPointerObservation> pointer{};
 };
 
 enum class OriginalInputRouteKind : std::uint8_t

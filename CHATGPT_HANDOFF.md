@@ -373,6 +373,11 @@ of the same ordinary drag, but must not require a separate user action.
 - [ ] Detect an eligible source-window drag across a configured Deskflow edge
   and identify the exact destination from topology, without polling a guessed
   foreground window or converting ordinary pointer motion into export.
+  The existing capture/completion path now retains local event-time pointer
+  position and native window fields, with exact stamp validation and no second
+  raw consumer. This is a prerequisite, not titlebar/grab authority. The passive
+  [normal-titlebar probe](deploy/windowshare/native-titlebar-probe.md) is built;
+  physical observation remains pending. Preserve missing IDs as unavailable.
 - [ ] Implement prepare/first-frame/ownership-transfer/commit or rollback, with
   continuous drag ownership and one button-up destination.
 - [ ] Implement dragging the Viewer back to the Mac edge, restoring the source

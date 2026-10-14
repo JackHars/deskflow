@@ -72,6 +72,22 @@ struct OriginalInputRecord
       payload;
 };
 
+// Local, event-time pointer metadata. These are Quartz observations, not a
+// titlebar hit test, a native grab owner or permission to redirect a press.
+// Keep them outside OriginalInputRecord: they must not be reconstructed on the
+// receiver or serialized as authority in the original-input wire protocol.
+struct OriginalPointerObservation
+{
+  std::uint64_t epoch = 0, sequence = 0, sourceTimestampNs = 0;
+  double x = 0, y = 0;
+  std::uint32_t windowUnderPointer = 0, windowHandlingPointer = 0;
+  std::int64_t eventNumber = 0, sourceProcess = 0, sourceState = 0;
+
+  // Zero window IDs mean unavailable. They never identify the desktop, the
+  // foreground window, or a replacement object discovered by a later query.
+  bool matches(const OriginalInputRecord &record) const noexcept;
+};
+
 bool validOriginalInputRecord(const OriginalInputRecord &record) noexcept;
 std::optional<OriginalKeyEvent> originalInputKeyEvent(const OriginalInputRecord &record) noexcept;
 

@@ -6,6 +6,31 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Event-time pointer metadata:** the existing production capture/completion
+  path and Server copy conduit now retain position, native window IDs and
+  reported source fields with the exact epoch/sequence/source timestamp. The
+  two Mac constructed-event suites pass after correcting two fixture assumptions:
+  Quartz normalizes out-of-range window fields, and the synthetic marker must
+  be set on the private source before event creation. The final copy-queue test
+  publishes intervening records, so stale metadata rejection cannot pass due
+  to an unrelated sequence gap. The full Mac build and **16/16 related suites**
+  pass, including actual Server/coordinator/companion tests. Four scoped
+  ASan/UBSan suites pass with leak detection off; system frameworks and prebuilt
+  Qt libraries are not instrumented. The shared original-input and route suites
+  compile with strict warnings and pass on the home Ubuntu machine (GCC 15.2),
+  normally and with sanitizers: **4/4 executions**. The transferred source
+  hashes match the local tree; its owned temporary directory is removed.
+  This is portable-code Linux verification, not another native desktop matrix.
+  Logs/XML are `titlebar-integrated-tests-2`, `titlebar-capture-sanitize-tests`,
+  `titlebar-capture-tests-*` and `titlebar-ubuntu-portable/result.json` under
+  `build/roadmap-completion-20261014/`; earlier failures are retained. The final
+  adapter fixture accepts Quartz's actual representable field or expects the
+  optional metadata to be absent when it is out of range; its normal and
+  sanitizer retests both pass (`titlebar-final-adapter-*`). Source, binaries
+  and results are bound in `titlebar-capture-final-evidence.json`. A new
+  passive [normal-titlebar probe](deploy/windowshare/native-titlebar-probe.md)
+  builds; its physical run is **NOT_RUN**, pending fresh user readiness.
+  P5/H07 remains open. These changes do not enable export or input redirection.
 - **HID-head physical repeat:** exact `f5517122cdb800232e41e7e1ee9176d8dff7170d`,
   source/binary hash verification and fresh user readiness. The run
   `owned-hid-drag-physical-20261014T161234Z` exits 0 on a later unmarked HID

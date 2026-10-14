@@ -758,6 +758,93 @@ void testMixedQueueCopies()
   }
   check(!stream.pop(), "mixed queue drained exactly once");
 }
+
+void testEventTimePointerObservation()
+{
+  Fixture fixture;
+  Owned<CGEventRef> event{fixture.pointer(kCGEventLeftMouseDown, 0)};
+  CGEventSetLocation(event.get(), {-140.25, 800.5});
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointer, 71);
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 81);
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventNumber, 93);
+  const auto observed = capture(kCGEventLeftMouseDown, event.get());
+  check(
+      observed.record && observed.pointer && observed.pointer->matches(*observed.record),
+      "pointer metadata retains exact capture stamp"
+  );
+  check(
+      observed.pointer->x == -140.25 && observed.pointer->y == 800.5 && observed.pointer->windowUnderPointer == 71 &&
+          observed.pointer->windowHandlingPointer == 81 && observed.pointer->eventNumber == 93,
+      "distinct native window fields and fractional negative source coordinates survive capture"
+  );
+  check(
+      observed.pointer->sourceProcess == CGEventGetIntegerValueField(event.get(), kCGEventSourceUnixProcessID) &&
+          observed.pointer->sourceState == CGEventGetIntegerValueField(event.get(), kCGEventSourceStateID),
+      "reported source fields are preserved without treating them as device authentication"
+  );
+
+  auto changed = *observed.record;
+  ++changed.epoch;
+  check(!observed.pointer->matches(changed), "pointer metadata cannot cross epochs");
+  changed = *observed.record;
+  ++changed.sequence;
+  check(!observed.pointer->matches(changed), "pointer metadata cannot move to a later press");
+  changed = *observed.record;
+  ++changed.sourceTimestampNs;
+  check(!observed.pointer->matches(changed), "pointer metadata cannot replace source time");
+  changed = *observed.record;
+  changed.payload = OriginalInputBoundary::Checkpoint;
+  check(!observed.pointer->matches(changed), "pointer metadata cannot be attached to a checkpoint");
+
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointer, 0);
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 0);
+  const auto unavailable = capture(kCGEventLeftMouseDown, event.get());
+  check(
+      unavailable.record && unavailable.pointer && !unavailable.pointer->windowUnderPointer &&
+          !unavailable.pointer->windowHandlingPointer,
+      "unknown event-time windows remain zero without a foreground or geometry fallback"
+  );
+  for (const auto invalid : {-1LL, 0x100000000LL}) {
+    CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointer, invalid);
+    // Quartz stores this field as a native window ID and may normalize the
+    // setter's wider signed value. Compare against the actual event getter,
+    // not an impossible representation invented by the fixture.
+    const auto raw = CGEventGetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointer);
+    const auto normalized = capture(kCGEventLeftMouseDown, event.get());
+    const bool representable = raw >= 0 && raw <= std::numeric_limits<std::uint32_t>::max();
+    check(
+        normalized.record &&
+            (representable ? normalized.pointer && normalized.pointer->windowUnderPointer == raw : !normalized.pointer),
+        "capture preserves representable Quartz window IDs and omits invalid native metadata"
+    );
+  }
+  CGEventSetIntegerValueField(event.get(), kCGMouseEventWindowUnderMousePointer, 71);
+  CGEventSetLocation(event.get(), {std::numeric_limits<double>::quiet_NaN(), 0});
+  const auto invalidPoint = capture(kCGEventLeftMouseDown, event.get());
+  check(invalidPoint.record && !invalidPoint.pointer, "nonfinite source point cannot become pointer evidence");
+  Owned<CGEventRef> key{fixture.key(0, kCGEventKeyDown, modifiers)};
+  check(
+      !capture(kCGEventKeyDown, key.get()).pointer, "keys have no pointer metadata even if Quartz has a cursor position"
+  );
+  // Use a separately marked private source, as the live host does. Rewriting
+  // source userData on a previously materialized event is not this contract.
+  Owned<CGEventSourceRef> loopSource{CGEventSourceCreate(kCGEventSourceStatePrivate)};
+  CGEventSourceSetUserData(loopSource.get(), syntheticEventTag);
+  Owned<CGEventRef> loopEvent{
+      CGEventCreateMouseEvent(loopSource.get(), kCGEventLeftMouseDown, sourcePoint, kCGMouseButtonLeft)
+  };
+  CGEventSetTimestamp(loopEvent.get(), timestamp);
+  CGEventSetFlags(loopEvent.get(), 0);
+  check(
+      CGEventGetIntegerValueField(loopEvent.get(), kCGEventSourceUserData) == syntheticEventTag,
+      "valid fixture retains its loop marker"
+  );
+  const auto synthetic = capture(kCGEventLeftMouseDown, loopEvent.get());
+  check(
+      synthetic.status == OriginalInputCapture::Status::Ignored && !synthetic.pointer,
+      "marked synthetic events create no native pointer observation"
+  );
+}
 } // namespace
 
 int main()
@@ -770,6 +857,7 @@ int main()
     testConstructionLimitsAndSources();
     testOwnerReleaseIntents();
     testMixedQueueCopies();
+    testEventTimePointerObservation();
     std::cout << "OriginalInput Mac private-event tests passed\n";
   } catch (const std::exception &error) {
     std::cerr << "OriginalInput Mac test failure: " << error.what() << '\n';

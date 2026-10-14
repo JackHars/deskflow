@@ -214,6 +214,52 @@ void testQueueOrderAndDiscontinuity()
   }
 }
 
+void testPointerObservationIdentity()
+{
+  Fixture fixture;
+  const auto down = fixture.record(OriginalInputButton{0, true, 1});
+  const OriginalPointerObservation original{
+      down.epoch, down.sequence, down.sourceTimestampNs, -1200.25, 450.5, 71, 81, 33, 123, -1
+  };
+  check(original.matches(down), "local pointer metadata retains fractional/negative coordinates and native IDs");
+  const auto later = fixture.record(OriginalInputButton{0, false, 1});
+  check(!original.matches(later), "down metadata cannot be reused for the physical release");
+  auto replacementEpoch = down;
+  ++replacementEpoch.epoch;
+  check(!original.matches(replacementEpoch), "sequence reuse in a new capture epoch cannot revive metadata");
+  auto timestampSubstitution = down;
+  ++timestampSubstitution.sourceTimestampNs;
+  check(!original.matches(timestampSubstitution), "source timestamp substitution is rejected");
+  auto unavailable = original;
+  unavailable.windowUnderPointer = unavailable.windowHandlingPointer = 0;
+  check(unavailable.matches(down), "unavailable native IDs remain a valid observation without inventing identity");
+  for (const auto invalid :
+       {std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::infinity(),
+        double(std::numeric_limits<std::int32_t>::max()) + 1, double(std::numeric_limits<std::int32_t>::min()) - 1}) {
+    auto point = original;
+    point.x = invalid;
+    check(!point.matches(down), "invalid x cannot enter native coordinate lookup");
+    point = original;
+    point.y = invalid;
+    check(!point.matches(down), "invalid y cannot enter native coordinate lookup");
+  }
+  for (const auto invalidProcess : {-1LL, 1LL + std::numeric_limits<std::int32_t>::max()}) {
+    auto process = original;
+    process.sourceProcess = invalidProcess;
+    check(!process.matches(down), "reported process identity cannot silently narrow");
+  }
+  auto negativeEvent = original;
+  negativeEvent.eventNumber = -1;
+  check(!negativeEvent.matches(down), "negative native event number is unavailable");
+  auto otherKind = down;
+  otherKind.payload = key(0, OriginalKeyTransition::Down);
+  check(!original.matches(otherKind), "keyboard input cannot carry stale pointer metadata");
+  otherKind.payload = OriginalInputBoundary::Checkpoint;
+  check(!original.matches(otherKind), "checkpoint cannot carry stale pointer metadata");
+  otherKind.payload = OriginalInputMotion{1, -1, 0};
+  check(original.matches(otherKind), "drag motion can retain its own event-time metadata");
+}
+
 void testOverflowEmergencyAndLifetime()
 {
   Fixture fixture;
@@ -848,6 +894,7 @@ int main()
 {
   try {
     testRecords();
+    testPointerObservationIdentity();
     testQueueOrderAndDiscontinuity();
     testOverflowEmergencyAndLifetime();
     testUnknownCoverageAndHeldStartup();

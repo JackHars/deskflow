@@ -535,6 +535,55 @@ void stopBeforeRunStarts()
   CFRelease(loop);
   check(timely, "queued stop survives publication-before-run race");
 }
+
+void pointerObservationLifetime()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "pointer observation capture starts");
+  event.button(0, true);
+  CGEventSetLocation(event.event, {-22.5, 300.25});
+  CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointer, 71);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 81);
+  const auto stamp = source.beginCapture(kCGEventLeftMouseDown, event.event);
+  check(bool(stamp) && !source.popCaptured(), "metadata waits for the same legacy translation completion");
+  CGEventSetLocation(event.event, {999, 1000});
+  CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointer, 99);
+  source.completeCapture({stamp, 1, false});
+  const auto captured = source.popCaptured();
+  check(
+      captured && captured->pointer && captured->pointer->matches(captured->input.record) &&
+          captured->pointer->x == -22.5 && captured->pointer->y == 300.25 &&
+          captured->pointer->windowUnderPointer == 71 && captured->pointer->windowHandlingPointer == 81,
+      "completed capture retains event-time values rather than reading a mutated Quartz event"
+  );
+  const auto inbox = source.completedInput();
+  check(inbox->bind(71) && inbox->publish(*captured), "the existing Session/Server conduit carries the observation");
+  const auto copied = inbox->pop();
+  check(
+      copied && copied->pointer && copied->pointer->matches(copied->input.record) &&
+          copied->pointer->windowUnderPointer == 71 && copied->pointer->x == -22.5,
+      "one-consumer copy path preserves pointer metadata"
+  );
+  check(source.checkpoint(101, 0), "checkpoint follows pointer input");
+  const auto checkpoint = source.popCaptured();
+  check(checkpoint && !checkpoint->pointer, "a checkpoint cannot inherit the preceding pointer observation");
+  check(inbox->publish(*checkpoint) && bool(inbox->pop()), "checkpoint preserves the copy conduit's sequence");
+  event.key(0);
+  CGEventSetTimestamp(event.event, 102);
+  const auto key = captureCompleted(source, event);
+  check(!key.pointer, "a keyboard event clears the pointer observation");
+  check(inbox->publish(key) && bool(inbox->pop()), "key preserves the copy conduit's sequence");
+  event.button(0, false);
+  CGEventSetTimestamp(event.event, 103);
+  auto mismatched = captureCompleted(source, event);
+  check(bool(mismatched.pointer), "release has its own metadata");
+  --mismatched.pointer->sequence;
+  check(!inbox->publish(mismatched) && !inbox->live(), "a mismatched observation revokes the copy conduit");
+  check(source.epoch().live(), "invalid copy metadata does not stop the sole raw consumer or emergency capture");
+  source.stop();
+  check(!copied->input.live(), "a retained pointer observation never outlives its input epoch");
+}
 } // namespace
 
 int main()
@@ -550,6 +599,7 @@ int main()
     concurrentStartStop();
     concurrentCaptureDrain();
     stopBeforeRunStarts();
+    pointerObservationLifetime();
     std::cout << "Original input capture lifecycle tests passed\n";
     return 0;
   } catch (const std::exception &error) {

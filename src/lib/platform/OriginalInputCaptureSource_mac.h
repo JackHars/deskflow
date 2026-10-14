@@ -63,6 +63,7 @@ private:
   std::uint64_t m_sequence = 0;
   OriginalInputStamp m_openStamp;
   OriginalInputTransitionEvidence m_openTransition;
+  std::optional<OriginalPointerObservation> m_openPointer;
   // Zero means Unknown or held, never "up by default". Only a captured Up
   // establishes a released control; each subsequent Down consumes that edge.
   std::array<std::uint64_t, originalKey::keyCount> m_releasedKeys{};
@@ -72,6 +73,7 @@ private:
   {
     OriginalInputTranslation translation;
     OriginalInputTransitionEvidence transition;
+    std::optional<OriginalPointerObservation> pointer;
   };
   std::array<Completed, OriginalInputStream::capacity> m_completed;
   std::atomic<std::uint64_t> m_completedWritten{0}, m_completedRead{0};

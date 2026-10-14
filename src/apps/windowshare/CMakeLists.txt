@@ -389,6 +389,12 @@ if(WINDOWSHARE_APP)
       add_test(NAME windowshare-native-drag-observation COMMAND windowshare-native-drag-probe)
       add_test(NAME windowshare-native-drag-construction COMMAND windowshare-native-drag-probe --construction-check)
       set_tests_properties(windowshare-native-drag-observation windowshare-native-drag-construction PROPERTIES TIMEOUT 15)
+      # Explicit user-operated observation of a normal AppKit titlebar through
+      # the production capture adapter. Never invoked by unattended CTest.
+      add_executable(windowshare-native-titlebar-probe NativeTitlebarDragProbe.mm)
+      target_compile_options(windowshare-native-titlebar-probe PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic -Werror)
+      target_link_libraries(windowshare-native-titlebar-probe PRIVATE windowshare-local-input "-framework AppKit" "-framework ApplicationServices")
+      set_target_properties(windowshare-native-titlebar-probe PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       add_dependencies(windowshare-native-smoke deskflow-holding-display-helper)
       # Run explicitly on the actual desktop after permission approval, not CI.
     endif()

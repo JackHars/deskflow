@@ -56,6 +56,7 @@ public:
     const auto &record = captured.input.record;
     const auto &translation = captured.translation;
     if (!captured.input.live() || !captured.input.epoch.sameEpoch(m_epoch) || !validOriginalInputRecord(record) ||
+        (captured.pointer && !captured.pointer->matches(record)) ||
         translation.stamp != OriginalInputStamp{record.epoch, record.sequence, 0} ||
         translation.parts > maximumOriginalInputParts || m_lastSequence == std::numeric_limits<std::uint64_t>::max() ||
         (m_lastSequence && record.sequence != m_lastSequence + 1) || record.sourceTimestampNs < m_lastTimestamp) {

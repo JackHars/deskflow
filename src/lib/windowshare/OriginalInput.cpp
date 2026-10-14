@@ -6,6 +6,7 @@
 #include "InputEvidence.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <type_traits>
 #include <utility>
@@ -95,6 +96,16 @@ bool emergency(const OriginalInputRecord &record) noexcept
   return false;
 }
 } // namespace
+
+bool OriginalPointerObservation::matches(const OriginalInputRecord &record) const noexcept
+{
+  constexpr auto low = std::numeric_limits<std::int32_t>::min(), high = std::numeric_limits<std::int32_t>::max();
+  return validOriginalInputRecord(record) && epoch == record.epoch && sequence == record.sequence &&
+         sourceTimestampNs == record.sourceTimestampNs && std::isfinite(x) && std::isfinite(y) && x >= low &&
+         x <= high && y >= low && y <= high && eventNumber >= 0 && sourceProcess >= 0 && sourceProcess <= high &&
+         (std::holds_alternative<OriginalInputMotion>(record.payload) ||
+          std::holds_alternative<OriginalInputButton>(record.payload));
+}
 
 std::optional<OriginalKeyEvent> originalInputKeyEvent(const OriginalInputRecord &record) noexcept
 {

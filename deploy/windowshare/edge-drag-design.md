@@ -68,9 +68,15 @@ moved AX window and is documented at the end of movement, but carries no
 initiating press/drag incarnation or distinction between a user drag and an
 application-driven move. The public CG event window-under-pointer fields do
 not document ownership of the active WindowServer grab. Current
-`OriginalInputRecord` retains raw button/motion semantics, but not either
-window-under-pointer field. Adding a later AX hit test to that record would
-not repair the missing event-time grab identity.
+`OriginalInputRecord` retains raw button/motion semantics. Its completed local
+capture now also retains a separate `OriginalPointerObservation` with both
+window-under-pointer fields and the original position, bound to the same
+epoch/sequence/timestamp. The sole raw consumer and existing Server copy conduit
+preserve that observation. It is not serialized as remote authority and zero
+IDs remain unavailable. Adding a later AX hit test would not repair missing
+event-time grab identity. The new [normal titlebar probe](native-titlebar-probe.md)
+uses this real capture path without posting or suppressing input; its physical
+run is still pending.
 
 An explicitly preselected exact source could support a narrower, declared
 "preview and drop this selected window" interaction: the user has already

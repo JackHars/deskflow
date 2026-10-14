@@ -64,6 +64,7 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
         evidence->source(*result.record);
     if (result.record && m_stream.push(*result.record)) {
       m_openTransition = classifyTransition(*result.record);
+      m_openPointer = result.pointer;
       ++m_sequence;
       m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
       return m_openStamp;
@@ -93,9 +94,10 @@ void OriginalInputCaptureSource::completeCapture(OriginalInputTranslation transl
     return;
   }
   InputEvidenceMutation evidence(InputEvidenceQueue::Translation, this, 1, 0);
-  m_completed[written % m_completed.size()] = {translation, m_openTransition};
+  m_completed[written % m_completed.size()] = {translation, m_openTransition, m_openPointer};
   m_openStamp = {};
   m_openTransition = {};
+  m_openPointer.reset();
   m_completedWritten.store(written + 1, std::memory_order_release);
 }
 void OriginalInputCaptureSource::capture(CGEventType type, CGEventRef event) noexcept
@@ -193,7 +195,7 @@ std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() n
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return {};
   }
-  return OriginalInputCaptured{*input, translation, completed.transition};
+  return OriginalInputCaptured{*input, translation, completed.transition, completed.pointer};
 }
 std::optional<OriginalInputDelivery> OriginalInputCaptureSource::pop() noexcept
 {

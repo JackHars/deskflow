@@ -215,6 +215,33 @@ bool commonFields(CGEventRef event, CGEventSourceRef source, const OriginalInput
          CGEventGetIntegerValueField(event, kCGEventSourceUserData) == syntheticEventTag &&
          CGEventGetIntegerValueField(event, kCGEventSourceStateID) == CGEventSourceGetSourceStateID(source);
 }
+
+std::optional<OriginalPointerObservation>
+pointerObservation(CGEventRef event, const OriginalInputRecord &record) noexcept
+{
+  if (!std::holds_alternative<OriginalInputMotion>(record.payload) &&
+      !std::holds_alternative<OriginalInputButton>(record.payload))
+    return {};
+  const auto under = CGEventGetIntegerValueField(event, kCGMouseEventWindowUnderMousePointer);
+  const auto handling = CGEventGetIntegerValueField(event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent);
+  constexpr auto maximumWindow = std::numeric_limits<std::uint32_t>::max();
+  if (under < 0 || under > maximumWindow || handling < 0 || handling > maximumWindow)
+    return {};
+  const auto point = CGEventGetLocation(event);
+  OriginalPointerObservation value{
+      record.epoch,
+      record.sequence,
+      record.sourceTimestampNs,
+      point.x,
+      point.y,
+      static_cast<std::uint32_t>(under),
+      static_cast<std::uint32_t>(handling),
+      CGEventGetIntegerValueField(event, kCGMouseEventNumber),
+      CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID),
+      CGEventGetIntegerValueField(event, kCGEventSourceStateID)
+  };
+  return value.matches(record) ? std::optional(value) : std::nullopt;
+}
 } // namespace
 
 OriginalInputCapture captureOriginalInputEvent(
@@ -236,7 +263,7 @@ OriginalInputCapture captureOriginalInputEvent(
   record.flags = CGEventGetFlags(event);
   if (!readPayload(callbackType, event, record) || !validOriginalInputRecord(record))
     return result;
-  return {OriginalInputCapture::Status::Captured, record};
+  return {OriginalInputCapture::Status::Captured, record, pointerObservation(event, record)};
 }
 
 CGEventRef

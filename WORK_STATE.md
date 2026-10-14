@@ -2,6 +2,24 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+The next P5 prerequisite is implemented in the production capture path:
+`OriginalPointerObservation` retains the original pointer position, both native
+window-under-pointer fields and reported source metadata beside the exact
+input stamp. Capture completion and the existing Session/Server copy queue
+preserve it without a second raw consumer or a protocol change. Missing IDs
+stay unavailable; these observations grant no drag or posting authority.
+The full Mac build, 16 related routing/input suites and four scoped ASan/UBSan
+suites pass. Two shared input suites also compile and pass on the home Ubuntu
+machine with GCC 15.2, both normally and with ASan/UBSan (four executions).
+That remote test uses source hashes matching this working tree and removes
+only its own temporary directory. See `TESTING.md` for exact evidence and limits.
+
+The new passive `windowshare-native-titlebar-probe` builds and observes a normal
+AppKit titlebar through that same adapter. It neither posts nor suppresses
+input. A fresh readiness question is pending; the physical run is **NOT_RUN**.
+Procedure and limits: `deploy/windowshare/native-titlebar-probe.md`.
+This does not complete automatic titlebar detection, transfer or P5/H07.
+
 Production identity commit `dbf1f07ef5c28dc898a4a5fa5762b54aca23506d` now
 passes all six [hosted checks](https://github.com/JackHars/deskflow/actions/runs/38591194186).
 Its staged signed exact-library Mac bundle passes audit, private handshake and

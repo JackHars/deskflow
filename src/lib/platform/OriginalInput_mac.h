@@ -21,6 +21,7 @@ struct OriginalInputCapture
   };
   Status status = Status::Ignored;
   std::optional<OriginalInputRecord> record;
+  std::optional<OriginalPointerObservation> pointer{};
 };
 
 // Read only the supplied event, using no allocating containers or physical
@@ -31,6 +32,8 @@ struct OriginalInputCapture
 // Captured result contains a record and consumes the caller's proposed sequence.
 // Key transitions classify syntax/side flags only; they establish neither
 // physical continuity, ownership, nor the neutral startup barrier.
+// Pointer observations preserve supplied event fields only. Missing or invalid
+// optional metadata does not invalidate an otherwise supported input record.
 OriginalInputCapture captureOriginalInputEvent(
     CGEventType callbackType, CGEventRef event, std::uint64_t epoch, std::uint64_t sequence
 ) noexcept;
