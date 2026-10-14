@@ -36,6 +36,16 @@ drag ownership or remote child support. Two user-operated drag probes observed
 continued movement after targeted PID mouse-up. Normal titlebar dragging is
 still required, and the P5 checklist remains open.
 
+A later explicitly selected system-stream experiment on `f5517122c` has a
+positive physical observation: the user confirmed the owned window stopped
+while held, and the new HID-head observer captured the eventual real release
+before clean shutdown. Early post-submission frame updates are retained; no
+native grab-completion acknowledgement or production handoff is claimed. This
+fixture starts dragging from its own content view, so arbitrary-app titlebar
+initiation remains a separate implementation boundary. See the latest
+`TESTING.md` entry and `deploy/windowshare/native-drag-probe.md` before repeating
+research already completed.
+
 ## Assignment and division of work
 
 Complete the remaining Seamless Windows code in a **cloud coding environment**.

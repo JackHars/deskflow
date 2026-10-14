@@ -6,6 +6,20 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **HID-head physical repeat:** exact `f5517122cdb800232e41e7e1ee9176d8dff7170d`,
+  source/binary hash verification and fresh user readiness. The run
+  `owned-hid-drag-physical-20261014T161234Z` exits 0 on a later unmarked HID
+  left-up, **3.616467373 s after submission**. Both taps and the app observe
+  the marked synthetic up. The user confirms “Yes, stopped then closed on
+  release.” Counts: 211 later pointer motions, 175 frame observations paired
+  with newer motion. Two early frame changes remain in the raw outcome
+  `window-movement-observed-after-release-submission`; the following 180 frame
+  samples are stable. This is a positive owned-fixture observation with the
+  real release captured, **not H07 or arbitrary-app titlebar acceptance**.
+  The probe's immediate HID-release shutdown makes its zero unmarked-session-up
+  count inconclusive about later delivery. `interpretation-evidence.json`
+  binds the logs, analysis and direct user report; source hashes match the
+  tested commit. No probe remains running and no production input route changed.
 - **User-operated system-release experiment:** the first HID attempt
   (`owned-hid-drag-physical-20261014T155548Z`) rejects a zero-timestamp event
   before posting. An independent constructed-only check identifies the wrong
@@ -21,8 +35,8 @@ SPDX-License-Identifier: MIT
   separate session-up observer builds and passes **2/2 noninteractive tests**
   in both normal and scoped ASan/UBSan builds (leak detection off; system and
   prebuilt Qt libraries not instrumented). Hashes are in
-  `hid-drag-dual-observer-evidence.json`;
-  its physical repeat is awaiting readiness. Logs are `hid-drag-dual-observer-*`.
+  `hid-drag-dual-observer-evidence.json`; the later physical repeat is recorded
+  above. Logs are `hid-drag-dual-observer-*`.
 - **Native identity production checkpoint:** `dbf1f07ef5c28dc898a4a5fa5762b54aca23506d`
   passes all six hosted jobs in
   [run 38591194186](https://github.com/JackHars/deskflow/actions/runs/38591194186).

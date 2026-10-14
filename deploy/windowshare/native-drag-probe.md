@@ -111,14 +111,39 @@ and further frame changes without a new pointer serial. Neither those later
 changes nor the eventual second press establishes continued button ownership.
 Both attempts and the direct user report are retained under
 `build/roadmap-completion-20261014/owned-hid-drag-physical-20261014T155548Z/`
-and `owned-hid-drag-physical-20261014T155854Z/`. The separate HID-head observer
-was added afterward; it still requires its own physical run.
+and `owned-hid-drag-physical-20261014T155854Z/`.
+
+The subsequent HID-head run used committed `f5517122cdb800232e41e7e1ee9176d8dff7170d`
+and its verified binary, after fresh user readiness. It captured the later
+unmarked left-up at the HID boundary **3.616467373 seconds** after the synthetic
+submission and exited normally on that release. The marked up was observed at
+both taps and by the app. The user confirmed **“Yes, stopped then closed on
+release.”** There were 211 post-submission pointer motions and 175 frame
+observations paired with newer motion. Two early frame updates remain in the
+raw result; the subsequent 180 frame samples have identical bounds. The
+conservative outcome therefore remains
+`window-movement-observed-after-release-submission`, not a rewritten automated
+grab-release pass. This supplies a positive user observation and a complete
+observed button cycle for this owned fixture.
+
+Evidence is `owned-hid-drag-physical-20261014T161234Z/` under the same build root,
+including raw logs, source/binary hashes, `motion-analysis.json`, the direct
+`user-observation.json` and their hash-bound `interpretation-evidence.json`.
+The zero `unmarkedSessionUps` count is not proof that the later up was swallowed:
+the probe stops after HID observation and does not wait for a session drain.
+The production Core already captures at HID-head in `OSXComputer::enable()`;
+this result does not justify adding another raw consumer or prove the full
+Core/Host ownership transfer. Ordinary titlebar initiation in arbitrary apps
+also remains untested: this fixture starts its own drag with
+`performWindowDragWithEvent:` from the blue content area.
 
 Retain stdout, stderr, exit status, binary/source hashes, macOS version and the
 user's observation. The output distinguishes an app-up receipt, later physical
-motion and independent native frame movement. A frame still moving after the
-submission demonstrates that this submission did not stop that native drag.
-Stable frames during later physical motion remain an observation, not a
+motion and independent native frame movement. A changed frame after the post
+call is recorded even if the synthetic event has not yet been consumed;
+posting and app receipt are not WindowServer completion acknowledgements.
+Preserve those early updates and the later observation separately. Stable
+frames during later physical motion remain an observation, not a
 documented grab-release acknowledgement or a transferable permission. Physical
 release, stale callbacks, missing motion, identity loss and timeout cannot be
 reported as a successful synthetic release.

@@ -17,9 +17,17 @@ constructed-only clock-domain correction, the user observed the owned window
 stop while the button remained held. The marked up reached the app and session
 tap, but no later unmarked session-up was observed; a second press invalidated
 the automated run. The result remains inconclusive for release ownership/H07.
-A new listen-only HID-head observer plus separate session-up observer builds
-and passes both noninteractive regressions; its physical repeat awaits user
-readiness. The owned AppKit attached-sheet observation finds a distinct
+A new listen-only HID-head observer plus separate session-up observer passes
+both normal and scoped sanitizer regressions. Its fresh user-operated run on
+`f5517122c` captures the real release 3.616 seconds after submission and exits
+cleanly. The user confirms the window stopped while held and closed on release.
+Two early frame updates remain in the conservative automated result; subsequent
+frames are stable through continuing pointer motion. This is positive evidence
+for the explicitly started owned drag, not arbitrary-app titlebar initiation
+or a cross-machine handoff. Exact evidence and user report:
+`owned-hid-drag-physical-20261014T161234Z` under the Oct 14 root. Production Core
+already captures at HID-head; a second raw consumer is not needed or authorized
+by this diagnostic. The owned AppKit attached-sheet observation finds a distinct
 native window ID with the exact parent link, but does not enable child capture
 or input. Both production drag and remote child interaction remain unfinished.
 

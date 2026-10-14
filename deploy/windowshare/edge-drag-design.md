@@ -105,9 +105,17 @@ A separate explicitly selected `--interactive-hid` probe tests one
 system-stream release while the owned fixture is active. After fixing an
 unstamped-event rejection, the user observed the window stop while still
 holding the button. The session-level observer did not see the later unmarked
-up and the next press invalidated the run. A new listen-only HID-head observer
-with a separate session-up observer is prepared to investigate that boundary.
-No production fallback or grab-completion acknowledgement is established.
+up and the next press invalidated the run. A later listen-only HID-head run
+on `f5517122c` captured the real release 3.616 seconds after the submitted up,
+then exited cleanly. The user confirmed that the window stopped while held
+and closed on release. Two early frame changes and the conservative automated
+outcome remain recorded; the later frame samples are stable during continuing
+pointer movement. See `owned-hid-drag-physical-20261014T161234Z` and the probe
+procedure for exact evidence. This establishes the observed release cycle for
+the fixture's explicitly started AppKit drag. Ordinary arbitrary-application
+titlebar initiation, production fallback and a native grab-completion
+acknowledgement remain unestablished. Core already observes at HID-head; do
+not introduce a second raw capture consumer to reproduce this diagnostic.
 
 `NativeSourceTransaction` is recovery bookkeeping used by the real NativeHost
 return path. New Preparing exports write `restoreRequired:false` because
