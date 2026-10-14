@@ -90,9 +90,10 @@ public:
   {
     return 1;
   }
-  bool isAnyMouseButtonDown(uint32_t &) const override
+  bool isAnyMouseButtonDown(uint32_t &button) const override
   {
-    return false;
+    button = mouseHeld ? 1 : 0;
+    return mouseHeld;
   }
   void fakeMouseButton(ButtonID, bool) override
   {
@@ -171,6 +172,7 @@ public:
 
   KeyModifierMask modifiers = 0;
   bool mayLeave = true;
+  bool mouseHeld = false;
   mutable bool sawLiveSelection = false;
   std::optional<deskflow::windowshare::SelectedPeer> watchedSelection;
 
@@ -2469,6 +2471,198 @@ void ServerTests::inputRoutes_orderlyCloseReleasesBeforeClosing()
   server.onMouseUp(1);
   QVERIFY(f.first->take().isEmpty());
   QVERIFY(f.second->take().isEmpty());
+}
+
+void ServerTests::windowDragEdge_configuredMappingsKeepLocalOwner()
+{
+  using namespace deskflow::windowshare;
+  struct EdgeCase
+  {
+    Direction side;
+    int x, y, destinationX, destinationY;
+    WindowDragEdgeSide observed;
+  };
+  for (const auto &test : std::array{
+           EdgeCase{Direction::Right, 999, 250, 0, 250, WindowDragEdgeSide::Right},
+           EdgeCase{Direction::Left, 0, 250, 999, 250, WindowDragEdgeSide::Left},
+           EdgeCase{Direction::Top, 250, 0, 250, 999, WindowDragEdgeSide::Top},
+           EdgeCase{Direction::Bottom, 250, 999, 250, 0, WindowDragEdgeSide::Bottom}
+       }) {
+    RoutingFixture f;
+    auto &server = *f.server;
+    QVERIFY(f.config.connect("primary", test.side, 0, 1, "first", 0, 1));
+    QVERIFY(server.setConfig(f.config));
+    server.m_disableLockToComputer = false;
+    f.platform->mouseHeld = true;
+    auto mailbox = std::make_shared<WindowDragEdgeMailbox>();
+    QVERIFY(server.setWindowDragEdgeMailbox(mailbox));
+    QVERIFY(!server.setWindowDragEdgeMailbox(mailbox));
+    QVERIFY(server.setOriginalInputRoutes(std::make_shared<OriginalInputRoutes>()));
+    IPlatformComputer::ButtonInfo button(1, 0);
+    Event down(
+        EventTypes::PrimaryComputerButtonDown, f.primary.getEventTarget(), &button, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{77, 1, 1}
+    );
+    QVERIFY(f.events.dispatchEvent(down));
+    IPlatformComputer::MotionInfo point{test.x, test.y};
+    Event move(
+        EventTypes::PrimaryComputerMotionOnPrimary, f.primary.getEventTarget(), &point, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{77, 2, 1}
+    );
+    QVERIFY(f.events.dispatchEvent(move));
+    QVERIFY(!mailbox->read()); // Configured computer names are not authentication.
+    f.first->authenticate();
+    f.clear();
+    Event next(
+        EventTypes::PrimaryComputerMotionOnPrimary, f.primary.getEventTarget(), &point, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{77, 3, 1}
+    );
+    QVERIFY(f.events.dispatchEvent(next));
+    const auto observed = mailbox->read();
+    QVERIFY(observed && observed->live());
+    const auto &edge = observed->edge();
+    QCOMPARE(edge.press, (OriginalInputStamp{77, 1, 1}));
+    QCOMPARE(edge.motion, (OriginalInputStamp{77, 3, 1}));
+    QCOMPARE(edge.side, test.observed);
+    QCOMPARE(edge.recipient, server.m_inputRecipients.at(f.firstClient));
+    QCOMPARE(edge.destinationX, test.destinationX);
+    QCOMPARE(edge.destinationY, test.destinationY);
+    QCOMPARE(server.m_active, static_cast<BaseClientProxy *>(&f.primary));
+    QVERIFY(!server.selectedPeer());
+    QVERIFY(f.first->take().isEmpty() && f.second->take().isEmpty());
+    const auto owner = server.m_inputRoutes.repeat({InputRouteState::Kind::Button, 1});
+    QVERIFY(owner && owner->recipients.empty() && !owner->originalOwner);
+    Event up(
+        EventTypes::PrimaryComputerButtonUp, f.primary.getEventTarget(), &button, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{77, 4, 1}
+    );
+    QVERIFY(f.events.dispatchEvent(up));
+    QVERIFY(!observed->live() && !mailbox->read());
+    QVERIFY(f.first->take().isEmpty()); // Up remains with its original local owner.
+    f.platform->mouseHeld = false;
+    QVERIFY(server.onMouseMovePrimary(test.x, test.y));
+    QCOMPARE(server.m_active, static_cast<BaseClientProxy *>(f.firstClient));
+  }
+}
+
+void ServerTests::windowDragEdge_revokesOnReleaseAndTopology()
+{
+  using namespace deskflow::windowshare;
+  for (int cause = 0; cause != 9; ++cause) {
+    RoutingFixture f;
+    auto &server = *f.server;
+    QVERIFY(f.config.connect("primary", Direction::Right, 0, 1, "first", 0, 1));
+    QVERIFY(server.setConfig(f.config));
+    server.m_disableLockToComputer = false;
+    f.platform->mouseHeld = true;
+    f.first->authenticate();
+    auto mailbox = std::make_shared<WindowDragEdgeMailbox>();
+    QVERIFY(server.setWindowDragEdgeMailbox(mailbox));
+    QVERIFY(server.setOriginalInputRoutes(std::make_shared<OriginalInputRoutes>()));
+    IPlatformComputer::ButtonInfo button(1, 0);
+    IPlatformComputer::MotionInfo point{999, 500};
+    Event down(
+        EventTypes::PrimaryComputerButtonDown, f.primary.getEventTarget(), &button, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{81, 1, 1}
+    );
+    Event move(
+        EventTypes::PrimaryComputerMotionOnPrimary, f.primary.getEventTarget(), &point, Event::EventFlags::DontFreeData,
+        OriginalInputStamp{81, 2, 1}
+    );
+    QVERIFY(f.events.dispatchEvent(down) && f.events.dispatchEvent(move));
+    const auto observed = mailbox->read();
+    QVERIFY(observed);
+    switch (cause) {
+    case 0:
+      server.onMouseUp(1);
+      break;
+    case 1:
+      server.onMouseMovePrimary(500, 500);
+      break;
+    case 2:
+      server.onKeyDown(kKeyEscape, 0, 53, "", "");
+      break;
+    case 3:
+      QVERIFY(server.setConfig(f.config));
+      break;
+    case 4:
+      server.handleShapeChanged(f.firstClient);
+      break;
+    case 5:
+      server.handleClientDisconnected(f.firstClient);
+      break;
+    case 6:
+      server.onScreensaver(true);
+      break;
+    case 7:
+      server.revokeSelectedPeer();
+      break;
+    case 8:
+      f.first->identity->revoke();
+      break;
+    }
+    QVERIFY(!observed->live() && !mailbox->read());
+  }
+}
+
+void ServerTests::windowDragEdge_honorsDelaysCornersAndOriginalIdentity()
+{
+  using namespace deskflow::windowshare;
+  RoutingFixture f;
+  auto &server = *f.server;
+  QVERIFY(f.config.connect("primary", Direction::Right, 0.25f, 0.75f, "first", 0, 1));
+  QVERIFY(server.setConfig(f.config));
+  server.m_disableLockToComputer = false;
+  f.platform->mouseHeld = true;
+  f.first->authenticate();
+  auto mailbox = std::make_shared<WindowDragEdgeMailbox>();
+  QVERIFY(server.setWindowDragEdgeMailbox(mailbox));
+  QVERIFY(server.setOriginalInputRoutes(std::make_shared<OriginalInputRoutes>()));
+  std::uint64_t sequence = 0;
+  const auto dispatch = [&](EventTypes type, void *data, bool original = true) {
+    const auto stamp = original ? OriginalInputStamp{91, ++sequence, 1} : OriginalInputStamp{};
+    return f.events.dispatchEvent(
+        Event(type, f.primary.getEventTarget(), data, Event::EventFlags::DontFreeData, stamp)
+    );
+  };
+  IPlatformComputer::ButtonInfo button(1, 0);
+  IPlatformComputer::MotionInfo point{999, 500};
+  QVERIFY(dispatch(EventTypes::PrimaryComputerButtonDown, &button, false));
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!mailbox->read()); // Configured/synthetic down cannot borrow a later raw move.
+  server.onMouseUp(1);
+  QVERIFY(dispatch(EventTypes::PrimaryComputerButtonDown, &button));
+  point.m_y = 100;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!mailbox->read()); // Outside the configured edge segment.
+  point.m_y = 500;
+  server.m_switchWaitDelay = 0.04;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!mailbox->read());
+  QTest::qSleep(45);
+  server.handleSwitchWaitTimeout(); // Physical lock still denies the ordinary switch.
+  QVERIFY(!mailbox->read());        // Timer cannot manufacture an original motion.
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  const auto waited = mailbox->read();
+  QVERIFY(waited);
+  QCOMPARE(waited->edge().destinationY, 501); // Existing fractional edge mapping.
+  server.m_lockedToComputer = true;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!waited->live() && !mailbox->read());
+  server.m_lockedToComputer = false;
+  server.m_switchWaitDelay = 0;
+  server.m_switchTwoTapDelay = 1;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!mailbox->read());
+  server.m_switchTwoTapDelay = 0;
+  // addComputer installs per-screen defaults and addOption is insert-only.
+  // Change this fixture's owned map, without modifying persistent Settings.
+  auto *options = const_cast<deskflow::server::Config::ScreenOptions *>(f.config.getOptions("primary"));
+  QVERIFY(options);
+  (*options)[kOptionComputerSwitchCorners] = s_topRightCornerMask;
+  (*options)[kOptionComputerSwitchCornerSize] = 600;
+  QVERIFY(dispatch(EventTypes::PrimaryComputerMotionOnPrimary, &point));
+  QVERIFY(!mailbox->read()); // Locked corner wins even with a held valid press.
 }
 
 void ServerTests::selectedPeer_requiresCurrentAuthenticatedRemote()

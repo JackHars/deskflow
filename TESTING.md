@@ -6,6 +6,26 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Configured-edge observation and exact press join pass:** the Server now
+  publishes the authenticated configured neighbor, screen bounds, mapped point
+  and exact original local press through a one-value mailbox. Tests cover all
+  four directions, partial-edge mapping, dwell requiring a later real motion,
+  double-tap/corner/scroll-lock policy, unchanged local button ownership and
+  revocation on release, Escape, reconfiguration, shape change, disconnect,
+  screensaver and shutdown. Portable tests cover stale/replayed/mismatched
+  observations, TLS loss, counter exhaustion and concurrent mailbox closure.
+  Actual Session tests cover joining through the sole raw consumer, immediate
+  withdrawal before delayed release annotations, and deletion inside the new
+  callback. The corrected Server/companion suites pass **2/2**
+  (`p5-edge-final-tests-2.*`), as do the enabled Core build, feature-OFF Core and
+  Server suite, portable Mac edge test and scoped ASan/UBSan test
+  (`p5-edge-portable-tests.*`, `p5-edge-sanitize-tests.*`, `p5-edge-feature-off-*`).
+  The same portable edge suite passes normally and under ASan/UBSan directly
+  on home Ubuntu, GCC 15.2, with transferred source hashes verified and owned
+  temporary files removed (`p5-edge-ubuntu-2/result.json`). The earlier failed
+  fixture/build/routing runs are retained, not reclassified. This is Core
+  observation only: no private drag command, source mutation, input switch,
+  moving preview or GNOME drag-back is enabled by this checkpoint.
 - **Same-event HID/annotated identity join passes physically:**
   `owned-titlebar-joined-physical-20261014T174302Z` records the exact owned
   window **10383** on both joined down and up, native event number **516**,
@@ -31,7 +51,7 @@ SPDX-License-Identifier: MIT
   and painted current geometry. Old geometry, changed identity, timeout and
   reentrant cancellation cannot commit; existing source journaling owns rollback.
   The post-release frame query/timer is **not** a native grab-completion receipt.
-  No configured-edge trigger or GNOME drag-back controller calls this preparation
+  Neither the Core edge candidate nor a GNOME drag-back controller calls this preparation
   API yet; the ordinary explicit export path is unchanged.
 - **Current automated validation:** the enabled Mac Core/Host build and ordinary
   feature-OFF Core build pass. **10/10** scoped Mac integration suites pass

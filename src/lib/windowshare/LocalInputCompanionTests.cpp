@@ -72,6 +72,17 @@ bool LocalInputPeerTrust::verify(LocalInputProcess expected) const
   return trust.verify && localInputProcess(expected.pid) == expected;
 }
 #ifdef __APPLE__
+struct WindowDragEdgeMailboxTestAccess
+{
+  static bool bind(WindowDragEdgeMailbox &mailbox)
+  {
+    return mailbox.bind(91);
+  }
+  static bool publish(WindowDragEdgeMailbox &mailbox, WindowDragEdge edge)
+  {
+    return mailbox.publish(std::move(edge));
+  }
+};
 struct LocalInputCoreSessionTestAccess
 {
   static std::unique_ptr<LocalInputCoreSession> captureOnly()
@@ -726,6 +737,88 @@ struct CaptureFixture
   }
 };
 
+void coreSessionWindowDragEdge()
+{
+  for (bool destroy : {false, true}) {
+    auto session = LocalInputCoreSessionTestAccess::captureOnly();
+    const auto source = session->captureSource();
+    const auto mailbox = session->windowDragEdgeMailbox();
+    check(
+        source->start() && source->startAnnotations() && source->routes()->bind(91) &&
+            WindowDragEdgeMailboxTestAccess::bind(*mailbox),
+        "edge session fixture starts without native taps"
+    );
+    deskflow::AuthenticatedPeerIssuer issuer;
+    deskflow::AuthenticatedPeerTicket::Fingerprint pin{};
+    pin.fill(0x45);
+    const auto ticket = *issuer.issue(pin);
+    CaptureFixture fixture;
+    CGEventSetType(fixture.event, kCGEventLeftMouseDown);
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventButtonNumber, 0);
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventClickState, 1);
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventNumber, 92);
+    CGEventSetLocation(fixture.event, {200, 200});
+    const auto down = source->beginCapture(kCGEventLeftMouseDown, fixture.event);
+    source->completeCapture({down, 1, false});
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventWindowUnderMousePointer, 812);
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 812);
+    source->captureAnnotation(kCGEventLeftMouseDown, fixture.event);
+    LocalInputCoreSessionTestAccess::drain(*session);
+    CGEventSetType(fixture.event, kCGEventLeftMouseDragged);
+    CGEventSetTimestamp(fixture.event, 200);
+    const auto motion = source->beginCapture(kCGEventLeftMouseDragged, fixture.event);
+    source->completeCapture({motion, 1, false});
+    WindowDragEdge edge{
+        91,
+        19,
+        {down.epoch, down.sequence, 1},
+        {motion.epoch, motion.sequence, 1},
+        WindowDragEdgeSide::Right,
+        {0, 0, 1000, 1000},
+        {0, 0, 1000, 1000},
+        999,
+        200,
+        0,
+        200,
+        ticket
+    };
+    check(WindowDragEdgeMailboxTestAccess::publish(*mailbox, edge), "Core publishes configured edge");
+    std::optional<WindowDragEdgeCandidate> retained;
+    int offers = 0, withdrawals = 0;
+    session->onWindowDragEdge = [&](const auto &candidate) {
+      if (!candidate) {
+        ++withdrawals;
+        return;
+      }
+      ++offers;
+      retained = candidate;
+      check(candidate->live() && candidate->press.window() == 812, "consumer joins the original down and exact window");
+      if (destroy)
+        session.reset();
+    };
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(offers == 1 && retained && !source->popCaptured(), "one raw consumer notifies once after draining");
+    if (destroy) {
+      check(!session && !retained->live() && !mailbox->read(), "callback destruction revokes all retained values");
+      continue;
+    }
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(offers == 1, "poll does not repeat unchanged motion");
+    CGEventSetType(fixture.event, kCGEventLeftMouseUp);
+    CGEventSetTimestamp(fixture.event, 300);
+    CGEventSetIntegerValueField(fixture.event, kCGMouseEventClickState, 0);
+    const auto up = source->beginCapture(kCGEventLeftMouseUp, fixture.event);
+    source->completeCapture({up, 1, false});
+    // Hold back its annotation and the Core's corresponding release. The sole
+    // raw consumer must revoke now, without waiting for either delayed queue.
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(withdrawals == 1 && !retained->live(), "real raw up immediately withdraws the candidate");
+    source->captureAnnotation(kCGEventLeftMouseUp, fixture.event);
+    LocalInputCoreSessionTestAccess::drain(*session);
+    check(offers == 1 && withdrawals == 1, "late annotation cannot revive the ended drag");
+  }
+}
+
 void coreSessionRouteJoin()
 {
   auto session = LocalInputCoreSessionTestAccess::captureOnly();
@@ -1140,6 +1233,7 @@ int main(int argc, char **argv)
     coreSessionCustomDrain();
 #ifdef __APPLE__
     coreSessionRouteJoin();
+    coreSessionWindowDragEdge();
     coreSessionCompletedCaptures();
     coreSessionCompletedCaptureOverflow();
     coreSessionCompletedCaptureLifetime();

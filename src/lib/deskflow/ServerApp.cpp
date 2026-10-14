@@ -30,6 +30,7 @@
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/SelectedPeerMailbox.h"
 #include "windowshare/SelectedPeerPublisher.h"
+#include "windowshare/WindowDragEdge.h"
 #endif
 
 // must be before computer header includes
@@ -79,6 +80,8 @@ ServerApp::~ServerApp()
   // already removed the publisher; close also denies after an exceptional exit.
   if (m_selectedPeerMailbox)
     m_selectedPeerMailbox->close();
+  if (m_windowDragEdgeMailbox)
+    m_windowDragEdgeMailbox->close();
 #endif
 }
 
@@ -106,6 +109,14 @@ void ServerApp::setSelectedPeerMailbox(std::shared_ptr<deskflow::windowshare::Se
       thread() != QThread::currentThread())
     throw std::logic_error("Selected peer mailbox must be configured once before core startup");
   m_selectedPeerMailbox = std::move(mailbox);
+}
+
+void ServerApp::setWindowDragEdgeMailbox(std::shared_ptr<deskflow::windowshare::WindowDragEdgeMailbox> mailbox)
+{
+  if (!mailbox || m_windowDragEdgeMailbox || m_serverState != ServerState::Uninitialized ||
+      thread() != QThread::currentThread())
+    throw std::logic_error("Window drag edge mailbox must be configured once before core startup");
+  m_windowDragEdgeMailbox = std::move(mailbox);
 }
 
 void ServerApp::stopSelectedPeerPublication()
@@ -553,6 +564,10 @@ ClientListener *ServerApp::openClientListener(const NetworkAddress &address)
 Server *ServerApp::openServer(ServerConfig &config, PrimaryClient *primaryClient)
 {
   auto server = std::make_unique<Server>(config, primaryClient, m_serverComputer, getEvents());
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (m_windowDragEdgeMailbox && !server->setWindowDragEdgeMailbox(m_windowDragEdgeMailbox))
+    throw std::runtime_error("Window drag observation could not bind its server");
+#endif
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE && defined(Q_OS_MACOS)
   if (m_originalInputCapture) {
     if (!server->setOriginalInputRoutes(m_originalInputCapture->routes()) ||

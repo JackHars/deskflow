@@ -8,6 +8,7 @@
 #include "OriginalInputRoute.h"
 #include "OriginalPointerJoin.h"
 #include "SelectedPeerMailbox.h"
+#include "WindowDragEdgeJoin.h"
 
 namespace deskflow::windowshare {
 
@@ -32,6 +33,7 @@ public:
   LocalInputChannel *channel() const;
   std::optional<LocalInputCompanion::ExitResult> exitResult() const;
   std::shared_ptr<SelectedPeerMailbox> selectedPeerMailbox() const;
+  std::shared_ptr<WindowDragEdgeMailbox> windowDragEdgeMailbox() const;
 #ifdef __APPLE__
   std::shared_ptr<OriginalInputCaptureSource> captureSource() const;
   // Owner-thread observations only. This callback reports a historical exact
@@ -39,12 +41,16 @@ public:
   // It may stop/destroy the session synchronously.
   std::function<void(const OriginalInputRouted &)> onRoutedInput;
   std::function<void(const OriginalPointerJoin::Match &)> onPointerWindow;
+  // Exact original press plus configured edge, or null when withdrawn. A
+  // callback must recheck candidate.live(); this does not switch computers.
+  std::function<void(const std::optional<WindowDragEdgeCandidate> &)> onWindowDragEdge;
 #endif
   std::function<void(QString)> onStopped;
 
 private:
   LocalInputCoreSession() = default;
   std::shared_ptr<SelectedPeerMailbox> m_selectedPeerMailbox = std::make_shared<SelectedPeerMailbox>();
+  std::shared_ptr<WindowDragEdgeMailbox> m_windowDragEdgeMailbox = std::make_shared<WindowDragEdgeMailbox>();
   std::unique_ptr<LocalInputChannel> m_channel;
   std::unique_ptr<LocalInputCompanion> m_companion;
   int m_stopWaitMs = 2000;
@@ -58,6 +64,8 @@ private:
   std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;
   std::unique_ptr<OriginalInputRouteJoin> m_captureJoin;
   std::unique_ptr<OriginalPointerJoin> m_pointerJoin;
+  WindowDragEdgeJoin m_windowDragEdgeJoin;
+  std::uint64_t m_windowDragEdgeGeneration = 0, m_windowDragEdgeSequence = 0;
   std::shared_ptr<bool> m_callbackLifetime = std::make_shared<bool>(true);
   QTimer m_captureTimer;
 #endif

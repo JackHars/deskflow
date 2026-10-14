@@ -95,6 +95,7 @@ public:
     if (auto *evidence = deskflow::windowshare::inputEvidence())
       evidence->revokeOwner();
     m_server.m_selectionChanging = true;
+    m_server.invalidateWindowDragEdge(true);
     m_server.invalidateSelectedPeer();
     if (m_wasAlive)
       m_server.flushOriginalBeforeSelection();
@@ -952,9 +953,12 @@ void Server::avoidJumpZone(const BaseClientProxy *dst, Direction dir, int32_t &x
 }
 
 bool Server::isSwitchOkay(
-    BaseClientProxy *newComputer, Direction dir, int32_t x, int32_t y, int32_t xActive, int32_t yActive
+    BaseClientProxy *newComputer, Direction dir, int32_t x, int32_t y, int32_t xActive, int32_t yActive,
+    double *dragWait
 )
 {
+  if (dragWait)
+    *dragWait = -1;
   LOG_VERBOSE("try to leave \"%s\" on %s", getName(m_active).c_str(), Config::dirName(dir));
 
   // is there a neighbor?
@@ -991,6 +995,7 @@ bool Server::isSwitchOkay(
     }
   }
 
+  bool edgePreventSwitch = preventSwitch;
   // if waiting before a switch then prepare to switch later
   if (!allowSwitch && m_switchWaitDelay > 0.0) {
     if (isNewDirection || !isSwitchWaitStarted()) {
@@ -1019,9 +1024,15 @@ bool Server::isSwitchOkay(
       // yep, no switching
       LOG_VERBOSE("locked in corner");
       preventSwitch = true;
+      edgePreventSwitch = true;
       stopSwitch();
     }
   }
+
+  // Observation of a held drag uses the same configured delays/corners, but
+  // cannot treat the physical button lock as permission to leave the source.
+  if (dragWait && !edgePreventSwitch && !isLockedToComputerServer())
+    *dragWait = allowSwitch ? 0 : m_switchWaitDelay;
 
   // ignore if mouse is locked to computer and don't try to switch later
   if (!preventSwitch && isLockedToComputer()) {
@@ -1330,6 +1341,9 @@ void Server::handleShapeChanged(BaseClientProxy *client)
   if (!m_clientSet.contains(client)) {
     return;
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  invalidateWindowDragEdge(true);
+#endif
 
   LOG_DEBUG("computer \"%s\" shape changed", getName(client).c_str());
 
@@ -1672,6 +1686,9 @@ void Server::handleLockCursorToComputerEvent(const Event &event)
 
   // enter new state
   if (newState != m_lockedToComputer) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    invalidateWindowDragEdge(true);
+#endif
     m_lockedToComputer = newState;
     LOG_INFO("cursor %s current computer", m_lockedToComputer ? "locked to" : "unlocked from");
 
@@ -2940,6 +2957,93 @@ void Server::observeOriginalSend(BaseClientProxy *client, bool relative) noexcep
   }
 }
 
+bool Server::setWindowDragEdgeMailbox(std::shared_ptr<deskflow::windowshare::WindowDragEdgeMailbox> mailbox)
+{
+  if (!mailbox || m_windowDragEdgeMailbox || m_selectionShutdown || !mailbox->bind(m_serverIncarnation))
+    return false;
+  m_windowDragEdgeMailbox = std::move(mailbox);
+  return true;
+}
+
+void Server::invalidateWindowDragEdge(bool forgetPress) noexcept
+{
+  m_windowDragEdgePending.reset();
+  if (m_windowDragEdgeMailbox)
+    m_windowDragEdgeMailbox->clear();
+  if (forgetPress) {
+    m_windowDragPress = {};
+    m_windowDragPressIncarnation = 0;
+  }
+}
+
+bool Server::observeWindowDragEdge(
+    BaseClientProxy *destination, Direction direction, int32_t x, int32_t y, int32_t sourceX, int32_t sourceY,
+    double waitSeconds
+)
+{
+  using namespace deskflow::windowshare;
+  if (!m_windowDragEdgeMailbox || !m_windowDragPress || !m_windowDragPressIncarnation || m_selectionShutdown ||
+      m_selectionChanging || m_selectionScreensaver || m_activeSaver || m_keyboardBroadcasting ||
+      isLockedToComputerServer() || m_active != m_primaryClient || !destination || destination == m_primaryClient ||
+      !m_clientSet.contains(destination) || !m_originalRouteObservation || !m_originalInputRoutes ||
+      !m_originalInputRoutes->live())
+    return false;
+  const auto press = m_inputRoutes.repeat({InputRoutes::Kind::Button, 1});
+  const auto recipient = m_inputRecipients.find(destination);
+  const auto &motion = m_originalRouteObservation->decision;
+  if (!press || press->incarnation != m_windowDragPressIncarnation || press->originalOwner ||
+      !press->recipients.empty() ||
+      recipient == m_inputRecipients.end() || motion.kind != OriginalInputRouteKind::Motion ||
+      motion.stamp.epoch != m_windowDragPress.epoch || motion.stamp.sequence <= m_windowDragPress.sequence ||
+      motion.stamp.part != 1)
+    return false;
+  const auto *stream = destination->getStream();
+  const auto ticket = stream ? stream->authenticatedPeerTicket() : std::nullopt;
+  if (!ticket || !ticket->live())
+    return false;
+  WindowDragEdge edge;
+  switch (direction) {
+  case Direction::Left:
+    edge.side = WindowDragEdgeSide::Left;
+    break;
+  case Direction::Right:
+    edge.side = WindowDragEdgeSide::Right;
+    break;
+  case Direction::Top:
+    edge.side = WindowDragEdgeSide::Top;
+    break;
+  case Direction::Bottom:
+    edge.side = WindowDragEdgeSide::Bottom;
+    break;
+  default:
+    return false;
+  }
+  edge.server = m_serverIncarnation;
+  edge.recipient = recipient->second;
+  edge.press = m_windowDragPress;
+  edge.motion = motion.stamp;
+  edge.sourceX = sourceX;
+  edge.sourceY = sourceY;
+  edge.destinationX = x;
+  edge.destinationY = y;
+  edge.peer = *ticket;
+  m_primaryClient->getShape(edge.source.x, edge.source.y, edge.source.width, edge.source.height);
+  destination->getShape(edge.destination.x, edge.destination.y, edge.destination.width, edge.destination.height);
+  if (!edge.valid() || !std::isfinite(waitSeconds) || waitSeconds < 0)
+    return false;
+  const auto now = WindowDragEdgeMailbox::Clock::now();
+  if (!m_windowDragEdgePending || !m_windowDragEdgePending->sameBoundary(edge)) {
+    m_windowDragEdgeMailbox->clear();
+    m_windowDragEdgePending = edge;
+    m_windowDragEdgeEntered = now;
+  }
+  // Only an actual later stamped motion can finish this dwell. The ordinary
+  // switch timer cannot manufacture drag motion or bypass the button owner.
+  if (std::chrono::duration<double>(now - m_windowDragEdgeEntered).count() < waitSeconds)
+    return true;
+  return m_windowDragEdgeMailbox->publish(std::move(edge));
+}
+
 std::optional<deskflow::windowshare::SelectedPeer> Server::selectedPeer() const
 {
   // No lazy publication: a failed switch or an in-progress transition must
@@ -2961,6 +3065,9 @@ void Server::invalidateSelectedPeer() noexcept
 void Server::revokeSelectedPeer() noexcept
 {
   m_selectionShutdown = true;
+  invalidateWindowDragEdge(true);
+  if (m_windowDragEdgeMailbox)
+    m_windowDragEdgeMailbox->close();
   if (m_originalInputRoutes)
     m_originalInputRoutes->revoke();
   if (m_originalInputCaptured)
@@ -3127,6 +3234,8 @@ void Server::onKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const s
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   const auto lifetime = m_originalLifetime;
+  if (id == kKeyEscape)
+    invalidateWindowDragEdge(true);
   if (deferOriginalInput(PendingKey{PendingKey::Phase::Down, id, mask, button, 0, lang}, inputRecipients(computers)))
     return;
   if (id == kKeySetModifiers || id == kKeyClearModifiers) {
@@ -3251,9 +3360,18 @@ void Server::onMouseDown(ButtonID id)
     recipients.push_back(active->second);
   if (deferOriginalInput(PendingButton{id, true}, recipients))
     return;
+  invalidateWindowDragEdge(true);
   if (m_inputRoutes.repeat({InputRoutes::Kind::Button, id}))
     return;
   const auto route = m_inputRoutes.down({InputRoutes::Kind::Button, id}, 0, 0, id, std::move(recipients));
+  if (id == 1 && route && !route->originalOwner && m_active == m_primaryClient && route->recipients.empty() &&
+      m_originalRouteObservation && m_originalInputRoutes && m_originalInputRoutes->live()) {
+    const auto stamp = m_originalRouteObservation->decision.stamp;
+    if (stamp && stamp.part == 1) {
+      m_windowDragPress = stamp;
+      m_windowDragPressIncarnation = route->incarnation;
+    }
+  }
   if (route)
     for (auto recipient : route->recipients)
       if (auto *client = inputRecipient(recipient)) {
@@ -3274,6 +3392,8 @@ void Server::onMouseUp(ButtonID id)
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   const auto lifetime = m_originalLifetime;
+  if (id == 1)
+    invalidateWindowDragEdge(true);
   InputRoutes::Recipients recipients;
   const auto active = m_inputRecipients.find(m_active);
   if (active != m_inputRecipients.end())
@@ -3300,6 +3420,9 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
 
   // mouse move on primary (server's) computer
   if (m_active != m_primaryClient) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    invalidateWindowDragEdge(true);
+#endif
     // stale event -- we're actually on a secondary computer
     return false;
   }
@@ -3361,6 +3484,9 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
     dirv = Bottom;
   }
   if (dirh == NoDirection && dirv == NoDirection) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    invalidateWindowDragEdge();
+#endif
     // still on local computer
     noSwitch(x, y);
     return false;
@@ -3370,6 +3496,9 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
   std::array<Direction, 2> dirs = {dirh, dirv};
   std::array<int32_t, 2> xs = {xh, x};
   std::array<int32_t, 2> ys = {y, yv};
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool edgeObserved = false;
+#endif
   for (int i = 0; i < 2; ++i) {
     Direction dir = dirs.at(i);
     if (dir == NoDirection) {
@@ -3381,13 +3510,23 @@ bool Server::onMouseMovePrimary(int32_t x, int32_t y)
     BaseClientProxy *newComputer = mapToNeighbor(m_active, dir, x, y);
 
     // should we switch or not?
-    if (isSwitchOkay(newComputer, dir, x, y, xc, yc)) {
+    double dragWait = -1;
+    const bool switchOkay = isSwitchOkay(newComputer, dir, x, y, xc, yc, &dragWait);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (!edgeObserved && dragWait >= 0)
+      edgeObserved = observeWindowDragEdge(newComputer, dir, x, y, xc, yc, dragWait);
+#endif
+    if (switchOkay) {
       // switch computer
       switchComputer(newComputer, x, y, false);
       return true;
     }
   }
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (!edgeObserved)
+    invalidateWindowDragEdge();
+#endif
   return false;
 }
 

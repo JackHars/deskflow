@@ -386,9 +386,16 @@ of the same ordinary drag, but must not require a separate user action.
 - [ ] Physically verify the exact native titlebar eligibility observer. The
   `--interactive-eligible` probe is prepared, with a separate owned source app;
   it does not post input. A passing owned join is not yet arbitrary-app eligibility.
-- [ ] Detect crossing a configured Deskflow edge and bind the authenticated
-  destination and live topology to the retained original press. The titlebar
-  observer and preparation API exist; this Core edge controller is not wired.
+- [x] Observe a configured Deskflow edge with the authenticated Core peer,
+  screen bounds and exact locally owned press. The bounded cross-thread mailbox
+  follows neighbor/partial-edge mapping, dwell, double-tap and locked corners;
+  release, Escape, topology changes and disconnect revoke retained observations.
+  The sole raw consumer joins the edge to the same annotated press and withdraws
+  it immediately on real up, even if its annotation or Core release is delayed.
+- [ ] Connect that edge candidate through the private channel to the matching
+  WindowShare peer and NativeHost preparation. The explicit dual-pin policy,
+  live connection/layout and proven native cutover must still gate this action.
+  The Core candidate callback currently performs no transfer or input switch.
 - [ ] Integrate preview motion, native drag cutover, painted readiness and drop
   commit as one continuous ordinary drag with exactly one button-up owner.
   The post-release frame query is not a native grab-completion receipt. Keeping

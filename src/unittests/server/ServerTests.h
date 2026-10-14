@@ -60,6 +60,9 @@ private Q_SLOTS:
   void selectedPeer_revokesBeforeRemoveCloseAndForceLeave();
   void selectedPeer_configBroadcastAndScreensaverFence();
   void selectedPeer_shutdownAndOverflowAreTerminal();
+  void windowDragEdge_configuredMappingsKeepLocalOwner();
+  void windowDragEdge_revokesOnReleaseAndTopology();
+  void windowDragEdge_honorsDelaysCornersAndOriginalIdentity();
 
 private:
   Arch m_arch;

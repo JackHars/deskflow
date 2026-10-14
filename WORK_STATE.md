@@ -2,6 +2,37 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+The subsequent Core edge-observation checkpoint is implemented and tested.
+`WindowDragEdgeMailbox` carries only one bounded value from the Server event
+thread to `LocalInputCoreSession`; no second raw consumer or cross-thread Server
+call is added. It binds the authenticated Core connection, exact original local
+press, configured neighbor/edge segment, mapped point and both screen bounds.
+Existing double-tap, corner locks and dwell policy are respected; only a real
+stamped motion can finish dwell. Leaving the edge, release, Escape, reconfiguration,
+shape change, saver, disconnect, shutdown or TLS revocation invalidates retained
+observations. A stalled worker's observation expires after 250ms. The consumer
+joins that press to the HID/annotation result, rejects expanded/uncertain input,
+and revokes immediately on raw up without waiting for either downstream queue.
+Its optional `onWindowDragEdge` callback is observation-only; it does not yet
+send a drag command to Host, prepare a preview, switch computers or post input.
+
+The enabled Core build, Server and companion suites, feature-OFF Core/Server
+test, and new portable edge tests pass. Edge ASan/UBSan passes on Mac. Normal
+and ASan/UBSan runs pass directly on home Ubuntu with exact source hashes,
+no desktop interaction and only the owned temporary directory removed.
+Evidence is `p5-edge-final-tests-2.*`, `p5-edge-portable-tests.*`,
+`p5-edge-sanitize-tests.*`, `p5-edge-feature-off-*` and
+`p5-edge-ubuntu-2/result.json` under `build/roadmap-completion-20261014`.
+Earlier failures remain preserved: a missing motion in the new portable fixture,
+an incorrect primary-recipient lookup (local ownership has no remote recipient),
+and test configuration/API assumptions. The corrected integration suites pass.
+
+The earlier join/preparation checkpoint is committed and pushed as
+`5416e738249219f27afd7699f6c7953fa1539aac`; its 31 source hashes match that
+commit (`p5-checkpoint-commit-binding.json`). The pending eligibility probe
+remains built from that checkpoint. Use its frozen archive and commit binding,
+not the subsequently edited working tree, when recording its physical result.
+
 P5 is in progress, not complete. The latest working checkpoint adds the bounded
 HID/annotated pointer join, private v6 observation transport, exact native
 standard-titlebar observation and the NativeHost preparation/drop gate. The
@@ -32,10 +63,10 @@ reuse readiness from the completed join test. Keep failed runs and bind each
 physical result to its frozen source/binary. No user response has arrived for
 this next test at the time this checkpoint is written.
 
-Remaining P5 integration: configured-edge/authenticated destination controller,
+Remaining P5 integration: private edge command/dual-pin destination controller,
 proven native drag/cursor cutover, moving/painted preview and real-release commit,
 GNOME-owned Viewer drag-back, connected cancellation/recovery and H07. The
-new preparation gate is not yet invoked by an edge controller. A fixed frame
+new preparation gate is not yet invoked by the Core edge candidate. A fixed frame
 query delay is not a native grab-completion receipt, and a remote preview alone
 does not prove seamless ownership. Do not mark P5 complete or silently substitute
 thumbnail dragging for the user's ordinary-titlebar requirement.

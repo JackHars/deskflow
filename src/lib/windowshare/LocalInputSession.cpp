@@ -58,7 +58,8 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   result->m_stopWaitMs = limits.gracefulMs + limits.terminateMs + 700;
   auto *self = result.get();
   result->m_companion->onChannel = [self](std::unique_ptr<LocalInputChannel> channel) {
-    channel->onClosed = [weak = std::weak_ptr<SelectedPeerMailbox>(self->m_selectedPeerMailbox)
+    channel->onClosed = [weak = std::weak_ptr<SelectedPeerMailbox>(self->m_selectedPeerMailbox),
+                         edge = std::weak_ptr<WindowDragEdgeMailbox>(self->m_windowDragEdgeMailbox)
 #ifdef __APPLE__
                              ,
                          capture = std::weak_ptr<OriginalInputCaptureSource>(self->m_captureSource)
@@ -69,6 +70,8 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
         source->stop();
 #endif
       if (const auto mailbox = weak.lock())
+        mailbox->close();
+      if (const auto mailbox = edge.lock())
         mailbox->close();
     };
     self->m_channel = std::move(channel);
@@ -100,6 +103,7 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
     self->m_captureTimer.stop();
 #endif
     self->m_selectedPeerMailbox->close();
+    self->m_windowDragEdgeMailbox->close();
     const auto callback = self->onStopped;
     if (callback)
       callback(std::move(reason));
@@ -127,11 +131,14 @@ LocalInputCoreSession::~LocalInputCoreSession()
 #ifdef __APPLE__
   *m_callbackLifetime = false;
   onRoutedInput = {};
+  onWindowDragEdge = {};
+  m_windowDragEdgeJoin.revoke();
   m_captureTimer.stop();
   if (m_captureSource)
     m_captureSource->stop();
 #endif
   m_selectedPeerMailbox->close();
+  m_windowDragEdgeMailbox->close();
   onStopped = {};
   if (m_companion) {
     m_companion->onChannel = {};
@@ -142,11 +149,13 @@ LocalInputCoreSession::~LocalInputCoreSession()
 bool LocalInputCoreSession::stop()
 {
 #ifdef __APPLE__
+  m_windowDragEdgeJoin.revoke();
   m_captureTimer.stop();
   if (m_captureSource)
     m_captureSource->stop();
 #endif
   m_selectedPeerMailbox->close();
+  m_windowDragEdgeMailbox->close();
   const QPointer<LocalInputCompanion> companion(m_companion.get());
   const int waitMs = m_stopWaitMs;
   if (!companion)
@@ -170,6 +179,10 @@ std::shared_ptr<SelectedPeerMailbox> LocalInputCoreSession::selectedPeerMailbox(
 {
   return m_selectedPeerMailbox;
 }
+std::shared_ptr<WindowDragEdgeMailbox> LocalInputCoreSession::windowDragEdgeMailbox() const
+{
+  return m_windowDragEdgeMailbox;
+}
 #ifdef __APPLE__
 std::shared_ptr<OriginalInputCaptureSource> LocalInputCoreSession::captureSource() const
 {
@@ -187,6 +200,8 @@ void LocalInputCoreSession::drainCapturedInput()
     m_captureTimer.stop();
     m_captureBarrier.reset();
     m_selectedPeerMailbox->close();
+    m_windowDragEdgeMailbox->close();
+    m_windowDragEdgeJoin.revoke();
     source->stop();
     const QPointer<LocalInputCompanion> companion(m_companion.get());
     // This nonblocking, terminal stop closes only the owned companion. A
@@ -197,6 +212,7 @@ void LocalInputCoreSession::drainCapturedInput()
   }
   const auto epoch = source->epoch();
   const auto pointerLost = [&] {
+    m_windowDragEdgeJoin.revoke();
     if (m_pointerNotificationsStopped)
       return;
     m_pointerNotificationsStopped = true;
@@ -204,6 +220,7 @@ void LocalInputCoreSession::drainCapturedInput()
       m_channel->sendWindowPointer({});
   };
   if (!epoch.live()) {
+    m_windowDragEdgeJoin.revoke();
     // Source::epoch() is also empty before producer startup. The conduit owns
     // the underlying epoch and can distinguish that state from continuity loss.
     (void)source->completedInput()->live();
@@ -247,7 +264,9 @@ void LocalInputCoreSession::drainCapturedInput()
     const auto captured = source->popCaptured();
     if (!captured)
       break;
+    m_windowDragEdgeJoin.capture(*captured);
     if (!m_captureBarrier->observe(captured->input)) {
+      m_windowDragEdgeJoin.revoke();
       // Keep the native observer alive for a later raw emergency.
       m_captureBarrier.reset();
       m_captureJoin->revoke();
@@ -289,6 +308,7 @@ void LocalInputCoreSession::drainCapturedInput()
       const auto pointer = m_pointerJoin->pop();
       if (!pointer)
         break;
+      m_windowDragEdgeJoin.pointer(*pointer);
       const auto callback = onPointerWindow;
       const auto lifetime = m_callbackLifetime;
       if (!m_pointerNotificationsStopped && m_channel && m_channel->supportsWindowPointer()) {
@@ -321,6 +341,19 @@ void LocalInputCoreSession::drainCapturedInput()
       if (!*lifetime)
         return;
     }
+  }
+  const auto edge = m_windowDragEdgeJoin.join(m_windowDragEdgeMailbox->read());
+  const auto generation = edge ? edge->boundary.generation() : 0;
+  const auto sequence = edge ? edge->boundary.edge().motion.sequence : 0;
+  if (generation != m_windowDragEdgeGeneration || sequence != m_windowDragEdgeSequence) {
+    m_windowDragEdgeGeneration = generation;
+    m_windowDragEdgeSequence = sequence;
+    const auto callback = onWindowDragEdge;
+    const auto lifetime = m_callbackLifetime;
+    if (callback)
+      callback(edge);
+    if (!*lifetime)
+      return;
   }
   // A joined dispatch is not a remote cursor/viewport acknowledgment, a
   // physical-neutral proof, or input authority. Original posting stays off.

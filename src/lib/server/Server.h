@@ -24,6 +24,7 @@
 #include "windowshare/OriginalInputDispatch.h"
 #include "windowshare/OriginalInputRoute.h"
 #include "windowshare/SelectedPeer.h"
+#include "windowshare/WindowDragEdge.h"
 #endif
 
 #include <climits>
@@ -217,6 +218,7 @@ public:
   // Core event-queue thread only. The copied value contains no client/stream
   // pointers and remains safe to inspect after this Server is destroyed.
   std::optional<deskflow::windowshare::SelectedPeer> selectedPeer() const;
+  bool setWindowDragEdgeMailbox(std::shared_ptr<deskflow::windowshare::WindowDragEdgeMailbox> mailbox);
 
   // Terminal shutdown fence. Call before entering any shutdown nested loop.
   // A subsequent client/configuration event cannot publish new authority.
@@ -291,7 +293,10 @@ private:
   // test if a switch is permitted.  this includes testing user
   // options like switch delay and tracking any state required to
   // implement them.  returns true iff a switch is permitted.
-  bool isSwitchOkay(BaseClientProxy *dst, Direction, int32_t x, int32_t y, int32_t xActive, int32_t yActive);
+  bool isSwitchOkay(
+      BaseClientProxy *dst, Direction, int32_t x, int32_t y, int32_t xActive, int32_t yActive,
+      double *dragWait = nullptr
+  );
 
   // update switch state due to a mouse move at \p x, \p y that
   // doesn't switch computers.
@@ -380,6 +385,11 @@ private:
   static std::uint64_t reserveServerIncarnation(std::atomic<std::uint64_t> &next) noexcept;
   void invalidateSelectedPeer() noexcept;
   void publishSelectedPeer() noexcept;
+  void invalidateWindowDragEdge(bool forgetPress = false) noexcept;
+  bool observeWindowDragEdge(
+      BaseClientProxy *destination, Direction direction, int32_t x, int32_t y, int32_t sourceX, int32_t sourceY,
+      double waitSeconds
+  );
 #endif
 
   // add client to list and attach event handlers for client
@@ -566,6 +576,11 @@ private:
   std::uint64_t m_selectionGeneration = 0;
   std::shared_ptr<std::atomic_bool> m_selectionRevoked;
   std::optional<deskflow::windowshare::SelectedPeer> m_selectedPeer;
+  std::shared_ptr<deskflow::windowshare::WindowDragEdgeMailbox> m_windowDragEdgeMailbox;
+  deskflow::windowshare::OriginalInputStamp m_windowDragPress;
+  std::uint64_t m_windowDragPressIncarnation = 0;
+  std::optional<deskflow::windowshare::WindowDragEdge> m_windowDragEdgePending;
+  std::chrono::steady_clock::time_point m_windowDragEdgeEntered;
   bool m_selectionShutdown = false;
   bool m_selectionScreensaver = false;
   bool m_selectionChanging = false;
