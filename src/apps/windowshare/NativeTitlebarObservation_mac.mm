@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "NativeTitlebarGeometry.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
 
@@ -169,28 +170,40 @@ NativeTitlebarObservation::begin(std::uint32_t window, Point press, QString *dia
   return result;
 }
 
-std::optional<NativeTitlebarObservation::Snapshot> NativeTitlebarObservation::read()
+std::optional<NativeTitlebarObservation::Snapshot> NativeTitlebarObservation::read(QString *diagnostic)
 {
   auto &impl = *m_impl;
-  if (!impl.live)
-    return std::nullopt;
-  const auto fail = [&]() -> std::optional<Snapshot> {
+  const auto fail = [&](const QString &reason) -> std::optional<Snapshot> {
     impl.live = false;
+    if (diagnostic)
+      *diagnostic = reason;
     return {};
   };
+  if (!impl.live)
+    return fail(QStringLiteral("Native titlebar observation already retired"));
   const auto &saved = impl.initial;
   const auto current = nativeWindow(saved.window);
   const auto actual = frame(impl.window.value);
   CGWindowID id = 0;
-  if (!AXIsProcessTrusted() || !current || !actual || current->process != saved.process ||
-      birth(current->process) != saved.processBirth || axWindowId(impl.window.value, id) != kAXErrorSuccess ||
-      id != saved.window || !sameFrame(*actual, current->bounds) || std::abs(actual->width - saved.initial.width) > 1 ||
-      std::abs(actual->height - saved.initial.height) > 1 ||
-      !attributeEquals(impl.window.value, kAXMinimizedAttribute, kCFBooleanFalse))
-    return fail();
+  if (!AXIsProcessTrusted())
+    return fail(QStringLiteral("Accessibility permission lost"));
+  if (!current)
+    return fail(QStringLiteral("Exact visible WindowServer window unavailable"));
+  if (!actual)
+    return fail(QStringLiteral("Retained AX window frame unavailable"));
+  if (current->process != saved.process || birth(current->process) != saved.processBirth)
+    return fail(QStringLiteral("Native process identity changed"));
+  if (axWindowId(impl.window.value, id) != kAXErrorSuccess || id != saved.window)
+    return fail(QStringLiteral("Retained AX native window identity changed"));
+  if (!sameNativeTitlebarExtent(saved.initial, *actual, current->bounds))
+    return fail(QStringLiteral("Native window size changed"));
+  if (!attributeEquals(impl.window.value, kAXMinimizedAttribute, kCFBooleanFalse))
+    return fail(QStringLiteral("Retained AX window minimized or unavailable"));
   auto result = saved;
-  result.current = *actual;
-  result.moved = std::hypot(actual->x - saved.initial.x, actual->y - saved.initial.y) >= 3;
+  result.current = current->bounds;
+  result.moved = std::hypot(result.current.x - saved.initial.x, result.current.y - saved.initial.y) >= 3;
+  if (diagnostic)
+    diagnostic->clear();
   return result;
 }
 } // namespace deskflow::windowshare::native

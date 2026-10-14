@@ -384,9 +384,12 @@ of the same ordinary drag, but must not require a separate user action.
   current produced/painted geometry are required. Existing durable recovery
   handles cancellation after mutation; untouched preparation leaves the source
   alone. Automated identity, stale-frame, timeout and reentrancy cases pass.
-- [ ] Physically verify the exact native titlebar eligibility observer. The
-  `--interactive-eligible` probe is prepared, with a separate owned source app;
-  it does not post input. A passing owned join is not yet arbitrary-app eligibility.
+- [x] Physically verify the exact native titlebar eligibility observer against a
+  separate owned AppKit window. The `--interactive-eligible` run
+  `20261014T194753Z` passes native titlebar admission, movement, exact down/up
+  joins and real release (201 drags, 131 frame changes). A timing difference
+  between AX and WindowServer positions was fixed without relaxing identity or
+  size checks. This does not yet verify every arbitrary application's titlebar.
 - [x] Observe a configured Deskflow edge with the authenticated Core peer,
   screen bounds and exact locally owned press. The bounded cross-thread mailbox
   follows neighbor/partial-edge mapping, dwell, double-tap and locked corners;
@@ -416,8 +419,9 @@ of the same ordinary drag, but must not require a separate user action.
 
 Acceptance: deterministic transaction/fault tests and harness support for H07.
 Do not call ordinary opening/closing of a Viewer "edge-drag support."
-The user deferred physical tests on 2026-10-14 and requested continued code work.
-Do not wait for a readiness answer to implement the remaining items. Current
+The user returned on 2026-10-14 and requested physical testing; owned native
+titlebar eligibility now passes. Implement the remaining items without waiting
+for further physical readiness. Current
 preparation cancels on real up; `observeWindowPointer` cannot automatically commit
 a drop. The explicit release API awaits the native cutover owner. Production
 preview placement/motion and GNOME drag-back remain unfinished. See

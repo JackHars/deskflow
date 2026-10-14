@@ -6,10 +6,40 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
-- **Physical tests deferred at the user's request:** continue implementation and
-  automated verification while the user is away. No readiness question is
-  pending. Native ordinary-titlebar eligibility and H07 remain **NOT_RUN**;
-  physical fixtures must wait until the user returns.
+- **Native ordinary-titlebar eligibility passes physically:** the user returned
+  and requested physical testing. `owned-titlebar-eligible-physical-20261014T194753Z`
+  records exact owned window **10482**, source PID **64457**, native event **521**,
+  joined raw down/up sequences **82/284**, accepted native titlebar identity,
+  **201 drag events**, **131 independent frame changes** and the real zero-click
+  release **3.472907914 seconds** after down. Completion is `physical-release`,
+  `eligibleSourceDrag=true`, exit 0, with exact owned-fixture cleanup and no
+  surviving titlebar probe. No input was posted or suppressed. Source/binary
+  hashes, raw logs and independently checked ordering are preserved in that
+  run's `launch.json`, `evidence.json` and `analysis.json`. The user confirmed
+  **“Yes, it worked normally”** to movement and closing only after release;
+  `user-observation.json` preserves that answer. The aggregate evidence is
+  `p5-titlebar-physical-evidence.json`.
+  This verifies the production read-only observer against a separate owned
+  AppKit window; arbitrary application compatibility and **H07 remain open**.
+- **Physical movement exposed and corrected asynchronous frame checks:** the
+  diagnostic run `20261014T194537Z` reports AX position **400,138** while
+  WindowServer reports **402,143**, both **640x368**, for the same retained
+  native window. Comparing their independently sampled origins incorrectly
+  retired an ordinary drag. Continued observation now uses WindowServer's pose
+  after rechecking exact AX/native ID, process birth, visibility and both native
+  sizes against the original extent. Either resize, invalid geometry, lost
+  identity or minimization still retires the observation. The recorded sample
+  and resize/invalid-geometry regressions pass in the native suite
+  (`p5-titlebar-physical-native-tests.*`); the production WindowShare build and
+  default/invalid probe invocation checks also pass. The subsequent physical run above
+  confirms movement and release with the correction.
+  Earlier startup failures, the user's missed 30-second window and two failed
+  drags remain recorded. The passive fixture now allows 90 seconds, has a
+  separate five-second watchdog cleanup grace, waits at most one second for
+  its owned WindowServer frame before installing taps, and reports the exact
+  startup/read failure. These harness changes do not extend production drag
+  budgets. An accidentally rerun older test executable is explicitly retained
+  as `p5-titlebar-old-binary-tests-not-current.*`, not current validation.
 - **Private drag preparation is connected:** Core/Host **v7**, separately
   negotiated capability 16 and fixed 208-byte message 20, carries Begin/Motion/
   Hold/Cancel with the original press, boundary, bounds, both explicit pins and
@@ -104,11 +134,11 @@ SPDX-License-Identifier: MIT
   (`p5-private-ubuntu/container-result.json`). No desktop input, installed app,
   existing container or machine setting was changed by these runs. The failed
   direct-host Qt dependency check remains recorded in `p5-private-ubuntu`.
-- **Next physical check is prepared, not run:** `--interactive-eligible` uses
+- **Physical eligibility probe:** `--interactive-eligible` uses
   one separately owned AppKit test window and the production read-only native
   titlebar observer. A separate source process keeps AX queries independent of
-  the observer's event loop. Physical execution is deferred. The default invocation
-  exits 2 without opening a window or tap. P5/H07 remain **NOT_RUN** for actual
+  the observer's event loop. Its physical pass is recorded above. The default
+  invocation exits 2 without opening a window or tap. P5/H07 remain **NOT_RUN** for actual
   edge crossing, continuous native drag cutover, destination preview/drop and
   drag-back. See `deploy/windowshare/native-titlebar-probe.md`.
 

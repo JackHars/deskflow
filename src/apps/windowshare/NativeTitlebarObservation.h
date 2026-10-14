@@ -33,7 +33,7 @@ public:
   };
   // Rechecks the retained AX object, native ID, process birth and size. Any
   // failure retires this observation permanently, even if an ID is later reused.
-  std::optional<Snapshot> read();
+  std::optional<Snapshot> read(QString *diagnostic = nullptr);
   bool matchesNativeWindow(AXUIElementRef window) const noexcept;
 
 private:

@@ -7,6 +7,7 @@
 #include "NativeHost.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeSourceTransaction.h"
+#include "NativeTitlebarGeometry.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
 #include "platform/OriginalInput_mac.h"
@@ -1075,6 +1076,29 @@ int main(int argc, char **argv)
     check(
         !native::NativeTitlebarObservation::begin(10383, {malformed.x, 0}),
         "Non-finite press cannot query a native titlebar"
+    );
+    const deskflow::windowshare::Rect initial{400, 137, 640, 368};
+    const deskflow::windowshare::Rect axDuringDrag{400, 138, 640, 368};
+    const deskflow::windowshare::Rect cgDuringDrag{402, 143, 640, 368};
+    check(
+        native::sameNativeTitlebarExtent(initial, axDuringDrag, cgDuringDrag),
+        "Recorded physical titlebar movement survives independently sampled AX/CG origins"
+    );
+    check(
+        !native::sameNativeTitlebarExtent(initial, {400, 138, 642, 368}, cgDuringDrag) &&
+            !native::sameNativeTitlebarExtent(initial, axDuringDrag, {402, 143, 640, 370}),
+        "A resize reported by either native API invalidates titlebar movement"
+    );
+    check(
+        !native::sameNativeTitlebarExtent(initial, {400, 138, 642, 368}, {402, 143, 642, 368}) &&
+            !native::sameNativeTitlebarExtent(initial, {400, 138, 639, 368}, {402, 143, 641, 368}),
+        "Matching resized windows and divergent native sizes cannot retain the press extent"
+    );
+    check(
+        !native::sameNativeTitlebarExtent(initial, {malformed.x, 138, 640, 368}, cgDuringDrag) &&
+            !native::sameNativeTitlebarExtent(initial, axDuringDrag, {402, 143, 0, 368}) &&
+            !native::sameNativeTitlebarExtent({}, axDuringDrag, cgDuringDrag),
+        "Invalid native geometry cannot retain titlebar movement"
     );
   }
   const auto document = QJsonDocument::fromJson(read(path));

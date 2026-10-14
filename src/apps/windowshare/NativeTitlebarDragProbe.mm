@@ -27,6 +27,8 @@ using namespace deskflow::windowshare;
 // or suppressed. The production capture source has exactly one raw consumer.
 namespace {
 using Clock = std::chrono::steady_clock;
+constexpr auto observationDuration = std::chrono::seconds(90);
+constexpr auto cleanupGrace = std::chrono::seconds(5);
 NSWindow *makeWindow()
 {
   NSWindow *window;
@@ -40,7 +42,7 @@ NSWindow *makeWindow()
   auto label = [NSTextField
       wrappingLabelWithString:
           @"Drag the normal title bar above this text.\nKeep moving for three seconds, then release.\n"
-          @"This test only observes. It will not stop your drag.\nThe window closes after release or 30 seconds."];
+          @"This test only observes. It will not stop your drag.\nThe window closes after release or 90 seconds."];
   label.frame = NSMakeRect(28, 90, 584, 180);
   label.font = [NSFont systemFontOfSize:21];
   [window.contentView addSubview:label];
@@ -62,7 +64,8 @@ int ownedTitlebarFixture()
     );
     std::fflush(stdout);
     dispatch_after(
-        dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+        dispatch_time(DISPATCH_TIME_NOW, (observationDuration + cleanupGrace).count() * NSEC_PER_SEC),
+        dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
           std::_Exit(124);
         }
     );
@@ -78,11 +81,11 @@ public:
       : m_location(annotated ? kCGAnnotatedSessionEventTap : kCGHIDEventTap),
         m_joinedMode(joined),
         m_eligibleMode(eligible),
-        m_deadline(Clock::now() + std::chrono::seconds(30))
+        m_deadline(Clock::now() + observationDuration)
   {
     m_watchdog = std::thread([this] {
       std::unique_lock lock(m_mutex);
-      if (!m_finished.wait_until(lock, m_deadline, [this] { return m_done; }))
+      if (!m_finished.wait_until(lock, m_deadline + cleanupGrace, [this] { return m_done; }))
         std::_Exit(124);
     });
   }
@@ -98,11 +101,18 @@ public:
   }
   bool start()
   {
+    const auto fail = [](const char *stage) {
+      const auto line =
+          QJsonDocument(QJsonObject{{"event", "startup-failed"}, {"stage", stage}}).toJson(QJsonDocument::Compact);
+      std::printf("%s\n", line.constData());
+      std::fflush(stdout);
+      return false;
+    };
     if (!CGPreflightListenEventAccess() || (m_eligibleMode && !AXIsProcessTrusted())) {
       std::fputs(
           "NOT_RUN: existing Input Monitoring and (for eligibility) Accessibility permission required\n", stderr
       );
-      return false;
+      return fail("permissions");
     }
     if (m_eligibleMode) {
       // Query a separate owned application, as the production Host does.
@@ -115,15 +125,25 @@ public:
       m_fixture.standardError = [NSFileHandle fileHandleWithStandardError];
       NSError *failure = nil;
       if (![m_fixture launchAndReturnError:&failure])
-        return false;
+        return fail("fixture-launch");
       auto data = [output.fileHandleForReading availableData];
       const auto info =
           QJsonDocument::fromJson(QByteArray(static_cast<const char *>(data.bytes), data.length)).object();
       m_windowId = CGWindowID(info["window"].toInteger());
       m_windowProcess = pid_t(info["pid"].toInteger());
       m_titleHeight = info["titleHeight"].toDouble();
+      const auto fixtureLine = QJsonDocument(
+                                   QJsonObject{
+                                       {"event", "owned-fixture-ready"},
+                                       {"window", qint64(m_windowId)},
+                                       {"pid", qint64(m_windowProcess)},
+                                       {"titleHeight", m_titleHeight}
+                                   }
+      ).toJson(QJsonDocument::Compact);
+      std::printf("%s\n", fixtureLine.constData());
+      std::fflush(stdout);
       if (m_windowProcess != m_fixture.processIdentifier || m_titleHeight <= 0 || m_titleHeight > 80)
-        return false;
+        return fail("fixture-identity");
     } else {
       m_window = makeWindow();
       m_windowId = CGWindowID(m_window.windowNumber);
@@ -132,9 +152,21 @@ public:
       m_titleHeight = NSHeight(m_window.frame) - NSHeight(content);
     }
     m_lastFrame = frame();
+    // The fixture reports its identity before its first AppKit run-loop turn.
+    // WindowServer may not have published that exact window's frame yet.
+    // Wait only during startup, before installing either observation tap.
+    const auto frameDeadline = Clock::now() + std::chrono::seconds(1);
+    while (!m_lastFrame && m_fixture.running && Clock::now() < frameDeadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      m_lastFrame = frame();
+    }
     m_frameTime = Clock::now();
-    if (!m_windowId || !m_lastFrame || !m_capture.start())
-      return false;
+    if (!m_windowId)
+      return fail("fixture-window-id");
+    if (!m_lastFrame)
+      return fail("fixture-native-frame");
+    if (!m_capture.start())
+      return fail("capture-start");
     m_epoch = m_capture.epoch();
     if (m_joinedMode) {
       m_join = std::make_unique<OriginalPointerJoin>(m_epoch);
@@ -147,11 +179,13 @@ public:
           },
           this
       );
-      if (!m_annotationTap || !m_capture.startAnnotations())
-        return false;
+      if (!m_annotationTap)
+        return fail("annotation-tap");
+      if (!m_capture.startAnnotations())
+        return fail("annotation-start");
       m_annotationSource = CFMachPortCreateRunLoopSource(nullptr, m_annotationTap, 0);
       if (!m_annotationSource)
-        return false;
+        return fail("annotation-source");
       CFRunLoopAddSource(CFRunLoopGetMain(), m_annotationSource, kCFRunLoopCommonModes);
     }
     const auto mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
@@ -160,10 +194,10 @@ public:
                       CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged);
     m_tap = CGEventTapCreate(m_location, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
     if (!m_tap)
-      return false;
+      return fail("capture-tap");
     m_source = CFMachPortCreateRunLoopSource(nullptr, m_tap, 0);
     if (!m_source)
-      return false;
+      return fail("capture-source");
     CFRunLoopAddSource(CFRunLoopGetMain(), m_source, kCFRunLoopCommonModes);
     CGEventTapEnable(m_tap, true);
     m_timer = [NSTimer timerWithTimeInterval:0.004
@@ -173,7 +207,7 @@ public:
                                        }];
     [NSRunLoop.mainRunLoop addTimer:m_timer forMode:NSRunLoopCommonModes];
     std::printf(
-        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"sourcePid\":%d,\"deadlineSeconds\":30,"
+        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"sourcePid\":%d,\"deadlineSeconds\":90,"
         "\"nativeTitlebar\":true,\"observationTap\":\"%s\",\"inputPosted\":false}\n",
         getpid(), m_windowId, m_windowProcess,
         m_joinedMode                   ? "hid-with-annotation-join"
@@ -410,8 +444,13 @@ private:
       return;
     }
     if (m_titlebar) {
-      const auto observed = m_titlebar->read();
+      QString diagnostic;
+      const auto observed = m_titlebar->read(&diagnostic);
       if (!observed) {
+        const auto line = QJsonDocument(
+                              QJsonObject{{"event", "native-titlebar-read-failed"}, {"diagnostic", diagnostic}}
+        ).toJson(QJsonDocument::Compact);
+        std::printf("%s\n", line.constData());
         finish("native-titlebar-identity-lost");
         return;
       }

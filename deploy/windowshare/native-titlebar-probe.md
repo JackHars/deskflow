@@ -26,7 +26,7 @@ observation cannot authorize export, input redirection or a synthetic release.
 
 ## Physical procedure
 
-Build the target, then obtain fresh readiness for this specific 30-second test.
+Build the target, then obtain fresh readiness for this specific 90-second test.
 Existing Input Monitoring permission is required; the probe never prompts for
 permission. Freeze the source and binary hashes before launch.
 
@@ -38,8 +38,8 @@ build/mac-default/bin/windowshare-native-titlebar-probe --interactive > titlebar
 Drag the **top title bar** of **Deskflow normal titlebar test - drag this title
 bar** for about three seconds, then release. The test only observes; there is
 no synthetic stop marker. Its content area does not initiate a drag. It closes
-after release or its fixed 30-second deadline. A separate watchdog exits even
-if the main run loop stalls. The default invocation prints usage and exits
+after release or its fixed 90-second deadline. Separate watchdogs exit after
+a five-second cleanup grace even if a run loop stalls. The default invocation prints usage and exits
 without a window or tap; unattended CTest does not run the interactive mode.
 
 One listen-only HID-head tap feeds the real capture adapter. One main-thread
@@ -73,7 +73,7 @@ release (see `TESTING.md`); no input is posted or suppressed.
 `--interactive-eligible` additionally runs `NativeTitlebarObservation`, the
 read-only observer used by NativeHost. It launches one separately owned source
 application with a normal AppKit titlebar. The source reports only its own ID,
-PID and titlebar height, and has an independent 30-second watchdog. The observer
+PID and titlebar height, and has an independent 95-second watchdog. The observer
 uses the joined event-time ID to retain an exact AX window/process birth, hit
 test the native titlebar, exclude controls/content, and observe movement with
 unchanged size. Fixture geometry is used only to grade the test, not as the
@@ -82,11 +82,27 @@ production eligibility decision. `ready.sourcePid` identifies the source;
 `native-titlebar-moved` and `complete.eligibleSourceDrag` record the result.
 On completion, the observer terminates only its own fixture and reports
 `owned-fixture-exit`. Existing Accessibility permission is also required.
-This next physical check has not run; obtain fresh readiness before launch.
+The owned physical run `20261014T194753Z` passes this check; obtain fresh readiness
+before another launch. The harness waits at most one second for its exact owned
+WindowServer frame before installing either tap, and reports startup failures
+by stage. This addresses a fixture-publication race without changing production
+identity admission.
 
-The source preparation/drop gate exists, but the configured-edge controller,
-native drag/cursor cutover, remote preview motion and GNOME drag-back are not
-wired. A painted preview, a timer, a source frame query or an eligibility
+The first eligible drags exposed a separate production observation bug:
+WindowServer and AX reported different origins during movement of the same
+native window. The diagnostic run retained AX `400,138` and CG `402,143`, both
+`640x368`. Subsequent observation rechecks the retained AX object, native ID and
+process birth, requires both native sizes to match the original extent, and
+uses WindowServer's current position. It does not compare independently sampled
+origins during movement. Initial exact titlebar hit/frame admission remains
+unchanged, and identity loss, either resize, invalid geometry and minimization
+still retire the observer permanently. The physical repeat records 201 drags,
+131 frame changes, exact joined down/up on window 10482 and real release after
+3.472907914 seconds, with owned cleanup and no posted/suppressed input.
+
+The source preparation/drop gate and authenticated configured-edge preparation
+controller exist. Native drag/cursor cutover, remote preview motion/drop and
+GNOME drag-back are not wired. A painted preview, a timer, a source frame query or an eligibility
 observation is not a native grab-completion receipt. Keep P5/H07 open until
 continuous transfer and return are implemented and tested.
 
