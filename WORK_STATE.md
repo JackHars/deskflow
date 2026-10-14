@@ -43,6 +43,17 @@ related integration suites pass across the initial 8/9 run and the corrected
 IPC suite's separate pass: its expected byte fixture needed the zero-count
 sample, while the previous positive-count representation remains covered.
 Evidence is `titlebar-zero-up-final-evidence.json` under the Oct 14 root.
+The fixes are committed and pushed as `e0a813d431d94c27a41cdd292ca34899bb0c9d3c`.
+The explicit `--interactive-annotated` probe mode observes the later
+application-annotated event stage. Its fresh physical run
+`owned-titlebar-annotated-physical-20261014T171931Z` passes: both event-time
+window IDs equal the owned window ID, followed by 167 drag events, 114 frame
+changes and a zero-click real release 3.079 seconds later. The source event
+number is 515 on both down and up. Production Core continues capturing at
+HID-head with its existing sole consumer. Next: verify and implement a bounded
+same-event join from annotated window identity to the original HID press.
+Separate single-tap runs do not establish that correlation or native grab
+authority, and the known fixture is not arbitrary-app titlebar eligibility.
 Procedure and limits: `deploy/windowshare/native-titlebar-probe.md`.
 This does not complete automatic titlebar detection, transfer or P5/H07.
 

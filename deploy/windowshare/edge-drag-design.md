@@ -86,6 +86,16 @@ and the real release without capture loss, while both native IDs remain zero.
 Exact evidence is tracked in the probe document. No native drag ownership
 transfer is established by these results.
 
+A separate passive run at `kCGAnnotatedSessionEventTap` then records both
+window fields equal to the retained owned window ID, followed by a complete
+ordinary drag and zero-click release. This is an available identity observation
+at the later, application-annotated stage. The two runs used separate single
+taps, so a same-event HID-to-annotation join remains unverified. The next
+prerequisite is to preserve HID capture/emergency behavior and verify a bounded
+join using event-time identity, rejecting missing, ambiguous, stale or changed
+records. This is still distinct from arbitrary-app titlebar eligibility and
+WindowServer grab ownership; no automatic release or export is enabled.
+
 An explicitly preselected exact source could support a narrower, declared
 "preview and drop this selected window" interaction: the user has already
 named the source, so it need not be inferred from foreground PID or a moved

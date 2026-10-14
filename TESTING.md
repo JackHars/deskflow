@@ -6,6 +6,19 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Annotated-stage window identity passes in the owned fixture:** the separate
+  `--interactive-annotated` mode builds and default/invalid invocations exit 2
+  without a window or tap (`titlebar-annotated-*`). Fresh physical run
+  `owned-titlebar-annotated-physical-20261014T171931Z` records both native window
+  fields as **10359**, exactly the owned window ID. It records 167 drag events,
+  114 frame changes and the real zero-click/subtype-3 up **3.078813456 seconds**
+  later; down/up event number is 515. Completion is `physical-release`, exit 0,
+  no capture rejection, no input posting/suppression, and the probe exits.
+  The run's `analysis.json` binds its exact raw evidence. Its single passive
+  tap is at the application-annotated stage; production Core's HID tap is
+  unchanged. These separate single-tap runs do not prove same-event correlation
+  across stages, arbitrary-app titlebar eligibility or native grab authority.
+  A bounded verified join to the original HID press remains next; P5/H07 is open.
 - **Normal titlebar capture passes on the Mac:** with fresh user readiness and
   both capture fixes, `owned-titlebar-physical-20261014T171313Z` records one
   ordinary titlebar down, **226 drag events, 150 owned-frame changes and one

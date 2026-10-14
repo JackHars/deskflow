@@ -27,7 +27,9 @@ using Clock = std::chrono::steady_clock;
 class Probe final
 {
 public:
-  Probe() : m_deadline(Clock::now() + std::chrono::seconds(30))
+  explicit Probe(bool annotated)
+      : m_location(annotated ? kCGAnnotatedSessionEventTap : kCGHIDEventTap),
+        m_deadline(Clock::now() + std::chrono::seconds(30))
   {
     m_watchdog = std::thread([this] {
       std::unique_lock lock(m_mutex);
@@ -78,7 +80,7 @@ public:
                       CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved) |
                       CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown) |
                       CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged);
-    m_tap = CGEventTapCreate(kCGHIDEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
+    m_tap = CGEventTapCreate(m_location, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
     if (!m_tap)
       return false;
     m_source = CFMachPortCreateRunLoopSource(nullptr, m_tap, 0);
@@ -94,8 +96,8 @@ public:
     [NSRunLoop.mainRunLoop addTimer:m_timer forMode:NSRunLoopCommonModes];
     std::printf(
         "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"deadlineSeconds\":30,"
-        "\"nativeTitlebar\":true,\"observationTap\":\"hid-head\",\"inputPosted\":false}\n",
-        getpid(), m_windowId
+        "\"nativeTitlebar\":true,\"observationTap\":\"%s\",\"inputPosted\":false}\n",
+        getpid(), m_windowId, m_location == kCGHIDEventTap ? "hid-head" : "annotated-session-head"
     );
     std::fflush(stdout);
     return true;
@@ -236,11 +238,13 @@ private:
         std::printf(
             "{\"event\":\"titlebar-down\",\"epoch\":%llu,\"sequence\":%llu,\"sourceTime\":%llu,"
             "\"underPointer\":%u,\"handlingPointer\":%u,\"eventWindowsMatchOwned\":%s,"
-            "\"sourcePid\":%lld,\"sourceState\":%lld,\"mouseSubtype\":%lld,\"x\":%.3f,\"y\":%.3f}\n",
+            "\"sourcePid\":%lld,\"sourceState\":%lld,\"mouseSubtype\":%lld,\"eventNumber\":%lld,"
+            "\"x\":%.3f,\"y\":%.3f}\n",
             static_cast<unsigned long long>(p.epoch), static_cast<unsigned long long>(p.sequence),
             static_cast<unsigned long long>(p.sourceTimestampNs), p.windowUnderPointer, p.windowHandlingPointer,
             m_eventWindowsMatch ? "true" : "false", static_cast<long long>(p.sourceProcess),
-            static_cast<long long>(p.sourceState), static_cast<long long>(p.mouseSubtype), p.x, p.y
+            static_cast<long long>(p.sourceState), static_cast<long long>(p.mouseSubtype),
+            static_cast<long long>(p.eventNumber), p.x, p.y
         );
       } else if (button) {
         if (button->down) {
@@ -249,8 +253,10 @@ private:
         }
         m_up = true;
         std::printf(
-            "{\"event\":\"physical-up\",\"sequence\":%llu,\"sourceTime\":%llu}\n",
-            static_cast<unsigned long long>(p.sequence), static_cast<unsigned long long>(p.sourceTimestampNs)
+            "{\"event\":\"physical-up\",\"sequence\":%llu,\"sourceTime\":%llu,"
+            "\"clicks\":%u,\"mouseSubtype\":%lld,\"eventNumber\":%lld}\n",
+            static_cast<unsigned long long>(p.sequence), static_cast<unsigned long long>(p.sourceTimestampNs),
+            button->clickCount, static_cast<long long>(p.mouseSubtype), static_cast<long long>(p.eventNumber)
         );
       } else if (!m_up && motion->dragButton == 0) {
         ++m_dragged;
@@ -330,6 +336,7 @@ private:
   OriginalInputEpoch m_epoch;
   std::optional<RejectedEvent> m_rejected;
   std::uint64_t m_callbackCount = 0, m_previousTimestamp = 0;
+  const CGEventTapLocation m_location;
   const Clock::time_point m_deadline;
   Clock::time_point m_frameTime;
   NSWindow *m_window = nil;
@@ -349,16 +356,20 @@ private:
 
 int main(int argc, char **argv)
 {
-  if (argc != 2 || std::strcmp(argv[1], "--interactive") != 0) {
+  const bool annotated = argc == 2 && std::strcmp(argv[1], "--interactive-annotated") == 0;
+  if (argc != 2 || (std::strcmp(argv[1], "--interactive") != 0 && !annotated)) {
     std::fputs(
-        "Usage: windowshare-native-titlebar-probe --interactive\nRequires a ready user; posts no input.\n", stderr
+        "Usage: windowshare-native-titlebar-probe --interactive|--interactive-annotated\n"
+        "Requires a ready user; posts no input. Annotated mode observes a later event stage; production Core stays at "
+        "HID.\n",
+        stderr
     );
     return 2;
   }
   @autoreleasepool {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    Probe probe;
+    Probe probe(annotated);
     if (!probe.start())
       return 2;
     [NSApp run];

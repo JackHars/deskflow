@@ -47,6 +47,18 @@ native window ID and PID, at 50 Hz, and uses that window's actual titlebar
 geometry to distinguish the test press from content/control clicks. This known
 fixture geometry is not an arbitrary-application titlebar detector.
 
+The separate `--interactive-annotated` mode uses one listen-only head tap at
+`kCGAnnotatedSessionEventTap` instead. The installed SDK and
+[Apple's documentation](https://developer.apple.com/documentation/coregraphics/cgeventtaplocation/cgannotatedsessioneventtap)
+describe this as the stage where events have been annotated to flow to an application.
+This research mode tests whether native window fields become available there;
+it does not move production Core's HID tap or add a second raw consumer. Obtain
+fresh readiness for this separate run. Preserve the reported `observationTap`
+with its result: an annotated-stage observation cannot be claimed as HID
+capture continuity or a correlation between the two stages. The fixed deadline
+still closes the window if WindowServer consumes drag/release events before
+they reach this later tap.
+
 Preserve stdout, stderr, exit status, OS version, source/binary hashes and the
 user's observation. `titlebar-down` reports both event-time native IDs and
 whether they equal the owned window. Missing IDs must not be filled from the
@@ -99,6 +111,20 @@ exit 0 and no surviving probe process. No input is posted or suppressed.
 Source/binary hashes are bound in `titlebar-zero-up-evidence.json`; the run's
 `analysis.json` verifies raw evidence hashes and ordering. Both event-time
 window IDs remain zero, so only owned normal-titlebar capture passes here.
+
+The separately selected annotated-stage run
+(`owned-titlebar-annotated-physical-20261014T171931Z`) supplies both native IDs
+as **10359**, equal to the independently retained owned window ID. It records
+167 drags, 114 frame changes and the real zero-click/subtype-3 up 3.078813456
+seconds later. Down/up event number is 515; completion is `physical-release`,
+exit 0, with no capture rejection or surviving process. No input is posted or
+suppressed. `titlebar-annotated-evidence.json` freezes the tested source/binary;
+the run's `analysis.json` verifies raw hashes and exact owned-window equality.
+This confirms a usable event-time window-ID source in this fixture at the
+later stage. A separate single-tap run does not prove same-event correlation
+with HID capture. Preserve that distinction when implementing the bounded
+join to the original HID press; do not move production capture to this stage
+or infer native grab ownership from the window-under-pointer fields alone.
 
 P5/H07 remains open. Even matching native IDs plus observed frame movement
 would be evidence for further candidate detection work, not a native-grab

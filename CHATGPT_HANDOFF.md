@@ -386,6 +386,13 @@ of the same ordinary drag, but must not require a separate user action.
   HID-head remain zero in the actual titlebar down. Preserve them as unavailable;
   the fixture's known identity is not arbitrary-app drag detection. Raw touch,
   pressure and gesture reconstruction remain unsupported.
+  A separate passive annotated-stage run now supplies both native window IDs
+  equal to the owned fixture, with 167 drags and a real zero-click release.
+  Next verify and implement a bounded same-event join between that observation
+  and the original HID press; separate single-tap runs do not establish the
+  correlation. Preserve HID capture/emergency behavior and reject missing,
+  ambiguous or stale identities. This does not establish titlebar eligibility
+  or native grab authority for arbitrary applications.
 - [ ] Implement prepare/first-frame/ownership-transfer/commit or rollback, with
   continuous drag ownership and one button-up destination.
 - [ ] Implement dragging the Viewer back to the Mac edge, restoring the source
