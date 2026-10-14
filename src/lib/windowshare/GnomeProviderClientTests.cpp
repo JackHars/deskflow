@@ -13,9 +13,11 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <future>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 #include <limits>
@@ -36,7 +38,71 @@ using namespace deskflow::windowshare;
 using namespace std::chrono_literals;
 using Clock = InputCutoffClock;
 
+namespace deskflow::windowshare {
+struct GnomeProviderClientTestAccess
+{
+  static std::mutex &mutex(GnomeProviderClient &client)
+  {
+    return client.stateMutexForTesting();
+  }
+  static bool pending(const GnomeProviderClient &client)
+  {
+    return client.pendingMapForTesting();
+  }
+  static bool completed(const GnomeProviderClient &client)
+  {
+    return client.pendingMapForTesting(true);
+  }
+  static std::atomic<std::uint64_t> &counter(GnomeProviderClient &client)
+  {
+    return client.requestCounterForTesting();
+  }
+};
+} // namespace deskflow::windowshare
+
 namespace {
+struct AdmissionHold
+{
+  std::mutex state;
+  std::condition_variable changed;
+  bool entered = false, released = false;
+  std::thread holder;
+  explicit AdmissionHold(GnomeProviderClient &client)
+      : holder([&] {
+          const std::lock_guard admission(GnomeProviderClientTestAccess::mutex(client));
+          std::unique_lock lock(state);
+          entered = true;
+          changed.notify_all();
+          // A regression that accidentally blocks the caller must fail the
+          // elapsed-time assertion, never strand the test process.
+          changed.wait_for(lock, std::chrono::seconds(2), [&] { return released; });
+        })
+  {
+    std::unique_lock lock(state);
+    if (!changed.wait_for(lock, std::chrono::seconds(2), [&] { return entered; })) {
+      released = true;
+      changed.notify_all();
+      lock.unlock();
+      holder.join();
+      throw std::runtime_error("Could not hold the real provider state mutex");
+    }
+  }
+  void release()
+  {
+    {
+      const std::lock_guard lock(state);
+      released = true;
+    }
+    changed.notify_all();
+    if (holder.joinable())
+      holder.join();
+  }
+  ~AdmissionHold()
+  {
+    release();
+  }
+};
+
 constexpr auto serviceName = "org.deskflow.Seamless.Gnome50";
 constexpr auto objectPath = "/org/deskflow/Seamless/Gnome50";
 constexpr auto sessionId = "fixture-session";
@@ -701,8 +767,9 @@ struct Service
         if (request.snapshot != paintSnapshot) {
           reply.ok = false;
           reply.reason = "fixture-stale-snapshot";
-        } else if (request.operation == GnomeViewportOperation::Map ||
-                   request.operation == GnomeViewportOperation::InputMap) {
+        } else if (
+            request.operation == GnomeViewportOperation::Map || request.operation == GnomeViewportOperation::InputMap
+        ) {
           reply.x = request.x * 0.8;
           reply.y = request.y * 0.8;
           if (request.operation == GnomeViewportOperation::InputMap) {
@@ -731,8 +798,10 @@ struct Service
             ++revision; // Deliberately emit NO native invalidation signal.
           if (std::exchange(invalidateOnCheck, false))
             invalidatePaint();
-        } else if (request.operation == GnomeViewportOperation::InputDrain ||
-                   request.operation == GnomeViewportOperation::InputSeal) {
+        } else if (
+            request.operation == GnomeViewportOperation::InputDrain ||
+            request.operation == GnomeViewportOperation::InputSeal
+        ) {
           ++qtDrainRequests;
           reply.cutoff = request.cutoff;
           if (wrongQtDrainBinding)
@@ -844,8 +913,10 @@ struct Service
         );
       }
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", viewerId));
-    } else if (!std::strcmp(name, "SelectInputPreparation") || !std::strcmp(name, "QueryInputPreparation") ||
-               !std::strcmp(name, "ActivateInputPreparation") || !std::strcmp(name, "FinishInputPreparation")) {
+    } else if (
+        !std::strcmp(name, "SelectInputPreparation") || !std::strcmp(name, "QueryInputPreparation") ||
+        !std::strcmp(name, "ActivateInputPreparation") || !std::strcmp(name, "FinishInputPreparation")
+    ) {
       check(
           advertisePreparation && caller == g_dbus_method_invocation_get_sender(invocation),
           "Preparation native call changed private owner or capability"
@@ -1085,8 +1156,10 @@ struct Service
       add("reason", g_variant_new_string(""));
       add("points", g_variant_builder_end(&mapped));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
-    } else if (!std::strcmp(name, "GetViewerWithAssociation") || !std::strcmp(name, "ValidateCurrentHit") ||
-               !std::strcmp(name, "ValidateRoutedPoint")) {
+    } else if (
+        !std::strcmp(name, "GetViewerWithAssociation") || !std::strcmp(name, "ValidateCurrentHit") ||
+        !std::strcmp(name, "ValidateRoutedPoint")
+    ) {
       check(caller == g_dbus_method_invocation_get_sender(invocation), "Viewport query changed private caller");
       const char *id = nullptr, *token = nullptr, *request = nullptr, *association = nullptr;
       guint value = 0, expectedRevision = revision;
@@ -1641,7 +1714,13 @@ void retainedPrefixMaps(const PrivateBus &bus)
           service.drainRequests == 1 && service.qtDrainRequests == 1 && service.qtMapRequests == 1,
       "Fresh exact point repeated the old-prefix drain or lost capture association"
   );
-  check(client.requestInputMap(seal, mapping) == 0, "Repeated capture acquired another sealed map");
+  const auto repeated = client.requestInputMap(seal, mapping);
+  check(repeated, "Repeated capture was not correlated through pending admission");
+  const auto repeatedResult = awaitMap(repeated);
+  check(
+      !repeatedResult.segment && repeatedResult.error == "cutoff-not-increasing" && service.qtMapRequests == 1,
+      "Repeated capture acquired another sealed map"
+  );
   auto changed = inputDrainRequest(12);
   changed.cutoff.capture.sequence += 2;
   changed.point.sequence += 2;
@@ -1670,6 +1749,253 @@ void retainedPrefixMaps(const PrivateBus &bus)
   client.stop();
   waitUntil([&] { return service.callerGone; }, "Retained prefix fixture did not close");
   check(service.failure.empty(), "Retained prefix fixture service failed");
+}
+GnomeProviderClient::InputDrainRequest mappedRequest(std::uint64_t id)
+{
+  auto result = inputDrainRequest(id);
+  result.cutoff.capture.sequence += id;
+  result.point.sequence = result.cutoff.capture.sequence;
+  return result;
+}
+GnomeProviderClient::InputDrainUpdate mappedResult(GnomeProviderClient &client, std::uint64_t id)
+{
+  std::optional<GnomeProviderClient::InputDrainUpdate> result;
+  waitUntil(
+      [&] {
+        result = client.takeInputMapUpdate();
+        return result.has_value();
+      },
+      "Deferred mapped admission did not complete"
+  );
+  check(result->request == id, "Mapped admission changed its local request ID");
+  return std::move(*result);
+}
+GnomeProviderClient::InputMapBatchUpdate mappedBatchResult(GnomeProviderClient &client, std::uint64_t id)
+{
+  std::optional<GnomeProviderClient::InputMapBatchUpdate> result;
+  waitUntil(
+      [&] {
+        result = client.takeInputMapBatchUpdate();
+        return result.has_value();
+      },
+      "Deferred batch admission did not complete"
+  );
+  check(result->request == id, "Batch admission changed its local request ID");
+  return std::move(*result);
+}
+void mappedAdmissionContention(const PrivateBus &bus)
+{
+  // Exercise scalar/batch handoff, original earliest deadlines, a real Qt seal
+  // invalidation, pending cancellation, terminal stop and allocator exhaustion.
+  for (unsigned mode = 0; mode < 8; ++mode) {
+    Service service(bus);
+    service.advertiseDrain = true;
+    service.orderingContract = "sha256:" + std::string(64, 'a');
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    auto initial = inputDrainRequest(10);
+    initial.retainPrefix = true;
+    const auto initialId = client.requestInputDrain(initial);
+    const auto first = inputDrainResult(client, initialId);
+    check(first.segment && first.segment->seal(), "Admission fixture did not retain a prefix");
+    const auto seal = *first.segment->seal();
+    auto mapping = mappedRequest(11);
+    std::vector<GnomeProviderClient::InputDrainRequest> points;
+    for (unsigned i = 0; i < 16; ++i)
+      points.push_back(mappedRequest(11 + i));
+    const bool batch = mode == 1 || mode == 3;
+    if (mode == 2)
+      mapping.deadline = Clock::now() + 35ms;
+    if (mode == 3)
+      points[7].deadline = Clock::now() + 35ms;
+    if (mode == 7)
+      GnomeProviderClientTestAccess::counter(client).store(UINT64_MAX - 2);
+    AdmissionHold hold(client);
+    const auto started = Clock::now();
+    const auto request = batch ? client.requestInputMapBatch(seal, points) : client.requestInputMap(seal, mapping);
+    check(Clock::now() - started < 100ms, "Mapped admission blocked on the worker state mutex");
+    check(request, "Valid mapped input was lost solely to state mutex contention");
+    const auto rejected = client.requestInputMap(seal, mappedRequest(30));
+    check(!rejected, "One pending admission grew a second queue");
+    const auto reservedThrough = GnomeProviderClientTestAccess::counter(client).load();
+    check(reservedThrough > request, "Rejected CAS publication reused its allocated request ID");
+    check(!client.requestViewportObservation(), "Ordinary admission replaced a queued map under contention");
+    if (mode == 2 || mode == 3) {
+      const auto deadline = mode == 2 ? mapping.deadline : points[7].deadline;
+      waitUntil([&] { return Clock::now() >= deadline; }, "Admission deadline did not expire");
+    }
+    if (mode == 4)
+      service.invalidateSeal();
+    bool canceled = false;
+    std::thread cleanup;
+    if (mode == 5)
+      cleanup = std::thread([&] { canceled = client.cancelInputDrain(request); });
+    if (mode == 6)
+      cleanup = std::thread([&] { client.stop(); });
+    hold.release();
+    if (cleanup.joinable())
+      cleanup.join();
+    if (mode == 5 || mode == 6) {
+      if (mode == 5) {
+        waitUntil([&] { return !GnomeProviderClientTestAccess::pending(client); }, "Canceled admission did not settle");
+        check(canceled && !seal.live() && !client.takeInputMapUpdate(), "Canceled admission published a late result");
+      } else {
+        const auto result = mappedResult(client, request);
+        check(!result.segment && !result.error.empty() && !seal.live(), "Stopped admission published a live result");
+      }
+    } else if (mode == 2 || mode == 3 || mode == 4) {
+      const auto denied = batch ? mappedBatchResult(client, request).error : mappedResult(client, request).error;
+      check(!denied.empty() && (mode == 4 || denied == "deadline-expired"), "Expired or revoked admission was renewed");
+      check(
+          service.qtMapRequests == 0 && service.qtBatchRequests == 0 && service.nativeBatchQueries == 0,
+          "Expired or revoked admission reached native mapping"
+      );
+      if (mode != 4) {
+        mapping.deadline = Clock::now() + 250ms;
+        for (auto &point : points)
+          point.deadline = mapping.deadline;
+        const auto renewed = batch ? client.requestInputMapBatch(seal, points) : client.requestInputMap(seal, mapping);
+        check(renewed > request, "Denied admission reused its local ID");
+        const auto repeated = batch ? mappedBatchResult(client, renewed).error : mappedResult(client, renewed).error;
+        check(repeated == "cutoff-not-increasing", "Replacing the deadline revived a denied cutoff request");
+      }
+    } else {
+      // Inspect completion without consuming it or depending on coalesced
+      // notification timing. Neither kind of admission may erase this result.
+      waitUntil(
+          [&] {
+            return service.qtMapRequests + service.qtBatchRequests == 1 &&
+                   GnomeProviderClientTestAccess::completed(client);
+          },
+          "Mapped completion was not published"
+      );
+      check(
+          !client.requestInputMap(seal, mappedRequest(40)) && !client.requestViewportObservation(),
+          "Unread mapped completion was overwritten"
+      );
+      if (batch) {
+        const auto result = mappedBatchResult(client, request);
+        check(result.error.empty() && result.segments.size() == points.size(), "Deferred batch did not complete");
+        for (std::size_t i = 0; i < points.size(); ++i)
+          check(
+              result.segments[i].binding() == points[i].cutoff &&
+                  result.segments[i].snapshot().routedPoint == points[i].point,
+              "Deferred batch substituted an exact point"
+          );
+      } else {
+        const auto result = mappedResult(client, request);
+        check(
+            result.error.empty() && result.segment && result.segment->binding() == mapping.cutoff &&
+                result.segment->snapshot().routedPoint == mapping.point,
+            "Deferred admission lost its exact point or request"
+        );
+      }
+      if (mode == 7) {
+        check(
+            request == UINT64_MAX - 1 && GnomeProviderClientTestAccess::counter(client).load() == UINT64_MAX &&
+                !client.requestInputMap(seal, mappedRequest(50)) && !client.requestViewportObservation() && seal.live(),
+            "Exhausted request counter wrapped or mutated the retained owner"
+        );
+      } else {
+        const auto next = client.requestInputMap(seal, mappedRequest(50));
+        check(next > reservedThrough, "Rejected admission ID was reused after result consumption");
+        const auto result = mappedResult(client, next);
+        check(result.segment && result.segment->live(), "Consumed slot could not admit the next exact map");
+      }
+    }
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Admission fixture did not close");
+    check(service.failure.empty(), "Admission fixture service failed");
+  }
+}
+void mappedAdmissionCancellationAndRace(const PrivateBus &bus)
+{
+  for (bool race : {false, true}) {
+    Service service(bus);
+    service.advertiseDrain = true;
+    service.orderingContract = "sha256:" + std::string(64, 'a');
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    auto initial = inputDrainRequest(10);
+    initial.retainPrefix = true;
+    const auto first = inputDrainResult(client, client.requestInputDrain(initial));
+    check(first.segment && first.segment->seal(), "Admission race did not retain a prefix");
+    const auto seal = *first.segment->seal();
+    if (race) {
+      std::promise<void> release;
+      auto start = release.get_future().share();
+      std::uint64_t mapped = 0, ordinary = 0;
+      std::thread map([&] {
+        start.wait();
+        mapped = client.requestInputMap(seal, mappedRequest(11));
+      });
+      std::thread observe([&] {
+        start.wait();
+        ordinary = client.requestViewportObservation();
+      });
+      release.set_value();
+      map.join();
+      observe.join();
+      check(mapped || ordinary, "Racing admissions lost both requests without ownership");
+      if (ordinary) {
+        const auto observed = viewportResult(client, ordinary);
+        check(observed.observation && !seal.live(), "Ordinary winner lost its result or failed to revoke the old seal");
+      }
+      if (mapped) {
+        const auto result = mappedResult(client, mapped);
+        check(
+            ordinary ? !result.segment : result.segment && result.segment->live(),
+            "CAS/ordinary admission race overwrote an unread result or authorized a replaced seal"
+        );
+      }
+    } else {
+      service.delaySnapshot = true;
+      const auto canceled = client.requestInputMap(seal, mappedRequest(11));
+      check(canceled, "In-flight cancellation map was refused");
+      waitUntil([&] { return !service.delayedReply.isEmpty(); }, "Map did not enter the real private Qt channel");
+      const auto lateBytes = std::exchange(service.delayedReply, {});
+      check(
+          !client.cancelInputDrain(canceled + 1) && client.cancelInputDrain(canceled) && !seal.live(),
+          "Cancellation lost the exact in-flight admission identity"
+      );
+      waitUntil(
+          [&] { return !GnomeProviderClientTestAccess::pending(client); }, "Canceled running slot did not settle"
+      );
+      check(!client.takeInputMapUpdate(), "Canceled running map published a late completion");
+      initial = inputDrainRequest(20);
+      initial.retainPrefix = true;
+      const auto fresh = inputDrainResult(client, client.requestInputDrain(initial));
+      check(fresh.segment && fresh.segment->seal(), "Canceled slot blocked a new sealed owner");
+      service.delaySnapshot = true;
+      const auto next = client.requestInputMap(*fresh.segment->seal(), mappedRequest(21));
+      check(next > canceled, "Replacement slot reused a canceled request ID");
+      waitUntil([&] { return !service.delayedReply.isEmpty(); }, "Replacement map did not reach the Qt channel");
+      GnomeViewportDecoder late;
+      late.append(lateBytes);
+      const auto object = late.take();
+      check(object.has_value(), "Canceled reply fixture lost its frame");
+      service.sendViewport(parseGnomeViewportReply(*object));
+      check(
+          !client.cancelInputDrain(canceled) && GnomeProviderClientTestAccess::pending(client),
+          "Stale cancellation erased the replacement slot"
+      );
+      service.delayedUntil = Clock::now();
+      const auto completed = mappedResult(client, next);
+      check(
+          completed.segment && completed.segment->live() && fresh.segment->seal()->live(),
+          "Late canceled reply erased or completed the replacement request"
+      );
+    }
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Admission race fixture did not close");
+    check(service.failure.empty(), "Admission race fixture service failed");
+  }
 }
 void retainedPrefixBatches(const PrivateBus &bus)
 {
@@ -2367,6 +2693,9 @@ int main(int argc, char **argv)
         "PASS: sender build evidence is exact, independently revocable, and late canceled calls cannot revive it"
     );
     retainedPrefixMaps(bus);
+    mappedAdmissionContention(bus);
+    mappedAdmissionCancellationAndRace(bus);
+    std::puts("PASS: bounded map admission preserves contention, deadlines, cancellation, results and IDs");
     retainedPrefixBatches(bus);
     exactWindowAssociation(bus);
     inputPreparationFocusPromotionAndCleanup(bus);

@@ -366,6 +366,26 @@ struct GnomeProviderClient::Impl
     std::optional<InputDrainSeal> seal;
     std::vector<InputDrainRequest> maps{};
   };
+  struct MapAdmission
+  {
+    enum class Phase
+    {
+      Waiting,
+      Running,
+      Complete
+    };
+    Request request;
+    Phase phase = Phase::Waiting;
+    std::optional<InputDrainUpdate> update;
+    std::optional<InputMapBatchUpdate> batchUpdate;
+    std::string terminalError;
+  };
+  // Publication alone is lock-free. After CAS transfers ownership, every
+  // dereference and deletion is protected by mutex, including cancellation
+  // and unread completion. A running canceled slot remains occupied until
+  // the worker settles that exact request.
+  static_assert(std::atomic<MapAdmission *>::is_always_lock_free);
+  std::atomic<MapAdmission *> mapAdmission = nullptr;
   std::optional<Request> viewportRequest;
   std::shared_ptr<std::atomic_bool> viewportRevoked, latestDrainRevoked;
   std::uint64_t latestDrainRequest = 0;
@@ -374,7 +394,8 @@ struct GnomeProviderClient::Impl
   std::optional<InputCutoffBinding> activeSealCreation;   // Worker only.
   bool processingViewport = false; // Worker-context reentrancy guard, including nested GLib iteration.
   bool notified = false, viewportNotified = false, viewportBusy = false;
-  std::uint64_t nextViewportRequest = 0, lastViewportRequest = 0;
+  std::atomic<std::uint64_t> nextViewportRequest = 0;
+  std::uint64_t lastViewportRequest = 0;
   std::uint64_t lastInputCutoffRequest = 0;
   bool lastWasInputDrain = false;
   bool lastWasInputMap = false;
@@ -413,6 +434,11 @@ struct GnomeProviderClient::Impl
     stop();
     if (worker.joinable())
       worker.join();
+    {
+      // Also owns a publication that raced the terminal alive transition.
+      const std::lock_guard lock(mutex);
+      clearMapAdmission(true);
+    }
     if (requestContext)
       g_main_context_unref(requestContext);
     if (update.descriptor >= 0)
@@ -446,6 +472,7 @@ struct GnomeProviderClient::Impl
         prefixSeal->m_revoked->store(true, std::memory_order_release);
       if (preparation)
         preparation->state->store(InputPreparationState::Failed, std::memory_order_release);
+      endMapAdmission("provider-stopped");
     }
     g_cancellable_cancel(cancel);
   }
@@ -461,6 +488,7 @@ struct GnomeProviderClient::Impl
         prefixSeal->m_revoked->store(true, std::memory_order_release);
       if (preparation)
         preparation->state->store(InputPreparationState::Failed, std::memory_order_release);
+      endMapAdmission(error);
       if (update.descriptor >= 0)
         ::close(std::exchange(update.descriptor, -1));
       update.ready = false;
@@ -520,7 +548,8 @@ struct GnomeProviderClient::Impl
     );
     g_free(address);
     if (!bus || !(g_dbus_connection_get_capabilities(bus) & G_DBUS_CAPABILITY_FLAGS_UNIX_FD_PASSING))
-      throw std::runtime_error(error.message("GNOME provider requires a private Unix FD-capable session bus connection")
+      throw std::runtime_error(
+          error.message("GNOME provider requires a private Unix FD-capable session bus connection")
       );
     g_dbus_connection_set_exit_on_close(bus, false);
     owner = busOwner(service);
@@ -727,9 +756,9 @@ struct GnomeProviderClient::Impl
         const bool pointOnly = !revokeSeal && prefixSeal && prefixSeal->live();
         if (!pointOnly) {
           if (lastWasInputMapBatch)
-            inputMapBatchUpdate = InputMapBatchUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), {}};
+            publishMap(InputMapBatchUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), {}});
           else if (lastWasInputMap)
-            inputMapUpdate = InputDrainUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt};
+            publishMap(InputDrainUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt});
           else if (lastWasInputDrain)
             inputDrainUpdate = InputDrainUpdate{lastViewportRequest, std::string(reason.substr(0, 128)), std::nullopt};
           else
@@ -1686,121 +1715,204 @@ struct GnomeProviderClient::Impl
     if (channelFailed)
       fail("GNOME preparation private channel failed");
   }
-  std::uint64_t scheduleViewport(
-      std::optional<RoutedPoint> routedPoint, std::optional<InputCutoffBinding> cutoff = std::nullopt,
-      Clock::time_point inheritedDeadline = Clock::time_point::max(), bool retainPrefix = false,
-      std::optional<InputDrainSeal> seal = std::nullopt, std::vector<InputDrainRequest> maps = {}
+  std::uint64_t reserveViewportRequest()
+  {
+    auto current = nextViewportRequest.load(std::memory_order_relaxed);
+    while (current != std::numeric_limits<std::uint64_t>::max()) {
+      if (nextViewportRequest.compare_exchange_weak(current, current + 1, std::memory_order_relaxed))
+        return current + 1;
+    }
+    return 0;
+  }
+  // Caller holds mutex. Exchange prevents a new publisher from borrowing the
+  // retired object; a publisher never dereferences a pointer after transfer.
+  void clearMapAdmission(bool revoke)
+  {
+    std::unique_ptr<MapAdmission> pending(mapAdmission.exchange(nullptr, std::memory_order_acq_rel));
+    if (pending && revoke)
+      pending->request.revoked->store(true, std::memory_order_release);
+  }
+  bool cancelMapAdmission(std::uint64_t request, bool terminal = false)
+  {
+    auto *pending = mapAdmission.load(std::memory_order_acquire);
+    if (!pending || (!terminal && pending->request.id != request &&
+                     (!pending->request.seal || pending->request.seal->m_request != request)))
+      return false;
+    pending->request.revoked->store(true, std::memory_order_release);
+    if (pending->request.seal)
+      pending->request.seal->m_revoked->store(true, std::memory_order_release);
+    if (pending->phase != MapAdmission::Phase::Running)
+      clearMapAdmission(false);
+    return true;
+  }
+  void endMapAdmission(std::string_view reason)
+  {
+    auto *pending = mapAdmission.load(std::memory_order_acquire);
+    if (!pending)
+      return;
+    pending->request.revoked->store(true, std::memory_order_release);
+    if (pending->request.seal)
+      pending->request.seal->m_revoked->store(true, std::memory_order_release);
+    pending->terminalError = std::string(reason.substr(0, 128));
+    if (pending->phase == MapAdmission::Phase::Running)
+      return; // Only final worker settlement can make this result consumable.
+    if (pending->request.maps.empty()) {
+      if (!pending->update || pending->update->error.empty())
+        publishMap(InputDrainUpdate{pending->request.id, pending->terminalError, {}}, true);
+    } else if (!pending->batchUpdate || pending->batchUpdate->error.empty()) {
+      publishMap(InputMapBatchUpdate{pending->request.id, pending->terminalError, {}}, true);
+    }
+  }
+  void publishMap(InputDrainUpdate result, bool settled = false)
+  {
+    auto *pending = mapAdmission.load(std::memory_order_acquire);
+    if (pending && pending->request.id == result.request) {
+      pending->update = std::move(result);
+      if (settled || pending->phase != MapAdmission::Phase::Running)
+        pending->phase = MapAdmission::Phase::Complete;
+    } else {
+      inputMapUpdate = std::move(result);
+    }
+  }
+  void publishMap(InputMapBatchUpdate result, bool settled = false)
+  {
+    auto *pending = mapAdmission.load(std::memory_order_acquire);
+    if (pending && pending->request.id == result.request) {
+      pending->batchUpdate = std::move(result);
+      if (settled || pending->phase != MapAdmission::Phase::Running)
+        pending->phase = MapAdmission::Phase::Complete;
+    } else {
+      inputMapBatchUpdate = std::move(result);
+    }
+  }
+  const char *viewportAdmissionRefusal(const Request &request)
+  {
+    if (!alive.load(std::memory_order_acquire))
+      return "provider-not-live";
+    if (stopping.load())
+      return "provider-stopping";
+    if (request.routedPoint && !routedPointSupported.load(std::memory_order_acquire))
+      return "routed-point-unsupported";
+    if (viewportBusy)
+      return "viewport-busy";
+    if (viewportUpdate)
+      return "unread-viewport-update";
+    if (inputDrainUpdate)
+      return "unread-drain-update";
+    if (inputMapUpdate)
+      return "unread-map-update";
+    if (inputMapBatchUpdate)
+      return "unread-batch-update";
+    if (request.deadline <= Clock::now())
+      return "deadline-expired";
+    if (!request.maps.empty() && !routedPointsSupported.load(std::memory_order_acquire))
+      return "routed-batch-unsupported";
+    if (request.cutoff && !inputDrainSupported.load(std::memory_order_acquire))
+      return "input-drain-unsupported";
+    if (request.cutoff && request.cutoff->request <= lastInputCutoffRequest)
+      return "cutoff-not-increasing";
+    if (preparation &&
+        (!request.seal || preparation->state->load(std::memory_order_acquire) != InputPreparationState::Sealed))
+      return "preparation-not-sealed";
+    if (request.retainPrefix && (!request.cutoff || orderingContract.empty() || request.seal))
+      return "prefix-retention-unavailable";
+    if (request.seal && !request.cutoff)
+      return "seal-without-cutoff";
+    if (request.seal && !prefixSeal)
+      return "seal-not-retained";
+    if (request.seal && !request.seal->live())
+      return "seal-revoked";
+    if (request.seal && request.seal->m_provider != this)
+      return "seal-provider-changed";
+    if (request.seal && request.seal->m_revoked != prefixSeal->m_revoked)
+      return "seal-replaced";
+    if (request.seal &&
+        !continuesInputCutoffSeal(lastSealMap, request.maps.empty() ? *request.cutoff : request.maps.front().cutoff))
+      return "seal-map-not-continuing";
+    return nullptr;
+  }
+  void admitViewport(Request request)
+  {
+    if (!request.seal && prefixSeal)
+      prefixSeal->m_revoked->store(true, std::memory_order_release);
+    if (viewportRevoked)
+      viewportRevoked->store(true, std::memory_order_release);
+    latestDrainRequest = request.cutoff ? request.id : 0;
+    latestDrainRevoked = request.cutoff ? request.revoked : nullptr;
+    if (request.cutoff)
+      lastInputCutoffRequest = request.cutoff->request;
+    if (request.seal)
+      lastSealMap = *request.cutoff;
+    viewportRequest = std::move(request);
+    viewportBusy = true;
+  }
+  std::uint64_t scheduleMap(
+      std::optional<RoutedPoint> point, InputCutoffBinding cutoff, Clock::time_point inheritedDeadline,
+      const InputDrainSeal &seal, std::vector<InputDrainRequest> maps = {}
   )
   {
     const auto requestedAt = Clock::now();
     const auto deadline = std::min(inheritedDeadline, requestedAt + inputCutoffMaximumLifetime);
+    if (!alive.load(std::memory_order_acquire) || stopping.load() || !inputDrainSupported.load() ||
+        (point && !routedPointSupported.load()) || (!maps.empty() && !routedPointsSupported.load()) ||
+        deadline <= requestedAt || !seal.live() || seal.m_provider != this)
+      return 0;
+    const auto id = reserveViewportRequest();
+    if (!id)
+      return 0;
+    for (auto &item : maps)
+      item.deadline = std::min(item.deadline, requestedAt + inputCutoffMaximumLifetime);
+    auto pending = std::make_unique<MapAdmission>(MapAdmission{
+        Request{id, deadline, point, cutoff, std::make_shared<std::atomic_bool>(false), false, seal, std::move(maps)},
+        MapAdmission::Phase::Waiting,
+        {},
+        {},
+        {}
+    });
+    MapAdmission *empty = nullptr;
+    if (!mapAdmission.compare_exchange_strong(
+            empty, pending.get(), std::memory_order_release, std::memory_order_relaxed
+        ))
+      return 0;        // The reserved ID is deliberately never reused.
+    pending.release(); // Only mutex-protected worker/consumer paths own it now.
+    wakeWorker();
+    return id;
+  }
+  std::uint64_t scheduleViewport(
+      std::optional<RoutedPoint> routedPoint, std::optional<InputCutoffBinding> cutoff = std::nullopt,
+      Clock::time_point inheritedDeadline = Clock::time_point::max(), bool retainPrefix = false
+  )
+  {
+    const auto deadline = std::min(inheritedDeadline, Clock::now() + inputCutoffMaximumLifetime);
+    Request request{0, deadline, routedPoint, cutoff, {}, retainPrefix, {}, {}};
     const std::unique_lock lock(mutex, std::try_to_lock);
-    const auto refuse = [&](const char *reason) -> std::uint64_t {
-      // A failed try_lock must not inspect worker state. The remaining reasons
-      // are recorded while holding the same admission lock as before.
-      const char *operation = "observation";
-      if (!maps.empty())
-        operation = "input-map-batch";
-      else if (seal)
-        operation = "input-map";
-      else if (retainPrefix)
-        operation = "input-seal";
-      else if (cutoff)
-        operation = "input-drain";
+    const char *reason = !lock.owns_lock()                              ? "lock-contention"
+                         : mapAdmission.load(std::memory_order_acquire) ? "pending-map-admission"
+                                                                        : viewportAdmissionRefusal(request);
+    if (!reason) {
+      request.id = reserveViewportRequest();
+      if (!request.id)
+        reason = "request-counter-exhausted";
+    }
+    if (reason) {
       std::fprintf(
           stderr,
           "GNOME viewport admission refused operation=%s cutoff=%llu locked=%u previousRequest=%llu "
           "previousCutoff=%llu previousMap=%llu reason=%s\n",
-          operation, static_cast<unsigned long long>(cutoff ? cutoff->request : 0),
-          static_cast<unsigned>(lock.owns_lock()),
-          static_cast<unsigned long long>(lock.owns_lock() ? nextViewportRequest : 0),
+          retainPrefix ? "input-seal"
+          : cutoff     ? "input-drain"
+                       : "observation",
+          static_cast<unsigned long long>(cutoff ? cutoff->request : 0), static_cast<unsigned>(lock.owns_lock()),
+          static_cast<unsigned long long>(nextViewportRequest.load(std::memory_order_relaxed)),
           static_cast<unsigned long long>(lock.owns_lock() ? lastInputCutoffRequest : 0),
           static_cast<unsigned long long>(lock.owns_lock() ? lastSealMap.request : 0), reason
       );
       return 0;
-    };
-    if (!lock.owns_lock())
-      return refuse("lock-contention");
-    if (!alive.load(std::memory_order_acquire))
-      return refuse("provider-not-live");
-    if (stopping.load())
-      return refuse("provider-stopping");
-    if (routedPoint && !routedPointSupported.load(std::memory_order_acquire))
-      return refuse("routed-point-unsupported");
-    if (viewportBusy)
-      return refuse("viewport-busy");
-    if (viewportUpdate)
-      return refuse("unread-viewport-update");
-    if (inputDrainUpdate)
-      return refuse("unread-drain-update");
-    if (inputMapUpdate)
-      return refuse("unread-map-update");
-    if (inputMapBatchUpdate)
-      return refuse("unread-batch-update");
-    if (deadline <= requestedAt)
-      return refuse("deadline-expired");
-    if (!maps.empty() && !routedPointsSupported.load(std::memory_order_acquire))
-      return refuse("routed-batch-unsupported");
-    if (cutoff && !inputDrainSupported.load(std::memory_order_acquire))
-      return refuse("input-drain-unsupported");
-    if (cutoff && cutoff->request <= lastInputCutoffRequest)
-      return refuse("cutoff-not-increasing");
-    if (nextViewportRequest == std::numeric_limits<std::uint64_t>::max())
-      return refuse("request-counter-exhausted");
-    if (preparation && (!seal || preparation->state->load(std::memory_order_acquire) != InputPreparationState::Sealed))
-      return refuse("preparation-not-sealed");
-    if (retainPrefix && (!cutoff || orderingContract.empty() || seal))
-      return refuse("prefix-retention-unavailable");
-    if (seal && !cutoff)
-      return refuse("seal-without-cutoff");
-    if (seal && !prefixSeal)
-      return refuse("seal-not-retained");
-    if (seal && !seal->live())
-      return refuse("seal-revoked");
-    if (seal && seal->m_provider != this)
-      return refuse("seal-provider-changed");
-    if (seal && seal->m_revoked != prefixSeal->m_revoked)
-      return refuse("seal-replaced");
-    if (seal && !continuesInputCutoffSeal(lastSealMap, maps.empty() ? *cutoff : maps.front().cutoff))
-      return refuse("seal-map-not-continuing");
-    if (!seal && prefixSeal)
-      prefixSeal->m_revoked->store(true, std::memory_order_release);
-    if (viewportRevoked)
-      viewportRevoked->store(true, std::memory_order_release);
-    const auto id = ++nextViewportRequest;
-    for (auto &item : maps)
-      item.deadline = std::min(item.deadline, requestedAt + inputCutoffMaximumLifetime);
-    viewportRequest = Request{id,           deadline, routedPoint,    cutoff, std::make_shared<std::atomic_bool>(false),
-                              retainPrefix, seal,     std::move(maps)};
-    latestDrainRequest = cutoff ? id : 0;
-    latestDrainRevoked = cutoff ? viewportRequest->revoked : nullptr;
-    if (cutoff)
-      lastInputCutoffRequest = cutoff->request;
-    if (seal)
-      lastSealMap = *cutoff;
-    viewportBusy = true;
-    // A fresh record must not wait for the 10ms lifecycle poll. Attaching a
-    // one-shot source is asynchronous even when called from a notification;
-    // the worker remains the only native/Qt-channel consumer.
-    auto *source = g_idle_source_new();
-    g_source_set_priority(source, G_PRIORITY_DEFAULT);
-    g_source_set_callback(
-        source,
-        [](gpointer data) -> gboolean {
-          auto &self = *static_cast<Impl *>(data);
-          if (!self.stopping.load() && self.alive.load()) {
-            try {
-              self.observePendingViewport();
-            } catch (const std::exception &error) {
-              self.fail(error.what());
-            }
-          }
-          return G_SOURCE_REMOVE;
-        },
-        this, nullptr
-    );
-    g_source_attach(source, requestContext);
-    g_source_unref(source);
+    }
+    const auto id = request.id;
+    request.revoked = std::make_shared<std::atomic_bool>(false);
+    admitViewport(std::move(request));
+    wakeWorker();
     return id;
   }
   void observePendingViewport()
@@ -1819,10 +1931,29 @@ struct GnomeProviderClient::Impl
     drainViewport();
     processPreparation();
     std::optional<Request> request;
+    bool admissionDenied = false;
     {
       const std::lock_guard lock(mutex);
+      auto *pending = mapAdmission.load(std::memory_order_acquire);
+      if (pending && pending->phase == MapAdmission::Phase::Waiting) {
+        if (const auto *reason = viewportAdmissionRefusal(pending->request)) {
+          // A nonzero pending ID consumed this cutoff even when it could not
+          // enter native work. A new deadline cannot revive the same request.
+          lastInputCutoffRequest = std::max(lastInputCutoffRequest, pending->request.cutoff->request);
+          if (pending->request.maps.empty())
+            publishMap(InputDrainUpdate{pending->request.id, reason, {}}, true);
+          else
+            publishMap(InputMapBatchUpdate{pending->request.id, reason, {}}, true);
+          admissionDenied = true;
+        } else {
+          pending->phase = MapAdmission::Phase::Running;
+          admitViewport(pending->request);
+        }
+      }
       request = std::exchange(viewportRequest, std::nullopt);
     }
+    if (admissionDenied)
+      notify(true);
     if (!request)
       return;
     activeRequestRevoked = request->revoked;
@@ -1977,7 +2108,7 @@ struct GnomeProviderClient::Impl
                           : result.observation ? result.observation->m_revoked
                                                : nullptr;
         if (!request->maps.empty()) {
-          inputMapBatchUpdate = InputMapBatchUpdate{request->id, std::move(result.error), std::move(batchResult)};
+          publishMap(InputMapBatchUpdate{request->id, std::move(result.error), std::move(batchResult)}, true);
         } else if (request->cutoff) {
           InputDrainUpdate drain{result.request, std::move(result.error), std::nullopt};
           if (result.observation) {
@@ -2007,11 +2138,24 @@ struct GnomeProviderClient::Impl
             drain.segment = std::move(segment);
           }
           if (request->seal)
-            inputMapUpdate = std::move(drain);
+            publishMap(std::move(drain), true);
           else
             inputDrainUpdate = std::move(drain);
         } else
           viewportUpdate = std::move(result);
+      } else if (
+          const auto *pending = mapAdmission.load(std::memory_order_acquire);
+          pending && pending->request.id == request->id
+      ) {
+        if (pending->terminalError.empty()) {
+          clearMapAdmission(false);
+        } else {
+          if (request->maps.empty())
+            publishMap(InputDrainUpdate{request->id, pending->terminalError, {}}, true);
+          else
+            publishMap(InputMapBatchUpdate{request->id, pending->terminalError, {}}, true);
+          publish = true;
+        }
       }
       viewportBusy = false;
     }
@@ -2114,6 +2258,22 @@ GnomeProviderClient::GnomeProviderClient(GnomeProviderConfig configuration, std:
 {
 }
 GnomeProviderClient::~GnomeProviderClient() = default;
+std::mutex &GnomeProviderClient::stateMutexForTesting()
+{
+  return m_impl->mutex;
+}
+std::atomic<std::uint64_t> &GnomeProviderClient::requestCounterForTesting()
+{
+  return m_impl->nextViewportRequest;
+}
+bool GnomeProviderClient::pendingMapForTesting(bool completed) const
+{
+  if (!completed)
+    return m_impl->mapAdmission.load(std::memory_order_acquire) != nullptr;
+  const std::lock_guard lock(m_impl->mutex);
+  const auto *pending = m_impl->mapAdmission.load(std::memory_order_acquire);
+  return pending && pending->phase == Impl::MapAdmission::Phase::Complete;
+}
 GnomeProviderClient::Update GnomeProviderClient::takeUpdate()
 {
   const std::lock_guard lock(m_impl->mutex);
@@ -2165,14 +2325,17 @@ std::uint64_t GnomeProviderClient::requestInputPreparation(InputPreparationReque
     return 0;
   const std::lock_guard lock(m_impl->mutex);
   if (!m_impl->alive.load() || m_impl->stopping.load() || !m_impl->inputPreparationSupported.load() ||
-      m_impl->preparation || m_impl->viewportBusy || m_impl->viewportUpdate || m_impl->inputDrainUpdate ||
-      m_impl->inputMapUpdate || m_impl->inputMapBatchUpdate || m_impl->inputPreparationCleanupUpdate ||
-      (m_impl->prefixSeal && m_impl->prefixSeal->live()) || request.binding.request <= m_impl->lastInputCutoffRequest ||
-      m_impl->nextViewportRequest == UINT64_MAX)
+      m_impl->preparation || m_impl->mapAdmission.load(std::memory_order_acquire) || m_impl->viewportBusy ||
+      m_impl->viewportUpdate || m_impl->inputDrainUpdate || m_impl->inputMapUpdate || m_impl->inputMapBatchUpdate ||
+      m_impl->inputPreparationCleanupUpdate || (m_impl->prefixSeal && m_impl->prefixSeal->live()) ||
+      request.binding.request <= m_impl->lastInputCutoffRequest)
+    return 0;
+  const auto id = m_impl->reserveViewportRequest();
+  if (!id)
     return 0;
   request.deadline = std::min(request.deadline, now + inputPreparationMaximumLifetime);
   auto prep = std::make_shared<Impl::Preparation>();
-  prep->id = ++m_impl->nextViewportRequest;
+  prep->id = id;
   prep->request = request;
   m_impl->lastInputCutoffRequest = request.binding.request;
   if (m_impl->viewportRevoked)
@@ -2208,12 +2371,15 @@ GnomeProviderClient::promoteInputPreparation(const PreparedInputFocus &prepared,
   if (!prep || prepared.m_provider != m_impl.get() || prepared.m_request != prep->id ||
       prepared.m_state != prep->state ||
       prep->state->load(std::memory_order_acquire) != InputPreparationState::Prepared || m_impl->viewportBusy ||
-      m_impl->inputPreparationUpdate || m_impl->inputDrainUpdate ||
-      request.cutoff.request <= m_impl->lastInputCutoffRequest || m_impl->nextViewportRequest == UINT64_MAX)
+      m_impl->mapAdmission.load(std::memory_order_acquire) || m_impl->inputPreparationUpdate ||
+      m_impl->inputDrainUpdate || request.cutoff.request <= m_impl->lastInputCutoffRequest)
+    return 0;
+  const auto id = m_impl->reserveViewportRequest();
+  if (!id)
     return 0;
   request.deadline = std::min({request.deadline, prep->request.deadline, now + inputCutoffMaximumLifetime});
   prep->promotion = request;
-  prep->promotionId = ++m_impl->nextViewportRequest;
+  prep->promotionId = id;
   prep->state->store(InputPreparationState::Promoting, std::memory_order_release);
   prep->action = Impl::Preparation::Action::Promote;
   m_impl->lastInputCutoffRequest = request.cutoff.request;
@@ -2237,6 +2403,7 @@ bool GnomeProviderClient::cancelInputPreparation(std::uint64_t request, Clock::t
     return true;
   }
   prep->state->store(InputPreparationState::Canceling, std::memory_order_release);
+  m_impl->cancelMapAdmission(0, true);
   prep->operationRevoked->store(true, std::memory_order_release);
   prep->cleanupDeadline = std::min(cleanupDeadline, now + inputCutoffMaximumLifetime);
   prep->action = Impl::Preparation::Action::Cleanup;
@@ -2300,7 +2467,7 @@ std::uint64_t GnomeProviderClient::requestInputMap(const InputDrainSeal &seal, I
       request.point.sequence != request.cutoff.capture.sequence || !exactCoordinate(request.point.desktopX) ||
       !exactCoordinate(request.point.desktopY) || request.deadline <= Clock::now())
     return 0;
-  return m_impl->scheduleViewport(request.point, request.cutoff, request.deadline, false, seal);
+  return m_impl->scheduleMap(request.point, request.cutoff, request.deadline, seal);
 }
 std::uint64_t
 GnomeProviderClient::requestInputMapBatch(const InputDrainSeal &seal, std::vector<InputDrainRequest> requests)
@@ -2323,7 +2490,7 @@ GnomeProviderClient::requestInputMapBatch(const InputDrainSeal &seal, std::vecto
     deadline = std::min(deadline, request.deadline);
     previous = request.cutoff;
   }
-  return m_impl->scheduleViewport(std::nullopt, previous, deadline, false, seal, std::move(requests));
+  return m_impl->scheduleMap(std::nullopt, previous, deadline, seal, std::move(requests));
 }
 bool GnomeProviderClient::cancelInputDrain(std::uint64_t request)
 {
@@ -2336,9 +2503,11 @@ bool GnomeProviderClient::cancelInputDrain(std::uint64_t request)
     }
   }
   const std::lock_guard lock(m_impl->mutex);
+  const bool canceledMap = m_impl->cancelMapAdmission(request);
   const bool sealRequest = m_impl->prefixSeal && m_impl->prefixSeal->m_request == request;
-  if (!request || (!sealRequest && request != m_impl->latestDrainRequest) || !m_impl->latestDrainRevoked)
-    return false;
+  if (!request || (!sealRequest && !canceledMap && request != m_impl->latestDrainRequest) ||
+      !m_impl->latestDrainRevoked)
+    return canceledMap;
   if (m_impl->prefixSeal)
     m_impl->prefixSeal->m_revoked->store(true, std::memory_order_release);
   m_impl->latestDrainRevoked->store(true, std::memory_order_release);
@@ -2362,13 +2531,27 @@ std::optional<GnomeProviderClient::InputDrainUpdate> GnomeProviderClient::takeIn
 {
   const std::lock_guard lock(m_impl->mutex);
   m_impl->viewportNotified = false;
-  return std::exchange(m_impl->inputMapUpdate, std::nullopt);
+  if (auto result = std::exchange(m_impl->inputMapUpdate, std::nullopt))
+    return result;
+  auto *pending = m_impl->mapAdmission.load(std::memory_order_acquire);
+  if (!pending || pending->phase != Impl::MapAdmission::Phase::Complete || !pending->update)
+    return {};
+  auto result = std::move(pending->update);
+  m_impl->clearMapAdmission(false);
+  return result;
 }
 std::optional<GnomeProviderClient::InputMapBatchUpdate> GnomeProviderClient::takeInputMapBatchUpdate()
 {
   const std::lock_guard lock(m_impl->mutex);
   m_impl->viewportNotified = false;
-  return std::exchange(m_impl->inputMapBatchUpdate, std::nullopt);
+  if (auto result = std::exchange(m_impl->inputMapBatchUpdate, std::nullopt))
+    return result;
+  auto *pending = m_impl->mapAdmission.load(std::memory_order_acquire);
+  if (!pending || pending->phase != Impl::MapAdmission::Phase::Complete || !pending->batchUpdate)
+    return {};
+  auto result = std::move(pending->batchUpdate);
+  m_impl->clearMapAdmission(false);
+  return result;
 }
 std::optional<GnomeProviderClient::InputDrainUpdate> GnomeProviderClient::takeInputDrainUpdate()
 {

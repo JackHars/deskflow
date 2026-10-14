@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -221,6 +222,11 @@ public:
   std::uint64_t promoteInputPreparation(const PreparedInputFocus &prepared, InputDrainRequest request);
   bool cancelInputPreparation(std::uint64_t request, InputCutoffClock::time_point cleanupDeadline);
   std::optional<InputPreparationCleanupUpdate> takeInputPreparationCleanupUpdate();
+  // Retained maps reserve one bounded pending-admission slot without waiting
+  // for the worker state mutex. A nonzero ID is pending, not a native grant:
+  // worker admission may return an exact-ID denial within the original budget.
+  // The slot remains occupied until completion is consumed or cancellation
+  // settles; no request or per-point deadline is renewed while queued.
   std::uint64_t requestInputMap(const InputDrainSeal &seal, InputDrainRequest request);
   std::optional<InputDrainUpdate> takeInputMapUpdate();
   // One atomic result for 1..16 fresh points under the same historical seal.
@@ -241,6 +247,12 @@ public:
   void stop() noexcept;
 
 private:
+  // The private-bus regression adapter can hold the real state mutex and
+  // exhaust the ID allocator; neither seam changes production authority.
+  friend struct GnomeProviderClientTestAccess;
+  std::mutex &stateMutexForTesting();
+  std::atomic<std::uint64_t> &requestCounterForTesting();
+  bool pendingMapForTesting(bool completed = false) const;
   std::unique_ptr<Impl> m_impl;
 };
 
