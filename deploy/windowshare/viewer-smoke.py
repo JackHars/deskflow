@@ -61,7 +61,9 @@ def read_hello(connection):
         ["keyboard-route-v1", "input-route-v1", "media-recovery-v1"],
         ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1"],
         ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1",
-         "window-drag-preview-v1"]
+         "window-drag-preview-v1"],
+        ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1",
+           "window-drag-preview-v1", "window-family-v1"]
     ):
         raise RuntimeError("Unexpected viewer capabilities")
     if hello != {

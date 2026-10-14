@@ -1696,6 +1696,7 @@ private:
     m_mappedInputCapable = false;
     m_mediaRecoveryCapable = false;
     m_clipboardCapable = false;
+    m_familyCapable = false;
     m_stableTimer.stop();
     clearKeyframeRetries();
     clearCatalog();
@@ -1712,7 +1713,7 @@ private:
             {{"version", static_cast<int>(protocolVersion)},
              {"role", "viewer"},
              {"codec", "h264"},
-             {"capabilities", windowDragMoveCapabilities(
+             {"capabilities", windowFamilyCapabilities(windowDragMoveCapabilities(
                                   windowDragMotionCapabilities(
                                       windowDragPreviewCapabilities(clipboardTextCapabilities(
                                           keyboardRouteCapabilities(true, true, true), m_clipboardPolicy
@@ -1720,7 +1721,7 @@ private:
                                       nativeWindowDragAvailable()
                                   ),
                                   nativeWindowDragAvailable()
-                              )}}
+                              ))}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1814,31 +1815,36 @@ private:
       m_windowDragCapable = peerSupportsWindowDragPreview(object);
       m_windowDragMotionCapable = m_windowDragCapable && peerSupportsWindowDragMotion(object);
       m_windowDragMoveCapable = m_windowDragMotionCapable && peerSupportsWindowDragMove(object);
+      m_familyCapable = peerSupportsWindowFamily(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
+        m_native->setWindowFamiliesEnabled(m_familyCapable);
         m_established = true;
         if (!send(
                 MessageType::Accepted,
                 {{"version", static_cast<int>(protocolVersion)},
                  {"role", "host"},
                  {"codec", "h264"},
-                 {"capabilities",
-                  windowDragMoveCapabilities(
-                      windowDragMotionCapabilities(
-                          windowDragPreviewCapabilities(
-                              clipboardTextCapabilities(
-                                  m_keyboardCapable ? keyboardRouteCapabilities(
-                                                          m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable
-                                                      )
-                                                    : QJsonArray{},
-                                  m_clipboardCapable
-                              ),
-                              m_windowDragCapable
-                          ),
-                          m_windowDragMotionCapable
-                      ),
-                      m_windowDragMoveCapable
-                  )}}
+                 {"capabilities", windowFamilyCapabilities(
+                                      windowDragMoveCapabilities(
+                                          windowDragMotionCapabilities(
+                                              windowDragPreviewCapabilities(
+                                                  clipboardTextCapabilities(
+                                                      m_keyboardCapable ? keyboardRouteCapabilities(
+                                                                              m_inputCapable, m_mediaRecoveryCapable,
+                                                                              m_mappedInputCapable
+                                                                          )
+                                                                        : QJsonArray{},
+                                                      m_clipboardCapable
+                                                  ),
+                                                  m_windowDragCapable
+                                              ),
+                                              m_windowDragMotionCapable
+                                          ),
+                                          m_windowDragMoveCapable
+                                      ),
+                                      m_familyCapable
+                                  )}}
             ))
           return;
         // Every new connection waits for enumeration rather than publishing a
@@ -1990,6 +1996,17 @@ private:
       break;
     }
     case MessageType::Input:
+      if (object.value("kind") == QLatin1String("dismiss")) {
+        require(
+            m_familyCapable && object.size() == 2 && integer(object, "geometry") != 0,
+            "Invalid or unnegotiated family dismissal"
+        );
+        const auto source = m_hostMetadata.find(packet.session);
+        require(
+            source != m_hostMetadata.end() && parseWindowFamily(source->second).has_value(),
+            "Dismissal requires an attached window"
+        );
+      }
       m_native->input(packet.session, packet.epoch, object);
       break;
     case MessageType::Resize:
@@ -2027,6 +2044,10 @@ private:
     if (packet.type == MessageType::Opened) {
       require(packet.session > 0 && packet.epoch > 0, "Invalid window session");
       const auto metadata = parseObject(packet);
+      const auto family = parseWindowFamily(metadata);
+      require(!family || m_familyCapable, "Window families were not negotiated");
+      require(!family || metadata.value("windowDrag").toDouble(0) == 0, "Attached window cannot own a window drag");
+      m_families.open({packet.session, packet.epoch}, family);
       require(
           metadata.value("windowDrag").toDouble(0) == 0 || m_windowDragCapable,
           "Window drag previews were not negotiated"
@@ -2038,7 +2059,19 @@ private:
         return;
       }
       require(m_viewers.size() < 16, "Too many viewer windows");
-      auto *viewer = new Viewer(packet.session, packet.epoch, metadata);
+      QPointer<Viewer> familyParent;
+      if (family) {
+        const auto parent = m_viewers.find(family->parent.session);
+        require(
+            parent != m_viewers.end() && parent->second.window && parent->second.epoch == family->parent.epoch,
+            "Attached viewer parent is unavailable"
+        );
+        familyParent = parent->second.window;
+      }
+      auto ownedViewer = std::make_unique<Viewer>(packet.session, packet.epoch, metadata);
+      auto *viewer = ownedViewer.get();
+      if (family)
+        viewer->attachFamilyParent(familyParent);
       viewer->setMediaRecoveryEnabled(m_mediaRecoveryCapable);
       viewer->setAttribute(Qt::WA_DeleteOnClose);
       const auto id = packet.session;
@@ -2061,6 +2094,21 @@ private:
       viewer->onReturned = [this, id, epoch = packet.epoch, viewer, generation] {
         forgetViewer(id, epoch, viewer, generation);
       };
+      viewer->onDismissFamily = [this, id, epoch = packet.epoch, viewer, generation] {
+        if (!currentViewer(id, epoch, viewer, generation))
+          return;
+        for (const auto &[childId, child] : m_viewers) {
+          const auto *target = child.window.data();
+          if (target && target->family() && target->family()->parent == Owner{id, epoch} &&
+              target->family()->dismissible()) {
+            send(
+                MessageType::Input, {{"kind", "dismiss"}, {"geometry", number(target->geometryRevision())}}, childId,
+                child.epoch
+            );
+            return;
+          }
+        }
+      };
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
       viewer->onViewportInvalidated = [this, id, epoch = packet.epoch, viewer, generation] {
         if (currentViewer(id, epoch, viewer, generation) && m_viewportEndpoint)
@@ -2072,11 +2120,22 @@ private:
       };
 #endif
       connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer, generation] {
+        // QWidget emits this after Viewer members are gone, before its typed
+        // QPointer necessarily clears. Retire the pointer without dereferencing
+        // it before family cleanup can invoke any Viewer method.
+        if (currentViewer(id, epoch, viewer, generation))
+          m_viewers.at(id).window.clear();
         forgetViewer(id, epoch, viewer, generation);
       });
       m_viewers.emplace(id, View{packet.epoch, viewer, viewer});
+      ownedViewer.release();
+      const QPointer<Bridge> familyGuard(this);
+      const QPointer<Viewer> childGuard(viewer);
+      updateFamilyBlocks();
+      if (!familyGuard || !childGuard || m_shuttingDown)
+        return;
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
-      if (m_windowDragMoveCapable && m_viewportEndpoint) {
+      if (!family && m_windowDragMoveCapable && m_viewportEndpoint) {
         const QPointer<Bridge> alive(this);
         const QPointer<Viewer> target(viewer);
         auto *watcher = new WindowDragWatcher(
@@ -2107,7 +2166,8 @@ private:
       if (m_shuttingDown)
         return;
 #endif
-      viewer->placeOnScreen(m_screen);
+      if (!family)
+        viewer->placeOnScreen(m_screen);
       viewer->show();
       return;
     }
@@ -2180,10 +2240,7 @@ private:
       if (m_shuttingDown)
         return;
 #endif
-      viewer->disconnected();
-      viewer->onReturned = {};
-      m_viewers.erase(found);
-      viewer->close();
+      closeViewerFamily({packet.session, packet.epoch});
       break;
     default:
       throw std::runtime_error("Message is not valid for the viewer");
@@ -2244,6 +2301,7 @@ private:
       cancelWindowReturn(m_returnDrag->binding);
     auto viewers = std::move(m_viewers);
     m_viewers.clear();
+    m_families.clear();
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
     if (m_viewportEndpoint)
       m_viewportEndpoint->invalidate(QStringLiteral("viewer-set-changed"));
@@ -2269,19 +2327,63 @@ private:
   void forgetViewer(std::uint64_t session, std::uint64_t epoch, const Viewer *window, std::uint64_t generation)
   {
     if (currentViewer(session, epoch, window, generation)) {
-      m_viewers.erase(session);
+      // A local Return concerns the complete source family. Native child
+      // destruction uses Closed and retires only that child subtree instead.
+      const auto root = m_families.root({session, epoch});
+      const QPointer<Bridge> alive(this);
+      closeViewerFamily(root.session ? root : Owner{session, epoch});
+      if (!alive)
+        return;
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
       if (m_viewportEndpoint)
         m_viewportEndpoint->invalidate(QStringLiteral("viewer-returned"));
 #endif
     }
   }
+  void updateFamilyBlocks()
+  {
+    std::vector<std::pair<QPointer<Viewer>, bool>> updates;
+    for (const auto &[id, view] : m_viewers)
+      updates.emplace_back(view.window, m_families.blocked({id, view.epoch}));
+    const QPointer<Bridge> alive(this);
+    for (const auto &[viewer, blocked] : updates) {
+      if (viewer)
+        viewer->setFamilyBlocked(blocked);
+      if (!alive)
+        return;
+    }
+  }
+  void closeViewerFamily(Owner owner)
+  {
+    const auto removed = m_families.close(owner);
+    std::vector<QPointer<Viewer>> windows;
+    // Remove every authority first; close/release callbacks may reenter Bridge.
+    for (const auto member : removed) {
+      const auto it = m_viewers.find(member.session);
+      if (it != m_viewers.end() && it->second.epoch == member.epoch) {
+        windows.push_back(it->second.window);
+        m_viewers.erase(it);
+      }
+    }
+    const QPointer<Bridge> alive(this);
+    for (const auto &viewer : windows) {
+      if (viewer) {
+        viewer->onReturned = {};
+        viewer->disconnected();
+        if (viewer)
+          viewer->close();
+      }
+      if (!alive)
+        return;
+    }
+    updateFamilyBlocks();
+  }
   struct View
   {
     std::uint64_t epoch;
     QPointer<Viewer> window;
-    // QPointer is already null when QObject::destroyed runs. Keep an opaque
-    // identity for comparison only; a delayed callback cannot erase a successor.
+    // The destroyed callback clears window before retiring the family. Keep an
+    // opaque identity so a delayed callback cannot erase a successor.
     const Viewer *identity;
     QPointer<WindowDragPreviewController> drag{};
     QPointer<WindowDragWatcher> watcher{};
@@ -2323,6 +2425,8 @@ private:
   bool m_windowDragCapable = false;
   bool m_windowDragMotionCapable = false;
   bool m_windowDragMoveCapable = false;
+  bool m_familyCapable = false;
+  WindowFamilies m_families;
   std::unique_ptr<FocusedClipboard> m_clipboard;
   QMetaObject::Connection m_clipboardConnection;
   bool m_reservingKeyboard = false;

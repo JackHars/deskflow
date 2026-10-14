@@ -436,6 +436,33 @@ export function samePointerPosition(x, y, actualX, actualY) {
         Math.fround(x) === actualX && Math.fround(y) === actualY;
 }
 
+// Inputs are observations of actual MetaWindows owned by one retained
+// Meta.WaylandClient, never peer-provided PIDs or native window identifiers.
+// Only associated xdg_toplevel transients are admitted, not xdg_popups/grabs.
+export function ownedTransientParents(windows, child) {
+    if (!Array.isArray(windows) || windows.length > MAX_WINDOWS)
+        return null;
+    const parents = [];
+    const visited = new Set([child]);
+    let current = windows.find(window => window.identity === child);
+    if (!current)
+        return null;
+    while (current.parent) {
+        if (parents.length >= 15 || visited.has(current.parent))
+            return null;
+        visited.add(current.parent);
+        const matches = windows.filter(window => window.identity === current.parent);
+        if (matches.length !== 1)
+            return null;
+        current = matches[0];
+        if (!current.visible || !current.topLevel || !validWindowAssociation(current.wmClass) ||
+            associatedWindowIndices(windows, current.wmClass).length !== 1 || current.instance !== current.wmClass)
+            return null;
+        parents.push(current.identity);
+    }
+    return parents;
+}
+
 export function unavailableReason(state, allowUnfocused = false) {
     if (!state.nativeBackend)
         return 'unsupported-backend';
@@ -449,7 +476,7 @@ export function unavailableReason(state, allowUnfocused = false) {
         return 'buttons-held';
     if (state.windowCount !== 1)
         return state.windowCount === 0 ? 'viewer-not-mapped' : 'ambiguous-viewer';
-    if (!state.normalWindow || state.transient)
+    if ((!state.normalWindow || state.transient) && !state.ownedTransient)
         return 'unsupported-window';
     if (!state.visible)
         return 'viewer-not-visible';

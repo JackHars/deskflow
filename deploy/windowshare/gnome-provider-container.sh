@@ -98,6 +98,13 @@ runuser -u "$fixture_user" -- env QT_QPA_PLATFORM=offscreen LANG=C.UTF-8 \
 result=$?
 if [[ $result == 0 ]]; then
   runuser -u "$fixture_user" -- /usr/bin/python3 \
+    "$source_root/deploy/windowshare/gnome-window-family-tests.py" \
+    --fixture "$scratch/build/windowshare-gnome-family-fixture" \
+    --output "$scratch/report/window-family"
+  result=$?
+fi
+if [[ $result == 0 ]]; then
+  runuser -u "$fixture_user" -- /usr/bin/python3 \
     "$source_root/deploy/windowshare/gnome-provider/tests/launcher-native.py" \
     >"$scratch/launcher-native.log" 2>&1
   result=$?

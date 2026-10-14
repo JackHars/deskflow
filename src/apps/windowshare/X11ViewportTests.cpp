@@ -9,6 +9,7 @@
 #include <QEventLoop>
 #include <QThread>
 #include <QTimer>
+#include <QWindow>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -206,9 +207,9 @@ void nativeObservations(const char *otherDisplay)
     barrier.close();
     check(!retained.live(), "Watcher fixture close retained live evidence");
   }
-  const auto rootAttributes =
-      own(xcb_get_window_attributes_reply(connection, xcb_get_window_attributes(connection, connection.root()), nullptr)
-      );
+  const auto rootAttributes = own(
+      xcb_get_window_attributes_reply(connection, xcb_get_window_attributes(connection, connection.root()), nullptr)
+  );
   check(bool(rootAttributes), "Cannot read root event mask");
   X11DisplayObserver observer(connection, 0);
   auto initial = observe(connection, observer);
@@ -218,9 +219,9 @@ void nativeObservations(const char *otherDisplay)
           !initial.snapshot().topology.empty() && !initial.snapshot().outputs.empty(),
       "Missing actual native identity/topology"
   );
-  const auto afterAttributes =
-      own(xcb_get_window_attributes_reply(connection, xcb_get_window_attributes(connection, connection.root()), nullptr)
-      );
+  const auto afterAttributes = own(
+      xcb_get_window_attributes_reply(connection, xcb_get_window_attributes(connection, connection.root()), nullptr)
+  );
   check(
       afterAttributes && rootAttributes->your_event_mask == afterAttributes->your_event_mask,
       "Observer replaced the owner's root event mask"
@@ -751,6 +752,60 @@ void viewerObservation()
   std::cout
       << "PASS native Qt connection witness, exact All point fence, fractional painted mapping, resume and lifecycle\n";
 }
+void attachedViewerObservation()
+{
+  auto *native = qApp->nativeInterface<QNativeInterface::QX11Application>();
+  auto *connection = native->connection();
+  selectFixtureMaster(connection);
+  Viewer parent(501, 1, metadata());
+  parent.resize(640, 480);
+  parent.move(100, 100);
+  parent.onSend = [](MessageType, const QJsonObject &, std::uint64_t, std::uint64_t) { return true; };
+  parent.show();
+  parent.committed();
+  parent.receiveFrame(frame(), 1);
+  check(waitUntil([&] { return parent.firstFramePainted(); }), "Family parent did not paint");
+  auto childMetadata = metadata();
+  childMetadata["width"] = 320;
+  childMetadata["height"] = 240;
+  childMetadata["family"] = windowFamilyJson({{501, 1}, 1, WindowFamilyRole::Menu, {40, 30}});
+  Viewer child(502, 1, childMetadata);
+  child.attachFamilyParent(&parent);
+  child.onSend = [&](MessageType type, const QJsonObject &message, std::uint64_t, std::uint64_t) {
+    if (type == MessageType::Input && message.value("kind") == "focus")
+      child.focusAcknowledged(1, static_cast<std::uint64_t>(message.value("request").toInteger()));
+    return true;
+  };
+  parent.setFamilyBlocked(true);
+  child.show();
+  child.committed();
+  child.receiveFrame(frame(), 1);
+  checked(
+      connection,
+      xcb_set_input_focus_checked(
+          connection, XCB_INPUT_FOCUS_POINTER_ROOT, static_cast<std::uint32_t>(child.winId()), XCB_CURRENT_TIME
+      ),
+      "Focusing isolated attached viewer"
+  );
+  check(
+      waitUntil([&] { return child.viewportObservation().has_value(); }),
+      "X11 child viewport unavailable: " + child.viewportUnavailableReason().toStdString()
+  );
+  auto observed = *child.viewportObservation();
+  check(
+      observed.snapshot().native.snapshot().surface == child.winId() && observed.snapshot().session == 502 &&
+          !parent.viewportObservation(),
+      "X11 child inherited parent native identity or input authority"
+  );
+  child.windowHandle()->setTransientParent(nullptr);
+  check(!observed.live() && !child.viewportObservation(), "Reparented X11 child retained input authority");
+  child.disconnected();
+  child.close();
+  parent.setFamilyBlocked(false);
+  parent.disconnected();
+  parent.close();
+  std::cout << "PASS exact X11 attached surface, modal parent fence and reparent denial\n";
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -772,6 +827,7 @@ int main(int argc, char **argv)
     namespaceWitnesses(other.toLocal8Bit().constData());
     nativePointValidation();
     viewerObservation();
+    attachedViewerObservation();
     return 0;
   } catch (const std::exception &error) {
     std::cerr << "FAIL: " << error.what() << '\n';

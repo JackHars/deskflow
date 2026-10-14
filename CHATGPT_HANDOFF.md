@@ -17,10 +17,11 @@ drain, so it cannot authorize original input.
 
 This checklist records implementation, not physical acceptance. The newest
 `WORK_STATE.md` and `TESTING.md` entries identify each tested source and its
-limits. Multiple-window association, focused text clipboard and native
-lifecycle/child-return changes are part of the current working candidate;
+limits. Multiple-window association, focused text clipboard and negotiated
+attached-window capture/lifecycle changes are part of the current working candidate;
 first-click preparation now passes actual Core/GNOME integration at both Qt
-scales. Bidirectional edge-drag code is integrated; final physical acceptance remains open. Historical
+scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
+physical H07/H08/H09 acceptance remains open. Historical
 results below do not cover later source changes.
 
 As of 2026-10-14, queue/admission commit `a2aa7a5e8` passes the home Ubuntu
@@ -438,24 +439,29 @@ drop coordination is implemented. All six hosted jobs pass at `c748915cc`
 
 ### P6 — Application compatibility
 
-- [ ] Associate dialogs/child windows with the correct exported application and
-  session; handle creation/destruction and modal focus without identity guesses.
-  Exact attached Sheet/Drawer association now fences and returns its retained
-  parent locally. Exact native ID lookup is available for AX windows through
-  a runtime-checked private SPI; remote child rendering/input remains unavailable.
-- [ ] Handle popup/context menus and owned transient surfaces under both Linux
-  adapters; unsupported surfaces must not be routed to an unrelated window.
+- [x] Associate supported dialogs/child windows with the exact exported parent
+  and session. Negotiated `window-family-v1` uses independently captured native
+  children, fresh painted acknowledgements, modal ancestor fencing, exact focus
+  and shared root recovery. Native dismissal retires only the child subtree;
+  unsupported identified children return their complete family locally.
+- [x] Handle supported popup/context menus and owned transient surfaces under
+  both Linux adapters. Qt and GNOME retain exact parent/surface associations;
+  stale, foreign or ambiguous links do not acquire input. X11 preserves relative
+  placement; GNOME currently uses compositor-managed transient placement.
 - [x] Integrate clipboard with the actual exported-window focus and lifetime,
   preserving configured sharing policy and avoiding feedback loops.
 - [x] Complete modifier/shortcut mapping and key-repeat behavior. Preserve the
   fixed Mac mapping: Option = `alt`, Command = `super`; the old reversal is fixed.
 - [x] Add reproducible browser/Electron and native-app scenarios, including
   Unicode/composition behavior or clearly documented unsupported input methods.
-  See `deploy/windowshare/app-compatibility.md`; execution of those named native
-  scenarios is separate, pending H08/H09 evidence.
 
-Acceptance: association, clipboard-loop and key mapping regressions in cloud;
-named applications and real shortcuts/dialogs/menus in H08/H09.
+Code and automated fixtures are implemented. **Physical H08/H09 remain NOT_RUN**;
+no blanket compatibility claim is made for named applications or arbitrary
+popup/IME implementations. See `deploy/windowshare/window-families.md` for the
+protocol and limits, and `deploy/windowshare/app-compatibility.md` for the
+updated acceptance procedure. The isolated GNOME fixture exercises real owned
+sheet/menu surfaces and separate Qt/native parent mutations, without a Mac app
+or production original-input authority.
 
 ### P7 — Recovery and performance
 

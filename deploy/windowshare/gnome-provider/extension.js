@@ -14,7 +14,7 @@ import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
     validRequest, validRoutedPointRequest, validRoutedPoints, validWindowAssociation, associatedWindowIndices,
-    duplicateWindowAssociationNotification,
+    duplicateWindowAssociationNotification, ownedTransientParents,
     StageUpdateSequence, InputDrainSequence, PreparationActivationSequence,
     INPUT_DRAIN_BINDING_TYPES, validInputDrainBinding, ORDERING_LIMIT,
     INPUT_PREPARATION_BINDING_TYPES, validInputPreparationBinding, sameInputPreparationBinding,
@@ -619,6 +619,29 @@ class Provider {
         }), session.association).map(index => owned[index]) : owned;
         const windowActor = selected.length === 1 ? selected[0] : null;
         const window = windowActor?.get_meta_window();
+        const topLevel = item => [Meta.WindowType.NORMAL, Meta.WindowType.DIALOG,
+            Meta.WindowType.MODAL_DIALOG, Meta.WindowType.UTILITY].includes(item.get_window_type());
+        const parentRecords = owned.map(actor => {
+            const item = actor.get_meta_window();
+            return {identity: item, parent: item.get_transient_for(), topLevel: topLevel(item),
+                visible: !item.minimized && !item.is_hidden() && item.showing_on_its_workspace() &&
+                    actor.is_visible() && actor.is_mapped(),
+                wmClass: item.get_wm_class(), instance: item.get_wm_class_instance()};
+        });
+        const parents = window ? ownedTransientParents(parentRecords, window) : null;
+        if (window && session.familyParents && (parents === null || parents.length !== session.familyParents.length ||
+            parents.some((parent, index) => parent !== session.familyParents[index]))) {
+            this._close(session, 'viewer-parent-replaced');
+            throw new Error('The owned viewer parent changed');
+        }
+        if (window && parents !== null && !session.familyParents) {
+            session.familyParents = parents;
+            for (const parent of parents) {
+                this._watch(parent, 'unmanaged', 'viewer-parent-unmanaged', session.windowSignals, session);
+                this._watch(parent, 'notify::minimized', 'viewer-parent-minimized', session.windowSignals, session);
+                this._watch(parent, 'notify::wm-class', 'viewer-parent-association', session.windowSignals, session);
+            }
+        }
         if (window && session.window && session.window !== window) {
             this._close(session, 'viewer-window-replaced');
             throw new Error('The owned viewer window was replaced');
@@ -705,6 +728,7 @@ class Provider {
             windowCount: selected.length,
             normalWindow: window?.get_window_type() === Meta.WindowType.NORMAL,
             transient: Boolean(window?.get_transient_for()),
+            ownedTransient: Boolean(window && topLevel(window) && parents?.length && validWindowAssociation(session.association)),
             visible: Boolean(window && !window.minimized && !window.is_hidden() &&
                 window.showing_on_its_workspace() && windowActor.is_visible() && windowActor.is_mapped()),
             focused: Boolean(window && global.display.focus_window === window),
@@ -723,7 +747,8 @@ class Provider {
         }
         // Query-time comparison catches changes even if their signal is not
         // exposed to extensions. Retained observations are never renewed.
-        const signature = JSON.stringify([state, frame && rectArray(frame), buffer && rectArray(buffer)]);
+        const signature = JSON.stringify([state, frame && rectArray(frame), buffer && rectArray(buffer),
+            parents?.map(parent => [parent.get_stable_sequence(), parent.get_wm_class()])]);
         if (signature !== session.signature) {
             session.signature = signature;
             this._invalidate(session, 'native-state-changed');
@@ -1037,6 +1062,7 @@ class Provider {
             return;
         disconnect(session.windowSignals);
         session.windowSignals = [];
+        session.familyParents = null;
         session.window = null;
         session.surface = null;
         session.windowToken = '';

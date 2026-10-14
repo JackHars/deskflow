@@ -292,9 +292,9 @@ std::optional<GnomePreparationTarget> Viewer::waylandPreparationTarget() const
 }
 std::optional<GnomePreparationTarget> Viewer::waylandDragTarget() const
 {
-  if (m_viewportClosed || !m_connected || m_failed || m_returned || m_waitingRecoveryPaint || m_videoRecovering ||
-      m_videoPaused || !m_readySent || m_resizing || isMinimized() || !isVisible() || !m_error.isEmpty() ||
-      m_paintedGeometry != m_geometry || !m_paintedWayland || m_paintedClient != size() ||
+  if (!familyInputAvailable() || m_viewportClosed || !m_connected || m_failed || m_returned || m_waitingRecoveryPaint ||
+      m_videoRecovering || m_videoPaused || !m_readySent || m_resizing || isMinimized() || !isVisible() ||
+      !m_error.isEmpty() || m_paintedGeometry != m_geometry || !m_paintedWayland || m_paintedClient != size() ||
       m_paintedDpr != devicePixelRatioF() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty() ||
       !m_waylandAssociation)
     return {};
@@ -563,6 +563,8 @@ Viewer::Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &me
 
 Viewer::~Viewer()
 {
+  *m_familyLife = false; // QWidget can emit parent signals after these members are gone.
+
   onViewportInvalidated = {};
   onForwardingFenceChanged = {};
   invalidateViewport();
@@ -582,6 +584,11 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
 {
   if (m_failed || m_returned)
     return;
+  const auto family = parseWindowFamily(metadata);
+  if (m_geometry && (bool(family) != bool(m_family) || (family && !family->sameAttachment(*m_family)))) {
+    fail(QStringLiteral("Window family attachment changed"));
+    return;
+  }
   const std::uint64_t geometry = revision(metadata.value(QStringLiteral("geometry")));
   const double sourceWidth = metadata.value(QStringLiteral("width")).toDouble(-1);
   const double sourceHeight = metadata.value(QStringLiteral("height")).toDouble(-1);
@@ -597,8 +604,13 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     return;
   }
   const bool firstMetadata = m_geometry == 0;
+  m_family = family;
   const auto dragValue = metadata.value(QStringLiteral("windowDrag"));
   const auto drag = revision(dragValue);
+  if (m_family && drag) {
+    fail(QStringLiteral("Attached windows cannot own a titlebar transfer"));
+    return;
+  }
   if ((!dragValue.isUndefined() && dragValue != QJsonValue(0) && !drag) || (!firstMetadata && drag != m_windowDrag)) {
     fail(QStringLiteral("Window drag identity changed during the preview"));
     return;
@@ -610,6 +622,16 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     setAttribute(Qt::WA_ShowWithoutActivating);
     setWindowFlag(Qt::WindowDoesNotAcceptFocus);
     setFocusPolicy(Qt::NoFocus);
+  }
+  if (firstMetadata && m_family) {
+    setMinimumSize(2, 2);
+    setWindowFlag(Qt::FramelessWindowHint);
+    if (!m_family->acceptsInput()) {
+      setAttribute(Qt::WA_ShowWithoutActivating);
+      setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+      setWindowFlag(Qt::WindowTransparentForInput);
+      setFocusPolicy(Qt::NoFocus);
+    }
   }
   if (!firstMetadata && geometry != m_geometry) {
     // The next access unit belongs to a different source geometry. Revoke
@@ -646,6 +668,7 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     resize(initial.expandedTo(minimumSize()));
   }
   m_applyingMetadata = false;
+  placeInFamily();
   const std::uint64_t acknowledged = revision(metadata.value(QStringLiteral("resizeRequest")));
   if (m_resizing && !m_resizeDebounce.isActive() &&
       ((acknowledged != 0 && acknowledged == m_resizeRequest) ||
@@ -656,6 +679,94 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
   if (metadata.value(QStringLiteral("phase")).toString() == QStringLiteral("remote"))
     committed();
   update();
+}
+
+void Viewer::attachFamilyParent(Viewer *parent)
+{
+  if (!m_family || !parent || parent == this || isVisible() || m_familyAttached ||
+      m_family->parent != Owner{parent->m_session, parent->m_epoch})
+    throw std::runtime_error("Invalid viewer family parent");
+  m_familyParent = parent;
+  m_familyParentLife = parent->m_familyLife;
+  m_familyAttached = true;
+  // QWidget ownership would destroy children inside the parent's destructor,
+  // before Bridge can retire their input routes. Use only a native transient.
+  (void)parent->winId();
+  (void)winId();
+  windowHandle()->setTransientParent(parent->windowHandle());
+  connect(windowHandle(), &QWindow::transientParentChanged, this, [this] {
+    invalidateViewport();
+    releaseInput(KeyboardRouteReason::AuthorityLost);
+  });
+  parent->installEventFilter(this);
+  connect(parent, &QObject::destroyed, this, [this] {
+    m_familyParent = nullptr;
+    disconnected();
+    close();
+  });
+  placeInFamily();
+}
+void Viewer::setFamilyBlocked(bool blocked)
+{
+  if (m_familyBlocked == blocked)
+    return;
+  m_familyBlocked = blocked;
+  invalidateViewport();
+  // A closed dialog never resurrects a focus acknowledgement or a held key.
+  m_requireFocusIntent = true;
+  releaseInput(KeyboardRouteReason::FocusChanged);
+}
+Viewer *Viewer::familyParent() const
+{
+  const auto live = m_familyParentLife.lock();
+  // QPointer<Viewer>::data() itself is an invalid downcast once only QWidget's
+  // base destructor remains. The separate lifetime closes before that point.
+  return live && *live ? m_familyParent.data() : nullptr;
+}
+bool Viewer::familyInputAvailable() const
+{
+  if (m_familyBlocked || (m_family && !m_family->acceptsInput()))
+    return false;
+  const auto *child = this;
+  for (unsigned depth = 0; depth < 16; ++depth) {
+    if (!child->m_family)
+      return true;
+    const auto *parent = child->familyParent();
+    if (!parent || !parent->m_connected || parent->m_returned || parent->m_failed || !parent->isVisible() ||
+        parent->isMinimized() || !child->windowHandle() ||
+        child->windowHandle()->transientParent() != parent->windowHandle())
+      return false;
+    child = parent;
+  }
+  return false;
+}
+void Viewer::placeInFamily()
+{
+  if (!m_family || !familyParent() || familyParent()->m_source.isEmpty())
+    return;
+  const auto video = familyParent()->videoRect();
+  const auto scale = video.width() / familyParent()->m_source.width();
+  if (!std::isfinite(scale) || scale <= 0)
+    return;
+  const bool applying = m_applyingMetadata;
+  m_applyingMetadata = true;
+  resize((m_source * scale).toSize().expandedTo(minimumSize()));
+  // Wayland deliberately has no global-position fallback. Its compositor
+  // places the exact transient parent/child pair; X11 honors this offset.
+  if (QGuiApplication::platformName() != QStringLiteral("wayland"))
+    move(familyParent()->mapToGlobal((video.topLeft() + m_family->offset * scale).toPoint()));
+  m_applyingMetadata = applying;
+}
+bool Viewer::eventFilter(QObject *object, QEvent *event)
+{
+  if (object == familyParent() && (event->type() == QEvent::Move || event->type() == QEvent::Resize))
+    QTimer::singleShot(0, this, [this] { placeInFamily(); });
+  if (object == familyParent() && (event->type() == QEvent::Hide || event->type() == QEvent::WindowStateChange ||
+                                   event->type() == QEvent::PlatformSurface || event->type() == QEvent::WinIdChange)) {
+    invalidateViewport();
+    releaseInput(KeyboardRouteReason::Hidden);
+  }
+  return false;
 }
 
 void Viewer::pauseVideoForHiddenViewer()
@@ -1253,7 +1364,13 @@ void Viewer::paintEvent(QPaintEvent *)
     if (wayland &&
         (!m_waylandAssociation || !currentWaylandAssociation(windowHandle(), *wayland, *m_waylandAssociation))) {
       invalidateViewport();
-      m_waylandAssociation = associateWaylandWindow(windowHandle(), *wayland);
+      m_waylandAssociation = m_family ? (familyParent() && familyParent()->m_waylandAssociation
+                                             ? associateWaylandWindow(
+                                                   windowHandle(), *wayland, familyParent()->windowHandle(),
+                                                   &*familyParent()->m_waylandAssociation
+                                               )
+                                             : std::nullopt)
+                                      : associateWaylandWindow(windowHandle(), *wayland);
     } else if (!wayland)
       m_waylandAssociation.reset();
     if (m_paintedGeometry != m_frameGeometry || m_paintedClient != size() || m_paintedImage != m_image.size() ||
@@ -1333,9 +1450,9 @@ void Viewer::focusOutEvent(QFocusEvent *event)
 
 bool Viewer::acceptsLocalInput() const
 {
-  return m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint && !m_videoRecovering && !m_videoPaused &&
-         m_readySent && m_committed && m_localActive && !m_resizing && !isMinimized() &&
-         m_paintedGeometry == m_geometry;
+  return familyInputAvailable() && m_connected && !m_failed && !m_returned && !m_waitingRecoveryPaint &&
+         !m_videoRecovering && !m_videoPaused && m_readySent && m_committed && m_localActive && !m_resizing &&
+         !isMinimized() && m_paintedGeometry == m_geometry;
 }
 
 void Viewer::requestFocus()
@@ -1587,6 +1704,14 @@ void Viewer::mouseButtonDown(QMouseEvent *event, int clickCount)
     m_suppressedButtons.insert(code);
     return;
   }
+  if (m_familyBlocked && onDismissFamily && m_connected && !m_failed && !m_returned && isVisible()) {
+    // Consume this actual outside press as dismissal, never replay it into the
+    // parent after the popup disappears. A native input fence still wins.
+    m_suppressedButtons.insert(code);
+    const auto dismiss = onDismissFamily;
+    dismiss();
+    return;
+  }
   const auto point = mapToSource(event->position());
   if (!point || !acceptsLocalInput() || m_heldButtons.contains(code))
     return;
@@ -1667,7 +1792,7 @@ void Viewer::wheelEvent(QWheelEvent *event)
 void Viewer::resizeEvent(QResizeEvent *event)
 {
   QWidget::resizeEvent(event);
-  if (!m_applyingMetadata && m_readySent && m_committed && m_connected && !isMinimized())
+  if (!m_family && !m_applyingMetadata && m_readySent && m_committed && m_connected && !isMinimized())
     scheduleResize();
 }
 

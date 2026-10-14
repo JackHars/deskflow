@@ -9,6 +9,7 @@
 #include "GnomeViewportProtocol.h"
 #include "KeyboardRoute.h"
 #include "WaylandViewport.h"
+#include "WindowFamily.h"
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QJsonObject>
@@ -74,6 +75,16 @@ public:
   Viewer(std::uint64_t session, std::uint64_t epoch, const QJsonObject &metadata, QWidget *parent = nullptr);
   ~Viewer() override;
   void applyMetadata(const QJsonObject &metadata);
+  void attachFamilyParent(Viewer *parent);
+  void setFamilyBlocked(bool blocked);
+  bool familyBlocked() const
+  {
+    return m_familyBlocked;
+  }
+  const std::optional<WindowFamily> &family() const
+  {
+    return m_family;
+  }
   void receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry);
   // Set only once by the authenticated Bridge's capability negotiation, before
   // the first frame. Legacy peers retain fail-closed decoder-overflow behavior.
@@ -139,6 +150,7 @@ public:
   std::function<bool(const KeyboardRouteControl &)> onKeyboardRouteSend;
   std::function<void(QString)> onError;
   std::function<void()> onReturned;
+  std::function<void()> onDismissFamily;
 
   // Read-only state also permits headless tests without exposing input bypasses.
   QRectF videoRect() const;
@@ -173,6 +185,16 @@ protected:
   void closeEvent(QCloseEvent *event) override;
 
 private:
+  bool familyInputAvailable() const;
+  Viewer *familyParent() const;
+  void placeInFamily();
+  bool eventFilter(QObject *object, QEvent *event) override;
+  std::optional<WindowFamily> m_family;
+  QPointer<Viewer> m_familyParent;
+  std::shared_ptr<bool> m_familyLife = std::make_shared<bool>(true);
+  std::weak_ptr<const bool> m_familyParentLife;
+  bool m_familyAttached = false;
+  bool m_familyBlocked = false;
   void invalidateViewport();
   void forwardingFenceChanged();
   std::shared_ptr<std::atomic_bool> m_viewportRevoked = std::make_shared<std::atomic_bool>(false);

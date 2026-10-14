@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
     unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validRoutedPoints, validViewportHandle,
-    validWindowAssociation, associatedWindowIndices, duplicateWindowAssociationNotification,
+    validWindowAssociation, associatedWindowIndices, duplicateWindowAssociationNotification, ownedTransientParents,
     StageUpdateSequence, InputDrainSequence, PreparationActivationSequence, validInputDrainBinding,
     validInputPreparationBinding, sameInputPreparationBinding,
     ORDERING_BUILDS, ORDERING_MAIN, ORDERING_CLUTTER, ORDERING_FILE_MAX, ORDERING_MAPS_MAX,
@@ -546,4 +546,30 @@ test('mapping layout identity changes for replacement mappings even with the sam
     for (const text of [mappedFiles().replaceAll('1001', '1009'),
         mappedFiles().replace('2000-3000', '2000-4000'), mappedFiles().replace('00001000', '00002000')])
         assert.notEqual(JSON.stringify(mappedOrderingModules(text)), old);
+});
+
+
+test('owned transient ancestry rejects foreign, ambiguous, hidden, replaced and cyclic parents', () => {
+    const token = letter => `org.deskflow.window.${letter.repeat(64)}`;
+    const parent = {identity: 1, parent: null, visible: true, topLevel: true, wmClass: token('a'), instance: token('a')};
+    const child = {identity: 2, parent: 1, visible: true, topLevel: true, wmClass: token('b'), instance: token('b')};
+    const menu = {identity: 3, parent: 2, visible: true, topLevel: true, wmClass: token('c'), instance: token('c')};
+    assert.deepEqual(ownedTransientParents([parent, child, menu], 3), [2, 1]);
+    for (const changed of [{visible: false}, {topLevel: false}, {parent: 3}, {wmClass: ''}, {instance: token('d')}])
+        assert.equal(ownedTransientParents([{...parent, ...changed}, child, menu], 3), null);
+    assert.equal(ownedTransientParents([child, menu], 3), null);
+    assert.equal(ownedTransientParents([parent, {...parent, identity: 9}, child, menu], 3), null);
+    assert.equal(ownedTransientParents([parent, child, {...menu, parent: 9}], 3), null);
+    assert.equal(ownedTransientParents([parent, child, {...menu, parent: 3}], 3), null);
+    assert.deepEqual(ownedTransientParents([parent, child, menu], 1), []);
+});
+
+test('owned top-level transient still needs ordinary surface, focus and no compositor grab', () => {
+    const good = {nativeBackend: true, locked: false, overview: false, grabbed: false,
+        modal: false, buttonsHeld: false, windowCount: 1, normalWindow: false,
+        transient: true, ownedTransient: true, visible: true, focused: true, oneSurface: true};
+    assert.equal(unavailableReason(good), '');
+    for (const changed of [{ownedTransient: false}, {oneSurface: false}, {focused: false},
+        {grabbed: true}, {modal: true}, {visible: false}, {windowCount: 2}])
+        assert.notEqual(unavailableReason({...good, ...changed}), '');
 });

@@ -4,7 +4,43 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
-## Latest local evidence — 2026-10-14
+## P6 family verification — 2026-10-14
+
+Implementation is connected; **H08/H09 stay NOT_RUN** until actual app and
+physical input acceptance. The test procedure is
+[app-compatibility.md](deploy/windowshare/app-compatibility.md); implementation
+boundaries and commands are in [window-families.md](deploy/windowshare/window-families.md).
+
+- `p6-final-mac-tests.json`: all five signed Mac suites pass (family, Viewer,
+  Bridge, viewport and native original-input). The production app builds;
+  `p6-final-mac-viewer-smoke.json` passes authenticated reconnect and clean shutdown
+  with that Viewer, without starting NativeHost.
+- `p6-linux-family-4/result.json`: full Ubuntu app build; eight Qt/X11 suites;
+  provider logic; Viewer reconnect smoke; real isolated GNOME sheet/menu
+  creation, native mapping, parent blocking, dismissal and separate Qt/native
+  reparent denial pass. X11 exercises 1 and 1.25 scale. Frozen archive SHA-256:
+  `64b570095898da231763ab5279a6352709dce9d07f21b4b9a7e29c8a274e4902`.
+- `p6-sanitize-tests.json`: family, Viewer and Bridge pass Mac ASan/UBSan with
+  leak detection disabled. `p6-sanitize-tests-before-lifetime-fix.json` preserves
+  the parent-destruction failure fixed by a separate Viewer lifetime token.
+  `p6-direct-destruction-before-fix.json` separately reproduces Bridge cleanup
+  accessing an already-destroyed Viewer; the destruction callback now clears
+  its typed pointer before retiring the remaining family members. The full
+  Bridge suite passes ASan/UBSan in `p6-direct-destruction-fixed.json`.
+  The final production rebuild and signed Bridge suite pass in
+  `p6-destruction-mac-build.log` and `p6-final-bridge-tests.json`.
+- Earlier P6 reports remain evidence of failures. In particular run 2's GNOME
+  fixture incorrectly swallowed an assertion; run 3 correctly failed because a
+  Qt parent-property change alone did not change the compositor parent. Run 4
+  independently changes the real owned xdg role and requires an explicit native
+  parent-change rejection. Those earlier runs are not accepted as full passes.
+
+GNOME compositor placement is supported; exact source-relative popup placement
+is still a limitation. These fixtures do not exercise actual Mac app capture,
+key release across native modal creation, AX Cancel behavior in named apps,
+physical input, arbitrary popup implementations or IME composition.
+
+## Previous P5 evidence — 2026-10-14
 
 - **Final hosted checkpoint passes all six jobs:** commit
   `c748915ccb65c4b169188d3ae2d1ea326a288ff9`, [run 38645498688](https://github.com/JackHars/deskflow/actions/runs/38645498688).
@@ -1448,7 +1484,7 @@ and edge drag remain unaccepted.
 | C06 | Actual Viewer/Bridge/transport; pending focus, pause/resume and old queued events | PASS component checks — local Viewer/viewport/Bridge and hosted transport at c867af9d0; complete old-input drain remains C05, not covered by these passes. |
 | C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at c867af9d0 — real private headless GNOME/Qt and X11 fixtures; no user desktop or physical monitor claim. |
 | C08 | Multi-window/topology/holding lifecycle, drag transaction and failure regressions | NOT_RUN for full milestone — portable topology/restore cases pass in C01; multi-window ownership and bidirectional edge drag remain unfinished. |
-| C09 | Dialog/clipboard/shortcut associations and resource scheduling/recovery tests | NOT_RUN for app compatibility — scheduling/recovery component regressions pass in hosted app checks; native dialogs, clipboard and shortcut acceptance remain open. |
+| C09 | Dialog/clipboard/shortcut associations and resource scheduling/recovery tests | Family/clipboard/shortcut component regressions pass locally, including actual private GNOME/X11 child surfaces; named native dialogs, clipboard and shortcut acceptance remain H08/H09 NOT_RUN. |
 | C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at c867af9d0 — Mac application/core, native event construction and isolated packaging checks; local unreaped-host regression FAIL before / PASS after 7bc8cf332. |
 | C11 | Linux packaging/install/uninstall in a disposable environment | PASS inert archive/manifest/staging tests at c867af9d0; NOT_RUN for end-user install/upgrade/removal acceptance. No host installation performed. |
 | C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS preflight C++ formatting, changed-file REUSE lint and git diff check; exact source and evidence recorded. Full-repository REUSE lint NOT_RUN. All six current hosted jobs and source bundle PASS. |

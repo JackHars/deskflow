@@ -13,6 +13,7 @@
 #include "NativeSourceTransaction.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
+#include "WindowFamily.h"
 #include "platform/OriginalInput_mac.h"
 
 #import <AppKit/AppKit.h>
@@ -423,6 +424,7 @@ struct WindowIdentity
   qint64 launch = 0;
   QString bundle, title;
   Rect frame;
+  bool onScreen = false;
 };
 qint64 launchTime(pid_t pid)
 {
@@ -456,6 +458,7 @@ std::optional<WindowIdentity> identity(CGWindowID id, bool *knownMissing = nullp
       ))
     return std::nullopt;
   result.frame = rect(frame);
+  result.onScreen = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
   result.title = string(info[(__bridge NSString *)kCGWindowName]);
   result.launch = launchTime(result.pid);
   result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
@@ -1136,6 +1139,13 @@ using namespace native;
 
 struct NativeHost::Impl
 {
+  struct AttachedSurface
+  {
+    Owner parent;
+    CF<AXUIElementRef> window;
+    WindowFamilyRole role;
+    CGWindowID id = 0;
+  };
   struct Entry
   {
     Session session;
@@ -1153,6 +1163,8 @@ struct NativeHost::Impl
     std::uint64_t producedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
     NativeAssociatedReturn associatedReturn;
+    std::optional<WindowFamily> family;
+    std::shared_ptr<AttachedSurface> pendingChild;
     std::shared_ptr<NativeSourceTransaction> sourceTransaction = std::make_shared<NativeSourceTransaction>();
     std::shared_ptr<WindowDragTransaction> windowDrag;
     std::optional<LocalWindowPointer> dragRealRelease;
@@ -1206,6 +1218,8 @@ struct NativeHost::Impl
   QString journalPath;
   std::map<std::uint64_t, std::unique_ptr<Entry>> entries;
   std::map<CGWindowID, SCWindow *> catalog;
+  bool familiesEnabled = false;
+  std::uint64_t familyRelation = 0;
   // Snapshot taken before any new export. A disconnection/hotplug/scale change
   // invalidates all old Viewer geometry and input ownership before restoration.
   std::optional<std::vector<PhysicalOutputSignature>> physicalAtExport;
@@ -1370,9 +1384,8 @@ struct NativeHost::Impl
     CF<CFTypeRef> actualFocus(attribute(app.get(), kAXFocusedWindowAttribute));
     CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
     const auto actualBounds = bounds(e->window);
-    if (!actualFocus || !CFEqual(actualFocus.get(), e->window) || !minimized ||
-        !CFEqual(minimized.get(), kCFBooleanFalse) || !actualBounds ||
-        !sameGeometry(*actualBounds, e->session.source) || (e->moved && !holding.available()))
+    if (!focusMatches(*e) || (!e->family && !minimized) || (minimized && !CFEqual(minimized.get(), kCFBooleanFalse)) ||
+        !actualBounds || !sameGeometry(*actualBounds, e->session.source) || (e->moved && !holding.available()))
       return std::nullopt;
     return lifecycle->current(admitted) ? std::optional(binding) : std::nullopt;
   }
@@ -1411,11 +1424,11 @@ struct NativeHost::Impl
     AXUIElementSetMessagingTimeout(app.get(), 0.25f);
     if (!current())
       return false;
-    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
-    if (!current() || !focused || !CFEqual(focused.get(), target->window.get()))
+    const auto *e = entry(target->binding.owner.session, target->binding.owner.epoch);
+    if (!current() || !e || !focusMatches(*e))
       return false;
     CF<CFTypeRef> minimized(attribute(target->window.get(), kAXMinimizedAttribute));
-    if (!current() || !minimized || !CFEqual(minimized.get(), kCFBooleanFalse))
+    if (!current() || (!e->family && !minimized) || (minimized && !CFEqual(minimized.get(), kCFBooleanFalse)))
       return false;
     const auto frame = bounds(target->window.get());
     return current() && frame && sameGeometry(*frame, target->frame);
@@ -1453,7 +1466,400 @@ struct NativeHost::Impl
     }
     restore(parent.owner.session, false);
   }
+  static AXUIElementRef element(CFTypeRef value)
+  {
+    return value && CFGetTypeID(value) == AXUIElementGetTypeID() ? static_cast<AXUIElementRef>(value) : nullptr;
+  }
+  static std::optional<WindowFamilyRole> surfaceRole(AXUIElementRef window)
+  {
+    CF<CFTypeRef> role(attribute(window, kAXRoleAttribute));
+    if (!role)
+      return {};
+    if (CFEqual(role.get(), kAXSheetRole))
+      return WindowFamilyRole::Sheet;
+    if (CFEqual(role.get(), kAXDrawerRole))
+      return WindowFamilyRole::Drawer;
+    if (CFEqual(role.get(), kAXMenuRole))
+      return WindowFamilyRole::Menu;
+    if (CFEqual(role.get(), kAXPopoverRole))
+      return WindowFamilyRole::Popover;
+    if (CFEqual(role.get(), kAXHelpTagRole))
+      return WindowFamilyRole::Tooltip;
+    CF<CFTypeRef> subrole(attribute(window, kAXSubroleAttribute));
+    if (CFEqual(role.get(), kAXWindowRole) && subrole &&
+        (CFEqual(subrole.get(), kAXDialogSubrole) || CFEqual(subrole.get(), kAXSystemDialogSubrole)))
+      return WindowFamilyRole::Dialog;
+    return {};
+  }
+  static bool attachedTo(AXUIElementRef child, AXUIElementRef parent, pid_t process)
+  {
+    if (!child || !parent || CFEqual(child, parent))
+      return false;
+    pid_t childPid = 0, parentPid = 0;
+    if (AXUIElementGetPid(child, &childPid) != kAXErrorSuccess || childPid != process ||
+        AXUIElementGetPid(parent, &parentPid) != kAXErrorSuccess || parentPid != process)
+      return false;
+    const auto role = surfaceRole(child);
+    if (role == WindowFamilyRole::Sheet || role == WindowFamilyRole::Drawer) {
+      CF<CFTypeRef> attached(attribute(child, kAXWindowAttribute));
+      if (element(attached.get()) && CFEqual(attached.get(), parent))
+        return true;
+    }
+    // Walk actual AX ancestry, with both a depth and wall-clock budget. A
+    // matching application, title or rectangle cannot establish ownership.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    CF<CFTypeRef> cursor(CFRetain(child));
+    for (unsigned depth = 0; depth < 24 && element(cursor.get()) && std::chrono::steady_clock::now() < deadline;
+         ++depth) {
+      pid_t pid = 0;
+      if (AXUIElementGetPid(element(cursor.get()), &pid) != kAXErrorSuccess || pid != process)
+        return false;
+      AXUIElementSetMessagingTimeout(element(cursor.get()), 0.05f);
+      CF<CFTypeRef> next(attribute(element(cursor.get()), kAXParentAttribute));
+      if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
+        return false;
+      if (CFEqual(next.get(), parent))
+        return true;
+      cursor = std::move(next);
+    }
+    return false;
+  }
+  std::shared_ptr<AttachedSurface> focusedChild(const Entry &parent) const
+  {
+    const QPointer<NativeHost> alive(q);
+    const auto expected = parent.identity;
+    const Owner owner{parent.session.id, parent.session.epoch};
+    CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(parent.window)));
+    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!active || active.processIdentifier != expected.pid || launchTime(expected.pid) != expected.launch)
+      return {};
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(expected.pid));
+    AXUIElementSetMessagingTimeout(app.get(), 0.05f);
+    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
+    if (!alive || !element(focused.get()))
+      return {};
+    CF<CFTypeRef> cursor(CFRetain(focused.get()));
+    std::shared_ptr<AttachedSurface> result;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    unsigned childrenVisited = 0;
+    const auto observe = [&](AXUIElementRef candidate, bool focusedPath) {
+      if (!candidate || CFEqual(candidate, retained.get()) || (!focusedPath && result))
+        return;
+      AXUIElementSetMessagingTimeout(candidate, 0.05f);
+      const auto role = surfaceRole(candidate);
+      if (!role || !attachedTo(candidate, retained.get(), expected.pid))
+        return;
+      CGWindowID window = 0;
+      axWindowId(candidate, window);
+      // Controls rendered inside the existing native window already appear in
+      // its capture. Never invent a second destination for an HTML dialog.
+      if (window == expected.id)
+        return;
+      if (!focusedPath) {
+        const auto native = identity(window);
+        if (!native || !native->onScreen || native->pid != expected.pid || native->launch != expected.launch)
+          return; // AX may retain dormant menu descriptions after dismissal.
+      }
+      result = std::make_shared<AttachedSurface>();
+      result->parent = owner;
+      result->window = CF<AXUIElementRef>(static_cast<AXUIElementRef>(CFRetain(candidate)));
+      result->role = *role;
+      result->id = window;
+    };
+    for (unsigned depth = 0;
+         alive && depth < 24 && element(cursor.get()) && std::chrono::steady_clock::now() < deadline; ++depth) {
+      AXUIElementSetMessagingTimeout(element(cursor.get()), 0.05f);
+      observe(element(cursor.get()), true);
+      // Cocoa menus/help tags need not become AXFocusedUIElement. Inspect the
+      // focused control's actual ancestors and their immediate AX children,
+      // bounded to 64 nodes, and accept only a live independent native surface.
+      CF<CFTypeRef> children(attribute(element(cursor.get()), kAXChildrenAttribute));
+      if (children && CFGetTypeID(children.get()) == CFArrayGetTypeID()) {
+        const auto array = static_cast<CFArrayRef>(children.get());
+        for (CFIndex i = 0;
+             i < CFArrayGetCount(array) && childrenVisited++ < 64 && std::chrono::steady_clock::now() < deadline; ++i)
+          observe(element(CFArrayGetValueAtIndex(array, i)), false);
+      }
+      if (CFEqual(cursor.get(), retained.get()))
+        break;
+      CF<CFTypeRef> next(attribute(element(cursor.get()), kAXParentAttribute));
+      if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
+        break;
+      cursor = std::move(next);
+    }
+    CF<CFTypeRef> fresh(attribute(app.get(), kAXFocusedUIElementAttribute));
+    return alive && fresh && CFEqual(fresh.get(), focused.get()) ? result : nullptr;
+  }
+  bool familyBlocked(const Entry &e) const
+  {
+    const auto pendingBlocks = [](const Entry &item) {
+      return item.pendingChild && WindowFamily{{}, 0, item.pendingChild->role, {}}.blocksParent();
+    };
+    if (pendingBlocks(e) || e.associatedReturn.blocked())
+      return true;
+    const Owner owner{e.session.id, e.session.epoch};
+    for (const auto &[id, child] : entries) {
+      if (!child->family || (!pendingBlocks(*child) && !child->family->blocksParent()))
+        continue;
+      auto parent = child->family->parent;
+      for (unsigned depth = 0; depth < maxSessions; ++depth) {
+        if (parent == owner)
+          return true;
+        const auto *item = entry(parent.session, parent.epoch);
+        if (!item || !item->family)
+          break;
+        parent = item->family->parent;
+      }
+    }
+    return false;
+  }
+  bool familyContains(Owner owner, Owner ancestor) const
+  {
+    for (unsigned depth = 0; depth < maxSessions; ++depth) {
+      if (owner == ancestor)
+        return true;
+      const auto *e = entry(owner.session, owner.epoch);
+      if (!e || !e->family)
+        return false;
+      owner = e->family->parent;
+    }
+    return false;
+  }
+  bool familyPresented(const Entry &e) const
+  {
+    auto owner = Owner{e.session.id, e.session.epoch};
+    for (unsigned depth = 0; depth < maxSessions; ++depth) {
+      const auto *ancestor = entry(owner.session, owner.epoch);
+      if (!ancestor || !ancestor->visible || (depth && ancestor->session.phase != Phase::Remote))
+        return false;
+      if (!ancestor->family)
+        return true;
+      owner = ancestor->family->parent;
+    }
+    return false;
+  }
+  bool familyCurrent(const Entry &e, bool cleanup = false) const
+  {
+    if (!e.family)
+      return true;
+    const auto family = *e.family;
+    const auto expected = e.identity;
+    CF<AXUIElementRef> child(static_cast<AXUIElementRef>(CFRetain(e.window)));
+    const auto *parent = entry(family.parent.session, family.parent.epoch);
+    if (!parent ||
+        (parent->session.phase != Phase::Remote && (!cleanup || parent->session.phase != Phase::Returning)) ||
+        parent->identity.pid != expected.pid || parent->identity.launch != expected.launch)
+      return false;
+    const QPointer<NativeHost> alive(q);
+    CF<AXUIElementRef> retainedParent(static_cast<AXUIElementRef>(CFRetain(parent->window)));
+    CGWindowID childId = 0;
+    pid_t childPid = 0;
+    const auto native = identity(expected.id);
+    return alive && native && (cleanup || native->onScreen) && native->pid == expected.pid &&
+           native->launch == expected.launch && AXUIElementGetPid(child.get(), &childPid) == kAXErrorSuccess &&
+           childPid == expected.pid && axWindowId(child.get(), childId) == kAXErrorSuccess && childId == expected.id &&
+           surfaceRole(child.get()) == family.role && attachedTo(child.get(), retainedParent.get(), expected.pid) &&
+           alive;
+  }
+  bool focusMatches(const Entry &e, bool cleanup = false) const
+  {
+    if (familyBlocked(e) || !familyCurrent(e, cleanup))
+      return false;
+    CF<AXUIElementRef> app(AXUIElementCreateApplication(e.identity.pid));
+    AXUIElementSetMessagingTimeout(app.get(), 0.05f);
+    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
+    if (!element(focused.get()))
+      return false;
+    CF<CFTypeRef> top(attribute(element(focused.get()), kAXTopLevelUIElementAttribute));
+    if (element(top.get()) && CFEqual(top.get(), e.window)) {
+      CGWindowID focusedId = 0;
+      if (axWindowId(element(focused.get()), focusedId) == kAXErrorSuccess && focusedId == e.identity.id)
+        return true;
+    }
+    CF<CFTypeRef> cursor(focused ? CFRetain(focused.get()) : nullptr);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+    for (unsigned depth = 0; depth < 24 && element(cursor.get()) && std::chrono::steady_clock::now() < deadline;
+         ++depth) {
+      AXUIElementSetMessagingTimeout(element(cursor.get()), 0.05f);
+      if (CFEqual(cursor.get(), e.window))
+        return true;
+      if (surfaceRole(element(cursor.get()))) {
+        CGWindowID window = 0;
+        if (axWindowId(element(cursor.get()), window) != kAXErrorSuccess || window != e.identity.id)
+          return false;
+      }
+      CF<CFTypeRef> next(attribute(element(cursor.get()), kAXParentAttribute));
+      if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
+        break;
+      cursor = std::move(next);
+    }
+    // A child must appear in the exact focused UI ancestry. AXFocusedWindow
+    // alone can name its parent even while the child consumes AppKit keys.
+    if (e.family)
+      return false;
+    CF<CFTypeRef> window(attribute(app.get(), kAXFocusedWindowAttribute));
+    return window && CFEqual(window.get(), e.window);
+  }
+  Owner familyRoot(Owner owner) const
+  {
+    for (unsigned depth = 0; depth < maxSessions; ++depth) {
+      const auto *e = entry(owner.session, owner.epoch);
+      if (!e || !e->family)
+        return e ? owner : Owner{};
+      owner = e->family->parent;
+    }
+    return {};
+  }
+  void returnFamilyWhenIdle(Owner owner)
+  {
+    if (!entry(owner.session, owner.epoch))
+      return;
+    if (callbackDepth) {
+      QTimer::singleShot(10, q, [this, owner] { returnFamilyWhenIdle(owner); });
+      return;
+    }
+    restore(owner.session, false);
+  }
+  void failFamily(Owner owner, QString reason)
+  {
+    const auto root = familyRoot(owner);
+    auto *e = entry(root.session, root.epoch);
+    if (!e || e->session.phase == Phase::Returning)
+      return;
+    e->session.beginReturn();
+    // Retire outside any NativeHost callback that retains an Entry.
+    QTimer::singleShot(0, q, [this, root, reason] {
+      const QPointer<NativeHost> alive(q);
+      if (!entry(root.session, root.epoch))
+        return;
+      if (callbackDepth) {
+        QTimer::singleShot(10, q, [this, root] { returnFamilyWhenIdle(root); });
+        return;
+      }
+      error(reason + "; returning the attached window family to the Mac");
+      if (alive)
+        restore(root.session, false);
+    });
+  }
+  void completeChild(const std::shared_ptr<AttachedSurface> &candidate, SCShareableContent *content)
+  {
+    const auto admitted = lifecycle->admission();
+    auto *parent = entry(candidate->parent.session, candidate->parent.epoch);
+    if (!admitted || !parent || parent->pendingChild != candidate || parent->session.phase != Phase::Remote)
+      return;
+    if (!familyPresented(*parent)) {
+      parent->pendingChild.reset();
+      return;
+    }
+    const auto fresh = focusedChild(*parent);
+    if (!fresh || fresh->id != candidate->id || !CFEqual(fresh->window.get(), candidate->window.get())) {
+      parent->pendingChild.reset(); // It was dismissed before capture began.
+      return;
+    }
+    const auto native = identity(candidate->id);
+    const auto frame = bounds(candidate->window.get());
+    SCWindow *shareable = nil;
+    for (SCWindow *window in content.windows)
+      if (window.windowID == candidate->id && window.owningApplication.processID == parent->identity.pid) {
+        if (shareable) {
+          shareable = nil;
+          break;
+        }
+        shareable = window;
+      }
+    if (!native || !native->onScreen || native->pid != parent->identity.pid ||
+        native->launch != parent->identity.launch || !frame || !sameGeometry(*frame, native->frame) || !shareable ||
+        !sameGeometry(*frame, rect(shareable.frame)) || entries.size() >= maxSessions ||
+        familyRelation == maxJsonInteger || !targetedPointerAvailable()) {
+      failFamily(candidate->parent, "The exact attached surface cannot be captured and targeted independently");
+      return;
+    }
+    auto child = std::make_unique<Entry>();
+    child->identity = *native;
+    child->window = static_cast<AXUIElementRef>(CFRetain(candidate->window.get()));
+    child->shareable = shareable;
+    do {
+      child->session.id = QRandomGenerator::system()->generate64() & maxJsonInteger;
+    } while (!child->session.id || entries.count(child->session.id));
+    const auto root = familyRoot(candidate->parent);
+    const auto *recoveryOwner = entry(root.session, root.epoch);
+    if (!recoveryOwner || recoveryOwner->session.phase != Phase::Remote || !recoveryOwner->session.journaled) {
+      failFamily(candidate->parent, "Attached surface lost its durable recovery owner");
+      return;
+    }
+    child->session.prepareAttached(1, *frame, recoveryOwner->session);
+    child->family = WindowFamily{
+        candidate->parent,
+        ++familyRelation,
+        candidate->role,
+        {frame->x - parent->session.source.x, frame->y - parent->session.source.y}
+    };
+    const Owner owner{child->session.id, child->session.epoch};
+    const QPointer<NativeHost> alive(q);
+    startCapture(std::move(child), admitted);
+    if (!alive)
+      return;
+    parent = entry(candidate->parent.session, candidate->parent.epoch);
+    if (!parent || parent->pendingChild != candidate)
+      return;
+    parent->pendingChild.reset();
+    if (!entry(owner.session, owner.epoch))
+      failFamily(candidate->parent, "Attached surface capture failed");
+  }
   bool handleAssociatedChild(Owner owner)
+  {
+    if (!familiesEnabled)
+      return handleLegacyAttachedChild(owner);
+    auto *parent = entry(owner.session, owner.epoch);
+    if (!parent || !lifecycle->admission() || destroying)
+      return true;
+    if (!familyPresented(*parent))
+      return true;
+    if (parent->session.phase == Phase::Returning || !familyCurrent(*parent))
+      return true;
+    if (parent->pendingChild)
+      return familyBlocked(*parent);
+    const auto candidate = focusedChild(*parent);
+    if (!candidate)
+      return familyBlocked(*parent);
+    for (const auto &[id, existing] : entries)
+      if (existing->identity.id == candidate->id)
+        return familyBlocked(*parent);
+    parent->pendingChild = candidate; // Fence before revoking or any callback.
+    const QPointer<NativeHost> alive(q);
+    if (candidate->role != WindowFamilyRole::Tooltip)
+      releases(owner, KeyboardRouteReason::FocusChanged);
+    if (!alive)
+      return true;
+    parent = entry(owner.session, owner.epoch);
+    if (!parent || parent->pendingChild != candidate)
+      return true;
+    if (!candidate->id || parent->session.phase != Phase::Remote) {
+      failFamily(owner, "Attached surface has no independent capture identity");
+      return true;
+    }
+    auto life = lifetime;
+    [SCShareableContent
+        getShareableContentExcludingDesktopWindows:YES
+                               onScreenWindowsOnly:NO
+                                 completionHandler:^(SCShareableContent *content, NSError *) {
+                                   std::lock_guard lock(life->mutex);
+                                   if (life->receiver)
+                                     QMetaObject::invokeMethod(
+                                         life->receiver,
+                                         [this, candidate, content] { completeChild(candidate, content); },
+                                         Qt::QueuedConnection
+                                     );
+                                 }];
+    QTimer::singleShot(3000, q, [this, candidate] {
+      const auto *e = entry(candidate->parent.session, candidate->parent.epoch);
+      if (e && e->pendingChild == candidate)
+        failFamily(candidate->parent, "Attached surface enumeration timed out");
+    });
+    const auto *current = entry(owner.session, owner.epoch);
+    return !current || familyBlocked(*current);
+  }
+  bool handleLegacyAttachedChild(Owner owner)
   {
     if (QThread::currentThread() != q->thread())
       return false;
@@ -1660,11 +2066,7 @@ struct NativeHost::Impl
         if (!keyboard)
           return true;
         const auto *owner = entry(target->binding.owner.session, target->binding.owner.epoch);
-        if (owner && owner->associatedReturn.blocked())
-          return false; // An attached sheet may consume parent-key-window ups.
-        CF<AXUIElementRef> app(AXUIElementCreateApplication(target->identity.pid));
-        CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
-        return focused && CFEqual(focused.get(), target->window.get());
+        return owner && focusMatches(*owner, true);
       };
       if (!keyDestinationCurrent())
         return false;
@@ -1796,7 +2198,9 @@ struct NativeHost::Impl
   }
   QJsonObject metadata(const Entry &e) const
   {
-    return {
+    const auto root = familyRoot({e.session.id, e.session.epoch});
+    const auto *source = entry(root.session, root.epoch);
+    QJsonObject result{
         {"title", e.identity.title.left(512)},
         {"windowId", double(e.identity.id)},
         {"width", qRound(e.session.source.width)},
@@ -1806,13 +2210,16 @@ struct NativeHost::Impl
         {"geometry", double(e.session.geometry)},
         {"codec", "h264"},
         {"phase", e.session.phase == Phase::Remote ? "remote" : "preparing"},
-        {"sourceVisible", !e.moved},
+        {"sourceVisible", source ? !source->moved : !e.moved},
         {"windowDrag", e.windowDrag ? double(e.windowDrag->binding().drag) : 0},
         {"dragAnchorX", e.dragAnchor.x()},
         {"dragAnchorY", e.dragAnchor.y()},
         {"resizeRequest", double(e.resizeRequest)},
         {"hardwareEncoder", e.capture && e.capture->hardware.load()}
     };
+    if (e.family)
+      result.insert("family", windowFamilyJson(*e.family));
+    return result;
   }
   void opened(const Entry &e)
   {
@@ -2111,7 +2518,7 @@ struct NativeHost::Impl
       config.preservesAspectRatio = NO;
     }
     if (@available(macOS 14.2, *))
-      config.includeChildWindows = YES;
+      config.includeChildWindows = !familiesEnabled;
     return config;
   }
   void updateCapture(Entry &e)
@@ -2271,6 +2678,11 @@ struct NativeHost::Impl
       if (!e->windowDrag->begin(*drag, e->session.geometry))
         return;
     }
+    startCapture(std::move(e), admitted);
+  }
+  void startCapture(std::unique_ptr<Entry> e, NativeHostLifecycle::Admission admitted)
+  {
+    const QPointer<NativeHost> alive(q);
     e->started = QDateTime::currentMSecsSinceEpoch();
     e->capture = std::make_shared<Capture>();
     e->capture->receiver = q;
@@ -2361,6 +2773,29 @@ struct NativeHost::Impl
     if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame || !paintedGeometry ||
         paintedGeometry != e->session.geometry || e->producedGeometry != paintedGeometry || e->relocating)
       return;
+    if (e->family) {
+      const auto native = identity(e->identity.id);
+      const auto frame = bounds(e->window);
+      if (!familyCurrent(*e) || !native || native->pid != e->identity.pid || native->launch != e->identity.launch ||
+          !frame || !sameGeometry(*frame, e->session.source) || !sameGeometry(native->frame, *frame)) {
+        failFamily({session, epoch}, "Attached surface changed before its first painted frame");
+        return;
+      }
+      const auto root = familyRoot({session, epoch});
+      const auto *recoveryOwner = entry(root.session, root.epoch);
+      if (!recoveryOwner || !recoveryOwner->session.journaled) {
+        failFamily({session, epoch}, "Attached surface lost its durable recovery owner");
+        return;
+      }
+      e->session.commitAttached(epoch, recoveryOwner->session);
+      const QPointer<NativeHost> alive(q);
+      opened(*e);
+      if (alive && entry(session, epoch) && q->onCommitted) {
+        CallbackScope scope(*this);
+        q->onCommitted(session, epoch);
+      }
+      return;
+    }
     const auto drag = e->windowDrag;
     if (drag) {
       if (!drag->painted(paintedGeometry) || !e->dragReleaseFrameObserved || !drag->reserveCommit(drag->binding()))
@@ -2533,12 +2968,21 @@ struct NativeHost::Impl
       Entry &e, CGEventRef event, CGEventFlags modifiers, NativeHostLifecycle::Admission admitted, bool cleanup = false
   )
   {
-    if (cleanup && e.associatedReturn.blocked() && event &&
-        (CGEventGetType(event) == kCGEventKeyUp || CGEventGetType(event) == kCGEventFlagsChanged)) {
+    const bool keyboard =
+        event && (CGEventGetType(event) == kCGEventKeyDown || CGEventGetType(event) == kCGEventKeyUp ||
+                  CGEventGetType(event) == kCGEventFlagsChanged);
+    if (cleanup) {
+      bool missing = false;
+      const auto observed = identity(e.identity.id, &missing);
+      if (missing || (observed && (observed->pid != e.identity.pid || observed->launch != e.identity.launch)))
+        return true; // Natural child dismissal cannot post to a replacement.
+    }
+    if (keyboard && !focusMatches(e, cleanup)) {
       // A sheet can share its parent's AXFocusedWindow while owning AppKit key
       // dispatch. Do not redirect the parent's release into that child or claim
       // successful cleanup. Restore remains possible with this latch closed.
-      originalCleanupFailed = true;
+      if (cleanup)
+        originalCleanupFailed = true;
       return false;
     }
     if (!event || (!cleanup && !lifecycle->current(admitted)) || !AXIsProcessTrusted() ||
@@ -2679,16 +3123,21 @@ struct NativeHost::Impl
     if (!app)
       return false;
     AXUIElementSetMessagingTimeout(app.get(), 0.25f);
-    AXUIElementPerformAction(window.get(), kAXRaiseAction);
-    if (!current())
-      return false;
-    AXUIElementSetAttributeValue(window.get(), kAXMainAttribute, kCFBooleanTrue);
-    if (!current())
-      return false;
-    AXUIElementSetAttributeValue(app.get(), kAXFocusedWindowAttribute, window.get());
-    if (!current())
-      return false;
-    [[NSRunningApplication runningApplicationWithProcessIdentifier:pid] activateWithOptions:0];
+    if (!current()->family) {
+      AXUIElementPerformAction(window.get(), kAXRaiseAction);
+      if (!current())
+        return false;
+      AXUIElementSetAttributeValue(window.get(), kAXMainAttribute, kCFBooleanTrue);
+      if (!current())
+        return false;
+      AXUIElementSetAttributeValue(app.get(), kAXFocusedWindowAttribute, window.get());
+      if (!current())
+        return false;
+      [[NSRunningApplication runningApplicationWithProcessIdentifier:pid] activateWithOptions:0];
+    }
+    // Attached sheets/menus already own the native application's interaction.
+    // Raising or making the parent key here could dismiss the very child whose
+    // Viewer requested focus. Accept only its existing exact focus ancestry.
     if (!current())
       return false;
     if (handleAssociatedChild(owner) || !alive)
@@ -2696,7 +3145,7 @@ struct NativeHost::Impl
     CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedWindowAttribute));
     if (!current())
       return false;
-    if (!focused || !CFEqual(focused.get(), window.get())) {
+    if (!focusMatches(*current())) {
       error("The app did not accept focus for this window");
       return false;
     }
@@ -2723,6 +3172,43 @@ struct NativeHost::Impl
       return;
     const Owner owner{session, epoch};
     const auto kind = event["kind"].toString();
+    if (kind == "dismiss") {
+      if (!admitted || callbackDepth || !familiesEnabled || !e->family || !e->family->dismissible() ||
+          !familyPresented(*e) || e->session.phase != Phase::Remote ||
+          integer(event["geometry"]) != e->session.geometry || !familyCurrent(*e))
+        return;
+      const auto expected = e->identity;
+      CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(e->window)));
+      const auto valid = [&] {
+        if (!alive || !lifecycle->current(admitted))
+          return false;
+        const auto *current = entry(session, epoch);
+        const auto native = identity(expected.id);
+        const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+        const auto frame = bounds(window.get());
+        return current && familyCurrent(*current) && native && native->pid == expected.pid &&
+               native->launch == expected.launch && frame && sameGeometry(*frame, current->session.source) &&
+               sameGeometry(native->frame, *frame) && active && active.processIdentifier == expected.pid &&
+               CFEqual(current->window, window.get());
+      };
+      if (!valid())
+        return;
+      if (familyRoot(focusOwner) == familyRoot(owner))
+        releases(focusOwner, KeyboardRouteReason::FocusChanged);
+      if (!valid())
+        return;
+      CFArrayRef actions = nullptr;
+      const auto copied = AXUIElementCopyActionNames(window.get(), &actions);
+      CF<CFArrayRef> ownedActions(actions);
+      if (!valid())
+        return;
+      if (copied != kAXErrorSuccess || !actions ||
+          !CFArrayContainsValue(actions, CFRangeMake(0, CFArrayGetCount(actions)), kAXCancelAction) ||
+          AXUIElementPerformAction(window.get(), kAXCancelAction) != kAXErrorSuccess) {
+        failFamily(owner, "The attached popup does not expose exact Accessibility cancellation");
+      }
+      return;
+    }
     if (kind != "release" && kind != "visibility") {
       if (handleAssociatedChild(owner) || !alive)
         return;
@@ -2740,8 +3226,14 @@ struct NativeHost::Impl
       if (!event["visible"].isBool())
         return;
       e->visible = event["visible"].toBool();
-      if (!e->visible)
+      if (!e->visible) {
+        if (focusOwner != owner && familyContains(focusOwner, owner)) {
+          releases(focusOwner, KeyboardRouteReason::Hidden);
+          if (!alive)
+            return;
+        }
         releases(owner, KeyboardRouteReason::Hidden);
+      }
       if (alive)
         if (auto *current = entry(session, epoch))
           updateCapture(*current);
@@ -2878,8 +3370,8 @@ struct NativeHost::Impl
     const auto admitted = lifecycle->admission();
     const QPointer<NativeHost> alive(q);
     auto *e = entry(session, epoch);
-    if (!admitted || !e || e->session.phase != Phase::Remote || width < 64 || height < 64 || width > 8192 ||
-        height > 8192 || request > maxJsonInteger)
+    if (!admitted || !e || e->family || familyBlocked(*e) || e->session.phase != Phase::Remote || width < 64 ||
+        height < 64 || width > 8192 || height > 8192 || request > maxJsonInteger)
       return;
     if (e->moved) {
       const auto current = [&]() -> Entry * {
@@ -2986,10 +3478,71 @@ struct NativeHost::Impl
         encodeImage(capture, capture->lastImage, true);
     });
   }
+  void retireChild(Owner owner)
+  {
+    auto *e = entry(owner.session, owner.epoch);
+    if (!e || !e->family)
+      return;
+    if (e->session.phase != Phase::Returning)
+      e->session.beginReturn();
+    if (callbackDepth) {
+      QTimer::singleShot(10, q, [this, owner] { retireChild(owner); });
+      return;
+    }
+    const QPointer<NativeHost> alive(q);
+    std::vector<Owner> children;
+    for (const auto &[id, child] : entries)
+      if (child->family && child->family->parent == owner)
+        children.push_back({id, child->session.epoch});
+    for (const auto child : children) {
+      retireChild(child);
+      if (!alive)
+        return;
+    }
+    releases(owner, KeyboardRouteReason::Returned);
+    if (!alive || !(e = entry(owner.session, owner.epoch)))
+      return;
+    const auto capture = e->capture;
+    SCStream *stream = e->stream;
+    DFWindowStream *delegate = e->delegate;
+    capture->shutdown();
+    [stream stopCaptureWithCompletionHandler:^(NSError *) {
+      (void)stream;
+      (void)delegate;
+    }];
+    entries.erase(owner.session);
+    if (!destroying && q->onClosed) {
+      CallbackScope scope(*this);
+      q->onClosed(owner.session);
+    }
+  }
   NativeSourceReturnResult restore(std::uint64_t session, bool raise = true, std::optional<Rect> requested = {})
   {
     const QPointer<NativeHost> alive(q);
     auto found = entries.find(session);
+    if (found == entries.end())
+      return NativeSourceReturnResult::Aborted;
+    if (found->second->family) {
+      const auto root = familyRoot({session, found->second->session.epoch});
+      if (root.session && root.session != session)
+        return restore(root.session, raise, requested);
+      retireChild({session, found->second->session.epoch});
+      return NativeSourceReturnResult::Closed;
+    }
+    const Owner root{session, found->second->session.epoch};
+    if (found->second->session.phase != Phase::Returning)
+      found->second->session.beginReturn();
+    found->second->pendingChild.reset();
+    std::vector<Owner> children;
+    for (const auto &[id, child] : entries)
+      if (child->family && child->family->parent == root)
+        children.push_back({id, child->session.epoch});
+    for (const auto child : children) {
+      retireChild(child);
+      if (!alive)
+        return NativeSourceReturnResult::Aborted;
+    }
+    found = entries.find(session);
     if (found == entries.end())
       return NativeSourceReturnResult::Aborted;
     const auto &e = *found->second;
@@ -3143,13 +3696,13 @@ struct NativeHost::Impl
       else {
         CF<AXUIElementRef> app(AXUIElementCreateApplication(focused->identity.pid));
         AXUIElementSetMessagingTimeout(app.get(), 0.25f);
-        CF<CFTypeRef> actualFocus(attribute(app.get(), kAXFocusedWindowAttribute));
-        if (!actualFocus || !CFEqual(actualFocus.get(), focused->window))
+        if (!focusMatches(*focused))
           releases();
       }
     }
     const auto now = QDateTime::currentMSecsSinceEpoch();
     std::vector<std::uint64_t> restoreIds;
+    std::vector<Owner> retiredChildren;
     for (auto &[id, e] : entries) {
       if (e->associatedReturn.blocked())
         continue; // One separately queued, exact-parent return owns this entry.
@@ -3180,8 +3733,14 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
-      auto current = identity(e->identity.id);
-      if (!current || current->pid != e->identity.pid || current->launch != e->identity.launch) {
+      bool missing = false;
+      auto current = identity(e->identity.id, &missing);
+      if (e->family && (missing || (current && (!current->onScreen || current->pid != e->identity.pid ||
+                                                current->launch != e->identity.launch)))) {
+        retiredChildren.push_back({id, e->session.epoch});
+        continue;
+      }
+      if (!familyCurrent(*e) || !current || current->pid != e->identity.pid || current->launch != e->identity.launch) {
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
         continue;
@@ -3218,6 +3777,11 @@ struct NativeHost::Impl
         }
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::GeometryChanged);
         e->session.source = *actual;
+        if (e->family) {
+          const auto *parent = entry(e->family->parent.session, e->family->parent.epoch);
+          if (parent)
+            e->family->offset = {actual->x - parent->session.source.x, actual->y - parent->session.source.y};
+        }
         ++e->session.geometry;
         if (e->windowDrag && e->session.phase == Phase::Preparing)
           e->windowDrag->geometryChanged(e->session.geometry);
@@ -3229,8 +3793,16 @@ struct NativeHost::Impl
         opened(*e);
       }
     }
-    for (auto id : restoreIds)
+    for (const auto owner : retiredChildren) {
+      retireChild(owner);
+      if (!childGuard)
+        return;
+    }
+    for (auto id : restoreIds) {
       restore(id);
+      if (!childGuard)
+        return;
+    }
   }
 };
 
@@ -3265,6 +3837,11 @@ bool NativeHost::recover()
 {
   m_impl->recoverJournal();
   return m_impl->recovered && m_impl->recovery.isEmpty();
+}
+void NativeHost::setWindowFamiliesEnabled(bool enabled)
+{
+  if (QThread::currentThread() == thread() && m_impl->entries.empty())
+    m_impl->familiesEnabled = enabled;
 }
 void NativeHost::setHoldingDisplayEnabled(bool enabled)
 {
@@ -3435,7 +4012,8 @@ NativeHost::windowReturnFrame(Owner owner, std::uint64_t geometry, Point pointer
   const auto *entry = m_impl->entry(owner.session, owner.epoch);
   if (!admitted || m_impl->destroying || m_impl->callbackDepth || !entry || !entry->moved ||
       entry->session.phase != Phase::Remote || entry->session.geometry != geometry || !entry->visible ||
-      !entry->capture || entry->capture->stopped || entry->associatedReturn.blocked() || !m_impl->holding.available())
+      !entry->capture || entry->capture->stopped || entry->family || m_impl->familyBlocked(*entry) ||
+      !m_impl->holding.available())
     return {};
   const auto expected = entry->identity;
   const auto source = entry->session.source;

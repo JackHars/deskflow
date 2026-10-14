@@ -1,6 +1,62 @@
 # Seamless Windows work state
 
-## Latest verified checkpoint — 2026-10-14
+## P6 implementation and local verification — 2026-10-14
+
+Window-family code is implemented; **physical H08/H09 remain NOT_RUN**. The user
+continues to defer physical testing. Do not launch visible Mac fixtures, event
+taps or desktop input routing from the automated results below.
+
+`window-family-v1` connects exact native child discovery/capture to separate
+painted child Viewers, immutable bounded parent/session relations, modal
+ancestor fencing, exact focus/clipboard ownership and child-only dismissal.
+Children share the root's durable recovery; they never receive independent AX
+relocation journals. Returning a member returns the complete family. Outside
+parent clicks may invoke the exact menu/popover's AX Cancel action, subject to
+existing input fences. Unsupported discovered children return locally.
+
+X11 uses source-relative child placement and exact child XIDs. GNOME admits only
+uniquely associated visible top-level ancestors owned by one retained native
+client; it preserves its existing single-surface/focus/grab/queue requirements.
+GNOME placement remains compositor-managed, so precise source-relative popup
+positioning is an explicit H08 usability limit. Arbitrary OS/app menus and IME
+candidates are not blanket-supported. See
+`deploy/windowshare/window-families.md` and `deploy/windowshare/app-compatibility.md`.
+
+Local evidence is in `build/roadmap-completion-20261014`:
+
+- The production Mac app builds. `p6-final-mac-tests.json` passes all five
+  signed suites: family, Viewer, Bridge, viewport and native original-input.
+  `p6-final-mac-viewer-smoke.json` passes authenticated reconnect and clean shutdown
+  with the production Viewer; it does not start NativeHost. The earlier
+  component run caught the missing shared-recovery preparation path and an
+  invalid input-fence test binding; both are corrected.
+- `p6-linux-family-4/result.json` passes the full Ubuntu app build, eight Qt/X11
+  suites (Xvfb at 1 and 1.25), provider policy, Viewer reconnect smoke and actual
+  isolated GNOME 50.1 / Qt 6.10.2 sheet/menu lifecycle and parent mutation tests.
+  The source is frozen with per-file hashes; the offline container removes its
+  own temporary directory and never accesses the user's desktop/devices.
+- `p6-sanitize-tests.json` passes family, Viewer and Bridge under Mac ASan/UBSan,
+  with separately signed copies and leak detection disabled. The retained
+  failing report `p6-sanitize-tests-before-lifetime-fix.json` exposed QPointer's
+  invalid Viewer downcast during QWidget destruction. A separate lifetime token
+  now closes before derived members are destroyed.
+- `p6-direct-destruction-before-fix.json` also reproduced a direct-deletion
+  path through Bridge's family cleanup. Its destroyed callback now clears the
+  typed pointer before retiring the family. The regression deletes both a
+  parent and a child directly, without relying on a prior Closed packet;
+  `p6-direct-destruction-fixed.json` passes the full Bridge suite under ASan/UBSan.
+  The final production rebuild and signed Bridge suite also pass in
+  `p6-destruction-mac-build.log` and `p6-final-bridge-tests.json`.
+- Do **not** count `p6-linux-family-2` as a complete GNOME pass: its harness caught
+  an assertion as an ordinary provider exception. Run 3 corrected that test and
+  exposed that Qt's transientParent setter does not mutate its existing native
+  xdg parent. Run 4 separately changes Qt state and the actual owned native role,
+  and requires the provider's explicit “owned viewer parent changed” rejection.
+
+The new GNOME family fixture runs in hosted native integration as well. Latest
+hosted P6 results will be recorded after this implementation commit is checked.
+
+## Previous verified P5 checkpoint — 2026-10-14
 
 The implementation and fixture corrections are committed and pushed through
 `c748915ccb65c4b169188d3ae2d1ea326a288ff9` on `feature/seamless-windows`.

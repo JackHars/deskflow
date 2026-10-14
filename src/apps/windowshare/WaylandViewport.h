@@ -60,12 +60,16 @@ struct WaylandWindowAssociation
   QPointer<QObject> role;
   quintptr surface = 0, topLevel = 0;
   std::uint32_t resource = 0;
+  QPointer<QWindow> parent;
+  std::shared_ptr<const WaylandWindowAssociation> parentAssociation;
 };
 // Writes an opaque app_id on this exact existing xdg_toplevel. Its appearance
 // on one owned MetaWindow is the compositor-side challenge response; window
 // titles, PIDs, rectangles and other windows on this connection are irrelevant.
-std::optional<WaylandWindowAssociation>
-associateWaylandWindow(QWindow *window, const WaylandViewportGeometry &expected);
+std::optional<WaylandWindowAssociation> associateWaylandWindow(
+    QWindow *window, const WaylandViewportGeometry &expected, QWindow *parent = nullptr,
+    const WaylandWindowAssociation *parentAssociation = nullptr
+);
 bool currentWaylandAssociation(
     QWindow *window, const WaylandViewportGeometry &expected, const WaylandWindowAssociation &association
 );

@@ -98,11 +98,11 @@ std::optional<Rect> recoveryRect(Rect original, std::span<const Rect> physicalDi
     // when a hotplug reverses CGGetActiveDisplayList's ordering.
     if (!chosen || overlap > bestOverlap ||
         (overlap == bestOverlap &&
-         (gap < bestGap || (gap == bestGap && (centerDistance < bestCenterDistance ||
-                                               (centerDistance == bestCenterDistance &&
-                                                std::tie(display.x, display.y, display.width, display.height) <
-                                                    std::tie(chosen->x, chosen->y, chosen->width, chosen->height)))))
-        )) {
+         (gap < bestGap ||
+          (gap == bestGap && (centerDistance < bestCenterDistance ||
+                              (centerDistance == bestCenterDistance &&
+                               std::tie(display.x, display.y, display.width, display.height) <
+                                   std::tie(chosen->x, chosen->y, chosen->width, chosen->height))))))) {
       chosen = display;
       bestOverlap = overlap;
       bestGap = gap;
@@ -270,9 +270,30 @@ void Session::frameReady(std::uint64_t receivedEpoch)
   require(receivedEpoch == epoch && phase == Phase::Preparing, "stale first frame");
   firstFrame = true;
 }
+void Session::prepareAttached(std::uint64_t nextEpoch, Rect frame, const Session &recoveryOwner)
+{
+  require(
+      phase == Phase::Local && id && nextEpoch > epoch && frame.valid() && !journaled && recoveryOwner.id != id &&
+          recoveryOwner.phase == Phase::Remote && recoveryOwner.journaled,
+      "attached export lacks durable family recovery"
+  );
+  epoch = nextEpoch;
+  original = source = frame;
+  firstFrame = false;
+  phase = Phase::Preparing;
+}
 void Session::commit(std::uint64_t receivedEpoch)
 {
   require(receivedEpoch == epoch && phase == Phase::Preparing && firstFrame && journaled, "export not ready");
+  phase = Phase::Remote;
+}
+void Session::commitAttached(std::uint64_t receivedEpoch, const Session &recoveryOwner)
+{
+  require(
+      receivedEpoch == epoch && phase == Phase::Preparing && firstFrame && !journaled && recoveryOwner.id != id &&
+          recoveryOwner.phase == Phase::Remote && recoveryOwner.journaled,
+      "attached export lacks painted frame or durable family recovery"
+  );
   phase = Phase::Remote;
 }
 void Session::beginReturn()

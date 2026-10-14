@@ -177,6 +177,64 @@ KeyboardRouteControl resumeRoute(KeyboardRouteControl control)
   return control;
 }
 
+void testAttachedWindowLifecycle()
+{
+  auto parent = std::make_unique<Viewer>(301, 1, metadata());
+  Recording parentEvents;
+  parentEvents.attach(*parent);
+  makeReady(*parent, parentEvents);
+  makeFocused(*parent, parentEvents);
+  key(*parent, QEvent::KeyPress, Qt::Key_A, "a");
+  parent->setFamilyBlocked(true);
+  const auto released = parentEvents.count(MessageType::Input, "key");
+  check(released == 2, "Modal transition did not release the parent's held key");
+  const auto staleRequest = parentEvents.focusRequest();
+  parent->focusAcknowledged(7, staleRequest);
+  key(*parent, QEvent::KeyPress, Qt::Key_B, "b");
+  check(parentEvents.count(MessageType::Input, "key") == released, "Modal parent accepted stale focus input");
+  auto childMetadata = metadata(1, 320, 240);
+  childMetadata.insert("family", windowFamilyJson({{301, 1}, 1, WindowFamilyRole::Sheet, {30, 40}}));
+  Viewer child(302, 1, childMetadata);
+  Recording childEvents;
+  childEvents.attach(child);
+  child.attachFamilyParent(parent.get());
+  check(
+      child.windowHandle()->transientParent() == parent->windowHandle(), "Child has no exact native transient parent"
+  );
+  makeReady(child, childEvents);
+  makeFocused(child, childEvents);
+  key(child, QEvent::KeyPress, Qt::Key_B, "b");
+  key(child, QEvent::KeyRelease, Qt::Key_B, "b");
+  check(childEvents.count(MessageType::Input, "key") == 2, "Painted focused child could not accept input");
+  child.resize(300, 220);
+  QCoreApplication::processEvents();
+  check(childEvents.count(MessageType::Resize) == 0, "Attached AX window was resized independently");
+  parent.reset();
+  check(!child.isVisible() && !child.clipboardFocus(), "Parent destruction left child focus/clipboard active");
+  key(child, QEvent::KeyPress, Qt::Key_C, "c");
+  check(childEvents.count(MessageType::Input, "key") == 2, "Orphaned child accepted input");
+}
+void testPopupDismissalFence()
+{
+  Viewer parent(401, 1, metadata());
+  Recording events;
+  events.attach(parent);
+  makeReady(parent, events);
+  makeFocused(parent, events);
+  unsigned dismissals = 0;
+  parent.onDismissFamily = [&] { ++dismissals; };
+  parent.setFamilyBlocked(true);
+  mouse(parent, QEvent::MouseButtonPress, {100, 100});
+  mouse(parent, QEvent::MouseButtonRelease, {100, 100}, Qt::LeftButton, Qt::NoButton);
+  check(
+      dismissals == 1 && events.count(MessageType::Input, "button") == 0, "Outside click leaked through popup dismissal"
+  );
+  InputPreparationBinding preparation{1, 1, {1, 1, 1}};
+  check(parent.beginInputPreparation(preparation), "Cannot fence modal parent's pending input");
+  mouse(parent, QEvent::MouseButtonPress, {100, 100});
+  check(dismissals == 1, "Input preparation fence allowed a popup dismissal");
+}
+
 void testInputMethodIsExplicitlyUnsupported()
 {
   Viewer viewer(205, 17, metadata());
@@ -1460,6 +1518,8 @@ int main(int argc, char **argv)
   application.setQuitOnLastWindowClosed(false);
   try {
     testDecoder();
+    testAttachedWindowLifecycle();
+    testPopupDismissalFence();
     testInputMethodIsExplicitlyUnsupported();
     testFocusedClipboardLifetime();
     testMappingAndReadiness();

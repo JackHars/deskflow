@@ -75,6 +75,9 @@ bool NativeHost::recover()
 void NativeHost::setHoldingDisplayEnabled(bool)
 {
 }
+void NativeHost::setWindowFamiliesEnabled(bool)
+{
+}
 bool NativeHost::setCaptureFrameRate(unsigned rate)
 {
   if (!validCaptureRate(rate))
@@ -283,6 +286,10 @@ struct ChannelTestAccess
 namespace {
 struct BridgeTestAccess
 {
+  static void families(Bridge &bridge)
+  {
+    bridge.m_familyCapable = true;
+  }
   static unsigned captureRate(const Bridge &bridge)
   {
     return bridge.m_native ? bridge.m_native->captureFrameRate() : 0;
@@ -703,6 +710,64 @@ void delayedViewerCleanup()
   BridgeTestAccess::receive(bridge, Packet{MessageType::Closed, 91, 2, 3, jsonBytes({})});
   QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
   check(!replacement && BridgeTestAccess::count(bridge) == 0, "Replacement viewer was not cleaned up");
+}
+
+void attachedViewerLifetime()
+{
+  Bridge bridge(false, Identity{QSslCertificate{}, QSslKey{}}, QByteArray(32, '\0'), QString{}, 0, 0, false);
+  const QJsonObject metadata{{"geometry", 1}, {"width", 640}, {"height", 480}, {"codec", "h264"}};
+  auto child = metadata;
+  child.insert("family", windowFamilyJson({{91, 2}, 1, WindowFamilyRole::Sheet, {20, 30}}));
+  BridgeTestAccess::receive(bridge, {MessageType::Opened, 91, 2, 1, jsonBytes(metadata)});
+  bool rejected = false;
+  try {
+    BridgeTestAccess::receive(bridge, {MessageType::Opened, 92, 3, 1, jsonBytes(child)});
+  } catch (const std::runtime_error &) {
+    rejected = true;
+  }
+  check(rejected && BridgeTestAccess::count(bridge) == 1, "Unnegotiated child created a Viewer");
+  BridgeTestAccess::families(bridge);
+  BridgeTestAccess::receive(bridge, {MessageType::Opened, 92, 3, 1, jsonBytes(child)});
+  QPointer<Viewer> parent = BridgeTestAccess::viewer(bridge, 91), attached = BridgeTestAccess::viewer(bridge, 92);
+  check(parent && attached && parent->familyBlocked(), "Opened child did not fence its parent");
+  const auto oldReturn = attached->onReturned;
+  BridgeTestAccess::receive(bridge, {MessageType::Closed, 92, 3, 2, jsonBytes({})});
+  check(!parent->familyBlocked() && BridgeTestAccess::count(bridge) == 1, "Native dismissal removed the parent");
+  child["family"] = windowFamilyJson({{91, 2}, 2, WindowFamilyRole::Menu, {20, 30}});
+  BridgeTestAccess::receive(bridge, {MessageType::Opened, 93, 4, 3, jsonBytes(child)});
+  oldReturn();
+  check(BridgeTestAccess::count(bridge) == 2, "Stale child callback removed the new family");
+  QPointer<Viewer> menu = BridgeTestAccess::viewer(bridge, 93);
+  BridgeTestAccess::receive(bridge, {MessageType::Closed, 91, 2, 4, jsonBytes({})});
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  check(!parent && !attached && !menu && BridgeTestAccess::count(bridge) == 0, "Parent close leaked attached Viewers");
+  BridgeTestAccess::receive(bridge, {MessageType::Opened, 91, 5, 5, jsonBytes(metadata)});
+  rejected = false;
+  try {
+    BridgeTestAccess::receive(bridge, {MessageType::Opened, 94, 1, 6, jsonBytes(child)});
+  } catch (const std::runtime_error &) {
+    rejected = true;
+  }
+  check(rejected && BridgeTestAccess::count(bridge) == 1, "Child attached to a replacement parent epoch");
+}
+
+void destroyedFamilyMember()
+{
+  for (const auto member : {91, 92}) {
+    Bridge bridge(false, Identity{QSslCertificate{}, QSslKey{}}, QByteArray(32, '\0'), QString{}, 0, 0, false);
+    BridgeTestAccess::families(bridge);
+    const QJsonObject metadata{{"geometry", 1}, {"width", 640}, {"height", 480}, {"codec", "h264"}};
+    auto child = metadata;
+    child["family"] = windowFamilyJson({{91, 2}, 1, WindowFamilyRole::Sheet, {20, 30}});
+    BridgeTestAccess::receive(bridge, {MessageType::Opened, 91, 2, 1, jsonBytes(metadata)});
+    BridgeTestAccess::receive(bridge, {MessageType::Opened, 92, 3, 2, jsonBytes(child)});
+    QPointer<Viewer> parent = BridgeTestAccess::viewer(bridge, 91), attached = BridgeTestAccess::viewer(bridge, 92);
+    // QObject::destroyed may run during QWidget's base destructor while its
+    // QPointer still points at an object whose Viewer members no longer exist.
+    delete BridgeTestAccess::viewer(bridge, member);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    check(!parent && !attached && BridgeTestAccess::count(bridge) == 0, "Destroyed member left live family Viewers");
+  }
 }
 
 void paintedReadyBinding()
@@ -2734,6 +2799,8 @@ int main(int argc, char **argv)
     QTextStream(stdout) << "TLS backend: " << QSslSocket::activeBackend() << "; Qt " << qVersion() << '\n';
     boundedPresentation();
     delayedViewerCleanup();
+    attachedViewerLifetime();
+    destroyedFamilyMember();
     paintedReadyBinding();
     captureRateConfiguration();
     QTemporaryDir directory;

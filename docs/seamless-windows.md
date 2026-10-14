@@ -2,6 +2,16 @@
 
 ## Current implementation — 2026-10-14
 
+P6 implements negotiated attached-window families: exact Mac child identity and
+capture, separately painted Linux children, modal ancestor fencing, exact
+focus/clipboard ownership and shared root recovery. Supported menus/popovers
+can be dismissed through their exact AX Cancel action; unsupported identified
+surfaces return their family locally. X11 preserves relative placement; GNOME
+uses compositor-managed top-level transients. Mac regressions/sanitizers and
+private Ubuntu X11/GNOME fixtures pass. **Physical H08/H09 remain NOT_RUN.** See
+[window-families.md](../deploy/windowshare/window-families.md) for supported
+roles, association rules and popup/IME limits.
+
 P5 bidirectional ordinary-titlebar dragging now has integrated motion-only holding,
 exact native preview placement/paint, real-release/drop joining, durable source
 relocation and ordinary Core cursor transfer. Mac and isolated Ubuntu tests
@@ -20,7 +30,7 @@ and native/code admission, not the ordinary Deskflow default.
 
 The current working candidate also includes exact Qt xdg_toplevel-to-Mutter
 window association, painted-frame holding relocation, lifecycle fencing,
-attached-sheet/drawer local return, and opt-in focused text clipboard. X11
+attached-window capture with local-return fallback, and opt-in focused text clipboard. X11
 namespace and hit checks are implemented, but X11 original delivery is denied
 without a proven native application-input drain. Unknown Mutter builds and
 unsupported roles/input contexts are likewise unavailable.
@@ -241,11 +251,11 @@ pending until the returned code is tested on the actual machines.
 | Milestone | Current evidence | Work required to finish |
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
-| Original input integration | Production coordinator, private v5 mapped delivery, IPC5 retained prefix/batches and audited Mutter build ordering are implemented. Exact cleanup requires both Host release and Core resume. | Complete first-click preparation and run final native/physical acceptance. |
+| Original input integration | Production coordinator, private v5 mapped delivery, IPC5 retained prefix/batches, first-click preparation and audited Mutter build ordering are implemented. Exact cleanup requires both Host release and Core resume. | Run final native/physical acceptance. |
 | Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Actual Qt role challenges select unique owned Mutter windows; holding relocation retains the first-painted geometry and exact restore journal. | Verify the new native multi-window fixture, focus changes, both monitors and physical failure recovery. |
-| Drag out and drag back | Transactional session primitives exist. | Implement and test edge-drag ownership in both directions using Deskflow topology. |
-| App compatibility | Exact original modifiers/repeats and opt-in focused text clipboard are implemented. Attached sheets/drawers return their parent locally; remote transients and IME remain unsupported. | Run native, browser and Electron shortcut/dialog/menu/copy-paste scenarios and resolve supported-path failures. |
+| Drag out and drag back | Bidirectional ordinary-titlebar code, native preview/release joining, durable restoration and automated regressions are integrated. | Complete H07 attended acceptance, including cancellation, recovery and repeated transfers. |
+| App compatibility | Attached child capture, modal fencing, popup dismissal, shared recovery, exact original modifiers/repeats and opt-in focused text clipboard are implemented. Private X11/GNOME family tests pass; GNOME popup placement and IME limits are documented. | Complete H08/H09 native, browser and Electron shortcut/dialog/menu/copy-paste acceptance and resolve supported-path failures. |
 | Recovery, performance and release | Journal/watchdog recovery, immediate lifecycle fencing, bounded fair media queues, passive CPU/RSS tooling and experimental packaging exist. | Verify final packaging, real-window crash recovery, latency/resource soak and installation/upgrade/removal. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
@@ -1036,15 +1046,18 @@ The [coordinate integration plan](seamless-windows-coordinate-plan.md) retains
 the original design. Its X11 namespace witness and native hit checks are now
 implemented; X11 still lacks the native drain required for original input.
 
-Automatic edge-drag export/return and transactional drag ownership are unfinished.
+Automatic edge-drag export/return and transactional drag ownership are implemented;
+physical H07 acceptance remains open.
 Precise Wayland placement may need compositor cooperation; Qt screen selection
 does not guarantee coordinates under every compositor. Ubuntu builds, direct-host
 foundation/application checks and private-Xvfb viewport/core tests now pass. The
 actual GNOME Wayland desktop currently reports one active monitor; live window
 input and a two-monitor arrangement still require direct validation.
 
-Remote dialog/popup rendering and IME composition remain unavailable. Exact
-attached sheets/drawers trigger local parent return. Focused text clipboard,
+Supported attached dialogs/popups now have separate remote streams and exact
+parent associations; unsupported identified surfaces return locally. GNOME
+source-relative popup placement and arbitrary IME composition remain unavailable.
+Focused text clipboard,
 original shortcut/repeat delivery, stream scheduling and watchdog recovery have
 code and automated coverage; real application and packaged cross-machine
 acceptance remains separate. The experimental application does not replace the

@@ -34,6 +34,9 @@ public:
   static void requestPermissions();
   bool recover();
   void setHoldingDisplayEnabled(bool enabled);
+  // Negotiated per connection before export. Legacy peers retain local return
+  // for associated children instead of receiving unknown session metadata.
+  void setWindowFamiliesEnabled(bool enabled);
   // Startup configuration only; rejects unsupported rates or live exports.
   bool setCaptureFrameRate(unsigned framesPerSecond);
   unsigned captureFrameRate() const;

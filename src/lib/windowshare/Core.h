@@ -144,8 +144,10 @@ struct Session
   Rect original, source;
   bool journaled = false, firstFrame = false;
   void prepare(std::uint64_t nextEpoch, Rect saved, Rect destination);
+  void prepareAttached(std::uint64_t nextEpoch, Rect frame, const Session &recoveryOwner);
   void frameReady(std::uint64_t receivedEpoch);
   void commit(std::uint64_t receivedEpoch);
+  void commitAttached(std::uint64_t receivedEpoch, const Session &recoveryOwner);
   void beginReturn();
   void restored();
   void suspend();

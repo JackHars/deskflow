@@ -206,6 +206,15 @@ bool currentWaylandAssociation(
   if (!association.role || association.token.isEmpty() || association.surface != expected.surface ||
       association.resource != expected.resource || readWaylandViewport(window) != std::optional(expected))
     return false;
+  if (window->transientParent() != association.parent ||
+      bool(association.parentAssociation) != bool(association.parent))
+    return false;
+  if (association.parentAssociation) {
+    const auto parentGeometry = readWaylandViewport(association.parent);
+    if (!parentGeometry ||
+        !currentWaylandAssociation(association.parent, *parentGeometry, *association.parentAssociation))
+      return false;
+  }
   auto *platform = dynamic_cast<QtWaylandClient::QWaylandWindow *>(window->handle());
   auto *role = platform ? platform->shellSurface() : nullptr;
   if (!role || role != association.role ||
@@ -221,12 +230,20 @@ bool currentWaylandAssociation(
   return false;
 #endif
 }
-std::optional<WaylandWindowAssociation> associateWaylandWindow(QWindow *window, const WaylandViewportGeometry &expected)
+std::optional<WaylandWindowAssociation> associateWaylandWindow(
+    QWindow *window, const WaylandViewportGeometry &expected, QWindow *parent,
+    const WaylandWindowAssociation *parentAssociation
+)
 {
 #ifdef WINDOWSHARE_SUPPORTED_QT_WAYLAND
-  if (readWaylandViewport(window) != std::optional(expected) || window->transientParent() ||
-      window->type() != Qt::Window)
+  if (readWaylandViewport(window) != std::optional(expected) || window->transientParent() != parent ||
+      window == parent || bool(parent) != bool(parentAssociation) || window->type() != Qt::Window)
     return {};
+  if (parent) {
+    const auto geometry = readWaylandViewport(parent);
+    if (!geometry || !currentWaylandAssociation(parent, *geometry, *parentAssociation))
+      return {};
+  }
   auto *platform = dynamic_cast<QtWaylandClient::QWaylandWindow *>(window->handle());
   auto *role = platform ? platform->shellSurface() : nullptr;
   if (!role || QByteArrayView(role->metaObject()->className()) != "QtWaylandClient::QWaylandXdgSurface")
@@ -243,8 +260,13 @@ std::optional<WaylandWindowAssociation> associateWaylandWindow(QWindow *window, 
       random[i * 4 + byte] = static_cast<char>(value >> (byte * 8));
   }
   WaylandWindowAssociation result{
-      QStringLiteral("org.deskflow.window.") + QString::fromLatin1(random.toHex()), role, expected.surface,
-      reinterpret_cast<quintptr>(*topLevel), expected.resource
+      QStringLiteral("org.deskflow.window.") + QString::fromLatin1(random.toHex()),
+      role,
+      expected.surface,
+      reinterpret_cast<quintptr>(*topLevel),
+      expected.resource,
+      parent,
+      parentAssociation ? std::make_shared<const WaylandWindowAssociation>(*parentAssociation) : nullptr
   };
   role->setAppId(result.token);
   if (!currentWaylandAssociation(window, expected, result))
@@ -256,6 +278,8 @@ std::optional<WaylandWindowAssociation> associateWaylandWindow(QWindow *window, 
 #else
   (void)window;
   (void)expected;
+  (void)parent;
+  (void)parentAssociation;
   return {};
 #endif
 }

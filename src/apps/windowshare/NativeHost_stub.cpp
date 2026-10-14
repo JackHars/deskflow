@@ -27,6 +27,9 @@ bool NativeHost::recover()
 void NativeHost::setHoldingDisplayEnabled(bool)
 {
 }
+void NativeHost::setWindowFamiliesEnabled(bool)
+{
+}
 bool NativeHost::setCaptureFrameRate(unsigned)
 {
   return false;
