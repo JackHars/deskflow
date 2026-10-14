@@ -385,6 +385,13 @@ named applications and real shortcuts/dialogs/menus in H08/H09.
   queues, including hidden/minimized viewers, resize and slow consumers.
 - [ ] Add reproducible latency/resource/load measurement tools and define
   explicit acceptance targets before measuring. Do not invent performance claims.
+  The bounded source/native recorder, strict normalizer, offline latency analyzer
+  and resource sampler now exist, with targets documented before collection.
+  Original-stamped Core EventQueue views now retain observation through queued,
+  retrieved and dispatched lifetimes, including borrowed InputFilter callbacks.
+  Their outstanding/dispatch metrics explicitly have no configured capacity.
+  Full platform/kernel coverage, bounded-backlog certification and actual
+  stimulus/display collection remain open.
 
 Acceptance: fault injection and bounded-resource tests in cloud; destructive
 owned-process cases, sleep/wake and actual performance/soak in H10/H11.

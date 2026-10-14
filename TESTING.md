@@ -4,10 +4,118 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Continuation — 2026-10-14
+
+The `final-integration-2` source described below is committed as
+`e461d2b31d66eb3cfc17a08e0cc3ba2953573ebc`. Independent comparison verifies
+all 1,098 source paths, modes and contents against its frozen archive;
+`build/roadmap-completion-20261013/integration-commit-binding.json` retains
+that binding. Notification correction `5589ec3dc` is also pushed. The new
+EventQueue observer and pending mapping-admission work are not covered by
+those older passing builds.
+
+- Generic EventQueue instrumentation now retains move-owned observation from
+  admission through pending/saved/retrieved storage and completed dispatch,
+  including the real InputFilter's nested borrowed view. The two counters
+  explicitly serialize `capacity:null`. Late observer installation, abandoned
+  events, exceptions and stamp mutation invalidate evidence. Normalizer
+  **38/38** and analyzer **35/35** pure cases pass, including the complete
+  19-entry declared Core/Host inventory. Source hashes and strict syntax checks
+  are in `build/event-queue-observer-20261014/freeze.json`. Commit `350d3cc67`
+  includes that freeze and the integrated target/CI configuration. This does not establish configured queue
+  bounds, platform/kernel coverage, native provenance or H11 completion.
+- Actual Mac full build **PASS** after adding the missing `src/lib` include path
+  to the standalone code-admission fixture. `mac-build.log` retains the first
+  failed build; `mac-build-2.log` records the passing rebuild. Enabled CTest is
+  **39/40 PASS** with two assertions failing inside the new EventQueue suite:
+  they check unread diagnostic rows instead of outstanding input. Test-only
+  commit `0cb99c4f3` now checks final counter depth and enqueue/retirement equality.
+  A targeted EventQueue rebuild/retest **PASSES**. This is 39 passing suites
+  plus the corrected suite's pass, not a rewritten all-green original run.
+  Evidence: `build/roadmap-completion-20261014/mac-tests.{log,xml}` and
+  `mac-event-test.{log,xml}`. OFF and observer sanitizer runs are still pending.
+- GNOME map admission `81efdc5a5`: an immutable, single pending scalar/batch
+  slot removes the state-mutex contention refusal. Worker admission retains
+  exact seal/request identity and every original deadline; unread completion,
+  cancellation, terminal failure, stale replies and ID exhaustion remain bounded.
+  The real private-bus regression fails before the correction. Strict compilation
+  and scoped ASan/UBSan then pass **21 groups / 10 new scenarios** in 5.502 s,
+  without GLib warnings; leak detection is disabled and prebuilt dependencies
+  are not fully instrumented. Evidence/hashes:
+  `build/gnome-map-admission-20261014/verification.json`. Native testing on the
+  home Ubuntu and the repeated focus matrix are still due. The earlier separate
+  private-channel failure remains unresolved.
+
+- `association-noop-matrix-1`: 12 planned fresh sessions, **11 PASS / 1 FAIL**,
+  without retries. Ordinary-click scale 1.25/run 1 fails on the actual client's
+  `reason=lock-contention` admission refusal. Values printed as zero while its
+  mutex is unavailable are placeholders, not observations of empty state.
+  This is an availability failure; it does not establish misdirected input.
+  The unchanged-notification revocation does not recur. Source archive
+  `9775730a5040c9a4a4376553b193a653ec297563e0257dc3d4bb229d4681fb61`,
+  manifest `5465aa7d9657048641c99d690b7adbf4f0231cba1eb6ebe4586eabd6015b0554`.
+  All **268 artifact hashes** and preservation/cleanup checks pass. Evidence:
+  `build/wifiman-resumed-20261013/ubuntu/association-noop-matrix-1/`.
+- [CI run 38577676662](https://github.com/JackHars/deskflow/actions/runs/38577676662)
+  on `5589ec3dc`: native GNOME, GCC, Clang and transport pass. Both Mac and Linux
+  application builds/tests pass, then their TLS reconnect fixture rejects the
+  new `mapped-input-v1` capability. This is reproduced locally against the
+  actual Mac Viewer and corrected by accepting its exact advertised set;
+  unknown sets, wrong order and duplicates still reject. The same binary
+  passes the corrected real TLS reconnect test, without a native Host or input
+  hooks. Logs: `build/roadmap-completion-20261014/viewer-smoke-before-app.log`,
+  `viewer-smoke-after.log`, `ci-linux-app-38577676662.log`, and
+  `ci-mac-app-38577676662.log`. Commit `b10d05cbd` fixes this fixture; the
+  original CI run remains failed and later skipped stages remain unrun.
+
 ## Current local completion checkpoint — 2026-10-13 (working tree)
 
 Current validation is split by the actual source checkpoint:
 
+- Final integrated source checkpoint `final-integration-2`: actual Mac
+  application/Core build and **39/39 enabled suites PASS**, followed by actual
+  ordinary Core build and **3/3 disabled compatibility suites PASS**. Actual
+  Ubuntu application/Core build, **36/36 enabled suites** and **4/4 disabled
+  suites PASS**. Actual Core/EiComputer and the broader GNOME/Qt first-click,
+  batched-map and two-window tests each pass at **scales 1 and 1.25**. This
+  includes the collector and its real 96-frame private-buffer regression.
+  Source archive:
+  `f622a09a51c1a57f18071046ac7271ea4c325cd2d9bd00411bda730e52b99ee2`;
+  manifest `2c6e01814157f30803a7670cb524ef029985cfe709434ee6283474822ef7aacd`
+  covers 1,098 files. All **130 returned artifact hashes**, runner identity,
+  ordinary-process/configuration preservation, unrelated-container preservation
+  and owned cleanup checks pass. Mac logs are
+  `build/roadmap-completion-20261013/final-mac-{build-2,tests,off-build,off-tests}.log`;
+  Ubuntu evidence is under `build/wifiman-resumed-20261013/ubuntu/final-integration-2/`.
+  Mac was macOS 26.1 with Qt 6.8.3; Ubuntu used the retained pinned
+  Qt 6.10.2/GNOME 50.1/Mutter 50.1/libei 1.5 image. Physical H tests remain unrun.
+- The subsequent exact-library signed Mac package includes the integrated
+  collector and physical-source controls. Bundle audit and private Core/Host
+  handshake/rejection smoke **PASS**. Archive SHA-256:
+  `5129765642ee36b0df1354d458fb4a4974663c8c87febe67bb34ba3e255e7b65`.
+  Evidence: `build/roadmap-completion-20261013/final-mac-package-1/evidence.json`.
+  This is a separate staged package; no installation or native input occurred.
+- Current private-component ASan/UBSan run passes input-evidence, code-admission,
+  preflight and bootstrap; local-input initially fails at identity authentication.
+  The original failure did not preserve its channel/child reason. A failure-only
+  diagnostic change leaves all waits and deadlines unchanged. One diagnostic
+  local-input run then **PASSES** (82.19 seconds), so the original cause is
+  **unresolved, not reproduced**. No sanitizer violation was reported in these
+  logs. Retained results and hashes:
+  `build/roadmap-completion-20261013/final-private-sanitize-evidence.json`.
+  This is four passing suites plus a separate diagnostic pass, not a claim that
+  the initial five-suite run passed. Qt and prebuilt dependency archives are
+  not fully instrumented.
+- The fixed `focus-recovery-reasons-matrix-1` diagnostic completes 12 sessions
+  using the integrated candidate's exact binaries and new diagnostic messages.
+  Ten pass; ordinary-click scale 1/run 2 and scale 1.25/run 2 fail. Both failures
+  follow a selected-window `notify::wm-class` whose complete class/instance
+  pair did not change. This unnecessarily revokes an otherwise live native
+  seal; commit `5589ec3dc` supplies the narrow fix. Earlier channel/admission failures did not
+  recur and their causes remain unresolved. All 269 artifact hashes and
+  preservation/cleanup checks pass. Source archive:
+  `56846827097db715def1dc4ba2a1bc2b22a3ebb60db1cd1937e8de5382672e3f`.
+  This diagnostic retains **FAILED** overall status; no failed session was retried.
 - Controlled focus-recovery diagnostic: `focus-recovery-matrix-1` reuses
   the verified first-click binaries for 12 fresh private sessions: three runs
   per scale (1/1.25) and recovery mode. All six prepared-first-click runs pass;

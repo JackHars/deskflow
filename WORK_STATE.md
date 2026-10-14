@@ -1,16 +1,81 @@
 # Seamless Windows work state
 
-## Roadmap completion in progress — 2026-10-13
+## Roadmap completion in progress — 2026-10-14
+
+The tested integration snapshot below is now committed as `e461d2b31` and
+pushed to `feature/seamless-windows`. Its 1,098 paths, file modes and contents
+match the frozen source archive exactly. The unchanged Mutter notification fix
+is committed and pushed as `5589ec3dc`. Failure-only private-channel fixture
+diagnostics are committed as `9b50e47a6`.
+
+The fixed `association-noop-matrix-1` diagnostic uses the notification fix in
+12 fresh private sessions. Eleven pass; ordinary-click scale 1.25/run 1 fails
+because the production mapping request returns zero solely on state-mutex
+contention. The old unchanged-notification failure does not recur. All 268
+artifact hashes and cleanup/preservation checks pass; overall status remains
+FAILED. A bounded pending-admission correction and generic EventQueue evidence
+coverage are implemented, with native validation still due.
+
+Commit `81efdc5a5` reserves one pending scalar/batch mapping without waiting for
+the worker mutex. It retains the original deadline and exact seal, revalidates
+on the worker and keeps unread results/cancellation tied to the original ID.
+The preserved deterministic regression fails before this correction. All 21
+private-bus groups, including ten new contention/lifetime scenarios, then pass
+strict compilation and ASan/UBSan (5.502 seconds). Evidence is
+`build/gnome-map-admission-20261014/verification.json`; it is not native GNOME
+acceptance and does not explain the earlier separate private-channel failure.
+
+The new full Mac build passes after correcting the code-admission fixture's
+include path. Its enabled run passes 39/40 suites; the new EventQueue suite has
+two incorrect assertions that confuse unread diagnostic rows with outstanding
+input. Commit `0cb99c4f3` checks final input accounting explicitly, and the
+targeted EventQueue retest passes. The initial failed suite remains recorded.
+Logs/XML: `build/roadmap-completion-20261014/mac-{build-2,tests,event-test}.*`.
+
+Hosted CI for `5589ec3dc` passes the GNOME, GCC, Clang and transport jobs.
+Mac and Linux application tests pass, then their reconnect smoke fails because its
+capability whitelist predates `mapped-input-v1`. The same failure reproduces
+against the Mac Viewer; adding that exact capability set passes the real TLS
+reconnect smoke. See `build/roadmap-completion-20261014/viewer-smoke-*.log`.
+Commit `b10d05cbd` corrects the fixture without changing production capability
+negotiation. That CI run remains failed; later skipped stages are not passes.
+
+The final integrated local checkpoint builds both applications and passes
+**39/39 enabled + 3/3 disabled Mac suites** and **36/36 enabled + 4/4 disabled
+Ubuntu suites**. Both actual Core/EiComputer and the broader private GNOME/Qt
+tests pass at scales 1 and 1.25. This source includes the collector, production
+physical harness, diagnostic refinements and 96-frame receive-buffer regression.
+Archive `f622a09a51c1a57f18071046ac7271ea4c325cd2d9bd00411bda730e52b99ee2`
+has 1,098 source files; all 130 returned artifact hashes and preservation/cleanup
+checks pass. See `TESTING.md` for exact paths and limits. The new exact-library
+Mac package also passes its audit and private handshake smoke (archive
+`5129765642ee36b0df1354d458fb4a4974663c8c87febe67bb34ba3e255e7b65`),
+without installation or native input. Four private sanitizer suites pass;
+local-input initially fails identity authentication, then passes one diagnostic
+run with unchanged deadlines. The original cause remains unresolved.
+This is not physical acceptance or complete roadmap delivery.
+
+The next fixed 12-session native diagnostic, `focus-recovery-reasons-matrix-1`,
+passes ten sessions and retains two ordinary-click failures. Both are traced
+to unchanged complete wm-class/instance notifications unnecessarily revoking
+an exact live seal. Commit `5589ec3dc` supplies the narrow correction. Prior channel and
+admission failures did not recur, so their causes remain unresolved. All 269
+artifact hashes and cleanup/preservation checks pass; overall status remains
+FAILED. No failed session was retried.
 
 The opt-in original-input evidence collector and production physical harness
 are now connected. The source Record control arms one bounded run only after
 matching live Core/Host ownership and empty declared queues. The recorder
-includes source capture, 13 Core queues, four Host queues and native disposable
+includes source capture, 15 Core metrics, four Host queues and native disposable
 source fields. Independent review caught and corrected a capture/start race
-and omitted Qt receive buffering. Generic EventQueue and platform/kernel
-queues remain explicitly unmeasured; complete queue coverage and H11 are not
-claimed. Pure checks pass: 34 normalizer, 34 Mac harness and 23 Linux harness.
-Final application builds and regression validation are in progress.
+and omitted Qt receive buffering. The new EventQueue observer follows stamped
+input across pending/saved/retrieved storage and callback completion. Its two
+metrics have explicit null capacities; platform/kernel queues remain unmeasured.
+Complete bounded queue coverage and H11 are not claimed. New pure checks pass:
+38 normalizer and 35 analyzer cases; the earlier physical harness checks pass
+34 Mac and 23 Linux cases.
+The integrated application builds and regression results are recorded above;
+the new observer is in `350d3cc67` with the test-only correction `0cb99c4f3`.
 
 The fixed 12-session `focus-recovery-matrix-1` diagnostic verifies all 269
 artifact hashes and cleanup/preservation checks. It uses the earlier identical

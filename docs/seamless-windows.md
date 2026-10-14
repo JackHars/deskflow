@@ -1,6 +1,6 @@
 # Experimental window sharing
 
-## Current implementation — 2026-10-13
+## Current implementation — 2026-10-14
 
 The configured Mac Core now connects original captured input to the exact
 exported source through the production coordinator. Private protocol v5 and
@@ -18,9 +18,17 @@ without a proven native application-input drain. Unknown Mutter builds and
 unsupported roles/input contexts are likewise unavailable.
 
 First-click preparation now has a distinct `IPP1` gate and focus-only activation
-before the genuine Host All lease. Mac protocol/coordinator tests and scoped
-sanitizers pass; native Linux verification is still in progress. Natural
-bidirectional edge dragging remains open.
+before the genuine Host All lease. Actual Mac and Ubuntu application/Core builds and enabled/disabled regression
+suites pass. Actual Core/EI and GNOME/Qt integration pass at Qt scales 1 and
+1.25. A separate repeated native diagnostic retains intermittent failures;
+see `TESTING.md` for their cause and follow-up status. Natural bidirectional
+edge dragging remains open.
+The subsequent fixes preserve exact seals across unchanged Mutter notifications
+and retain one pending mapped-input request across brief client mutex contention.
+The latter passes deterministic private-bus and sanitizer regressions; fresh
+native validation is still due. Generic stamped Core EventQueue lifetimes are
+also measured, with explicit unbounded counters and no claim of full queue or
+performance acceptance.
 Physical input, real app compatibility, two monitors, installation and sustained
 performance still require acceptance on the final candidate. See the checked
 implementation roadmap in [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md), precise
