@@ -5,7 +5,7 @@ import test from 'node:test';
 import {
     ProviderState, STARTUP_MS, UINT32_MAX, samePointerPosition, supportedVersion,
     unavailableReason, validLaunch, validRect, validRequest, validRoutedPointRequest, validRoutedPoints, validViewportHandle,
-    validWindowAssociation, associatedWindowIndices,
+    validWindowAssociation, associatedWindowIndices, duplicateWindowAssociationNotification,
     StageUpdateSequence, InputDrainSequence, PreparationActivationSequence, validInputDrainBinding,
     validInputPreparationBinding, sameInputPreparationBinding,
     ORDERING_BUILDS, ORDERING_MAIN, ORDERING_CLUTTER, ORDERING_FILE_MAX, ORDERING_MAPS_MAX,
@@ -55,6 +55,51 @@ test('per-window tokens select only exact unique owned-client candidates', () =>
     assert.deepEqual(associatedWindowIndices([...windows, windows[1]], token), [1, 3]);
     assert.deepEqual(associatedWindowIndices(windows, `${token}0`), []);
     assert.deepEqual(associatedWindowIndices(Array(257).fill(windows[1]), token), []);
+});
+
+test('same-value native association notification preserves only the exact live owned window incarnation', () => {
+    const association = `org.deskflow.window.${'a'.repeat(64)}`;
+    const binding = {session: {}, viewer: {}, window: {}, windowToken: 'owned-window-1', association};
+    const previous = {wmClass: association, instance: association};
+    const current = {...binding, ...previous, live: true, viewerExited: false, owned: true, wayland: true};
+    const retained = {revision: 25, revoked: false};
+    const notify = value => {
+        if (!duplicateWindowAssociationNotification(binding, previous, value)) {
+            ++retained.revision;
+            retained.revoked = true;
+        }
+    };
+    notify(current);
+    assert.deepEqual(retained, {revision: 25, revoked: false});
+    for (const change of [{session: {}}, {viewer: {}}, {window: {}}, {windowToken: 'owned-window-2'},
+        {association: `org.deskflow.window.${'b'.repeat(64)}`}, {live: false}, {viewerExited: true},
+        {owned: false}, {wayland: false}])
+        assert.equal(duplicateWindowAssociationNotification(binding, previous, {...current, ...change}), false,
+            JSON.stringify(change));
+    notify({...current, window: {}});
+    notify(current);
+    assert.deepEqual(retained, {revision: 26, revoked: true}, 'An unchanged notification cannot revive a revoked seal');
+});
+
+test('native association no-op policy compares complete canonical class and instance without truncation', () => {
+    const association = `org.deskflow.window.${'a'.repeat(64)}`;
+    const other = `org.deskflow.window.${'b'.repeat(64)}`;
+    const binding = {session: {}, viewer: {}, window: {}, windowToken: 'owned-window-1', association};
+    const previous = {wmClass: association, instance: association};
+    const current = {...binding, ...previous, live: true, viewerExited: false, owned: true, wayland: true};
+    for (const value of [null, undefined, '', association + '\n', association + 'x'.repeat(256), other]) {
+        assert.equal(duplicateWindowAssociationNotification(binding, previous, {...current, wmClass: value}), false);
+        assert.equal(duplicateWindowAssociationNotification(binding, previous, {...current, instance: value}), false);
+        assert.equal(duplicateWindowAssociationNotification(binding, {...previous, wmClass: value}, current), false);
+        assert.equal(duplicateWindowAssociationNotification(binding, {...previous, instance: value}, current), false);
+    }
+    const changed = {...previous, wmClass: other};
+    assert.equal(duplicateWindowAssociationNotification(binding, previous, {...current, ...changed}), false);
+    assert.equal(duplicateWindowAssociationNotification(binding, changed, current), false,
+        'Restoring a changed pair remains an invalidation');
+    for (const broken of [{session: null}, {viewer: null}, {window: null}, {windowToken: ''}, {association: other},
+        {association: association + '\n'}])
+        assert.equal(duplicateWindowAssociationNotification({...binding, ...broken}, previous, current), false);
 });
 
 test('native point batches are bounded, exact, ordered captures in one epoch', () => {

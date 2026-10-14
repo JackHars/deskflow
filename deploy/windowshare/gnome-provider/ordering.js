@@ -125,4 +125,3 @@ export async function verifyMappedOrdering() {
             GLib.source_remove(timeout);
     }
 }
-

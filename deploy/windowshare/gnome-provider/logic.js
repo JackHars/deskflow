@@ -144,6 +144,22 @@ export function associatedWindowIndices(windows, association) {
         return [];
     return windows.flatMap((window, index) => window?.wmClass === association && window?.instance === association ? [index] : []);
 }
+export function duplicateWindowAssociationNotification(binding, previous, current) {
+    const object = value => value !== null && typeof value === 'object';
+    if (!object(binding) || !object(previous) || !object(current))
+        return false;
+    // Mutter notifies wm-class even when both values are unchanged. This only
+    // suppresses that no-op for the already retained exact native incarnation;
+    // it does not bind a replacement or restore any previously revoked proof.
+    return object(binding.session) && object(binding.viewer) && object(binding.window) &&
+        binding.session === current.session && binding.viewer === current.viewer && binding.window === current.window &&
+        typeof binding.windowToken === 'string' && binding.windowToken.length > 0 &&
+        binding.windowToken === current.windowToken && current.live === true && current.viewerExited === false &&
+        current.owned === true && current.wayland === true && validWindowAssociation(binding.association) &&
+        binding.association === current.association && previous.wmClass === binding.association &&
+        previous.instance === binding.association && current.wmClass === binding.association &&
+        current.instance === binding.association;
+}
 
 export const INPUT_DRAIN_BINDING_TYPES = Object.freeze({
     cutoffRequest: 's', coreConnectionGeneration: 'u', captureEpoch: 's', captureSequence: 's',

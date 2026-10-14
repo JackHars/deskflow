@@ -14,6 +14,7 @@ import {
     BUS_NAME, OBJECT_PATH, MAX_ACTORS, MAX_WINDOWS, STARTUP_MS, ProviderState,
     samePointerPosition, supportedVersion, unavailableReason, validRect,
     validRequest, validRoutedPointRequest, validRoutedPoints, validWindowAssociation, associatedWindowIndices,
+    duplicateWindowAssociationNotification,
     StageUpdateSequence, InputDrainSequence, PreparationActivationSequence,
     INPUT_DRAIN_BINDING_TYPES, validInputDrainBinding, ORDERING_LIMIT,
     INPUT_PREPARATION_BINDING_TYPES, validInputPreparationBinding, sameInputPreparationBinding,
@@ -414,22 +415,35 @@ class Provider {
             this._watch(window, 'position-changed', 'window-position', session.windowSignals, session);
             this._watch(window, 'size-changed', 'window-size', session.windowSignals, session);
             this._watch(window, 'notify::minimized', 'window-minimized', session.windowSignals, session);
-            const association = () => [window.get_wm_class(), window.get_wm_class_instance()]
-                .map(value => String(value ?? '').slice(0, 128));
+            const association = () => ({wmClass: window.get_wm_class(), instance: window.get_wm_class_instance()});
+            const associationBinding = {session, viewer, window, windowToken: session.windowToken,
+                association: session.association};
             let previousAssociation = association();
             session.windowSignals.push([window, window.connect('notify::wm-class', () => {
+                let duplicate = false;
                 try {
                     const currentAssociation = association();
+                    duplicate = duplicateWindowAssociationNotification(associationBinding, previousAssociation, {
+                        ...currentAssociation, session: this._state.current, viewer: session.viewer,
+                        window: session.window, windowToken: session.windowToken, association: session.association,
+                        live: this._state.matches(session), viewerExited: viewer.exited,
+                        owned: viewer.client.owns_window(window),
+                        wayland: window.get_client_type() === Meta.WindowClientType.WAYLAND,
+                    });
+                    const diagnostic = value => [value.wmClass, value.instance]
+                        .map(text => String(text ?? '').slice(0, 128));
                     console.log(`Deskflow native association notification ${JSON.stringify({
                         nativeWindow: window.get_stable_sequence(), window: session.windowToken,
                         selected: session.window === window, revision: session.revision,
-                        old: previousAssociation, current: currentAssociation,
+                        old: diagnostic(previousAssociation), current: diagnostic(currentAssociation), duplicate,
                     })}`);
                     previousAssociation = currentAssociation;
                 } catch (_) {
                     // Diagnostics cannot turn a native invalidation into success.
+                    duplicate = false;
                 }
-                this._invalidate(session, 'window-association-changed');
+                if (!duplicate)
+                    this._invalidate(session, 'window-association-changed');
             })]);
             session.windowSignals.push([window, window.connect('unmanaged', () => {
                 this._invalidate(session, 'viewer-window-unmanaged');
