@@ -6,6 +6,17 @@
 if(UNIX AND NOT APPLE)
   pkg_check_modules(LIBEI REQUIRED QUIET "libei-1.0 >= ${REQUIRED_LIBEI_VERSION}")
   message(STATUS "libei version: ${LIBEI_VERSION}")
+  if(BUILD_WINDOWSHARE AND LIBEI_VERSION VERSION_LESS "1.5.0")
+    # Upstream 12237f19 fixes ei_unref before the EIS handshake creates a
+    # connection. The real EiComputer startup/teardown regression reproduces
+    # that crash on Debian's 1.3.901; it is also present in upstream 1.4.0.
+    # Keep the ordinary build's dependency policy independent of this opt-in.
+    message(FATAL_ERROR
+      "Experimental window sharing requires libei >= 1.5.0 (found ${LIBEI_VERSION}): "
+      "older releases can crash when closing an unfinished EIS connection. "
+      "Upgrade libei development and runtime packages, or configure BUILD_WINDOWSHARE=OFF."
+    )
+  endif()
 
   pkg_check_modules(LIBPORTAL REQUIRED QUIET "libportal >= ${REQUIRED_LIBPORTAL_VERSION}")
   message(STATUS "libportal version: ${LIBPORTAL_VERSION}")
@@ -187,18 +198,11 @@ if(BUILD_WINDOWSHARE)
     target_link_libraries(platform PRIVATE windowshare-local-input)
   elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(platform PRIVATE windowshare-gnome-provider)
-    # ei_new_ping/EI_EVENT_PONG were introduced in libei 1.4. Build the
-    # diagnostic on newer systems only; no sender PONG receipt is available on
-    # older systems and the experimental original-input route stays disabled.
-    # Ordinary Deskflow retains its historical >=1.3 dependency.
-    if(LIBEI_VERSION VERSION_GREATER_EQUAL "1.4")
-      # EiComputer.h includes the owned prefix state in its class layout.
-      # ClientApp/ServerApp allocate it outside this target, so every consumer
-      # must see the same layout as its constructor and event handlers.
-      target_compile_definitions(platform PUBLIC DESKFLOW_GNOME_EI_PING=1)
-    else()
-      message(STATUS "GNOME sender EI PONG observation unavailable: libei ${LIBEI_VERSION} < 1.4")
-    endif()
+    # The opt-in build requires libei 1.5, including ei_new_ping/EI_EVENT_PONG.
+    # EiComputer.h includes the owned prefix state in its class layout.
+    # ClientApp/ServerApp allocate it outside this target, so every consumer
+    # must see the same layout as its constructor and event handlers.
+    target_compile_definitions(platform PUBLIC DESKFLOW_GNOME_EI_PING=1)
     if(BUILD_X11_SUPPORT)
       pkg_check_modules(WS_XLIB_XCB REQUIRED IMPORTED_TARGET x11-xcb)
       target_link_libraries(platform PRIVATE windowshare-x11 PkgConfig::WS_XLIB_XCB)

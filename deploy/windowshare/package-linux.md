@@ -16,6 +16,13 @@ Build `deskflow-windowshare` (standalone `WINDOWSHARE_APP=ON`) and the real
 opt-in `deskflow-core` (`BUILD_WINDOWSHARE=ON`) from the **same checked-out
 revision**. Do not use objects from earlier incompatible builds.
 
+The experimental Core requires **libei 1.5.0 or later**, both when building and
+at runtime. Older unpatched releases can dereference a missing connection when
+an EI context is destroyed before its EIS handshake finishes. The actual
+startup/shutdown regression remains enabled; the opt-in configuration rejects
+older versions. Ordinary Deskflow's build dependency policy is unchanged.
+See [upstream fix 12237f19](https://gitlab.freedesktop.org/libinput/libei/-/commit/12237f19).
+
 ```sh
 python3 deploy/windowshare/package-linux-tests.py
 python3 deploy/windowshare/package-linux.py \

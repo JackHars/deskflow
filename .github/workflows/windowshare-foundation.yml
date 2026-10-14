@@ -134,7 +134,9 @@ jobs:
   linux-app:
     runs-on: ubuntu-24.04
     container:
-      image: debian:trixie
+      # libei >= 1.5 fixes teardown before EIS handshake completion. Keep the
+      # real startup/shutdown regression enabled on the supported runtime.
+      image: ubuntu:26.04
       options: --init
     timeout-minutes: 35
     steps:

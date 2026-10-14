@@ -105,7 +105,7 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
         "requirements": [
             "Linux x86_64 or matching build architecture and ABI",
             "runtime Qt version matching compiled Qt Wayland private APIs",
-            "the build's FFmpeg, XCB/Wayland and libei/GIO system dependencies",
+            "the build's FFmpeg, XCB/Wayland and GIO dependencies, and libei >= 1.5.0",
             "stable native GNOME Shell 50 for the optional observation provider; original input also requires "
             "the exact mapped Mutter/Clutter ordering build documented in gnome-provider/README.md",
             "mutually pinned private TLS identities and explicit user opt-in",

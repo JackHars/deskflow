@@ -67,6 +67,9 @@ void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff()
   // The actual sender connects only to this owned Unix listener. No desktop,
   // portal, provider, device, or native input authority is involved. An empty
   // first libei batch still reaches the production cutoff post-batch checks.
+  // Deliberately leave the handshake unfinished through destruction: quitting
+  // during startup must also be safe. Unpatched libei before 1.5 crashes here;
+  // the experimental build rejects those releases instead of skipping this.
   QLocalServer listener;
   const auto path = directory.filePath("eis.sock");
   QVERIFY(listener.listen(path));
