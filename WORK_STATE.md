@@ -30,10 +30,13 @@ Local evidence is in `build/roadmap-completion-20261014`:
   with the production Viewer; it does not start NativeHost. The earlier
   component run caught the missing shared-recovery preparation path and an
   invalid input-fence test binding; both are corrected.
-- `p6-linux-family-4/result.json` passes the full Ubuntu app build, eight Qt/X11
+- `p6-linux-final/result.json` verifies implementation commit `bfb9cb9e8` with
+  the full Ubuntu app build, eight Qt/X11
   suites (Xvfb at 1 and 1.25), provider policy, Viewer reconnect smoke and actual
   isolated GNOME 50.1 / Qt 6.10.2 sheet/menu lifecycle and parent mutation tests.
-  The source is frozen with per-file hashes; the offline container removes its
+  Its frozen archive SHA-256 is
+  `dd343d6799c5dd2733291903de1320f71246205cd980e1842c11b7e98f28e78e`.
+  The source has per-file hashes; the offline container removes its
   own temporary directory and never accesses the user's desktop/devices.
 - `p6-sanitize-tests.json` passes family, Viewer and Bridge under Mac ASan/UBSan,
   with separately signed copies and leak detection disabled. The retained
@@ -53,8 +56,12 @@ Local evidence is in `build/roadmap-completion-20261014`:
   xdg parent. Run 4 separately changes Qt state and the actual owned native role,
   and requires the provider's explicit “owned viewer parent changed” rejection.
 
-The new GNOME family fixture runs in hosted native integration as well. Latest
-hosted P6 results will be recorded after this implementation commit is checked.
+Implementation commit `bfb9cb9e80152386f4cb4ca7b5cf3dc0969afb10` is pushed to
+`feature/seamless-windows`. The new GNOME family fixture is wired into the hosted
+native job, but **P6 GitHub checks are NOT_RUN**: GitHub rejected workflow
+dispatch with HTTP 422, “Actions has been disabled for this repository.”
+`p6-github-checks-unavailable.json` records the result. Repository settings were
+not changed. The previous P5 CI result below does not cover P6.
 
 ## Previous verified P5 checkpoint — 2026-10-14
 

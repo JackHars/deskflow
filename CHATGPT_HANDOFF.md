@@ -89,7 +89,10 @@ Do not substitute a success-returning stub for a missing platform capability.
   descendant if your cloud workflow requires one. Never modify `master` or
   `main`, force-push, or merge into the default branch for this assignment.
 - Latest verified CI base: **`c748915ccb65c4b169188d3ae2d1ea326a288ff9`**.
-  Test-tool and documentation commits may be newer; start from the branch tip.
+  P6 implementation **`bfb9cb9e80152386f4cb4ca7b5cf3dc0969afb10`** has local
+  Mac/Ubuntu checks; its hosted checks could not run because repository Actions
+  is disabled. Test-tool and documentation commits may be newer; start from
+  the branch tip and use the exact results in `TESTING.md`.
 - Prior implementation: `eda21b39b19004af9f4abfaacb707bb9b380f6f8` adds Server
   ownership before legacy dispatch; `ef5145665` fixes portable core linkage.
 - Original local checkout, useful only to the returning local chat:

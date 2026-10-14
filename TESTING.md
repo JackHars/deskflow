@@ -11,15 +11,20 @@ physical input acceptance. The test procedure is
 [app-compatibility.md](deploy/windowshare/app-compatibility.md); implementation
 boundaries and commands are in [window-families.md](deploy/windowshare/window-families.md).
 
+- Implementation `bfb9cb9e80152386f4cb4ca7b5cf3dc0969afb10` is pushed.
+  **GitHub checks: NOT_RUN.** Dispatch returned HTTP 422 because Actions is
+  disabled for the repository (`p6-github-checks-unavailable.json`). The new
+  GNOME fixture is included in the workflow, but wiring it in is not a pass.
 - `p6-final-mac-tests.json`: all five signed Mac suites pass (family, Viewer,
   Bridge, viewport and native original-input). The production app builds;
   `p6-final-mac-viewer-smoke.json` passes authenticated reconnect and clean shutdown
   with that Viewer, without starting NativeHost.
-- `p6-linux-family-4/result.json`: full Ubuntu app build; eight Qt/X11 suites;
+- `p6-linux-final/result.json`: exact implementation `bfb9cb9e8`, full Ubuntu
+  app build; eight Qt/X11 suites;
   provider logic; Viewer reconnect smoke; real isolated GNOME sheet/menu
   creation, native mapping, parent blocking, dismissal and separate Qt/native
   reparent denial pass. X11 exercises 1 and 1.25 scale. Frozen archive SHA-256:
-  `64b570095898da231763ab5279a6352709dce9d07f21b4b9a7e29c8a274e4902`.
+  `dd343d6799c5dd2733291903de1320f71246205cd980e1842c11b7e98f28e78e`.
 - `p6-sanitize-tests.json`: family, Viewer and Bridge pass Mac ASan/UBSan with
   leak detection disabled. `p6-sanitize-tests-before-lifetime-fix.json` preserves
   the parent-destruction failure fixed by a separate Viewer lifetime token.
