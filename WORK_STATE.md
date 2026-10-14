@@ -59,6 +59,13 @@ on home Ubuntu pass (`p5-pointer-fixture-tests.json`,
 `p5-gcc-foundation-final/result.json`). Production code is unchanged by this
 follow-up. The original hosted compiler failure remains recorded.
 
+The hosted Linux run then passed all 19 application suites and exposed a stale
+capability list in `viewer-smoke.py`. Its exact offscreen Hello expectation now
+includes `window-drag-preview-v1`; unknown/duplicate/native move capabilities
+remain rejected. The real Viewer reconnect smoke passes on both Mac and home
+Ubuntu (`p5-viewer-smoke-mac.json`, `p5-viewer-smoke-linux/result.json`). This is
+another fixture-only correction, with no native Host or desktop input involved.
+
 The user's latest instruction is **“Keep building; test later.”** No readiness
 question is pending, and no physical fixture or desktop input routing has been
 started. **H07 is NOT_RUN and P5 physical acceptance remains open.** Current

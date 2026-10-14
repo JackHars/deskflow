@@ -55,6 +55,16 @@ SPDX-License-Identifier: MIT
   portable foundation suites pass under GCC 15 ASan/UBSan on home Ubuntu
   (`p5-gcc-foundation-final/result.json`, 1.13 s). The source hashes and original
   hosted compiler log are retained; production behavior is unchanged.
+- **Reconnect smoke recognizes the preview capability:** hosted Linux in
+  [run 38644472166](https://github.com/JackHars/deskflow/actions/runs/38644472166)
+  passed all 19 application suites, then the older smoke fixture rejected the
+  new `window-drag-preview-v1` Hello capability. Its exact accepted list now
+  includes that capability; duplicates, unknown capabilities and native motion/
+  move offers from the offscreen Viewer still fail. The real signed Mac and
+  rebuilt Ubuntu Viewer both pass refused-connection recovery, mutual TLS,
+  authenticated reconnect and clean exit (`p5-viewer-smoke-mac.json`,
+  `p5-viewer-smoke-linux/result.json`). Neither run starts a native Host or
+  interacts with the desktop. Production code is unchanged by this correction.
 - **Current Mac ASan/UBSan checks pass:**
   `p5-return-sanitize-tests.json` records four separately signed offscreen
   suites: Bridge (including preview destruction), all 36 coordinator cases,

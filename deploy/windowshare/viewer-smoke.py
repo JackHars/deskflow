@@ -53,12 +53,15 @@ def read_hello(connection):
         raise RuntimeError("Viewer did not start a fresh protocol negotiation")
     hello = json.loads(read_exact(connection, size))
     # Exact well-formed negotiated capability sets, including the optional
-    # media recovery and mapped input protocols. Reject duplicates, wrong order and unknown
-    # features rather than accepting arbitrary capability strings.
+    # media recovery, mapped input and provisional drag preview protocols.
+    # Reject duplicates, wrong order and unknown features. Offscreen smoke
+    # viewers have no native drag provider and must not advertise motion/moves.
     if hello.pop("capabilities", None) not in (
         None, ["keyboard-route-v1"], ["keyboard-route-v1", "input-route-v1"],
         ["keyboard-route-v1", "input-route-v1", "media-recovery-v1"],
-        ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1"]
+        ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1"],
+        ["keyboard-route-v1", "input-route-v1", "media-recovery-v1", "mapped-input-v1",
+         "window-drag-preview-v1"]
     ):
         raise RuntimeError("Unexpected viewer capabilities")
     if hello != {
