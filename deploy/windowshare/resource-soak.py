@@ -202,10 +202,11 @@ def measure(pids: Mapping[str, int], duration: float, interval: float, output: P
     with os.fdopen(fd, 'w', encoding='utf-8', buffering=1) as stream:
         def event(obj: dict) -> None:
             stream.write(json.dumps(obj, separators=(',', ':'), sort_keys=True, allow_nan=False) + '\n')
-        event({'event': 'start', 'format': 'deskflow-resource-soak-v1',
+        event({'event': 'start', 'format': 'deskflow-resource-soak-v2',
                'created_utc': datetime.now(timezone.utc).isoformat(),
                'platform': sys.platform, 'duration_s': duration, 'interval_s': interval,
                'identity_precision': 'linux-kernel-ticks' if sys.platform != 'darwin' else 'mac-ps-seconds',
+               'cpu_resolution_s': 1.0 if sys.platform == 'darwin' else 1.0 / os.sysconf('SC_CLK_TCK'),
                'targets': {name: {'pid': pid, 'birth': originals[name].birth} for name,pid in pids.items()},
                'interpretation': 'passive CPU/RSS/disk I/O only; no input or frame latency measured'})
         try:
@@ -214,11 +215,16 @@ def measure(pids: Mapping[str, int], duration: float, interval: float, output: P
                 elapsed = now - started
                 snapshots = {}
                 for name, pid in pids.items():
+                    before = time.monotonic()
                     reading = probe(pid)
+                    after = time.monotonic()
                     if reading.birth != originals[name].birth:
                         raise ChangedProcess(f'{name} PID {pid} no longer matches its recorded birth')
-                    history[name].append((now, reading))
+                    if history[name] and reading.cpu_seconds < history[name][-1][1].cpu_seconds:
+                        raise ValueError(f'{name} cumulative CPU counter regressed')
+                    history[name].append(((before + after) / 2, reading))
                     snapshots[name] = {
+                        'observed_start_s': before - started, 'observed_end_s': after - started,
                         'rss_bytes': reading.rss_bytes, 'cpu_seconds': reading.cpu_seconds,
                         'disk_read_bytes': reading.io_read_bytes, 'disk_write_bytes': reading.io_write_bytes}
                 event({'event': 'sample', 'elapsed_s': round(elapsed, 4), 'targets': snapshots})

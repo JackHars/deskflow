@@ -4,6 +4,61 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 media/resource tooling verification — 2026-10-14
+
+This checkpoint adds executable measurement tools; it does **not** complete
+H11 or the remaining platform/kernel queue work. Physical tests remain deferred.
+All new media runs force Qt offscreen and use only synthetic loopback video;
+no native source, input injection, input permit or physical display is involved.
+
+Evidence directory: `build/p7-evidence-20261014` (local, ignored).
+
+| Check | Result and evidence |
+| --- | --- |
+| Mac production build | PASS, `mac-final-build.log`; app, load tool, Viewer and Bridge |
+| Mac regressions | PASS, `mac-viewer-bridge-final.json`; both separately signed suites |
+| Mac steady/mixed and maximum stream load | PASS, `mac-media-load-final.json`; four-stream steady/mixed and 16-stream steady, three seconds each |
+| Mac 1080p load | PASS, `mac-hd-load-final.json`; two generated 1920×1080 IDRs, offered 30 fps, five seconds |
+| Mac ASan/UBSan | PASS, `mac-sanitizers-final.json`; Viewer suite and mixed four-stream load, leak detection disabled |
+| Ubuntu standalone app and Qt/X11 regressions | PASS, `linux-final/result.json`; full app build and eight CTests: family, viewport, Viewer, steady/mixed load, X11 scale 1/1.25, Bridge |
+| Ubuntu maximum streams and 1080p load | PASS, same report; 16-stream steady and two generated 1920×1080 streams |
+| Resource collector and fixed budget parser | PASS on Mac and Ubuntu: nine collector and 15 parser tests; Mac `resource-*-tests-final.log`, Ubuntu `linux-resource-final/result.json` |
+| Hosted checks | NOT_RUN; repository Actions was disabled at the recorded P6 dispatch attempt |
+| Physical H07/H08/H09, native H10 and performance H11 | NOT_RUN on this candidate |
+
+Ubuntu used the existing offline dependency container on the home machine,
+Ubuntu 26.04 / GCC 15.2 / Qt 6.10.2. It had no host desktop or device mounts.
+The full build's frozen archive SHA-256 is
+`765af8e75127d2002f738b2fe4876f356128abae1e44f97cd277e5fd9b0c817b`;
+`linux-final/source-sha256.json` records regular files and symlink targets.
+The final resource-only manifest and run cover the later correction that uses
+the longest observation interval for an upper bound on negative RSS growth.
+
+The mixed load must reach the real decoder capacity, reconcile every admitted
+and retired item, drain, request fresh video and resume painting. Its deliberate
+decoder burst bypasses transport and is labelled separately. Normal frames
+travel over the actual pinned Channel and respect its one-frame admission.
+Each stream must make progress; that is not a native scheduler fairness or
+sustained-fps verdict. Mac small-frame tests retain VideoToolbox initialization
+fallback messages, so GPU acceleration is not established by these results.
+
+For reproduction, use [media-load.md](deploy/windowshare/media-load.md) for
+build/CTest commands, generated-frame workloads, signing, metrics and failure
+interpretation. Use [resource-soak.md](deploy/windowshare/resource-soak.md)
+for collection and the fixed offline budget report. Both Python suites run as
+`python3 deploy/windowshare/resource-soak-tests.py` and
+`python3 deploy/windowshare/resource-budget-tests.py`. The workflow now includes
+both; this wiring is not hosted verification.
+
+Keep the initial failing `mac-media-load.json` and `mac-media-load-2.json` as
+failure evidence: the fixture first ignored Channel backpressure, then needed
+to deny automatic focus requests because it deliberately has no NativeHost.
+Final reports include source/executable hashes and preserve misses/replacements.
+No short run is promoted into the 60-minute pilot; all reports retain
+`h11_complete:false`. Actual capture-to-visible/input latency, GPU/network
+measurements, full native queue bounds, crash/sleep recovery and physical
+acceptance remain separate work.
+
 ## P6 family verification — 2026-10-14
 
 Implementation is connected; **H08/H09 stay NOT_RUN** until actual app and

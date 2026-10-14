@@ -160,7 +160,9 @@ jobs:
       - name: Check cross-machine control and bounded relay shutdown
         run: python3 deploy/windowshare/gnome-crossmachine-tests.py
       - name: Verify passive resource-soak evidence sampler
-        run: python3 deploy/windowshare/resource-soak-tests.py
+        run: |
+          python3 deploy/windowshare/resource-soak-tests.py
+          python3 deploy/windowshare/resource-budget-tests.py
       - name: Verify bounded input and latency evidence analysis
         run: |
           python3 deploy/windowshare/h11-evidence-tests.py
@@ -239,7 +241,9 @@ jobs:
       - name: Check manual coordinator cancellation and receipt freshness without input
         run: python3 deploy/windowshare/physical-macos-tests.py
       - name: Verify passive resource-soak evidence sampler
-        run: python3 deploy/windowshare/resource-soak-tests.py
+        run: |
+          python3 deploy/windowshare/resource-soak-tests.py
+          python3 deploy/windowshare/resource-budget-tests.py
       - name: Verify bounded input and latency evidence analysis
         run: |
           python3 deploy/windowshare/h11-evidence-tests.py

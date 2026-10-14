@@ -10,6 +10,11 @@ or modify either peer. Its unit tests use explicitly synthetic data, which is
 not evidence of product performance. Do not copy generated test traces into an
 acceptance bundle.
 
+P7 also provides [media-load.md](media-load.md) for synthetic TLS/decoder/Qt
+load and [resource-soak.md](resource-soak.md) for v2 sampling and fixed pilot
+budget evaluation. Local receive-to-Qt-paint histograms are a distinct boundary
+and cannot be converted to this analyzer's physical capture/display evidence.
+
 The existing `physical-macos.py` receipts have target-local event sequence and
 poll times. `resource-soak.py` has local process CPU/RSS counters. Neither has
 source-to-native event correlation, every pending-queue mutation, or a common

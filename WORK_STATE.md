@@ -1,5 +1,57 @@
 # Seamless Windows work state
 
+## P7 reproducible media/resource tooling — 2026-10-14
+
+The next P7 implementation slice is complete. The production Viewer now has
+explicitly enabled, fixed-storage queue/decode/unique-paint counters and a
+local receive-to-Qt-paint histogram. The ordinary app leaves collection off.
+`windowshare-media-load` drives actual pinned loopback TLS, FFmpeg and multiple
+offscreen Viewers. It obeys Channel backpressure, counts source replacements,
+separately injects decoder overload, and verifies hidden/resumed recovery.
+It starts no NativeHost, input tap or desktop window.
+
+Resource sampler v2 retains per-probe monotonic observation windows and CPU
+counter resolution. `resource-budget.py` recomputes the existing fixed pilot
+limits from raw samples, treats counter regression/missing slots as incomplete,
+and requires at least 3600 planned seconds for a resource-component verdict.
+It does not certify measurement provenance or the actual app workload.
+
+Evidence is retained in `build/p7-evidence-20261014`:
+
+- `mac-final-build.log`: production app, load tool, Viewer and Bridge build.
+  `mac-viewer-bridge-final.json`: both signed regression suites pass.
+  `mac-media-load-final.json`: four-stream steady/mixed and 16-stream steady
+  pass; the mixed run reaches the actual 16-frame decoder bound, drains and
+  recovers. `mac-hd-load-final.json`: two generated 1920×1080 streams pass the
+  five-second workload invariants. These are short diagnostics, not sustained
+  performance acceptance; small-frame Mac runs retain hardware-decoder fallback
+  messages and do not establish GPU acceleration.
+- `mac-sanitizers-final.json`: Viewer and the mixed load pass ASan/UBSan with
+  separately signed copies and leak detection disabled.
+- `linux-final/result.json`: the full standalone Ubuntu application builds;
+  all eight selected Qt/X11/load suites pass, followed by 16-stream and two
+  1920×1080-stream workloads. Its archive SHA-256 is
+  `765af8e75127d2002f738b2fe4876f356128abae1e44f97cd277e5fd9b0c817b`;
+  per-path hashes include source symlinks. The offline Ubuntu 26.04 container
+  used no host display/device/bus mounts and removed its own temporary files.
+- Final resource checks pass on both platforms: nine sampler and 15 budget
+  tests, including a real owned child, malformed/incomplete evidence, fixed
+  thresholds and conservative counter/timing uncertainty. Mac logs are
+  `resource-sampler-tests-final.log` and `resource-budget-tests-final.log`.
+  `linux-resource-final/result.json` and its source manifest cover the final
+  negative-RSS-growth upper-bound correction after the full Ubuntu build.
+- Earlier failed harness reports remain retained: they exposed a fixture
+  violating Channel admission and automatic focus requests without a fixture
+  reply. The final harness respects admission and explicitly denies input focus.
+
+The reproducible-tooling roadmap item is checked. **P7 is not fully complete:**
+full platform/kernel queue coverage and bounded Core EventQueue backlog remain
+open; H10/H11 native failure, display/input latency and hour-long resource
+acceptance remain NOT_RUN. Physical H07/H08/H09 are still deferred. Hosted
+checks for this slice are NOT_RUN; repository Actions was disabled at the last
+dispatch attempt recorded below. See `deploy/windowshare/media-load.md`,
+`deploy/windowshare/resource-soak.md` and the newest `TESTING.md` entry.
+
 ## P6 implementation and local verification — 2026-10-14
 
 Window-family code is implemented; **physical H08/H09 remain NOT_RUN**. The user

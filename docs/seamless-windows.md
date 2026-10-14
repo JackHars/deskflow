@@ -2,6 +2,15 @@
 
 ## Current implementation — 2026-10-14
 
+P7 now includes opt-in production Viewer queue/unique-paint diagnostics, a
+reproducible loopback TLS/decoder/offscreen multi-stream workload, and an offline
+resource evaluator using the predeclared hour-long pilot budgets. Mac and
+isolated Ubuntu regressions, overload recovery, 16-stream and generated 1080p
+workloads pass; scoped Mac sanitizers also pass. These are functional tool
+checks. Native latency, full platform/kernel queue bounds and H10/H11 acceptance
+remain open. See [media-load.md](../deploy/windowshare/media-load.md) and
+[resource-soak.md](../deploy/windowshare/resource-soak.md).
+
 P6 implements negotiated attached-window families: exact Mac child identity and
 capture, separately painted Linux children, modal ancestor fencing, exact
 focus/clipboard ownership and shared root recovery. Supported menus/popovers
@@ -256,7 +265,7 @@ pending until the returned code is tested on the actual machines.
 | Multiple windows and holding display | Actual Qt role challenges select unique owned Mutter windows; holding relocation retains the first-painted geometry and exact restore journal. | Verify the new native multi-window fixture, focus changes, both monitors and physical failure recovery. |
 | Drag out and drag back | Bidirectional ordinary-titlebar code, native preview/release joining, durable restoration and automated regressions are integrated. | Complete H07 attended acceptance, including cancellation, recovery and repeated transfers. |
 | App compatibility | Attached child capture, modal fencing, popup dismissal, shared recovery, exact original modifiers/repeats and opt-in focused text clipboard are implemented. Private X11/GNOME family tests pass; GNOME popup placement and IME limits are documented. | Complete H08/H09 native, browser and Electron shortcut/dialog/menu/copy-paste acceptance and resolve supported-path failures. |
-| Recovery, performance and release | Journal/watchdog recovery, immediate lifecycle fencing, bounded fair media queues, passive CPU/RSS tooling and experimental packaging exist. | Verify final packaging, real-window crash recovery, latency/resource soak and installation/upgrade/removal. |
+| Recovery, performance and release | Journal/watchdog recovery, lifecycle fencing, bounded media queues, production media diagnostics, real TLS/decoder/offscreen load tools, fixed resource-budget evaluation and experimental packaging exist. | Complete platform/kernel queue coverage and bounded Core backlog; verify final packaging, real-window crash recovery, latency/resource soak and installation/upgrade/removal. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
 hostname `jack` at `192.168.1.12`. The GNOME viewport milestone

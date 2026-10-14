@@ -8,6 +8,7 @@
 #include "Core.h"
 #include "GnomeViewportProtocol.h"
 #include "KeyboardRoute.h"
+#include "MediaMetrics.h"
 #include "WaylandViewport.h"
 #include "WindowFamily.h"
 #include <QImage>
@@ -153,6 +154,9 @@ public:
   std::function<void()> onDismissFamily;
 
   // Read-only state also permits headless tests without exposing input bypasses.
+  // Call on the GUI thread before any frame; cannot reset a running collection.
+  bool enableMediaMetrics();
+  std::optional<MediaMetrics> mediaMetrics() const;
   QRectF videoRect() const;
   std::optional<QPointF> mapToSource(QPointF position, bool clampDrag = false) const;
   bool firstFramePainted() const
@@ -276,6 +280,9 @@ private:
   std::shared_ptr<VideoDecoder> m_decoder;
   int m_pendingFrames = 0, m_decodeErrors = 0;
   qsizetype m_pendingBytes = 0;
+  std::optional<MediaMetrics> m_mediaMetrics;
+  std::uint64_t m_metricImage = 0, m_metricPaintedImage = 0;
+  MediaMetrics::Clock::time_point m_metricReceivedAt{};
 };
 
 } // namespace deskflow::windowshare

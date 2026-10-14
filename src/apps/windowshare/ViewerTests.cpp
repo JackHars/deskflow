@@ -270,6 +270,54 @@ void testDecoder()
   check(decoded.error.isEmpty() && !decoded.image.isNull(), "Decoder failed after reset");
 }
 
+void testMediaMetrics()
+{
+  MediaMetrics histogram;
+  check(!histogram.percentileUpperNs(95), "Empty histogram invented latency");
+  histogram.paint(1000000);
+  histogram.paint(1000001);
+  check(
+      histogram.percentileUpperNs(50) == 1000000 && histogram.percentileUpperNs(95) == 2000000,
+      "Latency buckets do not preserve conservative nearest-rank bounds"
+  );
+  histogram.paint(70000000000ULL);
+  check(
+      !histogram.percentileUpperNs(99) && histogram.receiveToPaint.back() == 1,
+      "Histogram overflow invented a finite percentile"
+  );
+
+  Recording recording;
+  Viewer viewer(30, 2, metadata());
+  recording.attach(viewer);
+  check(
+      !viewer.mediaMetrics() && viewer.enableMediaMetrics() && !viewer.enableMediaMetrics(),
+      "Diagnostics were implicit or reset a live baseline"
+  );
+  makeReady(viewer, recording);
+  const auto first = *viewer.mediaMetrics();
+  check(
+      first.received == 1 && first.admitted == 1 && first.retired == 1 && first.decoded == 1 && first.painted == 1 &&
+          first.pendingFrames == 0 && first.pendingBytes == 0 && first.peakFrames == 1 &&
+          first.peakBytes == std::uint64_t(frame().size()),
+      "Actual decode/paint diagnostics lost queue accounting"
+  );
+  for (int i = 0; i < 3; ++i)
+    viewer.repaint();
+  check(viewer.mediaMetrics()->painted == 1, "Widget repaints were counted as new decoded frames");
+  viewer.receiveFrame(frame(), 99);
+  check(
+      viewer.mediaMetrics()->ignored == 1 && viewer.mediaMetrics()->admitted == 1,
+      "Stale geometry changed admitted media counters"
+  );
+  viewer.receiveFrame(frame(), viewer.geometryRevision());
+  check(waitUntil([&] { return viewer.mediaMetrics()->painted == 2; }), "New decoded image did not record its paint");
+  check(
+      viewer.mediaMetrics()->received == 3 && viewer.mediaMetrics()->admitted == 2,
+      "Diagnostics counted stale frames as decoded work"
+  );
+  viewer.disconnected();
+}
+
 void testFocusedClipboardLifetime()
 {
   for (int invalidation = 0; invalidation < 6; ++invalidation) {
@@ -1518,6 +1566,7 @@ int main(int argc, char **argv)
   application.setQuitOnLastWindowClosed(false);
   try {
     testDecoder();
+    testMediaMetrics();
     testAttachedWindowLifecycle();
     testPopupDismissalFence();
     testInputMethodIsExplicitlyUnsupported();

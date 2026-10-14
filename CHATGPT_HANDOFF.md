@@ -21,7 +21,9 @@ limits. Multiple-window association, focused text clipboard and negotiated
 attached-window capture/lifecycle changes are part of the current working candidate;
 first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
-physical H07/H08/H09 acceptance remains open. Historical
+P7 media/resource tooling is implemented and locally verified on Mac and
+isolated Ubuntu. Full platform/kernel queue bounds and physical H07–H11
+acceptance remain open. Historical
 results below do not cover later source changes.
 
 As of 2026-10-14, queue/admission commit `a2aa7a5e8` passes the home Ubuntu
@@ -475,15 +477,23 @@ or production original-input authority.
   and retain diagnostics for hung owned children.
 - [x] Implement fair active-stream scheduling/backpressure and bounded media
   queues, including hidden/minimized viewers, resize and slow consumers.
-- [ ] Add reproducible latency/resource/load measurement tools and define
+- [x] Add reproducible latency/resource/load measurement tools and define
   explicit acceptance targets before measuring. Do not invent performance claims.
   The bounded source/native recorder, strict normalizer, offline latency analyzer
   and resource sampler now exist, with targets documented before collection.
+  The production Viewer has opt-in, fixed-storage receive-to-Qt-paint and queue
+  metrics. `windowshare-media-load` exercises actual TLS/decoding/offscreen
+  paint, bounded overload recovery and hidden/resumed streams. Resource v2
+  records per-probe timing and counter resolution; its offline budget report
+  applies the fixed pilot limits without accepting short runs as an hour soak.
+- [ ] Complete full platform/kernel queue coverage and bounded-backlog
+  certification, and collect the actual stimulus/display measurements.
   Original-stamped Core EventQueue views now retain observation through queued,
   retrieved and dispatched lifetimes, including borrowed InputFilter callbacks.
   Their outstanding/dispatch metrics explicitly have no configured capacity.
-  Full platform/kernel coverage, bounded-backlog certification and actual
-  stimulus/display collection remain open.
+  These diagnostics do not introduce production capacity limits or establish
+  native input/display latency. See `deploy/windowshare/media-load.md` and
+  `deploy/windowshare/resource-soak.md` for scope and reproducible commands.
 
 Acceptance: fault injection and bounded-resource tests in cloud; destructive
 owned-process cases, sleep/wake and actual performance/soak in H10/H11.

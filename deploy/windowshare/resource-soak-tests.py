@@ -78,8 +78,13 @@ class ResourceSoakTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 events = [json.loads(line) for line in output.read_text().splitlines()]
                 self.assertEqual(events[0]['event'], 'start')
+                self.assertEqual(events[0]['format'], 'deskflow-resource-soak-v2')
+                self.assertGreater(events[0]['cpu_resolution_s'], 0)
                 self.assertEqual(events[-1]['status'], 'complete')
                 self.assertGreaterEqual(sum(x['event']=='sample' for x in events), 2)
+                for sample in (x for x in events if x['event'] == 'sample'):
+                    reading = sample['targets']['child']
+                    self.assertLessEqual(reading['observed_start_s'], reading['observed_end_s'])
                 self.assertEqual(output.stat().st_mode & 0o777, 0o600)
                 self.assertNotIn('command', output.read_text())
                 self.assertNotIn('sleep(5)', output.read_text())
@@ -112,6 +117,17 @@ class ResourceSoakTests(unittest.TestCase):
         self.assertEqual(result['peak_rss_bytes'], 2000)
         self.assertEqual(result['cpu_percent_p95'], 50.)
         self.assertEqual(result['average_cpu_percent'], 50.)
+
+    def test_live_cpu_counter_regression_invalidates_collection(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace.jsonl'
+            readings = [MODULE.Reading('A', 1000, cpu) for cpu in (1, 2, 1)]
+            with mock.patch.object(MODULE, 'probe', side_effect=readings), mock.patch.object(MODULE.time, 'sleep'):
+                self.assertEqual(MODULE.measure({'viewer': 123}, 1, 1, path), 3)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(rows[-1]['status'], 'incomplete')
+            self.assertEqual(rows[-2]['reason'], 'ValueError')
+            self.assertIn('regressed', rows[-2]['detail'])
 
 
 if __name__ == '__main__':

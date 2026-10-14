@@ -840,6 +840,8 @@ void Viewer::requestVideoRecoveryWhenDrained()
     return;
   m_videoRecoveryRequestSent = true; // Before callback reentry.
   ++m_mediaRecoverySequence;
+  if (m_mediaMetrics)
+    ++m_mediaMetrics->recoveryRequests;
   send(
       MessageType::Input, {{"kind", "video-recovery"},
                            {"geometry", jsonNumber(m_geometry)},
@@ -847,8 +849,33 @@ void Viewer::requestVideoRecoveryWhenDrained()
   );
 }
 
+bool Viewer::enableMediaMetrics()
+{
+  if (QThread::currentThread() != thread() || m_mediaMetrics || m_pendingFrames || m_readySent || !m_image.isNull())
+    return false;
+  m_mediaMetrics.emplace();
+  m_mediaMetrics->frameCapacity = maxPendingFrames;
+  m_mediaMetrics->byteCapacity = maxPendingVideoBytes;
+  return true;
+}
+
+std::optional<MediaMetrics> Viewer::mediaMetrics() const
+{
+  if (QThread::currentThread() != thread() || !m_mediaMetrics)
+    return {};
+  auto result = *m_mediaMetrics;
+  result.pendingFrames = m_pendingFrames;
+  result.pendingBytes = m_pendingBytes;
+  return result;
+}
+
 void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
 {
+  const auto receivedAt = m_mediaMetrics ? MediaMetrics::Clock::now() : MediaMetrics::Clock::time_point{};
+  if (m_mediaMetrics) {
+    ++m_mediaMetrics->received;
+    ++m_mediaMetrics->ignored; // Subtracted only at actual queue admission.
+  }
   if (!m_connected || m_returned || m_failed || geometry != m_geometry || m_videoPaused)
     return;
   if (accessUnit.isEmpty() || accessUnit.size() > maxPayload) {
@@ -868,6 +895,8 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
     resetDecoder = true;
   }
   if (m_pendingFrames >= maxPendingFrames || accessUnit.size() > maxPendingVideoBytes - m_pendingBytes) {
+    if (m_mediaMetrics)
+      ++m_mediaMetrics->overflows;
     if (m_videoRecovering) {
       // A second overload before painting the recovery frame is not a safe
       // reason to silently reset the recovery deadline or repeat the request.
@@ -879,13 +908,21 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
   }
   ++m_pendingFrames;
   m_pendingBytes += accessUnit.size();
+  std::uint64_t metricSequence = 0;
+  if (m_mediaMetrics) {
+    metricSequence = ++m_mediaMetrics->admitted;
+    --m_mediaMetrics->ignored;
+    m_mediaMetrics->peakFrames = std::max(m_mediaMetrics->peakFrames, std::uint64_t(m_pendingFrames));
+    m_mediaMetrics->peakBytes = std::max(m_mediaMetrics->peakBytes, std::uint64_t(m_pendingBytes));
+  }
   const QPointer<Viewer> target(this);
   const auto decoder = m_decoder;
   const auto generation = m_decodeGeneration;
   const auto capturedGeneration = generation->load(std::memory_order_acquire);
   QMetaObject::invokeMethod(
       m_decodeWorker,
-      [target, decoder, generation, capturedGeneration, resetDecoder, accessUnit, geometry] {
+      [target, decoder, generation, capturedGeneration, resetDecoder, accessUnit, geometry, metricSequence,
+       receivedAt] {
         std::optional<VideoDecoder::Result> result;
         if (generation->load(std::memory_order_acquire) == capturedGeneration) {
           if (resetDecoder)
@@ -897,12 +934,14 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
         QMetaObject::invokeMethod(
             target,
             [target, result = std::move(result), generation, capturedGeneration, resetDecoder, size = accessUnit.size(),
-             geometry]() mutable {
+             geometry, metricSequence, receivedAt]() mutable {
               if (!target)
                 return;
               auto *self = target.data();
               --self->m_pendingFrames;
               self->m_pendingBytes -= size;
+              if (self->m_mediaMetrics)
+                ++self->m_mediaMetrics->retired;
               if (self->m_videoRecovering && !self->m_videoRecoveryRequestSent && !self->m_pendingFrames) {
                 const QPointer<Viewer> guard(self);
                 self->requestVideoRecoveryWhenDrained();
@@ -910,18 +949,33 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
                   return;
               }
               if (!result || generation->load(std::memory_order_acquire) != capturedGeneration || !self->m_connected ||
-                  self->m_returned || self->m_failed || geometry != self->m_geometry)
+                  self->m_returned || self->m_failed || geometry != self->m_geometry) {
+                if (self->m_mediaMetrics)
+                  ++self->m_mediaMetrics->discardedCompletions;
                 return;
+              }
               if (!result->error.isEmpty()) {
+                if (self->m_mediaMetrics)
+                  ++self->m_mediaMetrics->decodeErrors;
                 if (++self->m_decodeErrors >= 3)
                   self->fail(result->error);
                 else if (self->onError)
                   self->onError(result->error);
                 return;
               }
-              if (result->image.isNull())
+              if (result->image.isNull()) {
+                if (self->m_mediaMetrics)
+                  ++self->m_mediaMetrics->emptyDecodes;
                 return;
+              }
               self->m_decodeErrors = 0;
+              if (self->m_mediaMetrics) {
+                ++self->m_mediaMetrics->decoded;
+                if (self->m_metricImage && self->m_metricImage != self->m_metricPaintedImage)
+                  ++self->m_mediaMetrics->replacedBeforePaint;
+                self->m_metricImage = metricSequence;
+                self->m_metricReceivedAt = receivedAt;
+              }
               self->m_image = std::move(result->image);
               self->m_frameGeometry = geometry;
               if (resetDecoder)
@@ -1416,6 +1470,12 @@ void Viewer::paintEvent(QPaintEvent *)
   }
   painter.end();
   if (!m_image.isNull() && m_paintedGeometry == m_geometry && m_connected && !m_failed && !m_returned) {
+    if (m_mediaMetrics && m_error.isEmpty() && m_metricImage && m_metricImage != m_metricPaintedImage) {
+      m_metricPaintedImage = m_metricImage;
+      m_mediaMetrics->paint(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(MediaMetrics::Clock::now() - m_metricReceivedAt).count()
+      );
+    }
     if (!m_readySent && !m_readyPaintScheduled) {
       m_readyPaintScheduled = true;
       QTimer::singleShot(0, this, [this] {
