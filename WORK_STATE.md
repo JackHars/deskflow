@@ -1,5 +1,57 @@
 # Seamless Windows work state
 
+## Latest verified checkpoint — 2026-10-14
+
+Commit `c8a9617aa8dd930f5929dbf173d4af374b6068b6` passes all six hosted
+checks in [run 38586489277](https://github.com/JackHars/deskflow/actions/runs/38586489277).
+It requires libei >= 1.5 for the experimental Linux build. The preceding CI
+failure was reproduced on Debian 13/libei 1.3.901: `ei_unref` reaches an upstream
+null connection during pre-handshake teardown. The source audit finds upstream
+fix `12237f19` in 1.5, absent from 1.3.901 and 1.4.0. The startup/shutdown test
+is unchanged apart from explanatory comments. Debian opt-in configuration now
+rejects that dependency clearly; ordinary OFF configuration still succeeds.
+Ordinary runtime behavior with the old library has not been repaired or claimed
+safe. Diagnostic evidence is `debian-ei-teardown-red-1` and
+`libei-baseline-guard-2` under `build/wifiman-resumed-20261013/ubuntu/`.
+
+The queue/admission checkpoint `a2aa7a5e8` passes the home Ubuntu full build,
+**37/37 enabled + 5/5 disabled suites**, actual Core/EI and GNOME/Qt tests at
+scales 1/1.25, reconnect and package checks. Its 1,099-file source matches that
+commit exactly; all 135 returned artifact hashes verify. The identical binaries
+then pass **12/12 planned native sessions without retries**, with all 267
+artifact hashes and cleanup/preservation checks verified. See
+`queue-admission-integration-1` and `queue-admission-matrix-1` in that evidence
+root. Earlier failing matrices remain failed; the earlier unclassified private
+channel error is not retrospectively explained by these fixes.
+
+Mac OFF compatibility passes 4/4 suites. Scoped EventQueue and input-evidence
+ASan/UBSan regressions pass. The earlier enabled run remains 39/40 plus the
+corrected EventQueue suite's separate pass. The separately staged exact-library
+Mac package and Linux archive pass their audits and inert/private smokes; neither
+is installed. These packages predate the native identity change below.
+
+The new Mac Host lookup replaces title/geometry matching with a runtime-checked
+private HIServices AX/native window-ID join for export and recovery. The real
+owned-window regression distinguishes two same-title/same-frame windows,
+preserves identity across rename, and rejects a closed window's replacement.
+It passes with normal and ASan/UBSan builds. The final selected-window role
+guard passes four related CTests and the real native regression; its scoped
+sanitizer recovery and native tests also pass. Evidence is
+`build/roadmap-completion-20261014/native-exact-identity-1/` and
+`native-identity-role-evidence.json` and `native-identity-role-sanitize-*`; documentation is
+`deploy/windowshare/native-window-identity.md`. This is a private SPI dependency,
+not native grab authority or completed remote child support. Final packaging
+and hosted checks for this later source remain due.
+
+The user explicitly requires **normal titlebar dragging**, not a selected-window
+thumbnail interaction. Two fresh user-operated owned drag probes both record
+native movement after the PID-targeted synthetic up was received by the app
+(41/74 later pointer motions; 33/62 frame observations). Both close on the real
+physical release. That method does not end the native drag. P5 and end-to-end
+H07 remain open. Evidence: `owned-drag-physical-{1,2}` under the Oct 14 root.
+
+### Earlier checkpoint notes (retained history)
+
 ## Roadmap completion in progress — 2026-10-14
 
 The tested integration snapshot below is now committed as `e461d2b31` and

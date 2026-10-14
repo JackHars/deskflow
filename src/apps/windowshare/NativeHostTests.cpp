@@ -7,6 +7,7 @@
 #include "NativeHost.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeSourceTransaction.h"
+#include "NativeWindowIdentity_mac.h"
 #include "platform/OriginalInput_mac.h"
 #include <CoreGraphics/CoreGraphics.h>
 #include <QCoreApplication>
@@ -62,6 +63,38 @@ QByteArray read(const QString &path)
   QFile file(path);
   file.open(QIODevice::ReadOnly);
   return file.readAll();
+}
+void exactWindowIdentity()
+{
+  using namespace deskflow::windowshare;
+  const auto permissions = NativeHost::permissions();
+  check(
+      permissions["exactWindowIdentity"].toBool() == native::axWindowIdentityAvailable(),
+      "probe reports exact native identity capability"
+  );
+  check(
+      permissions["exactWindowIdentityApi"].toString().contains("private"),
+      "probe discloses the native identity SPI dependency"
+  );
+  CGWindowID window = 123;
+  check(
+      native::axWindowId(nullptr, window) == kAXErrorIllegalArgument && window == 0,
+      "missing AX objects cannot retain an earlier window ID"
+  );
+  window = 123;
+  check(
+      native::axWindowId(reinterpret_cast<AXUIElementRef>(CFSTR("not a window")), window) == kAXErrorIllegalArgument &&
+          window == 0,
+      "non-AX objects cannot grant native identity"
+  );
+  for (const auto [process, id] : {std::pair<pid_t, CGWindowID>{0, 123}, {-1, 123}, {getpid(), 0}}) {
+    QString diagnostic;
+    bool retryable = true;
+    check(
+        !native::copyExactAXWindow(process, id, &diagnostic, &retryable) && !retryable && !diagnostic.isEmpty(),
+        "incomplete native identities reject before an Accessibility query"
+    );
+  }
 }
 void targetedPointerConstruction()
 {
@@ -877,6 +910,7 @@ void preparationCancellation()
 int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
+  exactWindowIdentity();
   targetedPointerConstruction();
   captureTiming();
   originalNativeConstruction();

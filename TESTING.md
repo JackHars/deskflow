@@ -4,6 +4,89 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Latest local evidence — 2026-10-14
+
+- **Supported Linux CI:** all six jobs pass for `c8a9617aa` in
+  [run 38586489277](https://github.com/JackHars/deskflow/actions/runs/38586489277),
+  including the real EI startup/shutdown regression, ordinary OFF compatibility,
+  native GNOME, scoped sanitizers and packaging. Experimental Linux builds now
+  require libei >= 1.5; the CI application container uses Ubuntu 26.04.
+- **Retained Debian failure:** `debian-ei-teardown-red-1` reproduces the same
+  crash as CI run 38581798655 on its exact Debian base and libei 1.3.901.
+  GDB reaches `ei_disconnect` from `ei_unref` in `EiComputer::cleanupEi` before
+  an EIS connection object exists. This is upstream fix
+  [12237f19](https://gitlab.freedesktop.org/libinput/libei/-/commit/12237f19),
+  present in inspected 1.5 source and absent from inspected 1.3.901/1.4.0.
+  All 33 returned artifact hashes and preservation/cleanup checks verify.
+  The diagnostic remains FAILED. A collector-format correction only adapts its
+  compile-command inventory; raw artifacts and their hashes are retained.
+- **Dependency guard:** `libei-baseline-guard-2` verifies actual Debian ON
+  configuration rejects 1.3.901 with the actionable version diagnostic, while
+  actual OFF configuration succeeds. All 27 hashes and cleanup checks pass.
+  `libei-baseline-guard-1` retains a harness assertion failure caused by CMake
+  wrapping the diagnostic across lines; the second run normalizes whitespace.
+  No test is skipped and no production assertion is relaxed. This is not an
+  OFF runtime pass on the affected library. Archive:
+  `5a4219681212b992d63e2fd7108d2235617e6d1588481aed6d4ee6c4920096e8`.
+- **Home Ubuntu queue/admission build:** `queue-admission-integration-1`, exact
+  commit `a2aa7a5e8`, **37/37 ON + 5/5 OFF suites PASS**; actual Core/EI and
+  broader GNOME/Qt tests pass at scales 1/1.25. Reconnect, pure harness checks,
+  Linux package verification and inert launchers pass. All **135 artifact
+  hashes**, source/binary/runner identities and preservation/cleanup checks pass.
+  Source archive `c748a5627a83d66f6fa0540c594e8032caa5687924ee66ace5965662f1741882`,
+  manifest `8e4ce752affa59c631f7b0c7e5e8a936978e32d7225b74788dc2f38e4fc260e2`,
+  1,099 files. `commit-binding.json` compares every path/mode/content with Git.
+  Package SHA-256 `08ddad901465b7870febdc4aed865d0e3a7649b8e20474cd16eb1ce4defe85e5`;
+  the returned archive is independently verified locally. No installation.
+- **Repeated native matrix:** `queue-admission-matrix-1` uses the same verified
+  binaries and all 1,099 unchanged source files. Three runs per scale 1/1.25
+  and ordinary/prepared-first-click mode give **12/12 PASS**, with no retries.
+  All **267 artifact hashes** and preservation/cleanup checks pass. This is a
+  native-only reuse run, not another full build. Source archive:
+  `412ddb939a2bfc31d3d3af36ce92b72643e868ef9e722de06c9d7d644adbfa57`.
+  The preceding 9/12, 10/12 and 11/12 matrices remain FAILED evidence.
+- **Mac queue/admission checks:** ordinary OFF build and **4/4 suites PASS**.
+  Scoped ASan/UBSan EventQueue and input-evidence suites both PASS. Enabled
+  results remain the original **39/40**, then the corrected EventQueue suite's
+  separate pass. Logs/XML are `mac-off-*`, `event-sanitize-*` and
+  `input-evidence-sanitize-*` under `build/roadmap-completion-20261014/`.
+  Exact-library staged Mac package audit and private handshake/rejection smoke
+  PASS; archive SHA-256
+  `cebb12ba409f73a2475f25fdd0a0864f24eb7f41aae83672fe12b6c0399abecc`.
+  It is not installed and predates the identity change below.
+- **New native Mac identity:** current Host code uses the exact private
+  AX/native window-ID lookup for export and recovery. Actual owned AppKit
+  collision/rename/replacement checks PASS under `native-exact-identity-1/`.
+  Three pure CTests PASS (`mac-exact-identity-tests.*`) and the new native
+  recovery/admission executable PASS (`mac-exact-identity-recovery.log`).
+  Scoped ASan/UBSan recovery and the real owned-window test both PASS in
+  `native-identity-sanitize-*`. Leak detection is disabled; system/Qt libraries
+  are not fully instrumented. The first build reaches Core/Viewer/recovery
+  targets, then its original Make invocation cannot see the newly generated
+  identity-test target; the second and final build invocations pass. No source
+  workaround was needed. See the [native procedure](deploy/windowshare/native-window-identity.md).
+  The final window-role guard also passes **4/4 related CTests** and the real
+  collision/rename/replacement test (`mac-identity-role-*`). Its rebuilt scoped
+  ASan/UBSan recovery and native desktop tests pass
+  (`native-identity-role-sanitize-*`). REUSE passes **1,076/1,076 files**.
+  `native-identity-role-evidence.json` binds this final source and binaries to
+  those results; earlier evidence retains its earlier source hashes.
+  This does not establish child rendering, focus/drag authority or H08 acceptance.
+- **Physical drag prerequisite:** the user explicitly authorized the first
+  owned probe and requested the second. Both exit 0 after real release while
+  recording `window-movement-observed-after-targeted-up-submission`, app-up
+  true and `serverReleaseProven:false`. The two runs record 41/74 post-submission
+  motions and 33/62 later frame observations. Evidence and hashes:
+  `owned-drag-physical-{1,2}/` under the Oct 14 root. These are negative evidence
+  for that release method, not H07 passes. The user requires normal titlebar
+  dragging; selected-window thumbnail dragging is not an accepted substitute.
+
+Ubuntu folders above are under `build/wifiman-resumed-20261013/ubuntu/`;
+Mac folders are under `build/roadmap-completion-20261014/`. Full physical input,
+monitors, remote dialogs/popups, sleep/fault acceptance, performance/soak and
+installation remain pending. Earlier notes below describe their named source
+checkpoints; statements that a later check is pending are historical.
+
 ## Continuation — 2026-10-14
 
 The `final-integration-2` source described below is committed as

@@ -73,15 +73,15 @@ properties for the host's desktop-independent single-window filter.
 
 The remaining work is not just enabling that property (the host already sets
 it). A display-bound parent-plus-child capture path could render the bounded
-union, but the reviewed public AX and ScreenCaptureKit interfaces expose no
-documented join from the exact attached AX child to its CGWindowID. The
-existing parent `matchAX` helper matches title and geometry; it must not be
-promoted to exact child identity evidence. A mouse hit-test likewise identifies
-a native target at a point, not the corresponding AX object. Interactive child
-support needs a documented identity witness or a cooperative application
-adapter, then separate retained child geometry, painted acknowledgement,
-keyboard focus and release ownership. A child preview alone would not complete
-remote dialog support. The current local-return fallback remains explicit.
+union. The Host now uses an [exact private AX/native window join](native-window-identity.md)
+for initial export and recovery, replacing title/geometry matching. Its owned
+native regression covers AX windows, rename and replacement. It does not yet
+establish that an attached sheet, drawer or popup has its own capturable native
+window: the SPI can identify the containing parent instead. Each supported
+child role still needs that distinction, separate retained child geometry,
+painted acknowledgement, stacking, keyboard focus and release ownership.
+A mouse hit-test supplies no AX association, and a child preview alone would
+not complete remote dialog support. The local-return fallback remains explicit.
 
 ## Clipboard observation limit
 

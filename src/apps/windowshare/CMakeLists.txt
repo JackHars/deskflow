@@ -274,7 +274,7 @@ if(WINDOWSHARE_APP)
     target_compile_options(deskflow-holding-display-helper PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
     target_link_libraries(deskflow-holding-display-helper PRIVATE windowshare-transport "-framework Foundation" "-framework CoreGraphics")
     set_target_properties(deskflow-holding-display-helper PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-    target_sources(windowshare-native PRIVATE NativeHost_mac.mm HoldingDisplay.mm)
+    target_sources(windowshare-native PRIVATE NativeHost_mac.mm NativeWindowIdentity_mac.mm HoldingDisplay.mm)
     target_compile_options(windowshare-native PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
     set_target_properties(windowshare-native PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
     foreach(framework AppKit ApplicationServices ScreenCaptureKit VideoToolbox CoreMedia CoreVideo Carbon)
@@ -374,6 +374,12 @@ if(WINDOWSHARE_APP)
       add_executable(windowshare-native-tests NativeHostTests.cpp)
       target_link_libraries(windowshare-native-tests PRIVATE windowshare-native)
       add_test(NAME windowshare-native-recovery COMMAND windowshare-native-tests)
+      # Explicit native desktop check: two same-title/frame fixture windows,
+      # rename and replacement. No input or arbitrary application access.
+      add_executable(windowshare-native-identity-tests NativeWindowIdentityTests.mm)
+      target_compile_options(windowshare-native-identity-tests PRIVATE -fobjc-arc)
+      target_link_libraries(windowshare-native-identity-tests PRIVATE windowshare-native)
+      set_target_properties(windowshare-native-identity-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       # Default invocation is pure accounting only. The owned AppKit window,
       # listen-only tap and targeted fixture up require explicit --interactive.
       add_executable(windowshare-native-drag-probe NativeWindowDragProbe.mm)

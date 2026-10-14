@@ -38,6 +38,16 @@ one synthetic up to its own retained PID/window using the production event
 constructor. It does not inject a down, suppress physical input, target another
 application, export a window or start ordinary Deskflow. A 30-second watchdog
 ends even a hung tracking loop. Closing the owned window also ends the test.
+The probe also closes immediately after the physical release; keep holding and
+moving for several seconds after the title changes before releasing.
+
+On 2026-10-14 the user ran this probe twice on macOS 26.1. Both runs received
+the targeted app-up and then observed further native window movement before
+the real release. They recorded 41/74 later pointer motions and 33/62 later
+frame observations respectively. The targeted PID post did **not** end the
+WindowServer drag. Evidence is under
+`build/roadmap-completion-20261014/owned-drag-physical-{1,2}/`.
+Neither run authorizes production handoff or completes H07.
 
 Retain stdout, stderr, exit status, binary/source hashes, macOS version and the
 user's observation. The output distinguishes an app-up receipt, later physical

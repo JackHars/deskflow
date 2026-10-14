@@ -11,6 +11,7 @@
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
 #include "NativeSourceTransaction.h"
+#include "NativeWindowIdentity_mac.h"
 #include "platform/OriginalInput_mac.h"
 
 #import <AppKit/AppKit.h>
@@ -459,67 +460,23 @@ std::optional<WindowIdentity> identity(CGWindowID id, bool *knownMissing = nullp
   result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
   return result.frame.valid() && result.launch > 0 ? std::optional(result) : std::nullopt;
 }
-// AX has no public API that maps an AX window to a CGWindowID. Match the CG
-// window's current geometry and title, and fail closed when more than one AX
-// window matches. The retained AX object becomes the identity for that session.
+// An exact native window ID is required even when title and geometry collide.
+// The SPI join supplies identity only; the existing session/focus/input gates
+// remain independently required. Recheck the process incarnation after AX IPC.
 AXUIElementRef matchAX(const WindowIdentity &window, QString *diagnostic = nullptr, bool *retryable = nullptr)
 {
-  CF<AXUIElementRef> app(AXUIElementCreateApplication(window.pid));
-  // The first AX request can launch an application's accessibility bridge.
-  // This runs on the Qt control thread, never on an event tap/capture callback.
-  AXUIElementSetMessagingTimeout(app.get(), 1.0f);
-  CFTypeRef rawWindows = nullptr;
-  const auto result = AXUIElementCopyAttributeValue(app.get(), kAXWindowsAttribute, &rawWindows);
-  CF<CFTypeRef> array(rawWindows);
-  if (!array || CFGetTypeID(array.get()) != CFArrayGetTypeID()) {
-    if (diagnostic) {
-      auto process = [NSRunningApplication runningApplicationWithProcessIdentifier:window.pid];
-      *diagnostic = QString("AX window list status %1; registered %2, launched %3, policy %4")
-                        .arg(result)
-                        .arg(process != nil)
-                        .arg(process.finishedLaunching)
-                        .arg(process ? int(process.activationPolicy) : -1);
-    }
+  auto match = copyExactAXWindow(window.pid, window.id, diagnostic, retryable);
+  if (!match)
+    return nullptr;
+  const auto current = identity(window.id);
+  if (!current || current->pid != window.pid || current->launch != window.launch) {
+    CFRelease(match);
+    if (diagnostic)
+      *diagnostic = "Selected native window/process changed during Accessibility lookup";
     if (retryable)
-      *retryable = result == kAXErrorCannotComplete || result == kAXErrorNoValue;
+      *retryable = false;
     return nullptr;
   }
-  auto windows = static_cast<CFArrayRef>(array.get());
-  std::vector<AXUIElementRef> geometryMatches, exactMatches;
-  QStringList observed;
-  for (CFIndex index = 0; index < CFArrayGetCount(windows); ++index) {
-    auto candidate = static_cast<AXUIElementRef>(CFArrayGetValueAtIndex(windows, index));
-    if (CFGetTypeID(candidate) != AXUIElementGetTypeID())
-      continue;
-    AXUIElementSetMessagingTimeout(candidate, 0.3f);
-    auto frame = bounds(candidate);
-    if (frame)
-      observed.push_back(QString("%1,%2 %3x%4").arg(frame->x).arg(frame->y).arg(frame->width).arg(frame->height));
-    else
-      observed.push_back("unreadable bounds");
-    if (!frame || !closeEnough(*frame, window.frame))
-      continue;
-    geometryMatches.push_back(candidate);
-    CF<CFTypeRef> title(attribute(candidate, kAXTitleAttribute));
-    if (title && CFGetTypeID(title.get()) == CFStringGetTypeID() &&
-        string((__bridge NSString *)title.get()) == window.title)
-      exactMatches.push_back(candidate);
-  }
-  AXUIElementRef match = exactMatches.size() == 1      ? exactMatches.front()
-                         : geometryMatches.size() == 1 ? geometryMatches.front()
-                                                       : nullptr;
-  if (match)
-    CFRetain(match);
-  else if (diagnostic)
-    *diagnostic = QString("CG %1,%2 %3x%4; AX windows %5 [%6]")
-                      .arg(window.frame.x)
-                      .arg(window.frame.y)
-                      .arg(window.frame.width)
-                      .arg(window.frame.height)
-                      .arg(CFArrayGetCount(windows))
-                      .arg(observed.join("; "));
-  if (retryable && CFArrayGetCount(windows) == 0)
-    *retryable = true;
   return match;
 }
 std::vector<Rect> physicalDisplays()
@@ -3186,6 +3143,8 @@ QJsonObject NativeHost::permissions()
       {"accessibility", bool(AXIsProcessTrusted())},
       {"targetedPointer", targetedPointerAvailable()},
       {"targetedPointerApi", "private CoreGraphics window-location SPI"},
+      {"exactWindowIdentity", axWindowIdentityAvailable()},
+      {"exactWindowIdentityApi", "private HIServices _AXUIElementGetWindow SPI"},
       {"holdingDisplay", HoldingDisplay::supported()},
       {"emergencyRestore", "Control+Option+Shift+Escape"}
   };

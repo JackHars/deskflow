@@ -25,10 +25,19 @@ see `TESTING.md` for their cause and follow-up status. Natural bidirectional
 edge dragging remains open.
 The subsequent fixes preserve exact seals across unchanged Mutter notifications
 and retain one pending mapped-input request across brief client mutex contention.
-The latter passes deterministic private-bus and sanitizer regressions; fresh
-native validation is still due. Generic stamped Core EventQueue lifetimes are
+The latter passes deterministic private-bus and sanitizer regressions, the
+home Ubuntu full build (37 enabled/5 disabled suites), and all 12 planned
+repeated native sessions without retries. Generic stamped Core EventQueue lifetimes are
 also measured, with explicit unbounded counters and no claim of full queue or
 performance acceptance.
+The experimental Linux build now requires libei >= 1.5 because older unpatched
+releases can crash during early connection teardown. All six hosted checks pass
+for that change. Mac export/recovery now uses an
+[exact private AX/native window-ID join](../deploy/windowshare/native-window-identity.md)
+with no title/geometry fallback. Its owned native identity regression passes.
+This still does not establish native drag ownership: two physical drag probes
+observed continued WindowServer movement after the targeted PID mouse-up.
+Ordinary titlebar dragging remains the required interaction.
 Physical input, real app compatibility, two monitors, installation and sustained
 performance still require acceptance on the final candidate. See the checked
 implementation roadmap in [`CHATGPT_HANDOFF.md`](../CHATGPT_HANDOFF.md), precise

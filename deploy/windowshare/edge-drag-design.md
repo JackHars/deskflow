@@ -11,6 +11,11 @@ There is no production window-edge trigger, native-grab handoff packet,
 cross-machine drag commit, or drag-back transaction. An ordinary export/return
 must not be presented as natural bidirectional window dragging.
 
+The user confirmed on 2026-10-14 that normal application titlebar dragging is
+required. A selected-window thumbnail interaction does not satisfy this
+requirement. The preview-and-drop research below refers to a provisional
+rendering during that same ordinary drag, not a replacement interaction.
+
 ## What the APIs establish
 
 AppKit's `NSWindow::performWindowDragWithEvent:` accepts an original mouse-down
@@ -67,7 +72,7 @@ not document ownership of the active WindowServer grab. Current
 window-under-pointer field. Adding a later AX hit test to that record would
 not repair the missing event-time grab identity.
 
-An explicitly preselected exact source can support a narrower, declared
+An explicitly preselected exact source could support a narrower, declared
 "preview and drop this selected window" interaction: the user has already
 named the source, so it need not be inferred from foreground PID or a moved
 frame. Such a UX still needs uninterrupted source-local real down/up delivery,
@@ -76,7 +81,7 @@ bounded cancellation. It must not be advertised as discovering any arbitrary
 native titlebar drag. For a fixture-owned AppKit window, the actual call to
 `performWindowDragWithEvent:` with its original down supplies exact initiation
 evidence that an external AX observer lacks. This distinction is a feasible
-next research/implementation boundary, not a completed P5 claim.
+research boundary, not a completed P5 claim or the requested product behavior.
 
 Primary declarations inspected: SDK `AXUIElement.h` hit-testing documentation;
 `AXNotificationConstants.h` window-move notification; `CGEventTypes.h` fields
@@ -87,6 +92,14 @@ existing [owned probe](native-drag-probe.md) observes only its own window and
 does not grant arbitrary-application authority.
 
 ## Connected preparation rollback
+
+The Host now uses an [exact private AX/native window join](native-window-identity.md)
+for export and recovery. It distinguishes same-title/same-frame windows and
+rejects stale replacements. This supplies a stronger source-identity primitive;
+it does not establish which window owns an ongoing WindowServer drag. Two
+physical owned-probe runs on 2026-10-14 observed continued native movement after
+the PID-targeted up reached the app. That release method cannot authorize the
+requested continuous drag handoff.
 
 `NativeSourceTransaction` is recovery bookkeeping used by the real NativeHost
 return path. New Preparing exports write `restoreRequired:false` because
