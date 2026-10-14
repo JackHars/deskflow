@@ -174,7 +174,7 @@ public:
     case Outcome::InvalidObservation:
       return "invalid-observation";
     case Outcome::NoSubmission:
-      return "no-targeted-up-submission";
+      return "no-release-submission";
     case Outcome::AppUpOnly:
       return "app-up-received-without-sufficient-motion-observation";
     case Outcome::NoPostMotion:
@@ -182,7 +182,7 @@ public:
     case Outcome::MotionWithoutObservedFrameMovement:
       return "pointer-motion-without-observed-window-movement";
     case Outcome::FrameMovementAfterSubmission:
-      return "window-movement-observed-after-targeted-up-submission";
+      return "window-movement-observed-after-release-submission";
     }
     return "invalid-observation";
   }

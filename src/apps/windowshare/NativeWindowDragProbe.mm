@@ -23,7 +23,8 @@
 
 // Exercise the production private-source/window annotation constructor. This
 // executable never constructs a NativeHost, starts capture, or moves any other
-// application's window. Only --interactive can create the owned probe window.
+// application's window. Explicit interactive modes create the owned fixture.
+// The HID mode is a separate system-stream experiment, never a Host fallback.
 namespace deskflow::windowshare::native {
 bool targetedPointerAvailable();
 CGEventRef targetedPointerEvent(
@@ -178,7 +179,7 @@ namespace {
 class Probe final
 {
 public:
-  Probe() : m_state(nowNs())
+  explicit Probe(bool hidRelease) : m_state(nowNs()), m_hidRelease(hidRelease)
   {
     // A stalled WindowServer query or AppKit tracking loop must not leave a
     // fixture process/window around indefinitely. No subprocess is spawned.
@@ -201,11 +202,9 @@ public:
   bool start()
   {
     // Read-only preflight; this tool never requests or changes permissions.
-    if (!AXIsProcessTrusted() || !CGPreflightListenEventAccess() || !native::targetedPointerAvailable()) {
-      std::fputs(
-          "Probe unavailable: existing Accessibility, Input Monitoring and targeted-pointer APIs are required.\n",
-          stderr
-      );
+    if (!AXIsProcessTrusted() || !CGPreflightListenEventAccess() || !CGPreflightPostEventAccess() ||
+        (!m_hidRelease && !native::targetedPointerAvailable())) {
+      std::fputs("Probe unavailable: existing input permissions and the selected post API are required.\n", stderr);
       return false;
     }
     m_source = CGEventSourceCreate(kCGEventSourceStatePrivate);
@@ -213,8 +212,11 @@ public:
       return false;
     CGEventSourceSetUserData(m_source, syntheticEventTag);
     CGEventSourceSetLocalEventsSuppressionInterval(m_source, 0);
-    const auto mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
-                      CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved);
+    auto mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
+                CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved);
+    if (m_hidRelease)
+      mask |= CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged) |
+              CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown);
     m_tap =
         CGEventTapCreate(kCGSessionEventTap, kCGTailAppendEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
     if (!m_tap)
@@ -232,7 +234,8 @@ public:
     if (!m_window)
       return false;
     m_window->probe = this;
-    m_window.title = @"Deskflow owned WindowServer drag probe";
+    m_window.title =
+        m_hidRelease ? @"Deskflow owned system-release drag probe" : @"Deskflow owned WindowServer drag probe";
     m_window.releasedWhenClosed = NO;
     m_delegate = [[DFWindowDragProbeDelegate alloc] init];
     if (!m_delegate)
@@ -255,10 +258,10 @@ public:
                                        }];
     [NSRunLoop.mainRunLoop addTimer:m_timer forMode:NSRunLoopCommonModes];
     std::printf(
-        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"deadlineSeconds\":30,"
+        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"deadlineSeconds\":30,\"postRoute\":\"%s\","
         "\"instruction\":\"Hold the left button in the blue area, move the window, keep holding and moving after the "
-        "targeted-up marker, then release.\"}\n",
-        getpid(), m_windowId
+        "release marker, then release.\"}\n",
+        getpid(), m_windowId, route()
     );
     std::fflush(stdout);
     return true;
@@ -281,8 +284,15 @@ public:
     m_clicks = int(CGEventGetIntegerValueField(event.CGEvent, kCGMouseEventClickState));
     m_read = m_written; // Earlier events cannot become post-down observations.
     std::printf(
-        "{\"event\":\"real-down\",\"window\":%u,\"sourceTime\":%llu}\n", m_windowId,
-        static_cast<unsigned long long>(CGEventGetTimestamp(event.CGEvent))
+        "{\"event\":\"real-down\",\"window\":%u,\"sourceTime\":%llu,\"sourcePid\":%lld,"
+        "\"sourceState\":%lld,\"underPointer\":%lld,\"underPointerHandling\":%lld}\n",
+        m_windowId, static_cast<unsigned long long>(CGEventGetTimestamp(event.CGEvent)),
+        static_cast<long long>(CGEventGetIntegerValueField(event.CGEvent, kCGEventSourceUnixProcessID)),
+        static_cast<long long>(CGEventGetIntegerValueField(event.CGEvent, kCGEventSourceStateID)),
+        static_cast<long long>(CGEventGetIntegerValueField(event.CGEvent, kCGMouseEventWindowUnderMousePointer)),
+        static_cast<long long>(
+            CGEventGetIntegerValueField(event.CGEvent, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent)
+        )
     );
     std::fflush(stdout);
     return true;
@@ -292,7 +302,9 @@ public:
     if (!m_stopping && event.window == m_window && event.type == NSEventTypeLeftMouseUp && event.CGEvent &&
         CGEventGetIntegerValueField(event.CGEvent, kCGEventSourceUserData) == syntheticEventTag && m_state.posted()) {
       m_state.appUp();
-      std::puts("{\"event\":\"targeted-up-received-by-app\",\"serverReleaseProven\":false}");
+      std::printf(
+          "{\"event\":\"release-received-by-app\",\"postRoute\":\"%s\",\"serverReleaseProven\":false}\n", route()
+      );
       std::fflush(stdout);
     }
   }
@@ -304,10 +316,11 @@ public:
     std::printf(
         "{\"event\":\"complete\",\"reason\":\"%s\",\"outcome\":\"%s\",\"appUp\":%s,"
         "\"physicalUp\":%s,\"postMotions\":%llu,\"postFrameObservations\":%llu,"
+        "\"postRoute\":\"%s\",\"markedUpObservedInSession\":%s,"
         "\"serverReleaseProven\":false,\"productionDragAuthorized\":false}\n",
         reason, State::name(m_state.outcome()), m_state.appReceivedUp() ? "true" : "false",
         m_state.physicalUp() ? "true" : "false", static_cast<unsigned long long>(m_state.postMotions()),
-        static_cast<unsigned long long>(m_state.postFrameObservations())
+        static_cast<unsigned long long>(m_state.postFrameObservations()), route(), m_markerObserved ? "true" : "false"
     );
     std::fflush(stdout);
     teardown();
@@ -327,6 +340,10 @@ public:
   }
 
 private:
+  const char *route() const
+  {
+    return m_hidRelease ? "hid-windowserver" : "targeted-pid";
+  }
   struct Pointer
   {
     std::uint64_t serial = 0, sourceTime = 0;
@@ -343,9 +360,20 @@ private:
       self->m_lost = true;
       return event;
     }
-    if (!event || !self->m_state.begun() || self->m_stopping ||
-        isWindowshareSyntheticEvent(CGEventGetIntegerValueField(event, kCGEventSourceUserData)))
+    if (!event || !self->m_state.begun() || self->m_stopping)
       return event;
+    if (isWindowshareSyntheticEvent(CGEventGetIntegerValueField(event, kCGEventSourceUserData))) {
+      if (self->m_state.posted() && type == kCGEventLeftMouseUp &&
+          CGEventGetIntegerValueField(event, kCGEventSourceUserData) == syntheticEventTag &&
+          CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID) == getpid())
+        self->m_markerObserved = true;
+      return event;
+    }
+    if (type == kCGEventKeyDown || type == kCGEventFlagsChanged || type == kCGEventRightMouseDown ||
+        type == kCGEventOtherMouseDown) {
+      self->m_lost = true; // Other input cancels this isolated experiment.
+      return event;
+    }
     // Main-run-loop producer and consumer. Fixed storage; no I/O, AX, Qt,
     // allocation, waits, mutation or posting in this listen-only callback.
     if (self->m_written - self->m_read == self->m_pointer.size() || self->m_serial == UINT64_MAX) {
@@ -433,28 +461,67 @@ private:
         finish("modifier-changed-before-submission");
         return;
       }
-      auto event = native::targetedPointerEvent(
-          m_source, m_windowId, *frame, m_localPoint, kCGEventLeftMouseUp, 0, flags, m_eventNumber, m_clicks
-      );
+      CGEventRef event = nullptr;
+      if (m_hidRelease) {
+        // This is a global input-stream post, not a PID-directed event. Limit
+        // the experiment to this active, still-key owned fixture and one held
+        // left button. No key/button is synthesized to establish that state.
+        bool onlyLeft = CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft);
+        for (unsigned button = 1; button < 32; ++button)
+          onlyLeft &= !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, CGMouseButton(button));
+        bool keysUp = true;
+        for (unsigned key = 0; key < 128; ++key)
+          keysUp &= !CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, CGKeyCode(key));
+        if (!NSApp.active || NSApp.keyWindow != m_window || !m_window.visible || !onlyLeft || !keysUp) {
+          finish("system-release-preflight-changed");
+          return;
+        }
+        auto snapshot = CGEventCreate(nullptr);
+        if (!snapshot) {
+          finish("current-pointer-unavailable");
+          return;
+        }
+        const auto point = CGEventGetLocation(snapshot);
+        CFRelease(snapshot);
+        if (!std::isfinite(point.x) || !std::isfinite(point.y) || point.x < frame->x || point.y < frame->y ||
+            point.x >= frame->x + frame->width || point.y >= frame->y + frame->height) {
+          finish("pointer-left-owned-window-before-submission");
+          return;
+        }
+        event = CGEventCreateMouseEvent(m_source, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
+        if (event) {
+          CGEventSetFlags(event, flags);
+          CGEventSetIntegerValueField(event, kCGMouseEventNumber, m_eventNumber);
+          CGEventSetIntegerValueField(event, kCGMouseEventClickState, 0); // Travel already canceled the click.
+        }
+      } else {
+        event = native::targetedPointerEvent(
+            m_source, m_windowId, *frame, m_localPoint, kCGEventLeftMouseUp, 0, flags, m_eventNumber, m_clicks
+        );
+      }
       if (!event) {
-        finish("targeted-up-construction-denied");
+        finish("release-construction-denied");
         return;
       }
       const auto sourceTime = CGEventGetTimestamp(event);
       // Reserve the one shot immediately before the synchronous submission.
-      // postToPid has no WindowServer-grab completion result to interpret.
+      // Neither post API returns a WindowServer-grab completion result.
       if (!m_state.submitted(m_serial, sourceTime, *frame, nowNs())) {
         CFRelease(event);
         finish("submission-deadline-or-correlation-changed");
         return;
       }
-      CGEventPostToPid(getpid(), event);
+      if (m_hidRelease)
+        CGEventPost(kCGHIDEventTap, event);
+      else
+        CGEventPostToPid(getpid(), event);
       CFRelease(event);
-      m_window.title = @"Targeted up submitted — keep holding and moving, then release";
+      m_window.title = m_hidRelease ? @"System up submitted — keep holding and moving, then release"
+                                    : @"Targeted up submitted — keep holding and moving, then release";
       std::printf(
-          "{\"event\":\"targeted-up-submitted\",\"afterPointerSerial\":%llu,\"sourceTime\":%llu,"
+          "{\"event\":\"release-submitted\",\"postRoute\":\"%s\",\"afterPointerSerial\":%llu,\"sourceTime\":%llu,"
           "\"serverReleaseProven\":false}\n",
-          static_cast<unsigned long long>(m_serial), static_cast<unsigned long long>(sourceTime)
+          route(), static_cast<unsigned long long>(m_serial), static_cast<unsigned long long>(sourceTime)
       );
     }
     std::fflush(stdout);
@@ -497,6 +564,7 @@ private:
     }
   }
   State m_state;
+  const bool m_hidRelease;
   DFWindowDragProbeWindow *m_window = nil;
   DFWindowDragProbeDelegate *m_delegate = nil;
   DFWindowDragProbeView *m_view = nil;
@@ -510,7 +578,7 @@ private:
   deskflow::windowshare::Point m_localPoint;
   std::int64_t m_eventNumber = 0;
   int m_clicks = 0;
-  bool m_lost = false, m_stopping = false;
+  bool m_lost = false, m_stopping = false, m_markerObserved = false;
   std::mutex m_deadlineMutex;
   std::condition_variable m_deadlineCondition;
   bool m_finished = false;
@@ -532,7 +600,7 @@ private:
   (void)dirty;
   [[NSColor colorWithCalibratedRed:0.08 green:0.25 blue:0.45 alpha:1] setFill];
   NSRectFill(self.bounds);
-  [@"Hold and drag in this blue area.\nKeep holding and moving after the targeted-up marker.\nThen release. This owned "
+  [@"Hold and drag in this blue area.\nKeep holding and moving after the release marker.\nThen release. This owned "
    @"probe closes after 30 seconds." drawInRect:NSInsetRect(self.bounds, 24, 90)
                                  withAttributes:@{
                                    NSFontAttributeName : [NSFont systemFontOfSize:20],
@@ -563,14 +631,15 @@ int main(int argc, char **argv)
   // No NSApplication, window, event source or event tap in the default mode.
   if (argc == 1)
     return pureTests();
-  if (argc != 2 || std::strcmp(argv[1], "--interactive") != 0) {
-    std::fputs("Usage: windowshare-native-drag-probe [--interactive]\n", stderr);
+  const bool hidRelease = argc == 2 && std::strcmp(argv[1], "--interactive-hid") == 0;
+  if (argc != 2 || (!hidRelease && std::strcmp(argv[1], "--interactive") != 0)) {
+    std::fputs("Usage: windowshare-native-drag-probe [--interactive | --interactive-hid]\n", stderr);
     return 2;
   }
   @autoreleasepool {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    Probe probe;
+    Probe probe(hidRelease);
     if (!probe.start())
       return 2;
     [NSApp run];

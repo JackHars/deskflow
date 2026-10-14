@@ -76,8 +76,10 @@ it). A display-bound parent-plus-child capture path could render the bounded
 union. The Host now uses an [exact private AX/native window join](native-window-identity.md)
 for initial export and recovery, replacing title/geometry matching. Its owned
 native regression covers AX windows, rename and replacement. It does not yet
-establish that an attached sheet, drawer or popup has its own capturable native
-window: the SPI can identify the containing parent instead. Each supported
+establish that every attached sheet, drawer or popup has its own capturable native
+window: the SPI can identify the containing parent instead. The new owned
+AppKit sheet probe on macOS 26.1 observes a distinct sheet native ID with the
+exact attached-parent link; no capture or input is enabled by that observation. Each supported
 child role still needs that distinction, separate retained child geometry,
 painted acknowledgement, stacking, keyboard focus and release ownership.
 A mouse hit-test supplies no AX association, and a child preview alone would

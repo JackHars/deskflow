@@ -6,6 +6,30 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Native identity production checkpoint:** `dbf1f07ef5c28dc898a4a5fa5762b54aca23506d`
+  passes all six hosted jobs in
+  [run 38591194186](https://github.com/JackHars/deskflow/actions/runs/38591194186).
+  `native-identity-role-commit-binding.json` verifies the six identity-related
+  source files against their final local-test hashes. The separate signed
+  exact-library Mac package passes audit, private Core/Host handshake and
+  rejection smoke. Its read-only permission probe reports the exact-identity
+  API available under the packaged signing policy. ZIP SHA-256:
+  `118cbcbe5dd895ae12d623ca3dd1814f27ec082ec1029f7180bfad6fadfcdac4`
+  (47,801,994 bytes). Evidence is `mac-identity-package/evidence.json` under
+  the Oct 14 Mac root. It is staged, not installed; original input stayed disabled.
+- **Further test tools:** the separate `--interactive-hid` drag probe builds
+  and passes default pure accounting plus scoped ASan/UBSan checks. It is a
+  one-shot system-stream experiment restricted to its active owned fixture,
+  not a production input fallback. Its physical run is **NOT_RUN**, awaiting
+  fresh user readiness. Logs are `hid-drag-probe-*` under the Oct 14 Mac root.
+  The `--native-child-probe` observation finds the owned AppKit sheet's distinct
+  native ID and exact attached parent; it posts no input and grants no child
+  rendering authority. Both the regular and scoped ASan/UBSan native runs
+  record that observation and a clean owned-child exit. Leak detection is off
+  and prebuilt Qt/system libraries are not instrumented. Source, binary and
+  log hashes are in `native-probe-tools-evidence.json`. See `native-child-identity-*` and the
+  [procedure](deploy/windowshare/native-window-identity.md). These later tool
+  changes are not covered by the earlier hosted run above.
 - **Supported Linux CI:** all six jobs pass for `c8a9617aa` in
   [run 38586489277](https://github.com/JackHars/deskflow/actions/runs/38586489277),
   including the real EI startup/shutdown regression, ordinary OFF compatibility,

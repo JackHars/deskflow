@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT
 # Owned native window drag observation
 
 `windowshare-native-drag-probe` investigates a prerequisite for natural
-cross-desktop window dragging: whether a targeted mouse-up actually stops
+cross-desktop window dragging: whether a submitted mouse-up actually stops
 WindowServer's native window movement. Receiving a mouse-up in an application
 does not establish that fact. This tool cannot authorize a production handoff.
 
@@ -48,6 +48,40 @@ frame observations respectively. The targeted PID post did **not** end the
 WindowServer drag. Evidence is under
 `build/roadmap-completion-20261014/owned-drag-physical-{1,2}/`.
 Neither run authorizes production handoff or completes H07.
+
+## Separate system-stream experiment
+
+`--interactive-hid` is a different, explicitly selected experiment. It uses
+`CGEventPost(kCGHIDEventTap, ...)` to send one marked mouse-up into the system
+input stream. Apple's [tap-location documentation](https://developer.apple.com/documentation/coregraphics/cgeventtaplocation/cghideventtap)
+places this entry point at WindowServer. This is a global-stream operation,
+not a PID-targeted post or a production Host fallback. No natural-drag support
+is enabled by building or running it.
+
+Obtain fresh readiness for this specific test before launching it. The window
+is titled **Deskflow owned system-release drag probe**. Keep other keys/buttons
+released, drag in its blue area, then keep holding and moving for three seconds
+after **System up submitted** before physically releasing. It closes on that
+real release or after the same 30-second watchdog.
+
+```sh
+build/mac-default/bin/windowshare-native-drag-probe --interactive-hid > owned-hid-drag.jsonl 2> owned-hid-drag.stderr
+```
+
+Before the one allowed submission, the probe requires its own active, visible,
+key window, the original live native ID, the current pointer within that
+window, and only the physical left button held with all keyboard keys released.
+Other observed keys/buttons, observation loss, an early release or an expired
+deadline cancel the experiment. It never posts a down, suppresses real input,
+or changes another application's window. The event uses a private source and
+the current pointer position; no cursor warp or new drag is requested.
+
+Output names `postRoute` (`targeted-pid` or `hid-windowserver`) and separately
+records whether the marked up was observed in the session tap. The original
+down's pointer-window fields are diagnostic samples, not grab-ownership
+certificates. Neither marked-event observation nor an app-up receipt proves
+that WindowServer released the grab. `serverReleaseProven` and
+`productionDragAuthorized` remain false in every mode.
 
 Retain stdout, stderr, exit status, binary/source hashes, macOS version and the
 user's observation. The output distinguishes an app-up receipt, later physical

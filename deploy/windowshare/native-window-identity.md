@@ -58,3 +58,20 @@ malformed identity rejection without native window queries.
 
 Retain the JSON, stderr, exit status, binary/source hashes and OS version.
 This test is an identity regression, not H07 edge-drag or H08 app acceptance.
+
+## Attached-sheet observation
+
+`windowshare-native-identity-tests --native-child-probe` additionally asks its
+owned child process to attach an AppKit sheet. It inspects only the retained
+parent's direct AX children, compares `AXWindow` with that exact parent, and
+compares the SPI result with the fixture's independently reported sheet window
+number. It does not post input or activate the application. Windows are ordered
+behind the current desktop windows.
+
+On macOS 26.1, the fixture's `AXSheet` had its own distinct native window ID and
+an exact attached-parent link. The result is recorded as an observation with
+`childRenderingAuthorized:false`, not remote-dialog acceptance. It does not
+establish behavior for other apps, drawers, menus, popovers or IME surfaces.
+The production Host still returns an unsupported attached sheet's parent
+locally. Capture geometry, painted acknowledgements, stacking, modal focus and
+release ownership must be implemented before remote interaction can be enabled.

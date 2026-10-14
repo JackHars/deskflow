@@ -28,7 +28,10 @@ As of 2026-10-14, queue/admission commit `a2aa7a5e8` passes the home Ubuntu
 Commit `c8a9617aa` requires libei >= 1.5 for experimental Linux builds after
 reproducing an upstream early-teardown crash in older releases; all six hosted
 checks pass. The Mac Host's new private AX/native window-ID join has a passing
-owned native regression and scoped sanitizer checks. It does not establish
+owned native regression and scoped sanitizer checks. Its production commit
+`dbf1f07ef` passes all six hosted jobs and the staged signed Mac package audit
+and private smoke. A subsequent owned AppKit sheet probe observes a distinct
+child native ID and exact parent link. These results do not establish
 drag ownership or remote child support. Two user-operated drag probes observed
 continued movement after targeted PID mouse-up. Normal titlebar dragging is
 still required, and the P5 checklist remains open.
@@ -74,8 +77,8 @@ Do not substitute a success-returning stub for a missing platform capability.
 - Branch: **`feature/seamless-windows`**. Continue this branch or a clearly named
   descendant if your cloud workflow requires one. Never modify `master` or
   `main`, force-push, or merge into the default branch for this assignment.
-- Latest verified CI base: **`c8a9617aa8dd930f5929dbf173d4af374b6068b6`**.
-  Native identity and documentation commits may be newer; start from the branch tip.
+- Latest verified CI base: **`dbf1f07ef5c28dc898a4a5fa5762b54aca23506d`**.
+  Test-tool and documentation commits may be newer; start from the branch tip.
 - Prior implementation: `eda21b39b19004af9f4abfaacb707bb9b380f6f8` adds Server
   ownership before legacy dispatch; `ef5145665` fixes portable core linkage.
 - Original local checkout, useful only to the returning local chat:

@@ -381,7 +381,7 @@ if(WINDOWSHARE_APP)
       target_link_libraries(windowshare-native-identity-tests PRIVATE windowshare-native)
       set_target_properties(windowshare-native-identity-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       # Default invocation is pure accounting only. The owned AppKit window,
-      # listen-only tap and targeted fixture up require explicit --interactive.
+      # listen-only tap and one release require an explicit interactive mode.
       add_executable(windowshare-native-drag-probe NativeWindowDragProbe.mm)
       target_compile_options(windowshare-native-drag-probe PRIVATE -fobjc-arc)
       target_link_libraries(windowshare-native-drag-probe PRIVATE windowshare-native)

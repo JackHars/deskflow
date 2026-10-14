@@ -2,6 +2,22 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+Production identity commit `dbf1f07ef5c28dc898a4a5fa5762b54aca23506d` now
+passes all six [hosted checks](https://github.com/JackHars/deskflow/actions/runs/38591194186).
+Its staged signed exact-library Mac bundle passes audit, private handshake and
+rejection smoke, and a read-only packaged permission probe confirms the private
+identity lookup is available. ZIP SHA-256:
+`118cbcbe5dd895ae12d623ca3dd1814f27ec082ec1029f7180bfad6fadfcdac4`.
+Evidence: `build/roadmap-completion-20261014/mac-identity-package/evidence.json`.
+It has not replaced the installed experimental app; input acceptance remains due.
+
+Later test-tool work adds a separately selected, one-shot system-stream release
+experiment (`--interactive-hid`). Build, pure accounting and scoped sanitizer
+checks pass; fresh user readiness has been requested and the physical run is
+still NOT_RUN. The owned AppKit attached-sheet observation finds a distinct
+native window ID with the exact parent link, but does not enable child capture
+or input. Both production drag and remote child interaction remain unfinished.
+
 Commit `c8a9617aa8dd930f5929dbf173d4af374b6068b6` passes all six hosted
 checks in [run 38586489277](https://github.com/JackHars/deskflow/actions/runs/38586489277).
 It requires libei >= 1.5 for the experimental Linux build. The preceding CI
@@ -40,8 +56,8 @@ sanitizer recovery and native tests also pass. Evidence is
 `build/roadmap-completion-20261014/native-exact-identity-1/` and
 `native-identity-role-evidence.json` and `native-identity-role-sanitize-*`; documentation is
 `deploy/windowshare/native-window-identity.md`. This is a private SPI dependency,
-not native grab authority or completed remote child support. Final packaging
-and hosted checks for this later source remain due.
+not native grab authority or completed remote child support. The production
+source's hosted checks and staged package now pass as recorded above.
 
 The user explicitly requires **normal titlebar dragging**, not a selected-window
 thumbnail interaction. Two fresh user-operated owned drag probes both record
