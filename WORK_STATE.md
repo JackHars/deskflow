@@ -8,15 +8,41 @@ window-under-pointer fields and reported source metadata beside the exact
 input stamp. Capture completion and the existing Session/Server copy queue
 preserve it without a second raw consumer or a protocol change. Missing IDs
 stay unavailable; these observations grant no drag or posting authority.
-The full Mac build, 16 related routing/input suites and four scoped ASan/UBSan
-suites pass. Two shared input suites also compile and pass on the home Ubuntu
+At committed checkpoint `09d0fbfe8`, the full Mac build, 16 related routing/input
+suites and four scoped ASan/UBSan suites pass. Two shared input suites also
+compile and pass on the home Ubuntu
 machine with GCC 15.2, both normally and with ASan/UBSan (four executions).
-That remote test uses source hashes matching this working tree and removes
+That remote test uses source hashes matching that checkpoint and removes
 only its own temporary directory. See `TESTING.md` for exact evidence and limits.
 
 The new passive `windowshare-native-titlebar-probe` builds and observes a normal
 AppKit titlebar through that same adapter. It neither posts nor suppresses
-input. A fresh readiness question is pending; the physical run is **NOT_RUN**.
+input. Two physical attempts stopped before a titlebar-down: added rejection
+diagnostics identify the first trackpad mouse move's subtype 3 as the cause.
+The old adapter accepted only subtype 0. A constructed-only regression
+reproduces the failure, and support for touch-origin mouse-button/movement
+semantics is now implemented. Native touch/pressure/gesture reconstruction
+remains unsupported. The next physical run records the ordinary titlebar down,
+244 drag events and 164 owned-window frame changes, then exposes a second bug:
+the native drag-ending up has zero clicks, which the adapter rejects. Both
+event-time window IDs on the down are zero; HID-head fields alone do not
+identify the arbitrary app window. That failed run remains preserved.
+
+The zero-click release correction now preserves the native value through
+capture, portable validation and delivery. Receiver release still requires its
+exact retained button press and current route; positive click counts must still
+match. New regressions reproduce the old failure. The two corrected Mac capture
+suites and four scoped ASan/UBSan suites pass. Current source also passes both
+shared input suites normally and with sanitizers on the home Ubuntu machine
+(four executions, GCC 15.2, exact transferred hashes, owned temporary directory
+removed). The fresh passive repeat (`owned-titlebar-physical-20261014T171313Z`)
+passes: normal titlebar down, 226 drag events, 150 frame changes and the real
+release 4.022 seconds later, with clean shutdown and no input posting. Both
+HID-head window IDs remain zero. The full Mac Core/Host build passes. All nine
+related integration suites pass across the initial 8/9 run and the corrected
+IPC suite's separate pass: its expected byte fixture needed the zero-count
+sample, while the previous positive-count representation remains covered.
+Evidence is `titlebar-zero-up-final-evidence.json` under the Oct 14 root.
 Procedure and limits: `deploy/windowshare/native-titlebar-probe.md`.
 This does not complete automatic titlebar detection, transfer or P5/H07.
 

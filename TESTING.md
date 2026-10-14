@@ -6,6 +6,58 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Normal titlebar capture passes on the Mac:** with fresh user readiness and
+  both capture fixes, `owned-titlebar-physical-20261014T171313Z` records one
+  ordinary titlebar down, **226 drag events, 150 owned-frame changes and one
+  real release 4.022145439 seconds later**. It completes with `physical-release`,
+  exit 0, no capture rejection, no input posted/suppressed, and no probe left
+  running. `analysis.json` verifies the raw evidence hashes and sequence/time
+  ordering; `titlebar-zero-up-evidence.json` freezes the exact code/binary.
+  This passes owned normal-titlebar capture only. Both HID-head native window
+  IDs are still zero: arbitrary-app detection, transfer and **P5/H07 remain open**.
+- **Native zero-click release failure and correction:** the fresh run
+  `owned-titlebar-physical-20261014T170310Z` records an ordinary titlebar down,
+  **244 drag events and 164 independent owned-frame changes**. It then revokes
+  on the real touch-origin left-up (type 2, subtype 3, click count 0). Its exit 0
+  does not make it a pass: `complete.reason` is `capture-revoked`. Both window
+  ID fields on the down are **zero**, so the known fixture's identity cannot be
+  generalized to arbitrary application windows. `analysis.json` binds this
+  interpretation to the retained raw evidence. No input was posted/suppressed.
+  Three new regressions fail against the old zero-up guards
+  (`titlebar-zero-up-red-*`). The fix preserves zero on up through capture,
+  validation, IPC and native receiver preparation; down still requires a
+  positive count, and release still requires the exact retained press/route.
+  The corrected two Mac capture suites and four scoped ASan/UBSan suites pass
+  (`titlebar-zero-up-capture-*`, `titlebar-zero-up-sanitize-*`). Current shared
+  code also passes **4/4 home Ubuntu executions**: original-input and route,
+  normal plus ASan/UBSan, strict GCC 15.2, exact verified transferred source
+  hashes. Only the test's temporary directory is removed; no desktop input is
+  posted. See `titlebar-zero-up-ubuntu-portable/result.json`. This is portable
+  code verification, not a native Ubuntu acceptance rerun. The Mac Core/Host
+  build passes; the integrated run passes 8/9 suites. The sole IPC failure was
+  an expected-byte fixture still describing the old positive-count sample.
+  Its corrected zero-count golden vector and a retained positive-count check
+  pass the separate IPC rerun (`titlebar-zero-up-ipc-tests-2.*`). The failed
+  integrated result is retained; all nine related suites have a current pass.
+  The fresh physical repeat passes above. Final source and result hashes are
+  bound in `titlebar-zero-up-final-evidence.json`; the golden-vector correction
+  changes only tests after the physical run, not its probe or production code.
+- **Trackpad capture failure reproduced:** the normal-titlebar attempt
+  `owned-titlebar-physical-20261014T165243Z` stops before any titlebar-down record.
+  After adding first-rejection diagnostics, the fresh repeat
+  `owned-titlebar-physical-20261014T165717Z` records callback/native type 5,
+  subtype 3, flags 0, zero deltas and a nonzero native timestamp. The old adapter
+  returns Malformed and revokes on that first event. Both processes exit and
+  post no input; neither is a successful drag observation. The documented
+  `NX_SUBTYPE_MOUSE_TOUCH` was incorrectly excluded with tablet subtypes.
+  The constructed-only regression fails against that old adapter; see
+  `titlebar-touch-red-{test.log,test.xml,evidence.json}` under the Oct 14 root.
+  The correction supports touch-origin mouse pointer semantics, preserves the
+  subtype locally and continues rejecting tablet/unknown subtypes. The next
+  physical run above confirms the down/drag path and exposes the separate
+  zero-click-up bug; no touch-contact or gesture delivery is claimed. Before
+  the zero-up correction, seven related integration suites also pass
+  (`titlebar-touch-integrated-*`); that result does not cover the release fix.
 - **Event-time pointer metadata:** the existing production capture/completion
   path and Server copy conduit now retain position, native window IDs and
   reported source fields with the exact epoch/sequence/source timestamp. The
@@ -29,7 +81,7 @@ SPDX-License-Identifier: MIT
   sanitizer retests both pass (`titlebar-final-adapter-*`). Source, binaries
   and results are bound in `titlebar-capture-final-evidence.json`. A new
   passive [normal-titlebar probe](deploy/windowshare/native-titlebar-probe.md)
-  builds; its physical run is **NOT_RUN**, pending fresh user readiness.
+  builds; the subsequent physical failures and correction are recorded above.
   P5/H07 remains open. These changes do not enable export or input redirection.
 - **HID-head physical repeat:** exact `f5517122cdb800232e41e7e1ee9176d8dff7170d`,
   source/binary hash verification and fresh user readiness. The run

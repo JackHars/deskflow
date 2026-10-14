@@ -225,7 +225,7 @@ std::vector<OriginalInputRecord> mixedRecords()
        OriginalInputScroll{
            {minimum, maximum}, {-1, 0}, {65536, -65536}, OriginalScrollPhase::Began, OriginalMomentumPhase::None, true
        }},
-      {21, 150, 1005, shifted, OriginalInputButton{31, false, 3}},
+      {21, 150, 1005, shifted, OriginalInputButton{31, false, 0}},
       {21, 160, 1006, extraFlag, up},
       {21, 170, 1007, extraFlag, OriginalInputBoundary::Checkpoint}
   };
@@ -1002,7 +1002,7 @@ void preflightValues()
       "031f017fffffff",
       "0200000001fffffffe1f",
       "04800000007fffffffffffffff0000000000010000ffff0000010001",
-      "031f0000000003",
+      "031f0000000000", // Native drag release preserves zero clicks on the wire.
       "01000000280038030002",
       "0500"
   };
@@ -1015,6 +1015,13 @@ void preflightValues()
         "Mixed original golden record bytes changed"
     );
   }
+  auto countedUp = records[5];
+  std::get<OriginalInputButton>(countedUp.payload).clickCount = 3;
+  check(
+      validOriginalInputRecord(countedUp) &&
+          originalPayload(original, countedUp).mid(216) == QByteArray::fromHex("031f0000000003"),
+      "Positive-count release wire representation remains unchanged"
+  );
   check(originalPayload(original, records[4]).size() == 244, "Scroll payload exceeded its fixed bounded layout");
   check(
       originalPayload(original, records[0]).mid(192, 24) ==
@@ -2054,12 +2061,15 @@ void mixedInputAndMalformedRecords()
   altered(2, 25, 32);  // Invalid button.
   altered(2, 26, 2);   // Button direction is a strict bool.
   altered(2, 27, 128); // Click count exceeds signed32.
-  altered(4, 49, 3);   // Scroll phase is an enum, never a bitmask.
-  altered(4, 50, 4);   // Momentum phase.
-  altered(4, 50, 1);   // Gesture and momentum cannot overlap.
-  altered(4, 51, 2);   // Continuous is a strict bool.
-  altered(4, 51, 0);   // Phased discrete scroll is inconsistent.
-  altered(7, 25, 1);   // Discontinuity/emergency are never delivered.
+  auto zeroClickDown = records[2];
+  std::get<OriginalInputButton>(zeroClickDown.payload).clickCount = 0;
+  malformed.push_back(originalPayload(fixtureLease(), zeroClickDown));
+  altered(4, 49, 3); // Scroll phase is an enum, never a bitmask.
+  altered(4, 50, 4); // Momentum phase.
+  altered(4, 50, 1); // Gesture and momentum cannot overlap.
+  altered(4, 51, 2); // Continuous is a strict bool.
+  altered(4, 51, 0); // Phased discrete scroll is inconsistent.
+  altered(7, 25, 1); // Discontinuity/emergency are never delivered.
   altered(7, 25, 2);
   altered(7, 25, 255);
   auto unknownFlags = records[1];

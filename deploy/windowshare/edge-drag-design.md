@@ -75,8 +75,16 @@ epoch/sequence/timestamp. The sole raw consumer and existing Server copy conduit
 preserve that observation. It is not serialized as remote authority and zero
 IDs remain unavailable. Adding a later AX hit test would not repair missing
 event-time grab identity. The new [normal titlebar probe](native-titlebar-probe.md)
-uses this real capture path without posting or suppressing input; its physical
-run is still pending.
+uses this real capture path without posting or suppressing input. Its physical
+run on 2026-10-14 records a normal titlebar down and 244 drag events with 164
+owned-frame changes, but **both event-time window IDs are zero** at HID-head.
+This directly rules out those fields alone as the missing arbitrary-window
+identity source on the tested Mac. The known fixture geometry is not a
+production substitute. The same run exposes a zero-click native release
+rejection. The corrected fresh repeat records down, 226 drags, 150 frame changes
+and the real release without capture loss, while both native IDs remain zero.
+Exact evidence is tracked in the probe document. No native drag ownership
+transfer is established by these results.
 
 An explicitly preselected exact source could support a narrower, declared
 "preview and drop this selected window" interaction: the user has already

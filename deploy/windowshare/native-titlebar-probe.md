@@ -11,7 +11,8 @@ the [owned release experiment](native-drag-probe.md), whose content view calls
 input and never invokes that drag API.
 
 The production capture adapter now retains event-time position, both Quartz
-window-under-pointer fields, native event number and reported source PID/state.
+window-under-pointer fields, native event number, mouse subtype and reported
+source PID/state.
 `OriginalPointerObservation` is local metadata beside the input record, bound
 to its epoch, sequence and source timestamp. The existing completed-capture
 queue and Session/Server copy conduit carry it; there is no additional raw
@@ -52,6 +53,10 @@ whether they equal the owned window. Missing IDs must not be filled from the
 fixture, foreground app or a later hit test. `owned-frame` records independent
 frame changes, and `physical-up` retains the later unmarked input stamp.
 Other input, a second down, source loss or a deadline ends the observation.
+On capture loss, `capture-rejection` preserves the first rejecting event's
+scalar fields and the retained epoch's reason. This diagnostic performs no
+logging or native query in the tap, stores no typed text and never restarts
+the failed capture stream. A normal process exit alone is not a successful test.
 
 ## Acceptance boundary
 
@@ -59,7 +64,42 @@ Constructed-event regressions cover metadata copying, missing/invalid fields,
 synthetic filtering, mutation after capture, exact stamp matching and queue
 lifetime. They do not establish what a physical titlebar drag supplies.
 
-The physical normal-titlebar run is **NOT_RUN** as of this implementation
-checkpoint; a readiness request is pending. P5/H07 remains open. Even matching
-native IDs plus observed frame movement would be evidence for further candidate
-detection work, not a native-grab completion or cross-machine transfer receipt.
+The first two physical attempts on 2026-10-14 failed before recording a
+titlebar-down. The first (`owned-titlebar-physical-20261014T165243Z`) reported
+only `capture-revoked`. The diagnostic repeat (`20261014T165717Z`) identifies
+the first event as a valid touch-origin mouse move (type 5, subtype 3, flags 0,
+zero deltas). The old adapter rejected every nondefault mouse subtype, so an
+ordinary trackpad move revoked capture before the drag could begin. These
+failures remain recorded under `build/roadmap-completion-20261014/`.
+
+The adapter now accepts the documented touch-mouse subtype as mouse-button and
+movement semantics, while retaining its subtype in local observations. Tablet
+and unknown subtypes still fail. This does not implement raw touch contacts,
+pressure or gestures. The recorded mouse sample reproduces the old rejection
+in a constructed-only regression.
+
+The next fresh run (`owned-titlebar-physical-20261014T170310Z`) records the
+ordinary titlebar down, 244 drag events and 164 independent owned-frame changes.
+It then rejects the native left-up: touch-mouse subtype 3, click count **0**.
+That run remains failed at physical release. Both event-time window IDs at its
+down are **zero**, despite the known fixture being dragged. HID-head window
+fields alone cannot identify an arbitrary source on this tested Mac.
+
+The release correction permits zero only on up and preserves it through the
+portable record, local IPC and native receiver preparation. It does not copy
+the down's count onto the captured up. The receiver still requires the exact
+retained button press, route, capture epoch and forward sequence/time; nonzero
+counts must match the press. Regressions cover capture continuity, private
+event reconstruction, source transition evidence, press ownership and IPC.
+The fresh physical repeat with both corrections
+(`owned-titlebar-physical-20261014T171313Z`) passes: normal titlebar down, 226
+drag events, 150 independent frame changes and the real release 4.022145439
+seconds later. It completes with `physical-release`, no capture rejection,
+exit 0 and no surviving probe process. No input is posted or suppressed.
+Source/binary hashes are bound in `titlebar-zero-up-evidence.json`; the run's
+`analysis.json` verifies raw evidence hashes and ordering. Both event-time
+window IDs remain zero, so only owned normal-titlebar capture passes here.
+
+P5/H07 remains open. Even matching native IDs plus observed frame movement
+would be evidence for further candidate detection work, not a native-grab
+completion or cross-machine transfer receipt.

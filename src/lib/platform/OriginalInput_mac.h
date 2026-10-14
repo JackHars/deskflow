@@ -34,6 +34,8 @@ struct OriginalInputCapture
 // physical continuity, ownership, nor the neutral startup barrier.
 // Pointer observations preserve supplied event fields only. Missing or invalid
 // optional metadata does not invalidate an otherwise supported input record.
+// Default and touch-origin mouse events share pointer semantics. Native touch
+// contacts, pressure, gestures and tablet event reconstruction are unsupported.
 OriginalInputCapture captureOriginalInputEvent(
     CGEventType callbackType, CGEventRef event, std::uint64_t epoch, std::uint64_t sequence
 ) noexcept;

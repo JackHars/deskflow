@@ -5,6 +5,7 @@
 #include "platform/OriginalInput_mac.h"
 #include "windowshare/PlatformMarkers.h"
 
+#include <IOKit/hidsystem/IOLLEvent.h>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -252,6 +253,49 @@ void testKeysAndRawModifierTransitions()
   }
 }
 
+void testTrackpadMousePointer()
+{
+  Fixture fixture;
+  const std::pair<CGEventType, unsigned> kinds[]{{kCGEventMouseMoved, 0},        {kCGEventLeftMouseDown, 0},
+                                                 {kCGEventLeftMouseDragged, 0},  {kCGEventLeftMouseUp, 0},
+                                                 {kCGEventRightMouseDown, 1},    {kCGEventRightMouseDragged, 1},
+                                                 {kCGEventRightMouseUp, 1},      {kCGEventOtherMouseDown, 2},
+                                                 {kCGEventOtherMouseDragged, 2}, {kCGEventOtherMouseUp, 2}};
+  for (const auto &[type, button] : kinds) {
+    Owned<CGEventRef> event{fixture.pointer(type, button)};
+    CGEventSetIntegerValueField(event.get(), kCGMouseEventSubtype, NX_SUBTYPE_MOUSE_TOUCH);
+    CGEventSetFlags(event.get(), 0);
+    CGEventSetIntegerValueField(event.get(), kCGMouseEventDeltaX, 0);
+    CGEventSetIntegerValueField(event.get(), kCGMouseEventDeltaY, 0);
+    const bool up = type == kCGEventLeftMouseUp || type == kCGEventRightMouseUp || type == kCGEventOtherMouseUp;
+    CGEventSetIntegerValueField(event.get(), kCGMouseEventClickState, up ? 0 : 1);
+    CGEventSetTimestamp(event.get(), 153518096617967ULL);
+    check(
+        CGEventGetIntegerValueField(event.get(), kCGMouseEventSubtype) == NX_SUBTYPE_MOUSE_TOUCH,
+        "fixture reproduces the physical trackpad's touch-mouse subtype"
+    );
+    const auto captured = capture(type, event.get());
+    check(
+        captured.status == OriginalInputCapture::Status::Captured && captured.record && captured.pointer &&
+            captured.pointer->mouseSubtype == NX_SUBTYPE_MOUSE_TOUCH,
+        "touch-origin mouse motion/button events retain pointer semantics instead of revoking capture"
+    );
+    Owned<CGEventRef> output{createOriginalInputEvent(*captured.record, targetPoint, fixture.source.get())};
+    checkOutput(output.get(), fixture.source.get(), *captured.record);
+    check(
+        CGEventGetType(output.get()) == type &&
+            CGEventGetIntegerValueField(output.get(), kCGMouseEventSubtype) == kCGEventMouseSubtypeDefault,
+        "remote construction represents mouse semantics, without fabricating touch contacts"
+    );
+    if (up)
+      check(
+          std::get<OriginalInputButton>(captured.record->payload).clickCount == 0 &&
+              CGEventGetIntegerValueField(output.get(), kCGMouseEventClickState) == 0,
+          "touch-origin drag release preserves the observed zero click count"
+      );
+  }
+}
+
 void testMotionAndEveryButton()
 {
   Fixture fixture;
@@ -286,7 +330,9 @@ void testMotionAndEveryButton()
                               : button == 1 ? (down ? kCGEventRightMouseDown : kCGEventRightMouseUp)
                                             : (down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp);
       Owned<CGEventRef> press{fixture.pointer(buttonType, button)};
-      for (const auto clicks : {1, 2, 3, maximum}) {
+      for (const auto clicks : {0, 1, 2, 3, maximum}) {
+        if (down && clicks == 0)
+          continue;
         CGEventSetIntegerValueField(press.get(), kCGMouseEventClickState, clicks);
         const auto record = captured(press.get());
         const auto value = std::get<OriginalInputButton>(record.payload);
@@ -482,7 +528,8 @@ void testMalformedInputAndDiscontinuities()
     malformed(pointer.get());
   }
   CGEventSetIntegerValueField(pointer.get(), kCGMouseEventClickState, 1);
-  for (const auto subtype : {kCGEventMouseSubtypeTabletPoint, kCGEventMouseSubtypeTabletProximity}) {
+  for (const int subtype :
+       std::array<int, 5>{-1, kCGEventMouseSubtypeTabletPoint, kCGEventMouseSubtypeTabletProximity, 4, 255}) {
     CGEventSetIntegerValueField(pointer.get(), kCGMouseEventSubtype, subtype);
     malformed(pointer.get());
   }
@@ -857,6 +904,7 @@ int main()
     testConstructionLimitsAndSources();
     testOwnerReleaseIntents();
     testMixedQueueCopies();
+    testTrackpadMousePointer();
     testEventTimePointerObservation();
     std::cout << "OriginalInput Mac private-event tests passed\n";
   } catch (const std::exception &error) {

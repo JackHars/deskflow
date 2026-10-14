@@ -127,8 +127,11 @@ public:
         if (const auto *key = std::get_if<OriginalInputKey>(&record.payload)) {
           if (std::get<OriginalInputKey>(press->payload).keyboardType != key->keyboardType)
             return std::nullopt;
-        } else if (std::get<OriginalInputButton>(press->payload).clickCount !=
-                   std::get<OriginalInputButton>(record.payload).clickCount) {
+        } else if (const auto clicks = std::get<OriginalInputButton>(record.payload).clickCount;
+                   clicks && std::get<OriginalInputButton>(press->payload).clickCount != clicks) {
+          // Zero is a native drag-ending up with no click count. It still
+          // needs this exact route's retained button press; nonzero counts
+          // must match that press. Do not rewrite the captured release.
           return std::nullopt;
         }
         pending.prepared.press = press;

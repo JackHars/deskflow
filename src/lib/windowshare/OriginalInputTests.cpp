@@ -142,7 +142,9 @@ void testRecords()
   record.payload = OriginalInputButton{32, true, 1};
   check(!validOriginalInputRecord(record), "button count bound");
   record.payload = OriginalInputButton{31, true, 0};
-  check(!validOriginalInputRecord(record), "missing click state rejected");
+  check(!validOriginalInputRecord(record), "missing down click state rejected");
+  record.payload = OriginalInputButton{31, false, 0};
+  check(validOriginalInputRecord(record), "native drag release can carry zero clicks without normalization");
   record.payload = OriginalInputButton{31, true, 3};
   check(validOriginalInputRecord(record), "native click count retained beyond double click");
   record.payload =
@@ -616,10 +618,10 @@ void testPressOwnersAndReleases()
       !ledger.observe(fixture.emit(OriginalInputMotion{3, 4, 2}), 22).delivery,
       "ledger does not authorize a pointer mapping"
   );
-  auto up = ledger.observe(fixture.emit(OriginalInputButton{2, false, 2}), 22);
+  auto up = ledger.observe(fixture.emit(OriginalInputButton{2, false, 0}), 22);
   check(
       up.delivery && up.delivery->owner == 11 && up.delivery->pressSequence == button.delivery->pressSequence,
-      "button up stays with original owner despite selection change"
+      "zero-click button up stays with original owner despite selection change"
   );
   auto repeated = ledger.observe(fixture.emit(key(0, OriginalKeyTransition::Repeat)), 22);
   check(

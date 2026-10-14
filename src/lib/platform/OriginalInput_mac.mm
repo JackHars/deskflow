@@ -6,6 +6,7 @@
 #include "OriginalKeyboard_mac.h"
 #include "windowshare/PlatformMarkers.h"
 
+#include <IOKit/hidsystem/IOLLEvent.h>
 #include <cmath>
 #include <limits>
 #include <type_traits>
@@ -145,9 +146,12 @@ bool readPayload(CGEventType type, CGEventRef event, OriginalInputRecord &record
   default:
     break;
   }
-  // Tablet subtypes carry data this protocol cannot represent. Never silently
-  // turn them into a mouse record with the tablet information discarded.
-  if (CGEventGetIntegerValueField(event, kCGMouseEventSubtype) != kCGEventMouseSubtypeDefault)
+  // Trackpads emit ordinary mouse-button/movement events with the documented
+  // touch-mouse subtype. Model their mouse semantics; this protocol does not
+  // reconstruct touch contacts, pressure or gesture events. Tablet and unknown
+  // subtypes still require information this mouse protocol cannot represent.
+  const auto subtype = CGEventGetIntegerValueField(event, kCGMouseEventSubtype);
+  if (subtype != kCGEventMouseSubtypeDefault && subtype != NX_SUBTYPE_MOUSE_TOUCH)
     return false;
   const bool motion = type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged ||
                       type == kCGEventRightMouseDragged || type == kCGEventOtherMouseDragged;
@@ -163,9 +167,11 @@ bool readPayload(CGEventType type, CGEventRef event, OriginalInputRecord &record
     return true;
   }
   const auto clicks = CGEventGetIntegerValueField(event, kCGMouseEventClickState);
-  if (clicks <= 0 || clicks > std::numeric_limits<std::int32_t>::max())
-    return false;
   const bool down = type == kCGEventLeftMouseDown || type == kCGEventRightMouseDown || type == kCGEventOtherMouseDown;
+  // WindowServer can report zero clicks on the up that ends a native drag.
+  // Preserve it; only a down must carry a positive click count.
+  if (clicks < 0 || (down && clicks == 0) || clicks > std::numeric_limits<std::int32_t>::max())
+    return false;
   record.payload = OriginalInputButton{static_cast<std::uint8_t>(button), down, static_cast<std::uint32_t>(clicks)};
   return true;
 }
@@ -238,7 +244,8 @@ pointerObservation(CGEventRef event, const OriginalInputRecord &record) noexcept
       static_cast<std::uint32_t>(handling),
       CGEventGetIntegerValueField(event, kCGMouseEventNumber),
       CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID),
-      CGEventGetIntegerValueField(event, kCGEventSourceStateID)
+      CGEventGetIntegerValueField(event, kCGEventSourceStateID),
+      CGEventGetIntegerValueField(event, kCGMouseEventSubtype)
   };
   return value.matches(record) ? std::optional(value) : std::nullopt;
 }

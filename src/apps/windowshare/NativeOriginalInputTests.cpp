@@ -385,6 +385,45 @@ void deniedPressTransitions()
   }
 }
 
+void zeroClickDragRelease()
+{
+  for (const std::uint8_t button : {0, 1, 31}) {
+    Fixture f;
+    check(!f.prepare(f.record(OriginalInputButton{button, false, 0})), "zero-click orphan up has no owner");
+    check(!f.prepare(f.record(OriginalInputButton{button, true, 0})), "zero-click down cannot acquire a press");
+    const auto down = f.send(OriginalInputButton{button, true, 3});
+    f.send(OriginalInputMotion{12, -19, button});
+    const auto up = f.record(OriginalInputButton{button, false, 0});
+    auto staleOwner = f.owner;
+    ++staleOwner.generation;
+    check(!f.state.prepare(staleOwner, up, point(), 640, 480), "zero clicks cannot bypass exact route ownership");
+    auto invalid = up;
+    ++invalid.epoch;
+    check(!f.prepare(invalid), "zero clicks cannot release a different capture epoch");
+    invalid = up;
+    invalid.sequence = down.sequence;
+    check(!f.prepare(invalid), "zero clicks cannot bypass capture ordering");
+    invalid = up;
+    invalid.sourceTimestampNs = down.sourceTimestampNs - 1;
+    check(!f.prepare(invalid), "zero clicks cannot bypass source time ordering");
+    invalid = up;
+    std::get<OriginalInputButton>(invalid.payload).button = (button + 1) % originalInputButtonCount;
+    check(!f.prepare(invalid), "zero-click up cannot release a different button");
+    const auto pending = f.prepare(up);
+    check(
+        pending && pending->press && pending->press->sequence == down.sequence &&
+            std::get<OriginalInputButton>(pending->press->payload).clickCount == 3 &&
+            std::get<OriginalInputButton>(pending->record.payload).clickCount == 0,
+        "drag release retains both its zero click count and its exact original down"
+    );
+    check(f.state.submitted(pending->token) && f.state.empty(), "zero-click release retires the delivered press");
+    check(!f.prepare(up), "zero-click release cannot be replayed");
+    check(!f.prepare(f.record(OriginalInputButton{button, false, 0})), "later zero-click up cannot reacquire an owner");
+    const auto cleanup = f.state.revoke(f.owner);
+    check(cleanup && cleanup->releases.empty(), "completed zero-click release needs no duplicate cleanup up");
+  }
+}
+
 void mappingAndOrder()
 {
   Fixture f;
@@ -500,6 +539,7 @@ int main()
     exactAdmission();
     pressesAndCleanup();
     deniedPressTransitions();
+    zeroClickDragRelease();
     mappingAndOrder();
     scrollOwnership();
     std::cout << "PASS: native original-input owner, mapping, press/drag/modifier cleanup and lifecycle fences\n";

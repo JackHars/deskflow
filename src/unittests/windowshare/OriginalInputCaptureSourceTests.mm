@@ -7,6 +7,7 @@
 #include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/PlatformMarkers.h"
 
+#include <IOKit/hidsystem/IOLLEvent.h>
 #include <barrier>
 #include <chrono>
 #include <future>
@@ -217,6 +218,41 @@ void transitionModifiersAndButtons()
   check(source.checkpoint(101, 0), "logical checkpoint captured");
   const auto checkpoint = source.popCaptured();
   check(checkpoint && !acquires(*checkpoint), "checkpoint cannot mint transition or physical-neutral evidence");
+}
+
+void touchDragZeroClickRelease()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "touch drag capture starts");
+  const auto epoch = source.epoch();
+  // The observed physical sequence is a positive-count down, mouse drag, then
+  // a zero-count up. The up must survive both capture and completion unchanged.
+  event.button(0, true);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventSubtype, NX_SUBTYPE_MOUSE_TOUCH);
+  const auto down = captureCompleted(source, event);
+  CGEventSetTimestamp(event.event, 101);
+  CGEventSetType(event.event, kCGEventLeftMouseDragged);
+  captureCompleted(source, event);
+  event.button(0, false);
+  CGEventSetTimestamp(event.event, 102);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventSubtype, NX_SUBTYPE_MOUSE_TOUCH);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventClickState, 0);
+  const auto up = captureCompleted(source, event);
+  check(
+      epoch.live() && up.input.live() && up.pointer && up.pointer->matches(up.input.record) &&
+          up.pointer->mouseSubtype == NX_SUBTYPE_MOUSE_TOUCH &&
+          std::get<OriginalInputButton>(up.input.record.payload).clickCount == 0 &&
+          up.input.record.sequence == down.input.record.sequence + 2,
+      "zero-click trackpad release preserves capture continuity and exact local metadata"
+  );
+  event.button(0, true);
+  CGEventSetTimestamp(event.event, 103);
+  const auto next = captureCompleted(source, event);
+  check(
+      acquires(next) && next.transition.precedingReleaseSequence() == up.input.record.sequence,
+      "zero-click release establishes only its own next fresh button down"
+  );
 }
 
 void transitionScrollOwnership()
@@ -543,18 +579,21 @@ void pointerObservationLifetime()
   check(source.start(), "pointer observation capture starts");
   event.button(0, true);
   CGEventSetLocation(event.event, {-22.5, 300.25});
+  CGEventSetIntegerValueField(event.event, kCGMouseEventSubtype, NX_SUBTYPE_MOUSE_TOUCH);
   CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointer, 71);
   CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 81);
   const auto stamp = source.beginCapture(kCGEventLeftMouseDown, event.event);
   check(bool(stamp) && !source.popCaptured(), "metadata waits for the same legacy translation completion");
   CGEventSetLocation(event.event, {999, 1000});
   CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointer, 99);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventSubtype, kCGEventMouseSubtypeDefault);
   source.completeCapture({stamp, 1, false});
   const auto captured = source.popCaptured();
   check(
       captured && captured->pointer && captured->pointer->matches(captured->input.record) &&
           captured->pointer->x == -22.5 && captured->pointer->y == 300.25 &&
-          captured->pointer->windowUnderPointer == 71 && captured->pointer->windowHandlingPointer == 81,
+          captured->pointer->windowUnderPointer == 71 && captured->pointer->windowHandlingPointer == 81 &&
+          captured->pointer->mouseSubtype == NX_SUBTYPE_MOUSE_TOUCH,
       "completed capture retains event-time values rather than reading a mutated Quartz event"
   );
   const auto inbox = source.completedInput();
@@ -562,7 +601,8 @@ void pointerObservationLifetime()
   const auto copied = inbox->pop();
   check(
       copied && copied->pointer && copied->pointer->matches(copied->input.record) &&
-          copied->pointer->windowUnderPointer == 71 && copied->pointer->x == -22.5,
+          copied->pointer->windowUnderPointer == 71 && copied->pointer->x == -22.5 &&
+          copied->pointer->mouseSubtype == NX_SUBTYPE_MOUSE_TOUCH,
       "one-consumer copy path preserves pointer metadata"
   );
   check(source.checkpoint(101, 0), "checkpoint follows pointer input");
@@ -593,6 +633,7 @@ int main()
     translationCompletion();
     transitionKeyOwnership();
     transitionModifiersAndButtons();
+    touchDragZeroClickRelease();
     transitionScrollOwnership();
     discontinuitiesAndEmergency();
     emergencyRecognition();

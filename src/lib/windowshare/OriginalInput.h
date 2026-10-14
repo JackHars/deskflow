@@ -33,6 +33,8 @@ struct OriginalInputButton
 {
   std::uint8_t button = 0;
   bool down = false;
+  // Positive on down; a native drag-ending up may report zero. Preserve that
+  // value while resolving release ownership from the retained original press.
   std::uint32_t clickCount = 1;
 };
 enum class OriginalScrollPhase : std::uint8_t
@@ -82,6 +84,9 @@ struct OriginalPointerObservation
   double x = 0, y = 0;
   std::uint32_t windowUnderPointer = 0, windowHandlingPointer = 0;
   std::int64_t eventNumber = 0, sourceProcess = 0, sourceState = 0;
+  // Preserve the local mouse/touch origin without claiming touch-contact
+  // reconstruction in the mouse-button/motion wire representation.
+  std::int64_t mouseSubtype = 0;
 
   // Zero window IDs mean unavailable. They never identify the desktop, the
   // foreground window, or a replacement object discovered by a later query.

@@ -73,6 +73,7 @@ public:
     m_frameTime = Clock::now();
     if (!m_windowId || !m_lastFrame || !m_capture.start())
       return false;
+    m_epoch = m_capture.epoch();
     const auto mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
                       CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved) |
                       CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown) |
@@ -101,11 +102,48 @@ public:
   }
 
 private:
+  struct RejectedEvent
+  {
+    CGEventType callbackType = kCGEventNull, nativeType = kCGEventNull;
+    OriginalInputCapture::Status adapterStatus = OriginalInputCapture::Status::Ignored;
+    std::uint64_t timestamp = 0, previousTimestamp = 0, flags = 0, callbackCount = 0;
+    std::int64_t subtype = 0, button = 0, clicks = 0, dx = 0, dy = 0, sourcePid = 0, sourceState = 0;
+  };
   static CGEventRef tapped(CGEventTapProxy, CGEventType type, CGEventRef event, void *context)
   {
     // No native query, allocation, log, wait, mutation or posting here. The
     // same adapter/completion queue used by OSXComputer retains event fields.
-    static_cast<Probe *>(context)->m_capture.capture(type, event);
+    auto &probe = *static_cast<Probe *>(context);
+    const bool wasLive = probe.m_epoch.live();
+    ++probe.m_callbackCount;
+    probe.m_capture.capture(type, event);
+    if (wasLive && !probe.m_epoch.live()) {
+      // Preserve the first rejected event's scalar fields before the callback
+      // returns. Re-reading supplied fields for diagnostics creates no second
+      // queue consumer and cannot repair or restart the revoked source.
+      auto &failure = probe.m_rejected.emplace();
+      failure.callbackType = type;
+      failure.callbackCount = probe.m_callbackCount;
+      failure.previousTimestamp = probe.m_previousTimestamp;
+      failure.adapterStatus = captureOriginalInputEvent(type, event, 1, 1).status;
+      if (event && type != kCGEventTapDisabledByTimeout && type != kCGEventTapDisabledByUserInput) {
+        failure.nativeType = CGEventGetType(event);
+        failure.timestamp = CGEventGetTimestamp(event);
+        failure.flags = CGEventGetFlags(event);
+        failure.sourcePid = CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID);
+        failure.sourceState = CGEventGetIntegerValueField(event, kCGEventSourceStateID);
+        if (type == kCGEventMouseMoved || type == kCGEventLeftMouseDragged || type == kCGEventLeftMouseDown ||
+            type == kCGEventLeftMouseUp || type == kCGEventRightMouseDown || type == kCGEventOtherMouseDown) {
+          failure.subtype = CGEventGetIntegerValueField(event, kCGMouseEventSubtype);
+          failure.button = CGEventGetIntegerValueField(event, kCGMouseEventButtonNumber);
+          failure.clicks = CGEventGetIntegerValueField(event, kCGMouseEventClickState);
+          failure.dx = CGEventGetIntegerValueField(event, kCGMouseEventDeltaX);
+          failure.dy = CGEventGetIntegerValueField(event, kCGMouseEventDeltaY);
+        }
+      }
+    } else if (wasLive && event) {
+      probe.m_previousTimestamp = CGEventGetTimestamp(event);
+    }
     return event;
   }
   std::optional<CGRect> frame() const
@@ -141,6 +179,22 @@ private:
       return;
     }
     if (!m_capture.epoch().live()) {
+      if (m_rejected) {
+        const auto &f = *m_rejected;
+        std::printf(
+            "{\"event\":\"capture-rejection\",\"revocation\":%u,\"adapterStatus\":%u,"
+            "\"callbackType\":%u,\"nativeType\":%u,\"timestamp\":%llu,\"previousTimestamp\":%llu,"
+            "\"flags\":%llu,\"callbackCount\":%llu,\"subtype\":%lld,\"button\":%lld,\"clicks\":%lld,"
+            "\"dx\":%lld,\"dy\":%lld,\"sourcePid\":%lld,\"sourceState\":%lld}\n",
+            static_cast<unsigned>(m_epoch.reason()), static_cast<unsigned>(f.adapterStatus),
+            static_cast<unsigned>(f.callbackType), static_cast<unsigned>(f.nativeType),
+            static_cast<unsigned long long>(f.timestamp), static_cast<unsigned long long>(f.previousTimestamp),
+            static_cast<unsigned long long>(f.flags), static_cast<unsigned long long>(f.callbackCount),
+            static_cast<long long>(f.subtype), static_cast<long long>(f.button), static_cast<long long>(f.clicks),
+            static_cast<long long>(f.dx), static_cast<long long>(f.dy), static_cast<long long>(f.sourcePid),
+            static_cast<long long>(f.sourceState)
+        );
+      }
       finish("capture-revoked");
       return;
     }
@@ -182,11 +236,11 @@ private:
         std::printf(
             "{\"event\":\"titlebar-down\",\"epoch\":%llu,\"sequence\":%llu,\"sourceTime\":%llu,"
             "\"underPointer\":%u,\"handlingPointer\":%u,\"eventWindowsMatchOwned\":%s,"
-            "\"sourcePid\":%lld,\"sourceState\":%lld,\"x\":%.3f,\"y\":%.3f}\n",
+            "\"sourcePid\":%lld,\"sourceState\":%lld,\"mouseSubtype\":%lld,\"x\":%.3f,\"y\":%.3f}\n",
             static_cast<unsigned long long>(p.epoch), static_cast<unsigned long long>(p.sequence),
             static_cast<unsigned long long>(p.sourceTimestampNs), p.windowUnderPointer, p.windowHandlingPointer,
             m_eventWindowsMatch ? "true" : "false", static_cast<long long>(p.sourceProcess),
-            static_cast<long long>(p.sourceState), p.x, p.y
+            static_cast<long long>(p.sourceState), static_cast<long long>(p.mouseSubtype), p.x, p.y
         );
       } else if (button) {
         if (button->down) {
@@ -273,6 +327,9 @@ private:
     m_window = nil;
   }
   OriginalInputCaptureSource m_capture;
+  OriginalInputEpoch m_epoch;
+  std::optional<RejectedEvent> m_rejected;
+  std::uint64_t m_callbackCount = 0, m_previousTimestamp = 0;
   const Clock::time_point m_deadline;
   Clock::time_point m_frameTime;
   NSWindow *m_window = nil;

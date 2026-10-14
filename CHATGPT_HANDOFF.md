@@ -377,7 +377,15 @@ of the same ordinary drag, but must not require a separate user action.
   position and native window fields, with exact stamp validation and no second
   raw consumer. This is a prerequisite, not titlebar/grab authority. The passive
   [normal-titlebar probe](deploy/windowshare/native-titlebar-probe.md) is built;
-  physical observation remains pending. Preserve missing IDs as unavailable.
+  initial physical attempts exposed rejection of the trackpad's documented
+  touch-mouse subtype, now modeled as mouse pointer semantics. The next run
+  records normal titlebar down/drag but rejects its zero-click release. That
+  release is now preserved without relaxing retained-press/route ownership.
+  The corrected physical repeat passes down/226 drag events/real release,
+  with 150 owned-frame changes and clean shutdown. Both native window IDs at
+  HID-head remain zero in the actual titlebar down. Preserve them as unavailable;
+  the fixture's known identity is not arbitrary-app drag detection. Raw touch,
+  pressure and gesture reconstruction remain unsupported.
 - [ ] Implement prepare/first-frame/ownership-transfer/commit or rollback, with
   continuous drag ownership and one button-up destination.
 - [ ] Implement dragging the Viewer back to the Mac edge, restoring the source

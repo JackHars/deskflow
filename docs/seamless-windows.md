@@ -834,9 +834,17 @@ and require an empty ledger in addition to a committed physical neutral boundary
 Scroll ownership must survive gesture end and any following momentum; silence or
 a checkpoint cannot redirect that momentum to a new viewport.
 
-The Mac capture adapter preserves supplied CGEvent fields and constructs private,
-loop-tagged events without posting them. It rejects mismatched callback/event
-types, tablet subtypes, unsupported third scroll axes and malformed fields. It
+The Mac capture adapter preserves the modeled CGEvent fields and constructs
+private, loop-tagged events without posting them. Default mouse events and
+touch-origin mouse events (`NX_SUBTYPE_MOUSE_TOUCH`) retain their mouse-button,
+click-count and movement semantics. A native drag-ending up may have zero
+clicks; that value remains zero through capture and delivery, while a down
+still requires a positive count. Release ownership comes from the retained
+press and exact route, not from replacing the reported count. The local pointer
+observation also retains the original subtype; remote construction emits mouse
+events, without inventing touch contacts, pressure or gesture data. Tablet and unknown mouse subtypes
+remain unsupported. It rejects mismatched callback/event types, unsupported
+third scroll axes and malformed fields. It
 uses integer accessors for signed 16.16 scroll values. Every constructed field is
 read back: if Quartz narrows a representable wire value, construction fails
 instead of returning altered input. Constructed-event tests on the local Intel

@@ -127,7 +127,7 @@ bool validOriginalInputRecord(const OriginalInputRecord &record) noexcept
   if (const auto *motion = std::get_if<OriginalInputMotion>(&record.payload))
     return signed32(motion->dx) && signed32(motion->dy) && motion->dragButton <= originalInputButtonCount;
   if (const auto *button = std::get_if<OriginalInputButton>(&record.payload))
-    return button->button < originalInputButtonCount && button->clickCount &&
+    return button->button < originalInputButtonCount && (!button->down || button->clickCount) &&
            button->clickCount <= std::numeric_limits<std::int32_t>::max();
   if (const auto *scroll = std::get_if<OriginalInputScroll>(&record.payload)) {
     return validPhase(scroll->phase) && validMomentum(scroll->momentum) &&
