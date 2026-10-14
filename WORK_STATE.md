@@ -12,9 +12,14 @@ Evidence: `build/roadmap-completion-20261014/mac-identity-package/evidence.json`
 It has not replaced the installed experimental app; input acceptance remains due.
 
 Later test-tool work adds a separately selected, one-shot system-stream release
-experiment (`--interactive-hid`). Build, pure accounting and scoped sanitizer
-checks pass; fresh user readiness has been requested and the physical run is
-still NOT_RUN. The owned AppKit attached-sheet observation finds a distinct
+experiment (`--interactive-hid`). After a zero-timestamp rejection and a
+constructed-only clock-domain correction, the user observed the owned window
+stop while the button remained held. The marked up reached the app and session
+tap, but no later unmarked session-up was observed; a second press invalidated
+the automated run. The result remains inconclusive for release ownership/H07.
+A new listen-only HID-head observer plus separate session-up observer builds
+and passes both noninteractive regressions; its physical repeat awaits user
+readiness. The owned AppKit attached-sheet observation finds a distinct
 native window ID with the exact parent link, but does not enable child capture
 or input. Both production drag and remote child interaction remain unfinished.
 

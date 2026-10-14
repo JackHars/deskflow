@@ -101,10 +101,13 @@ physical owned-probe runs on 2026-10-14 observed continued native movement after
 the PID-targeted up reached the app. That release method cannot authorize the
 requested continuous drag handoff.
 
-A separate explicitly selected `--interactive-hid` probe now tests one
-system-stream release while the owned fixture is active. It is built and has
-passing pure/scoped sanitizer checks; a fresh user-operated run is still due.
-It supplies no production fallback or grab-completion acknowledgement.
+A separate explicitly selected `--interactive-hid` probe tests one
+system-stream release while the owned fixture is active. After fixing an
+unstamped-event rejection, the user observed the window stop while still
+holding the button. The session-level observer did not see the later unmarked
+up and the next press invalidated the run. A new listen-only HID-head observer
+with a separate session-up observer is prepared to investigate that boundary.
+No production fallback or grab-completion acknowledgement is established.
 
 `NativeSourceTransaction` is recovery bookkeeping used by the real NativeHost
 return path. New Preparing exports write `restoreRequired:false` because

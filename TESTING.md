@@ -6,6 +6,23 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **User-operated system-release experiment:** the first HID attempt
+  (`owned-hid-drag-physical-20261014T155548Z`) rejects a zero-timestamp event
+  before posting. An independent constructed-only check identifies the wrong
+  clock domain in the first repair, also without posting. The final constructor
+  uses system uptime; the independent native-clock regression and pure
+  accounting pass **2/2**. The corrected physical attempt
+  (`owned-hid-drag-physical-20261014T155854Z`) observes the marked up in the
+  session and app. The user directly reports “Stopped while I held the button.”
+  The automated result stays **inconclusive/invalid-observation**: no unmarked
+  session-up was observed and a second press ends the probe. Raw logs, source
+  and binary hashes, `motion-analysis.json` and `user-observation.json` are
+  retained. This is not an H07 pass. A later HID-head observation tap with a
+  separate session-up observer builds and passes **2/2 noninteractive tests**
+  in both normal and scoped ASan/UBSan builds (leak detection off; system and
+  prebuilt Qt libraries not instrumented). Hashes are in
+  `hid-drag-dual-observer-evidence.json`;
+  its physical repeat is awaiting readiness. Logs are `hid-drag-dual-observer-*`.
 - **Native identity production checkpoint:** `dbf1f07ef5c28dc898a4a5fa5762b54aca23506d`
   passes all six hosted jobs in
   [run 38591194186](https://github.com/JackHars/deskflow/actions/runs/38591194186).
@@ -20,8 +37,8 @@ SPDX-License-Identifier: MIT
 - **Further test tools:** the separate `--interactive-hid` drag probe builds
   and passes default pure accounting plus scoped ASan/UBSan checks. It is a
   one-shot system-stream experiment restricted to its active owned fixture,
-  not a production input fallback. Its physical run is **NOT_RUN**, awaiting
-  fresh user readiness. Logs are `hid-drag-probe-*` under the Oct 14 Mac root.
+  not a production input fallback. Its later physical attempts and harness
+  corrections are recorded above. Logs are `hid-drag-probe-*` under the Oct 14 Mac root.
   The `--native-child-probe` observation finds the owned AppKit sheet's distinct
   native ID and exact attached parent; it posts no input and grants no child
   rendering authority. Both the regular and scoped ASan/UBSan native runs

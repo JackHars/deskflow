@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mach/mach_time.h>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
@@ -138,6 +139,11 @@ int pureTests()
     }
     auto expired = readyState();
     check(!expired.mayPost(100 + State::durationNs), "absolute deadline stops a pending probe submission");
+    auto unstamped = readyState();
+    check(
+        !unstamped.submitted(1, 0, movedFrame, 600000100) && !unstamped.posted(),
+        "an unstamped constructed event cannot pass submission ordering"
+    );
     State late(100);
     check(late.begin(71, 81, originalFrame, {130, 230}, 1000, State::durationNs), "late real down can be observed");
     late.pointer(1, 1100, {150, 250}, false, State::durationNs + 1);
@@ -155,6 +161,55 @@ std::uint64_t nowNs()
 {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
       .count();
+}
+CGEventRef hidReleaseEvent(CGEventSourceRef source, CGPoint point, CGEventFlags flags, std::int64_t eventNumber)
+{
+  if (!source || !std::isfinite(point.x) || !std::isfinite(point.y) || eventNumber < 0)
+    return nullptr;
+  auto event = CGEventCreateMouseEvent(source, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
+  if (event) {
+    // CGEventCreateMouseEvent leaves timestamp zero on macOS 26.1. Stamp the
+    // new experiment event with system uptime in Quartz's clock domain, as
+    // the existing NSEvent constructor does. steady_clock can include sleep
+    // on this platform and must remain only the deadline clock.
+    CGEventSetTimestamp(event, std::uint64_t(NSProcessInfo.processInfo.systemUptime * 1e9));
+    CGEventSetFlags(event, flags);
+    CGEventSetIntegerValueField(event, kCGMouseEventNumber, eventNumber);
+    CGEventSetIntegerValueField(event, kCGMouseEventClickState, 0);
+  }
+  return event;
+}
+int constructionTests()
+{
+  mach_timebase_info_data_t timebase{};
+  if (mach_timebase_info(&timebase) != KERN_SUCCESS || !timebase.numer || !timebase.denom)
+    return 1;
+  const auto nativeTime = [&] {
+    return std::uint64_t(static_cast<__uint128_t>(mach_absolute_time()) * timebase.numer / timebase.denom);
+  };
+  const auto source = CGEventSourceCreate(kCGEventSourceStatePrivate);
+  if (!source)
+    return 1;
+  CGEventSourceSetUserData(source, syntheticEventTag);
+  // An independent native clock brackets the event. This also catches using
+  // the continuous/deadline clock after the Mac has slept.
+  const auto before = nativeTime();
+  const auto event = hidReleaseEvent(source, {100, 100}, 0, 42);
+  const auto after = nativeTime();
+  const auto timestamp = event ? CGEventGetTimestamp(event) : 0;
+  const bool valid = event && timestamp >= before && timestamp <= after &&
+                     CGEventGetType(event) == kCGEventLeftMouseUp &&
+                     CGEventGetIntegerValueField(event, kCGEventSourceUserData) == syntheticEventTag &&
+                     CGEventGetIntegerValueField(event, kCGMouseEventNumber) == 42 &&
+                     CGEventGetIntegerValueField(event, kCGMouseEventClickState) == 0 && CGEventGetFlags(event) == 0;
+  if (event)
+    CFRelease(event);
+  CFRelease(source);
+  std::printf(
+      "{\"constructedOnly\":true,\"inputPosted\":false,\"timestamp\":%llu,\"status\":\"%s\"}\n",
+      static_cast<unsigned long long>(timestamp), valid ? "passed" : "failed"
+  );
+  return valid ? 0 : 1;
 }
 class Probe;
 } // namespace
@@ -217,8 +272,10 @@ public:
     if (m_hidRelease)
       mask |= CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged) |
               CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown);
-    m_tap =
-        CGEventTapCreate(kCGSessionEventTap, kCGTailAppendEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
+    m_tap = CGEventTapCreate(
+        m_hidRelease ? kCGHIDEventTap : kCGSessionEventTap,
+        m_hidRelease ? kCGHeadInsertEventTap : kCGTailAppendEventTap, kCGEventTapOptionListenOnly, mask, tapped, this
+    );
     if (!m_tap)
       return false;
     m_tapSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, m_tap, 0);
@@ -226,6 +283,22 @@ public:
       return false;
     CFRunLoopAddSource(CFRunLoopGetMain(), m_tapSource, kCFRunLoopCommonModes);
     CGEventTapEnable(m_tap, true);
+    if (m_hidRelease) {
+      // Observe release delivery separately at the later session boundary.
+      // A system-stream post can change which releases reach this boundary;
+      // it cannot be the sole observer of the subsequent real button cycle.
+      m_sessionTap = CGEventTapCreate(
+          kCGSessionEventTap, kCGTailAppendEventTap, kCGEventTapOptionListenOnly, CGEventMaskBit(kCGEventLeftMouseUp),
+          sessionTapped, this
+      );
+      if (!m_sessionTap)
+        return false;
+      m_sessionTapSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, m_sessionTap, 0);
+      if (!m_sessionTapSource)
+        return false;
+      CFRunLoopAddSource(CFRunLoopGetMain(), m_sessionTapSource, kCFRunLoopCommonModes);
+      CGEventTapEnable(m_sessionTap, true);
+    }
 
     m_window = [[DFWindowDragProbeWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 380)
                                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
@@ -259,9 +332,10 @@ public:
     [NSRunLoop.mainRunLoop addTimer:m_timer forMode:NSRunLoopCommonModes];
     std::printf(
         "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"deadlineSeconds\":30,\"postRoute\":\"%s\","
+        "\"observationTap\":\"%s\","
         "\"instruction\":\"Hold the left button in the blue area, move the window, keep holding and moving after the "
         "release marker, then release.\"}\n",
-        getpid(), m_windowId, route()
+        getpid(), m_windowId, route(), observationTap()
     );
     std::fflush(stdout);
     return true;
@@ -316,11 +390,14 @@ public:
     std::printf(
         "{\"event\":\"complete\",\"reason\":\"%s\",\"outcome\":\"%s\",\"appUp\":%s,"
         "\"physicalUp\":%s,\"postMotions\":%llu,\"postFrameObservations\":%llu,"
-        "\"postRoute\":\"%s\",\"markedUpObservedInSession\":%s,"
+        "\"postRoute\":\"%s\",\"observationTap\":\"%s\",\"markedUpObservedAtTap\":%s,"
+        "\"markedUpObservedInSession\":%s,\"unmarkedSessionUps\":%u,"
         "\"serverReleaseProven\":false,\"productionDragAuthorized\":false}\n",
         reason, State::name(m_state.outcome()), m_state.appReceivedUp() ? "true" : "false",
         m_state.physicalUp() ? "true" : "false", static_cast<unsigned long long>(m_state.postMotions()),
-        static_cast<unsigned long long>(m_state.postFrameObservations()), route(), m_markerObserved ? "true" : "false"
+        static_cast<unsigned long long>(m_state.postFrameObservations()), route(), observationTap(),
+        m_markerObserved ? "true" : "false",
+        (m_hidRelease ? m_sessionMarkerObserved : m_markerObserved) ? "true" : "false", m_unmarkedSessionUps
     );
     std::fflush(stdout);
     teardown();
@@ -344,15 +421,41 @@ private:
   {
     return m_hidRelease ? "hid-windowserver" : "targeted-pid";
   }
+  const char *observationTap() const
+  {
+    return m_hidRelease ? "hid-head" : "session-tail";
+  }
   struct Pointer
   {
     std::uint64_t serial = 0, sourceTime = 0;
+    std::int64_t sourcePid = 0, sourceState = 0;
     deskflow::windowshare::Point point;
     CGEventType type = kCGEventNull;
   };
   static constexpr CGEventFlags momentaryModifiers = kCGEventFlagMaskShift | kCGEventFlagMaskControl |
                                                      kCGEventFlagMaskAlternate | kCGEventFlagMaskCommand |
                                                      kCGEventFlagMaskSecondaryFn;
+  static CGEventRef sessionTapped(CGEventTapProxy, CGEventType type, CGEventRef event, void *context)
+  {
+    auto *self = static_cast<Probe *>(context);
+    if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+      self->m_lost = true;
+      return event;
+    }
+    if (!event || !self->m_state.begun() || self->m_stopping || type != kCGEventLeftMouseUp)
+      return event;
+    const auto marker = CGEventGetIntegerValueField(event, kCGEventSourceUserData);
+    if (isWindowshareSyntheticEvent(marker)) {
+      if (self->m_state.posted() && marker == syntheticEventTag &&
+          CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID) == getpid())
+        self->m_sessionMarkerObserved = true;
+    } else if (self->m_unmarkedSessionUps < UINT32_MAX) {
+      ++self->m_unmarkedSessionUps;
+    } else {
+      self->m_lost = true;
+    }
+    return event;
+  }
   static CGEventRef tapped(CGEventTapProxy, CGEventType type, CGEventRef event, void *context)
   {
     auto *self = static_cast<Probe *>(context);
@@ -382,7 +485,12 @@ private:
     }
     const auto point = CGEventGetLocation(event);
     self->m_pointer[self->m_written++ % self->m_pointer.size()] = {
-        ++self->m_serial, CGEventGetTimestamp(event), {point.x, point.y}, type
+        ++self->m_serial,
+        CGEventGetTimestamp(event),
+        CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID),
+        CGEventGetIntegerValueField(event, kCGEventSourceStateID),
+        {point.x, point.y},
+        type
     };
     return event;
   }
@@ -436,9 +544,11 @@ private:
       );
       std::printf(
           "{\"event\":\"physical-pointer\",\"serial\":%llu,\"sourceTime\":%llu,"
-          "\"up\":%s,\"x\":%.3f,\"y\":%.3f}\n",
+          "\"up\":%s,\"x\":%.3f,\"y\":%.3f,\"type\":%u,\"sourcePid\":%lld,\"sourceState\":%lld}\n",
           static_cast<unsigned long long>(observation.serial), static_cast<unsigned long long>(observation.sourceTime),
-          observation.type == kCGEventLeftMouseUp ? "true" : "false", observation.point.x, observation.point.y
+          observation.type == kCGEventLeftMouseUp ? "true" : "false", observation.point.x, observation.point.y,
+          unsigned(observation.type), static_cast<long long>(observation.sourcePid),
+          static_cast<long long>(observation.sourceState)
       );
     }
     if (!m_state.begun())
@@ -488,12 +598,7 @@ private:
           finish("pointer-left-owned-window-before-submission");
           return;
         }
-        event = CGEventCreateMouseEvent(m_source, kCGEventLeftMouseUp, point, kCGMouseButtonLeft);
-        if (event) {
-          CGEventSetFlags(event, flags);
-          CGEventSetIntegerValueField(event, kCGMouseEventNumber, m_eventNumber);
-          CGEventSetIntegerValueField(event, kCGMouseEventClickState, 0); // Travel already canceled the click.
-        }
+        event = hidReleaseEvent(m_source, point, flags, m_eventNumber);
       } else {
         event = native::targetedPointerEvent(
             m_source, m_windowId, *frame, m_localPoint, kCGEventLeftMouseUp, 0, flags, m_eventNumber, m_clicks
@@ -547,6 +652,19 @@ private:
       CFRelease(m_tap);
       m_tap = nullptr;
     }
+    if (m_sessionTap) {
+      CGEventTapEnable(m_sessionTap, false);
+      CFMachPortInvalidate(m_sessionTap);
+    }
+    if (m_sessionTapSource) {
+      CFRunLoopRemoveSource(CFRunLoopGetMain(), m_sessionTapSource, kCFRunLoopCommonModes);
+      CFRelease(m_sessionTapSource);
+      m_sessionTapSource = nullptr;
+    }
+    if (m_sessionTap) {
+      CFRelease(m_sessionTap);
+      m_sessionTap = nullptr;
+    }
     if (m_window) {
       m_window->probe = nullptr;
       if (m_delegate)
@@ -573,12 +691,15 @@ private:
   CGEventSourceRef m_source = nullptr;
   CFMachPortRef m_tap = nullptr;
   CFRunLoopSourceRef m_tapSource = nullptr;
+  CFMachPortRef m_sessionTap = nullptr;
+  CFRunLoopSourceRef m_sessionTapSource = nullptr;
   std::array<Pointer, 256> m_pointer{};
   std::uint64_t m_written = 0, m_read = 0, m_serial = 0;
   deskflow::windowshare::Point m_localPoint;
   std::int64_t m_eventNumber = 0;
   int m_clicks = 0;
-  bool m_lost = false, m_stopping = false, m_markerObserved = false;
+  bool m_lost = false, m_stopping = false, m_markerObserved = false, m_sessionMarkerObserved = false;
+  std::uint32_t m_unmarkedSessionUps = 0;
   std::mutex m_deadlineMutex;
   std::condition_variable m_deadlineCondition;
   bool m_finished = false;
@@ -631,9 +752,13 @@ int main(int argc, char **argv)
   // No NSApplication, window, event source or event tap in the default mode.
   if (argc == 1)
     return pureTests();
+  if (argc == 2 && std::strcmp(argv[1], "--construction-check") == 0)
+    return constructionTests();
   const bool hidRelease = argc == 2 && std::strcmp(argv[1], "--interactive-hid") == 0;
   if (argc != 2 || (!hidRelease && std::strcmp(argv[1], "--interactive") != 0)) {
-    std::fputs("Usage: windowshare-native-drag-probe [--interactive | --interactive-hid]\n", stderr);
+    std::fputs(
+        "Usage: windowshare-native-drag-probe [--construction-check | --interactive | --interactive-hid]\n", stderr
+    );
     return 2;
   }
   @autoreleasepool {

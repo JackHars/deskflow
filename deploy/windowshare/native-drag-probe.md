@@ -77,11 +77,42 @@ or changes another application's window. The event uses a private source and
 the current pointer position; no cursor warp or new drag is requested.
 
 Output names `postRoute` (`targeted-pid` or `hid-windowserver`) and separately
-records whether the marked up was observed in the session tap. The original
+records whether the marked up was observed in the session tap. The HID mode
+now observes the button/motion cycle at a listen-only HID-head tap and retains
+a separate listen-only session-up observer. Logs identify `observationTap`,
+event type and the reported source PID/state. A missing later session-up cannot
+be substituted with a second press or treated as proof of a physical release.
+These reported source fields do not establish an authenticated device origin.
+The original
 down's pointer-window fields are diagnostic samples, not grab-ownership
 certificates. Neither marked-event observation nor an app-up receipt proves
 that WindowServer released the grab. `serverReleaseProven` and
 `productionDragAuthorized` remain false in every mode.
+
+The first user-operated HID attempt on 2026-10-14 ended before submission:
+`CGEventCreateMouseEvent` produced a zero timestamp and the existing ordering
+guard rejected it. The constructor now stamps system uptime in Quartz's clock
+domain. The absolute test deadline still uses its original independent clock.
+An intermediate constructed-only check exposed that this Mac's C++ steady
+clock includes slept time; that event was never posted. The final timestamp
+uses the same system uptime as the existing AppKit event constructor.
+
+`--construction-check` creates and releases an event without posting it,
+creating a window, installing a tap or requesting permission. It independently
+brackets the event timestamp with `mach_absolute_time`, so zero timestamps and
+the wrong clock domain fail. This check is registered in both Mac CTest entry
+points alongside the default pure accounting test.
+
+The corrected session-observed HID run reached the app and session tap. The
+user reported **“Stopped while I held the button.”** Its automation result
+remains inconclusive: the session tap saw no unmarked up, and a later press
+invalidated the run. There were two early frame updates, a long stable interval,
+and further frame changes without a new pointer serial. Neither those later
+changes nor the eventual second press establishes continued button ownership.
+Both attempts and the direct user report are retained under
+`build/roadmap-completion-20261014/owned-hid-drag-physical-20261014T155548Z/`
+and `owned-hid-drag-physical-20261014T155854Z/`. The separate HID-head observer
+was added afterward; it still requires its own physical run.
 
 Retain stdout, stderr, exit status, binary/source hashes, macOS version and the
 user's observation. The output distinguishes an app-up receipt, later physical
