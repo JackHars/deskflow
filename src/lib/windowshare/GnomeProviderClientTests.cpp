@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "GnomeProviderClient.h"
+#include "GnomeWindowDragProtocol.h"
 
 #include <QCoreApplication>
 #include <QFile>
@@ -125,6 +126,17 @@ constexpr auto introspection = R"xml(
       <arg type="h" direction="in"/>
       <arg type="s" direction="out"/>
     </method>
+    <method name="WindowDragPreview">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="t" direction="in"/><arg type="t" direction="in"/>
+      <arg type="s" direction="in"/><arg type="i" direction="in"/><arg type="i" direction="in"/>
+      <arg type="a{sv}" direction="out"/>
+    </method>
+    <method name="WatchWindowDrag">
+      <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
+      <arg type="s" direction="in"/><arg type="b" direction="in"/>
+    </method>
+    <signal name="WindowDragChanged"><arg type="s"/><arg type="u"/><arg type="s"/><arg type="a{sv}"/></signal>
     <method name="GetViewer">
       <arg type="s" direction="in"/><arg type="u" direction="in"/><arg type="s" direction="in"/>
       <arg type="a{sv}" direction="out"/>
@@ -467,6 +479,10 @@ struct Service
   unsigned capabilities = 0, creates = 0, launches = 0, closes = 0;
   bool callerGone = false;
   bool missingAssociationCapability = false, wrongWindowAssociation = false, duplicateWindowAssociation = false;
+  bool advertiseWindowDrag = false, wrongDragBinding = false, duplicateDragField = false;
+  unsigned nativeDragRequests = 0;
+  std::vector<GnomeWindowDragReply> dragReplies;
+  std::vector<GnomeWindowDragEvent> dragEvents;
 
   GnomeViewportState preparationPaint() const
   {
@@ -679,6 +695,13 @@ struct Service
       const auto object = viewportDecoder.take();
       if (!object)
         return;
+      if (isGnomeWindowDrag(*object)) {
+        if (object->value("kind") == QJsonValue("event"))
+          dragEvents.push_back(parseGnomeWindowDragEvent(*object));
+        else
+          dragReplies.push_back(parseGnomeWindowDragReply(*object));
+        continue;
+      }
       const auto request = parseGnomeViewportRequest(*object);
       GnomeViewportReply reply;
       reply.operation = request.operation;
@@ -836,6 +859,10 @@ struct Service
         g_variant_builder_add(&values, "{sv}", "routedPointsObservation", g_variant_new_boolean(true));
       if (advertiseStage)
         g_variant_builder_add(&values, "{sv}", "stageUpdateSequence", g_variant_new_boolean(true));
+      if (advertiseWindowDrag) {
+        g_variant_builder_add(&values, "{sv}", "windowDragPlacement", g_variant_new_boolean(true));
+        g_variant_builder_add(&values, "{sv}", "ownedWindowMoveObservation", g_variant_new_boolean(true));
+      }
       if (advertiseDrain) {
         g_variant_builder_add(&values, "{sv}", "inputDrainSegment", g_variant_new_boolean(true));
         g_variant_builder_add(
@@ -853,6 +880,48 @@ struct Service
       g_variant_builder_add(&values, "{sv}", "backend", g_variant_new_string("MetaBackendNative"));
       g_variant_builder_add(&values, "{sv}", "deliveryReady", g_variant_new_boolean(false));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(usa{sv})", 1u, "50.1", &values));
+    } else if (!std::strcmp(name, "WindowDragPreview")) {
+      ++nativeDragRequests;
+      const char *id = nullptr, *viewer = nullptr, *association = nullptr, *action = nullptr;
+      guint value = 0;
+      guint64 drag = 0, sequence = 0;
+      gint x = 0, y = 0;
+      g_variant_get(
+          parameters, "(&su&s&stt&sii)", &id, &value, &viewer, &association, &drag, &sequence, &action, &x, &y
+      );
+      check(
+          std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(viewer, viewerId) == 0 &&
+              caller == g_dbus_method_invocation_get_sender(invocation) && !std::strcmp(action, "place"),
+          "Native drag client changed session/caller/action"
+      );
+      GVariantBuilder values;
+      g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+      g_variant_builder_add(&values, "{sv}", "available", g_variant_new_boolean(true));
+      g_variant_builder_add(&values, "{sv}", "session", g_variant_new_string(sessionId));
+      g_variant_builder_add(&values, "{sv}", "generation", g_variant_new_uint32(generation));
+      g_variant_builder_add(&values, "{sv}", "viewer", g_variant_new_string(viewerId));
+      g_variant_builder_add(&values, "{sv}", "association", g_variant_new_string(association));
+      g_variant_builder_add(&values, "{sv}", "drag", g_variant_new_uint64(drag + (wrongDragBinding ? 1 : 0)));
+      g_variant_builder_add(&values, "{sv}", "sequence", g_variant_new_uint64(sequence));
+      g_variant_builder_add(&values, "{sv}", "x", g_variant_new_int32(x));
+      g_variant_builder_add(&values, "{sv}", "y", g_variant_new_int32(y));
+      g_variant_builder_add(&values, "{sv}", "width", g_variant_new_int32(640));
+      g_variant_builder_add(&values, "{sv}", "height", g_variant_new_int32(480));
+      g_variant_builder_add(&values, "{sv}", "revision", g_variant_new_uint32(1));
+      if (duplicateDragField)
+        g_variant_builder_add(&values, "{sv}", "revision", g_variant_new_uint32(1));
+      g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
+    } else if (!std::strcmp(name, "WatchWindowDrag")) {
+      const char *id = nullptr, *viewer = nullptr, *association = nullptr;
+      guint value = 0;
+      gboolean enabled = false;
+      g_variant_get(parameters, "(&su&s&sb)", &id, &value, &viewer, &association, &enabled);
+      check(
+          std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(viewer, viewerId) == 0 && enabled &&
+              caller == g_dbus_method_invocation_get_sender(invocation),
+          "Native drag watch changed exact owner"
+      );
+      g_dbus_method_invocation_return_value(invocation, nullptr);
     } else if (!std::strcmp(name, "CreateSession")) {
       check(creates++ == 0, "Client repeated CreateSession");
       caller = g_dbus_method_invocation_get_sender(invocation);
@@ -2623,6 +2692,90 @@ void nativeHitRecheckedAfterQtQueue(const PrivateBus &bus)
   }
 }
 
+void nativeWindowDragChannel(const PrivateBus &bus)
+{
+  for (unsigned fault = 0; fault != 4; ++fault) {
+    Service service(bus);
+    service.advertiseWindowDrag = fault != 1;
+    service.wrongDragBinding = fault == 2;
+    service.duplicateDragField = fault == 3;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    GnomeWindowDragRequest request{
+        1, 7, 18, service.preparationPaint().windowAssociation, GnomeWindowDragAction::Place, -200, 45
+    };
+    const auto send = [&](const GnomeWindowDragRequest &value) {
+      const auto frame = gnomeViewportFrame(gnomeWindowDragJson(value));
+      check(
+          ::send(service.viewportPeer.value, frame.constData(), frame.size(), 0) == frame.size(),
+          "Native drag request fixture write failed"
+      );
+    };
+    send(request);
+    if (fault >= 2) {
+      waitUntil([&] { return !client.live(); }, "Malformed native drag result did not retire the channel");
+      check(service.dragReplies.empty(), "Malformed compositor placement reached the Viewer");
+    } else {
+      waitUntil([&] { return !service.dragReplies.empty(); }, "Native drag result did not arrive");
+      const auto &reply = service.dragReplies.back();
+      check(
+          reply.binding == request && reply.ok == (fault == 0) && service.nativeDragRequests == (fault == 0 ? 1u : 0u),
+          "Native drag capability or exact binding was not enforced"
+      );
+      if (!fault) {
+        check(
+            reply.frame == QRect(-200, 45, 640, 480) && reply.revision == 1,
+            "Native compositor geometry was not preserved"
+        );
+        request.request = 2;
+        request.action = GnomeWindowDragAction::Watch;
+        request.x = request.y = 0;
+        send(request);
+        waitUntil([&] { return service.dragReplies.size() == 2; }, "Native watcher was not acknowledged");
+        check(service.dragReplies.back().ok, "Native watcher was refused");
+        GVariantBuilder values;
+        g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
+        g_variant_builder_add(&values, "{sv}", "viewer", g_variant_new_string(viewerId));
+        g_variant_builder_add(&values, "{sv}", "phase", g_variant_new_string("begin"));
+        g_variant_builder_add(&values, "{sv}", "grab", g_variant_new_uint64(4));
+        g_variant_builder_add(&values, "{sv}", "sequence", g_variant_new_uint64(1));
+        for (const auto *key : {"x", "y", "frameX", "frameY"})
+          g_variant_builder_add(&values, "{sv}", key, g_variant_new_int32(20));
+        g_variant_builder_add(&values, "{sv}", "width", g_variant_new_int32(640));
+        g_variant_builder_add(&values, "{sv}", "height", g_variant_new_int32(480));
+        g_variant_builder_add(&values, "{sv}", "buttonReleased", g_variant_new_boolean(false));
+        Error error;
+        const auto association = request.association.toUtf8();
+        check(
+            g_dbus_connection_emit_signal(
+                service.connection, service.caller.c_str(), objectPath, serviceName, "WindowDragChanged",
+                g_variant_new("(susa{sv})", sessionId, generation, association.constData(), &values), &error.value
+            ),
+            "Native drag signal fixture failed"
+        );
+        waitUntil([&] { return service.dragEvents.size() == 1; }, "Native drag signal did not reach owned Viewer");
+        check(
+            service.dragEvents[0].association == request.association && service.dragEvents[0].grab == 4 &&
+                service.dragEvents[0].phase == GnomeWindowDragEvent::Phase::Begin,
+            "Native drag signal lost its exact association"
+        );
+        // Placement and observation use a separate counter from input viewport
+        // operations. A fresh read remains usable after native drag traffic.
+        const auto observation = client.requestViewportObservation();
+        check(
+            observation && viewportResult(client, observation).observation.has_value(),
+            "Native drag traffic contaminated viewport request state"
+        );
+      }
+    }
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Native drag fixture session did not close");
+    check(service.failure.empty(), "Native drag fixture failed");
+  }
+}
 void viewportWrongAuthenticatedPeer(const PrivateBus &bus)
 {
   Service service(bus);
@@ -2656,6 +2809,10 @@ int main(int argc, char **argv)
   QCoreApplication application(argc, argv);
   try {
     PrivateBus bus;
+    nativeWindowDragChannel(bus);
+    std::puts(
+        "PASS: native placement/watcher channel binds exact owned windows and rejects malformed compositor replies"
+    );
     ownerMismatch(bus);
     std::puts("PASS: provider and Shell must have the same unique owner");
     closeDuringSetup(bus);

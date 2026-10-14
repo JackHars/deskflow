@@ -311,7 +311,8 @@ struct LocalWindowDragHost::State
     }
     current = value;
     lastRead = Clock::now();
-    if (value.kind == LocalWindowDrag::Kind::Motion && providers.motion) {
+    if ((value.kind == LocalWindowDrag::Kind::Motion || value.kind == LocalWindowDrag::Kind::Hold) &&
+        providers.motion) {
       const auto callback = providers.motion;
       const auto expected = *binding;
       try {

@@ -666,6 +666,34 @@ void pointerObservationLifetime()
   source.stop();
   check(!copied->input.live(), "a retained pointer observation never outlives its input epoch");
 }
+void heldWindowMotion()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(source.start(), "held motion capture starts");
+  event.button(0, true);
+  const auto press = captureCompleted(source, event);
+  check(!source.suppressWindowDragMotion(), "original down is never withheld");
+  check(source.windowDragMotionGate().arm(press.translation.stamp), "retained original press arms motion hold");
+  CGEventSetType(event.event, kCGEventLeftMouseDragged);
+  const auto motion = captureCompleted(source, event, 0);
+  check(source.suppressWindowDragMotion(), "admitted movement is withheld from native dispatch");
+  check(std::get<OriginalInputMotion>(motion.input.record.payload).dx == -7 &&
+            std::get<OriginalInputMotion>(motion.input.record.payload).dy == 12 &&
+            motion.translation.parts == 0 && motion.pointer && motion.pointer->matches(motion.input.record),
+        "sole consumer retains original deltas and event-time metadata for untranslated movement");
+  event.button(0, false);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventClickState, 0);
+  const auto release = captureCompleted(source, event);
+  check(!source.suppressWindowDragMotion() && release.translation.parts == 1 &&
+            std::get<OriginalInputButton>(release.input.record.payload).clickCount == 0,
+        "the original zero-click up still passes through legacy/native dispatch once");
+  check(!source.windowDragMotionGate().active(press.translation.stamp) &&
+            !source.windowDragMotionGate().arm(press.translation.stamp),
+        "released motion hold cannot be revived");
+  check(!source.popCaptured(), "no second capture consumer or duplicate release");
+  source.stop();
+}
 } // namespace
 
 int main()
@@ -684,6 +712,7 @@ int main()
     concurrentCaptureDrain();
     stopBeforeRunStarts();
     pointerObservationLifetime();
+    heldWindowMotion();
     std::cout << "Original input capture lifecycle tests passed\n";
     return 0;
   } catch (const std::exception &error) {

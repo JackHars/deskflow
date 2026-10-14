@@ -2,6 +2,31 @@
 <!-- SPDX-License-Identifier: MIT -->
 <node>
   <interface name="org.deskflow.Seamless.Gnome50">
+    <method name="WindowDragPreview">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="association" type="s" direction="in"/>
+      <arg name="drag" type="t" direction="in"/>
+      <arg name="sequence" type="t" direction="in"/>
+      <arg name="action" type="s" direction="in"/>
+      <arg name="x" type="i" direction="in"/>
+      <arg name="y" type="i" direction="in"/>
+      <arg name="placement" type="a{sv}" direction="out"/>
+    </method>
+    <method name="WatchWindowDrag">
+      <arg name="session" type="s" direction="in"/>
+      <arg name="generation" type="u" direction="in"/>
+      <arg name="viewer" type="s" direction="in"/>
+      <arg name="association" type="s" direction="in"/>
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
+    <signal name="WindowDragChanged">
+      <arg name="session" type="s"/>
+      <arg name="generation" type="u"/>
+      <arg name="association" type="s"/>
+      <arg name="observation" type="a{sv}"/>
+    </signal>
     <method name="GetCapabilities">
       <arg name="version" type="u" direction="out"/>
       <arg name="shellVersion" type="s" direction="out"/>

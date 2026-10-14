@@ -120,6 +120,10 @@ int child(QCoreApplication &app, int descriptor, const QString &mode)
     return mode != "native-denied";
   };
   providers.motion = [&](const WindowDragBinding &value, const LocalWindowDrag &edge) {
+    if (edge.kind == LocalWindowDrag::Kind::Hold) {
+      check(binding == value && edge.sequence > edge.pressSequence, "Stationary hold retains exact prepared owner");
+      return;
+    }
     check(
         binding == value && edge.sequence > edge.pressSequence && edge.destinationY == 288,
         "Motion stays with exact prepared owner"

@@ -21,6 +21,7 @@ import {
 } from './logic.js';
 import {closeDescriptorList, withViewerLauncher} from './launcher.js';
 import {orderingStillMapped, verifyMappedOrdering} from './ordering.js';
+import {OwnedDragPlacement, OwnedMoveGrab} from './window-drag.js';
 
 const REMOTE_NAME = 'org.gnome.Mutter.RemoteDesktop';
 const REMOTE_PATH = '/org/gnome/Mutter/RemoteDesktop';
@@ -137,6 +138,9 @@ class Provider {
         this._stageCapable = false;
         this._drainCapable = false;
         this._ordering = null;
+        this._dragLayout = {};
+        this._dragSerial = 0;
+        this._activeMoveWindow = null;
     }
 
     async start() {
@@ -200,6 +204,10 @@ class Provider {
         this._watch(Main.sessionMode, 'updated', 'session-mode-changed');
         this._watch(Main.overview, 'showing', 'overview');
         this._watch(Main.overview, 'hiding', 'overview');
+        this._signals.push([global.display, global.display.connect('grab-op-begin', (_display, window, op) =>
+            this._windowGrabBegin(window, op))]);
+        this._signals.push([global.display, global.display.connect_after('grab-op-end', (_display, window, op) =>
+            this._windowGrabEnd(window, op))]);
     }
 
     _watch(object, signal, reason, list = this._signals, session = null) {
@@ -214,6 +222,17 @@ class Provider {
     _invalidate(session, reason) {
         if (!this._state.matches(session))
             return;
+        if (['layout-changed', 'workspace-changed', 'session-mode-changed', 'overview'].includes(reason)) {
+            this._dragLayout = {};
+            for (const record of session.dragWindows?.values() ?? []) {
+                record.placement?.close();
+                if (record.grab) {
+                    record.grab.closed = true;
+                    this._emitWindowGrab(session, record, 'cancel', null, false);
+                    record.grab = null;
+                }
+            }
+        }
         if (!this._state.invalidate(session)) {
             this._close(session, 'revision-exhausted');
             return;
@@ -238,6 +257,8 @@ class Provider {
             viewportChannel: ['b', true], routedPointObservation: ['b', true],
             routedPointsObservation: ['b', true],
             perWindowAssociation: ['b', true],
+            windowDragPlacement: ['b', typeof Meta.Window.prototype.move_frame === 'function'],
+            ownedWindowMoveObservation: ['b', true],
             inputPreparation: ['b', this._drainCapable && Boolean(this._ordering) &&
                 typeof Meta.Window.prototype.activate === 'function' &&
                 typeof global.display.get_current_time_roundtrip === 'function'],
@@ -258,6 +279,7 @@ class Provider {
             Object.assign(session, {
                 cancel: new Gio.Cancellable(), invocation, signals: [], windowSignals: [], connection: null,
                 viewer: null, window: null, surface: null, signature: '', stageCheck: null, inputDrain: null,
+                dragWindows: new Map(),
             });
             session.timeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, STARTUP_MS, () => {
                 session.timeout = 0;
@@ -369,6 +391,198 @@ class Provider {
             // Also covers wrong caller/stale session/already-launched rejection
             // before the launcher takes ownership. An emptied list is harmless.
             closeDescriptorList(viewport?.fdList);
+        }
+    }
+
+    _dragWindow(session, token, association) {
+        const viewer = this._viewer(session, token);
+        if (!validWindowAssociation(association) || Main.sessionMode.isLocked || Main.sessionMode.isGreeter ||
+            !Main.sessionMode.allowScreencast || Main.overview.visible || Main.overview.animationInProgress ||
+            Main.modalCount !== 0)
+            throw new Error('Native window drag is unavailable');
+        const actors = global.get_window_actors();
+        if (actors.length > MAX_WINDOWS)
+            throw new Error('Too many native windows');
+        const owned = actors.filter(actor => {
+            const window = actor.get_meta_window();
+            return !actor.is_destroyed() && window.get_client_type() === Meta.WindowClientType.WAYLAND &&
+                viewer.client.owns_window(window) && window.get_wm_class() === association &&
+                window.get_wm_class_instance() === association;
+        });
+        if (owned.length !== 1)
+            throw new Error('Exact owned Viewer association unavailable');
+        const actor = owned[0], window = actor.get_meta_window();
+        if (window.get_window_type() !== Meta.WindowType.NORMAL || window.get_transient_for() || window.minimized ||
+            window.is_hidden() || !window.showing_on_its_workspace() || !actor.is_visible() || !actor.is_mapped() ||
+            !window.allows_move() || !validRect(window.get_frame_rect()))
+            throw new Error('Owned Viewer is not an ordinary visible movable window');
+        const previous = session.dragWindows.get(association);
+        if (previous && previous.window !== window)
+            throw new Error('Owned Viewer native identity changed');
+        if (previous)
+            return previous;
+        if (session.dragWindows.size >= 16)
+            throw new Error('Too many native drag associations');
+        const record = {association, window, actor, viewer: token, lastDrag: 0, placement: null,
+            watching: false, grab: null, signals: []};
+        session.dragWindows.set(association, record);
+        record.signals.push([window, window.connect('position-changed', () => {
+            if (!record.grab)
+                return;
+            const sample = this._sampleWindowGrab(session, record);
+            this._emitWindowGrab(session, record, sample ? 'motion' : 'cancel', sample, false);
+            if (!sample)
+                record.grab = null;
+        })]);
+        for (const signal of ['unmanaged', 'size-changed']) {
+            record.signals.push([window, window.connect(signal, () => {
+                record.placement?.close();
+                if (record.grab) {
+                    record.grab.closed = true;
+                    this._emitWindowGrab(session, record, 'cancel', null, false);
+                    record.grab = null;
+                }
+            })]);
+        }
+        return record;
+    }
+
+    WindowDragPreviewAsync([id, generation, token, association, drag, sequence, action, x, y], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            if (![drag, sequence].every(value => Number.isSafeInteger(value) && value > 0) ||
+                !['place', 'hold', 'verify', 'finish', 'cancel'].includes(action))
+                throw new Error('Invalid window drag request');
+            const record = this._dragWindow(session, token, association);
+            if (record.placement && record.placement.drag !== drag)
+                throw new Error('Another drag owns this native preview');
+            if (action === 'cancel' || action === 'finish') {
+                if (!record.placement || record.placement.drag !== drag ||
+                    (action === 'finish' && !record.placement.verify(sequence, nowMs(), record.window,
+                        this._dragLayout, record.window.get_frame_rect())))
+                    throw new Error('Stale native drag completion');
+                record.placement.close();
+                record.placement = null;
+            } else {
+                if (this._activeMoveWindow === record.window || record.grab)
+                    throw new Error('An ordinary native grab owns the preview');
+                if (!record.placement) {
+                    if (action !== 'place' || drag <= record.lastDrag)
+                        throw new Error('Retired native drag cannot be revived');
+                    record.lastDrag = drag;
+                    record.placement = new OwnedDragPlacement({association, drag, window: record.window,
+                        frame: record.window.get_frame_rect(), now: nowMs(), layout: this._dragLayout});
+                }
+                const placement = record.placement;
+                if (action === 'place') {
+                    placement.place(sequence, x, y, nowMs(), {
+                        current: {window: record.window, layout: this._dragLayout},
+                        frame: window => this._state.matches(session) &&
+                            this._viewer(session, token).client.owns_window(window) ? window.get_frame_rect() : null,
+                        move: (window, left, top) => window.move_frame(false, left, top),
+                    });
+                } else if (sequence !== placement.sequence || !(action === 'hold'
+                    ? placement.hold(nowMs(), record.window, this._dragLayout, record.window.get_frame_rect())
+                    : placement.verify(sequence, nowMs(), record.window, this._dragLayout, record.window.get_frame_rect()))) {
+                    throw new Error('Native drag placement is no longer current');
+                }
+            }
+            const frame = record.window.get_frame_rect();
+            invocation.return_value(new GLib.Variant('(a{sv})', [variants({
+                available: ['b', true], session: ['s', id], generation: ['u', generation],
+                viewer: ['s', token], association: ['s', association], drag: ['t', drag], sequence: ['t', sequence],
+                x: ['i', frame.x], y: ['i', frame.y], width: ['i', frame.width], height: ['i', frame.height],
+                revision: ['u', record.placement?.revision ?? 0],
+            })]));
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
+    WatchWindowDragAsync([id, generation, token, association, enabled], invocation) {
+        try {
+            const session = this._lookup(invocation, id, generation);
+            const record = this._dragWindow(session, token, association);
+            record.watching = enabled;
+            if (!enabled && record.grab) {
+                record.grab.closed = true;
+                this._emitWindowGrab(session, record, 'cancel', null, false);
+                record.grab = null;
+            }
+            invocation.return_value(null);
+        } catch (error) {
+            errorReply(invocation, error);
+        }
+    }
+
+    _sampleWindowGrab(session, record) {
+        try {
+            this._dragWindow(session, record.viewer, record.association);
+            const [point] = global.backend.get_cursor_tracker().get_pointer();
+            return record.grab?.sample(record.window, record.window.get_frame_rect(), point, nowMs()) ?? null;
+        } catch (_) {
+            return null;
+        }
+    }
+
+    _emitWindowGrab(session, record, phase, sample, released) {
+        if (!this._state.matches(session) || !record.grab)
+            return;
+        const frame = sample?.frame ?? record.grab.initial;
+        this._object?.emit_signal('WindowDragChanged', new GLib.Variant('(susa{sv})', [
+            session.id, session.generation, record.association, variants({
+                viewer: ['s', record.viewer], phase: ['s', phase], grab: ['t', record.grab.serial],
+                sequence: ['t', sample?.sequence ?? record.grab.sequence],
+                x: ['i', sample?.x ?? record.grab.point.x], y: ['i', sample?.y ?? record.grab.point.y],
+                frameX: ['i', frame.x], frameY: ['i', frame.y], width: ['i', frame.width], height: ['i', frame.height],
+                buttonReleased: ['b', released],
+            }),
+        ]));
+    }
+
+    _windowGrabBegin(window, op) {
+        this._activeMoveWindow = window;
+        if (op !== Meta.GrabOp.MOVING && op !== Meta.GrabOp.MOVING_UNCONSTRAINED)
+            return;
+        const session = this._state.current;
+        for (const record of session?.dragWindows?.values() ?? []) {
+            if (!record.watching || record.window !== window || record.placement || record.grab)
+                continue;
+            try {
+                this._dragWindow(session, record.viewer, record.association);
+                const [point, modifiers] = global.backend.get_cursor_tracker().get_pointer();
+                const buttons = Clutter.ModifierType.BUTTON1_MASK | Clutter.ModifierType.BUTTON2_MASK |
+                    Clutter.ModifierType.BUTTON3_MASK | Clutter.ModifierType.BUTTON4_MASK | Clutter.ModifierType.BUTTON5_MASK;
+                if ((modifiers & buttons) !== Clutter.ModifierType.BUTTON1_MASK || this._dragSerial >= Number.MAX_SAFE_INTEGER)
+                    continue;
+                record.grab = new OwnedMoveGrab(window, ++this._dragSerial, window.get_frame_rect(), point, nowMs());
+                const sample = this._sampleWindowGrab(session, record);
+                this._emitWindowGrab(session, record, sample ? 'begin' : 'cancel', sample, false);
+                if (!sample)
+                    record.grab = null;
+            } catch (_) {
+                record.grab = null;
+            }
+        }
+    }
+
+    _windowGrabEnd(window, _op) {
+        if (this._activeMoveWindow === window)
+            this._activeMoveWindow = null;
+        const session = this._state.current;
+        for (const record of session?.dragWindows?.values() ?? []) {
+            if (record.window !== window || !record.grab)
+                continue;
+            try {
+                const [point, modifiers] = global.backend.get_cursor_tracker().get_pointer();
+                const released = !(modifiers & Clutter.ModifierType.BUTTON1_MASK);
+                const sample = record.grab.end(window, window.get_frame_rect(), point, nowMs(), released);
+                this._emitWindowGrab(session, record, sample ? 'end' : 'cancel', sample, Boolean(sample));
+            } catch (_) {
+                this._emitWindowGrab(session, record, 'cancel', null, false);
+            } finally {
+                record.grab = null;
+            }
         }
     }
 
@@ -1171,6 +1385,13 @@ class Provider {
         if (!session || session.cleaned)
             return;
         session.cleaned = true;
+        for (const record of session.dragWindows?.values() ?? []) {
+            record.placement?.close();
+            if (record.grab)
+                record.grab.closed = true;
+            disconnect(record.signals);
+        }
+        session.dragWindows?.clear();
         this._finishPreparationActivation(session, session.preparationActivation, 'viewer-or-provider-closed');
         this._finishStageCheck(session, session.stageCheck, 'viewer-or-provider-closed');
         this._finishInputDrain(session, session.inputDrain, 'viewer-or-provider-closed');

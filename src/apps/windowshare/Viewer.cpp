@@ -288,9 +288,13 @@ bool Viewer::cancelX11Coordinate(std::uint64_t request)
 
 std::optional<GnomePreparationTarget> Viewer::waylandPreparationTarget() const
 {
+  return m_committed ? waylandDragTarget() : std::nullopt;
+}
+std::optional<GnomePreparationTarget> Viewer::waylandDragTarget() const
+{
   if (m_viewportClosed || !m_connected || m_failed || m_returned || m_waitingRecoveryPaint || m_videoRecovering ||
-      m_videoPaused || !m_readySent || !m_committed || m_resizing || isMinimized() || !isVisible() ||
-      !m_error.isEmpty() || m_paintedGeometry != m_geometry || !m_paintedWayland || m_paintedClient != size() ||
+      m_videoPaused || !m_readySent || m_resizing || isMinimized() || !isVisible() || !m_error.isEmpty() ||
+      m_paintedGeometry != m_geometry || !m_paintedWayland || m_paintedClient != size() ||
       m_paintedDpr != devicePixelRatioF() || m_paintedImage.isEmpty() || m_paintedVideo.isEmpty() ||
       !m_waylandAssociation)
     return {};
@@ -644,8 +648,8 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
   m_applyingMetadata = false;
   const std::uint64_t acknowledged = revision(metadata.value(QStringLiteral("resizeRequest")));
   if (m_resizing && !m_resizeDebounce.isActive() &&
-      ((acknowledged != 0 && acknowledged == m_resizeRequest) || (acknowledged == 0 && geometry > m_resizeBaseGeometry)
-      )) {
+      ((acknowledged != 0 && acknowledged == m_resizeRequest) ||
+       (acknowledged == 0 && geometry > m_resizeBaseGeometry))) {
     m_resizing = false;
     m_resizeTimeout.stop();
   }
@@ -1271,6 +1275,10 @@ void Viewer::paintEvent(QPaintEvent *)
     m_paintedVideo = videoRect();
     m_paintedDpr = devicePixelRatioF();
     m_paintedGeometry = m_frameGeometry;
+    if (m_framePaintSerial == ((std::uint64_t{1} << 53) - 1))
+      m_viewportClosed = true;
+    else
+      ++m_framePaintSerial;
     if (m_waitingRecoveryPaint && m_videoRecoveryFramePaintReady && m_paintedGeometry == m_geometry) {
       // An actual Qt paint, rather than a backend submission or decode callback,
       // is the first point at which this viewer can offer interaction again.

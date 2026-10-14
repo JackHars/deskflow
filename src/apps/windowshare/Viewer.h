@@ -102,6 +102,15 @@ public:
   std::optional<GnomeViewportState> waylandViewportState() const;
   std::optional<QPointF> mapWaylandSurface(const GnomeViewportState &expected, QPointF point) const;
   std::optional<GnomePreparationTarget> waylandPreparationTarget() const;
+  std::optional<GnomePreparationTarget> waylandDragTarget() const;
+  std::uint64_t framePaintSerial() const
+  {
+    return m_framePaintSerial;
+  }
+  std::uint64_t windowDragId() const
+  {
+    return m_windowDrag;
+  }
   std::optional<QPointF> mapPreparationTarget(const GnomePreparationTarget &expected, QPointF point) const;
   bool beginInputPreparation(const InputPreparationBinding &binding);
   bool inputPreparationFenced(const InputPreparationBinding &binding) const;
@@ -210,6 +219,7 @@ private:
   const std::uint64_t m_session, m_epoch;
   std::uint64_t m_geometry = 0, m_frameGeometry = 0, m_paintedGeometry = 0;
   std::uint64_t m_windowDrag = 0;
+  std::uint64_t m_framePaintSerial = 0;
   std::uint64_t m_focusRevision = 0, m_focusRequest = 0;
   std::uint64_t m_resizeRequest = 0, m_resizeBaseGeometry = 0;
   std::uint64_t m_keyboardGeneration = 0;

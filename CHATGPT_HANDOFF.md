@@ -408,6 +408,14 @@ of the same ordinary drag, but must not require a separate user action.
   Viewer or enable its input. Native callback failure and reentrancy are covered.
 - [ ] Integrate preview motion, native drag cutover, painted readiness and drop
   commit as one continuous ordinary drag with exactly one button-up owner.
+  The current implementation has a movement-only raw capture gate (buttons
+  always pass), negotiated `window-drag-motion-v1` preview placement, and a
+  separate authenticated GNOME placement/watcher channel. The Viewer requires
+  native placement, a fresh actual paint, and a matching native recheck before
+  acknowledging a position. Source press/release/drop coordination is still
+  unfinished; production does not yet arm the motion gate. The intended path
+  retains the original native button owner throughout and commits after the
+  real release, without synthesizing an early mouse-up.
   The post-release frame query is not a native grab-completion receipt. Keeping
   the native source drag alive while showing a remote preview still needs a
   proven cursor/drag ownership transition; do not enable it on an assumed timer.

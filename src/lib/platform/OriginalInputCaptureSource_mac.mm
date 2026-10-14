@@ -30,6 +30,7 @@ bool OriginalInputCaptureSource::start() noexcept
 
 OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CGEventRef event) noexcept
 {
+  m_suppressMotion = false;
   InputEvidenceCaptureActivity evidenceActivity;
   if (m_state.load(std::memory_order_acquire) != State::Running)
     return {};
@@ -63,6 +64,7 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
       if (auto *evidence = inputEvidence())
         evidence->source(*result.record);
     if (result.record && m_stream.push(*result.record)) {
+      m_suppressMotion = m_dragMotion.observe(*result.record);
       m_openTransition = classifyTransition(*result.record);
       m_openPointer = result.pointer;
       ++m_sequence;
@@ -276,6 +278,7 @@ bool OriginalInputCaptureSource::emergencyRequested() const noexcept
 
 void OriginalInputCaptureSource::stop() noexcept
 {
+  m_dragMotion.stop();
   m_annotationState.store(State::Stopped, std::memory_order_release);
   // Revocation precedes terminal publication. A racing successful start cannot
   // revive continuity, and a consumer holding an older token sees the stop.

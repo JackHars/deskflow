@@ -66,7 +66,7 @@ endif()
 add_test(NAME windowshare-original-keyboard COMMAND windowshare-original-keyboard-tests)
 
 find_package(Threads REQUIRED)
-foreach(check original-input original-input-route original-pointer-join window-drag-transaction window-drag-edge viewport-lease module-policy library-constraint)
+foreach(check original-input original-input-route original-pointer-join window-drag-transaction window-drag-edge window-drag-motion-gate viewport-lease module-policy library-constraint)
   if(check STREQUAL "original-input")
     set(foundation_sources ../../lib/windowshare/OriginalInputTests.cpp
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
@@ -78,6 +78,8 @@ foreach(check original-input original-input-route original-pointer-join window-d
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
   elseif(check STREQUAL "window-drag-transaction")
     set(foundation_sources WindowDragTransactionTests.cpp)
+  elseif(check STREQUAL "window-drag-motion-gate")
+    set(foundation_sources WindowDragMotionGateTests.cpp)
   elseif(check STREQUAL "window-drag-edge")
     set(foundation_sources WindowDragEdgeTests.cpp
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)

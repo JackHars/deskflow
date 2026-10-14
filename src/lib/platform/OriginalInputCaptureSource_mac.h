@@ -8,6 +8,7 @@
 #include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputRoute.h"
 #include "windowshare/OriginalPointerJoin.h"
+#include "windowshare/WindowDragMotionGate.h"
 
 namespace deskflow::windowshare {
 
@@ -37,6 +38,15 @@ public:
   void captureAnnotation(CGEventType type, CGEventRef event) noexcept;
   std::optional<OriginalPointerAnnotation> popAnnotation() noexcept;
   bool annotationsLive() const noexcept;
+  WindowDragMotionGate &windowDragMotionGate() noexcept
+  {
+    return m_dragMotion;
+  }
+  // Producer only, immediately after beginCapture for that same event.
+  bool suppressWindowDragMotion() const noexcept
+  {
+    return m_suppressMotion && m_stream.epoch().live();
+  }
 
   // Exactly one consumer, outside the tap. Check live evidence on every use.
   std::optional<OriginalInputCaptured> popCaptured() noexcept;
@@ -66,6 +76,8 @@ private:
     Stopped
   };
   OriginalInputStream m_stream;
+  WindowDragMotionGate m_dragMotion{m_stream.epoch().id()};
+  bool m_suppressMotion = false;
   std::atomic<State> m_state{State::Ready};
   std::atomic<State> m_annotationState{State::Ready};
   std::array<OriginalPointerAnnotation, OriginalPointerJoin::capacity> m_annotations;

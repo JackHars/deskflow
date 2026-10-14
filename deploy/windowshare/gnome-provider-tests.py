@@ -48,6 +48,7 @@ UUID = "seamless-windows@deskflow.org"
 SERVICE = "org.deskflow.Seamless.Gnome50"
 OBJECT = "/org/deskflow/Seamless/Gnome50"
 LOG_LIMIT = 16 * 1024 * 1024
+DRAG_ASSOCIATION = "org.deskflow.window." + "a" * 64
 
 
 def require(condition, message):
@@ -357,7 +358,7 @@ def viewer_child(log_path):
     def log(event, **values):
         output.write(json.dumps({"event": event, **values}) + "\n")
 
-    application = Gtk.Application(application_id="org.deskflow.PrivateGnomeFixture")
+    application = Gtk.Application(application_id=DRAG_ASSOCIATION)
 
     def activate(app):
         display = Gdk.Display.get_default()
@@ -369,7 +370,11 @@ def viewer_child(log_path):
 
         def pointer_event(controller, event_name, x, y):
             event = controller.get_current_event()
-            require(event is not None, "Missing real GDK event")
+            if event is None:
+                # Native placement can synthesize an enter without an input
+                # event. Keep it separate from the measured real GDK stream.
+                log("native-crossing", x=x, y=y)
+                return
             ok, surface_x, surface_y = event.get_position()
             require(ok, "GDK event has no surface-relative position")
             log(event_name, x=x, y=y, surfaceX=surface_x, surfaceY=surface_y)
@@ -547,6 +552,73 @@ def run_fixture(arguments):
             require(isinstance(frame, (tuple, list)) and len(frame) == 4
                     and all(math.isfinite(value) for value in frame) and frame[2] > 100 and frame[3] > 100,
                     "Invalid native frame rectangle")
+
+            # Exercise real native placement on the exact Meta.WaylandClient
+            # window. Neither this fixture nor its EI stream is production
+            # original-input evidence; all activity remains in this private Shell.
+            require(caps.get("windowDragPlacement") is True and caps.get("ownedWindowMoveObservation") is True,
+                    "Native ordinary drag capabilities absent")
+            def placement(action, sequence, x=0, y=0, *, caller=provider, association=DRAG_ASSOCIATION):
+                result, = caller.call("WindowDragPreview", "(sussttsii)",
+                                      (session, generation, token, association, 1, sequence, action, int(x), int(y)))
+                require(result.get("available") is True and result.get("drag") == 1
+                        and result.get("sequence") == sequence and result.get("association") == association,
+                        "Native drag placement changed exact binding")
+                return result
+
+            placed = placement("place", 1, frame[0] + 30, frame[1] + 20)
+            require((placed["x"], placed["y"], placed["width"], placed["height"]) ==
+                    (frame[0] + 30, frame[1] + 20, frame[2], frame[3]), "Native drag placement was not read back exactly")
+            held = placement("hold", 1)
+            require(held["revision"] == placed["revision"], "Native hold manufactured new movement")
+            expect_rejected(lambda: placement("place", 1, frame[0], frame[1]), "Replayed native drag motion")
+            expect_rejected(lambda: placement("verify", 1, caller=foreign), "Foreign native drag verification")
+            expect_rejected(lambda: placement("verify", 1, association="org.deskflow.window." + "b" * 64),
+                            "Substituted native window association")
+            restored = placement("place", 2, frame[0], frame[1])
+            placement("finish", 2)
+            expect_rejected(lambda: placement("place", 3, frame[0], frame[1]), "Retired native drag revival")
+            report["nativeWindowDragPlacement"] = {"placed": placed, "restored": restored, "replayAndOwnershipDenied": True}
+
+            grabs = []
+            signal_id = provider.connection.signal_subscribe(
+                unique_owner, SERVICE, "WindowDragChanged", OBJECT, None, provider.Gio.DBusSignalFlags.NONE,
+                lambda _bus, _sender, _path, _interface, _signal, values: grabs.append(values.unpack()))
+            provider.call("WatchWindowDrag", "(sussb)", (session, generation, token, DRAG_ASSOCIATION, True))
+            drag_x, drag_y = int(frame[0] + frame[2] / 2), int(frame[1] + 12)
+            ei.sync(f"M {{request}} {drag_x} {drag_y}")
+            ei.sync("D {request}")
+            ei.sync(f"M {{request}} {drag_x + 35} {drag_y + 25}")
+
+            def grab_phase(phase):
+                context = provider.GLib.MainContext.default()
+                for _ in range(32):
+                    if not context.pending():
+                        break
+                    context.iteration(False)
+                return next((value for value in grabs if value[3].get("phase") == phase), None)
+
+            began = wait_for(processes, lambda: grab_phase("begin"), "ordinary owned titlebar move begin", timeout=3)
+            ei.sync(f"M {{request}} {drag_x + 70} {drag_y + 35}")
+            moved = wait_for(processes, lambda: grab_phase("motion"), "ordinary owned titlebar move motion", timeout=3)
+            ei.sync("U {request}")
+            ended = wait_for(processes, lambda: grab_phase("end"), "ordinary owned titlebar move release", timeout=3)
+            require(all(value[:3] == (session, generation, DRAG_ASSOCIATION) for value in (began, moved, ended))
+                    and began[3]["grab"] == moved[3]["grab"] == ended[3]["grab"]
+                    and began[3]["sequence"] < moved[3]["sequence"] < ended[3]["sequence"]
+                    and ended[3]["buttonReleased"] is True, "Ordinary native move did not retain exact single release")
+            provider.call("WatchWindowDrag", "(sussb)", (session, generation, token, DRAG_ASSOCIATION, False))
+            provider.connection.signal_unsubscribe(signal_id)
+            report["nativeWindowMoveGrab"] = {"begin": began, "motion": moved, "end": ended, "productionInputAuthority": False}
+            # Restore the isolated fixture pose and cursor before the existing
+            # measured viewport rounds; use a fresh non-replayed placement ID.
+            provider.call("WindowDragPreview", "(sussttsii)",
+                          (session, generation, token, DRAG_ASSOCIATION, 2, 1, "place", int(frame[0]), int(frame[1])))
+            provider.call("WindowDragPreview", "(sussttsii)",
+                          (session, generation, token, DRAG_ASSOCIATION, 2, 1, "finish", 0, 0))
+            ei.sync(f"M {{request}} {initial_x} {initial_y}")
+            observation = wait_for(processes, viewer_observation, "restored native viewer")
+            report["initialViewerObservation"] = observation
 
             def viewer_events():
                 if not viewer_log.exists():

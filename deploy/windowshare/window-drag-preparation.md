@@ -6,12 +6,15 @@ SPDX-License-Identifier: MIT
 
 The Core can now prepare a provisional remote window from the exact original
 titlebar press and configured Deskflow edge. This is the preparation portion of
-P5. Continuous cursor/drag cutover, remote placement/drop and ordinary drag-back
-are still implementation work. A painted preview is not a completed transfer.
+P5. Remote preview placement now joins actual compositor geometry, a later Qt
+paint and a final compositor recheck. The local release/cursor transfer and
+ordinary drag-back coordinators are still implementation work. A painted preview
+is not a completed transfer.
 
-The user deferred physical testing on 2026-10-14. Automated tests must use fake
-native callbacks or the offscreen Qt platform. Do not launch a physical fixture
-or enable input routing while the user is away.
+The user deferred physical testing on 2026-10-14. Automated tests use isolated
+callbacks, offscreen Qt or a disposable headless compositor with its own buses,
+settings and input fixture. Do not launch a physical fixture or enable input
+routing on the user's desktop while they are away.
 
 ## Production path
 
@@ -27,11 +30,18 @@ or enable input routing while the user is away.
    independently observed current WindowShare TLS connection. The native binding
    uses that Host connection incarnation. Names, addresses and the remote peer's
    assertions do not establish the pairing.
-4. Bridge also requires negotiated `window-drag-preview-v1`. NativeHost performs
+4. Bridge also requires negotiated `window-drag-preview-v1` and
+   `window-drag-motion-v1` for production edge preparation. NativeHost performs
    its existing exact AX/native window, process-birth, titlebar, movement and
    physical-display checks before starting capture. The Viewer paints with
    `WA_ShowWithoutActivating`, `WindowDoesNotAcceptFocus`, and no local input
    admission until an explicit committed acknowledgement.
+   Its grip offset comes from the retained original native titlebar observation.
+   A separate WindowDrag message carries only preview controls. The Linux Viewer
+   uses its inherited provider socket and exact Wayland association to place its
+   native window. No network request names a PID or unrelated native window.
+   A native reply alone cannot acknowledge movement: a subsequent actual Qt
+   paint and exact native frame/revision recheck are also required.
 5. Core checks retained continuity every 25 ms and sends a Hold at most every
    100 ms. A Hold cannot change coordinates or the original sequence. Host
    silence of 350 ms cancels; total preparation is limited to 30 seconds. A
@@ -42,6 +52,14 @@ or enable input routing while the user is away.
    cancellation or shutdown cancels the exact preparation. Native callbacks are
    rechecked after returning, including callbacks that stop/destroy the owner.
    Cleanup also covers a late-created preview returned after cancellation.
+
+The Mac capture gate can withhold only movement belonging to one exact retained
+left press. Every button transition passes normal native dispatch. The gate has
+a 350 ms coordinator heartbeat and cannot revive a retired press. It is tested
+in capture fixtures but production does not arm it yet. The remaining coordinator
+must retain the original native owner until real up, join its dispatched release,
+verify the final preview/drop and then switch the ordinary Core cursor. An early
+synthetic mouse-up is not part of this path.
 
 `NativeHost::observeWindowPointer` no longer automatically turns a matching up
 into `releaseWindowDrag`. Observing that up before the source application's

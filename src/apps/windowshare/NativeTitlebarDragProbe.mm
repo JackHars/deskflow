@@ -29,7 +29,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr auto observationDuration = std::chrono::seconds(90);
 constexpr auto cleanupGrace = std::chrono::seconds(5);
-NSWindow *makeWindow()
+NSWindow *makeWindow(bool holdMotion = false)
 {
   NSWindow *window;
   window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 340)
@@ -41,8 +41,12 @@ NSWindow *makeWindow()
   window.movableByWindowBackground = NO;
   auto label = [NSTextField
       wrappingLabelWithString:
-          @"Drag the normal title bar above this text.\nKeep moving for three seconds, then release.\n"
-          @"This test only observes. It will not stop your drag.\nThe window closes after release or 90 seconds."];
+          holdMotion
+              ? @"Drag the normal title bar for FIVE seconds.\nKeep holding and moving when the window stops.\n"
+                @"Then release once. No button event is synthesized.\nThe test closes on release or after 90 seconds."
+              : @"Drag the normal title bar above this text.\nKeep moving for three seconds, then release.\n"
+                @"This test only observes. It will not stop your drag.\nThe window closes after release or 90 "
+                @"seconds."];
   label.frame = NSMakeRect(28, 90, 584, 180);
   label.font = [NSFont systemFontOfSize:21];
   [window.contentView addSubview:label];
@@ -51,12 +55,12 @@ NSWindow *makeWindow()
   [NSApp activateIgnoringOtherApps:YES];
   return window;
 }
-int ownedTitlebarFixture()
+int ownedTitlebarFixture(bool holdMotion)
 {
   @autoreleasepool {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    auto window = makeWindow();
+    auto window = makeWindow(holdMotion);
     const auto content = [window contentRectForFrameRect:window.frame];
     std::printf(
         "{\"window\":%ld,\"pid\":%d,\"titleHeight\":%.3f}\n", (long)window.windowNumber, getpid(),
@@ -77,10 +81,11 @@ int ownedTitlebarFixture()
 class Probe final
 {
 public:
-  explicit Probe(bool annotated, bool joined, bool eligible)
+  explicit Probe(bool annotated, bool joined, bool eligible, bool holdMotion)
       : m_location(annotated ? kCGAnnotatedSessionEventTap : kCGHIDEventTap),
         m_joinedMode(joined),
         m_eligibleMode(eligible),
+        m_holdMotion(holdMotion),
         m_deadline(Clock::now() + observationDuration)
   {
     m_watchdog = std::thread([this] {
@@ -119,7 +124,7 @@ public:
       // A main-thread AX RPC into this same process could block its own reply.
       m_fixture = [[NSTask alloc] init];
       m_fixture.executableURL = [NSURL fileURLWithPath:NSProcessInfo.processInfo.arguments[0]];
-      m_fixture.arguments = @[ @"--owned-titlebar-fixture" ];
+      m_fixture.arguments = @[ m_holdMotion ? @"--owned-titlebar-hold-fixture" : @"--owned-titlebar-fixture" ];
       auto output = [NSPipe pipe];
       m_fixture.standardOutput = output;
       m_fixture.standardError = [NSFileHandle fileHandleWithStandardError];
@@ -192,7 +197,10 @@ public:
                       CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved) |
                       CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown) |
                       CGEventMaskBit(kCGEventKeyDown) | CGEventMaskBit(kCGEventFlagsChanged);
-    m_tap = CGEventTapCreate(m_location, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly, mask, tapped, this);
+    m_tap = CGEventTapCreate(
+        m_location, kCGHeadInsertEventTap, m_holdMotion ? kCGEventTapOptionDefault : kCGEventTapOptionListenOnly, mask,
+        tapped, this
+    );
     if (!m_tap)
       return fail("capture-tap");
     m_source = CFMachPortCreateRunLoopSource(nullptr, m_tap, 0);
@@ -260,6 +268,13 @@ private:
       }
     } else if (wasLive && event) {
       probe.m_previousTimestamp = CGEventGetTimestamp(event);
+    }
+    if (probe.m_holdMotion && probe.m_capture.suppressWindowDragMotion()) {
+      ++probe.m_suppressedMotions;
+      const auto sequence = probe.m_capture.windowDragMotionGate().lastSuppressedSequence();
+      if (!probe.m_firstSuppressed)
+        probe.m_firstSuppressed = sequence;
+      return nullptr;
     }
     return event;
   }
@@ -363,6 +378,7 @@ private:
           return;
         }
         m_down = true;
+        m_downAt = Clock::now();
         m_downSequence = record.sequence;
         m_eventWindowsMatch = p.windowUnderPointer == m_windowId && p.windowHandlingPointer == m_windowId;
         std::printf(
@@ -391,6 +407,24 @@ private:
         );
       } else if (!m_up && motion->dragButton == 0) {
         ++m_dragged;
+      }
+    }
+    if (m_holdMotion && m_eligibleDrag && !m_up) {
+      auto &gate = m_capture.windowDragMotionGate();
+      const OriginalInputStamp press{m_epoch.id(), m_downSequence, 0};
+      if (!m_holdAttempted && Clock::now() - m_downAt >= std::chrono::milliseconds(500)) {
+        m_holdAttempted = true;
+        if (!gate.arm(press)) {
+          finish("motion-hold-denied");
+          return;
+        }
+        std::printf(
+            "{\"event\":\"motion-hold-began\",\"pressSequence\":%llu,\"inputPosted\":false}\n",
+            static_cast<unsigned long long>(m_downSequence)
+        );
+      } else if (m_holdAttempted && !gate.refresh(press)) {
+        finish("motion-hold-lost");
+        return;
       }
     }
     if (m_join) {
@@ -466,8 +500,10 @@ private:
     if (m_down && m_lastFrame && !CGRectEqualToRect(*current, *m_lastFrame)) {
       ++m_frameChanges;
       std::printf(
-          "{\"event\":\"owned-frame\",\"x\":%.3f,\"y\":%.3f,\"width\":%.3f,\"height\":%.3f}\n", current->origin.x,
-          current->origin.y, current->size.width, current->size.height
+          "{\"event\":\"owned-frame\",\"x\":%.3f,\"y\":%.3f,\"width\":%.3f,\"height\":%.3f,\"suppressedMotions\":%llu}"
+          "\n",
+          current->origin.x, current->origin.y, current->size.width, current->size.height,
+          static_cast<unsigned long long>(m_suppressedMotions)
       );
     }
     m_lastFrame = current;
@@ -481,6 +517,14 @@ private:
     if (m_stopping)
       return;
     m_stopping = true;
+    if (m_holdMotion)
+      std::printf(
+          "{\"event\":\"motion-hold-summary\",\"attempted\":%s,\"suppressedMotions\":%llu,\"firstSuppressed\":%llu,"
+          "\"lastSuppressed\":%llu,\"buttonEventsSuppressed\":0,\"inputPosted\":false}\n",
+          m_holdAttempted ? "true" : "false", static_cast<unsigned long long>(m_suppressedMotions),
+          static_cast<unsigned long long>(m_firstSuppressed),
+          static_cast<unsigned long long>(m_capture.windowDragMotionGate().lastSuppressedSequence())
+      );
     std::printf(
         "{\"event\":\"complete\",\"reason\":\"%s\",\"titlebarDown\":%s,\"physicalUp\":%s,"
         "\"eventWindowsMatchOwned\":%s,\"draggedEvents\":%llu,\"frameChanges\":%llu,"
@@ -558,6 +602,10 @@ private:
   const CGEventTapLocation m_location;
   const bool m_joinedMode;
   const bool m_eligibleMode;
+  const bool m_holdMotion;
+  bool m_holdAttempted = false;
+  std::uint64_t m_suppressedMotions = 0, m_firstSuppressed = 0;
+  Clock::time_point m_downAt;
   const Clock::time_point m_deadline;
   Clock::time_point m_frameTime;
   NSWindow *m_window = nil;
@@ -586,14 +634,17 @@ private:
 int main(int argc, char **argv)
 {
   if (argc == 2 && std::strcmp(argv[1], "--owned-titlebar-fixture") == 0)
-    return ownedTitlebarFixture();
+    return ownedTitlebarFixture(false);
+  if (argc == 2 && std::strcmp(argv[1], "--owned-titlebar-hold-fixture") == 0)
+    return ownedTitlebarFixture(true);
+  const bool holdMotion = argc == 2 && std::strcmp(argv[1], "--interactive-hold-motion") == 0;
   const bool annotated = argc == 2 && std::strcmp(argv[1], "--interactive-annotated") == 0;
-  const bool eligible = argc == 2 && std::strcmp(argv[1], "--interactive-eligible") == 0;
+  const bool eligible = holdMotion || (argc == 2 && std::strcmp(argv[1], "--interactive-eligible") == 0);
   const bool joined = eligible || (argc == 2 && std::strcmp(argv[1], "--interactive-joined") == 0);
   if (argc != 2 || (std::strcmp(argv[1], "--interactive") != 0 && !annotated && !joined)) {
     std::fputs(
         "Usage: windowshare-native-titlebar-probe "
-        "--interactive|--interactive-annotated|--interactive-joined|--interactive-eligible\n"
+        "--interactive|--interactive-annotated|--interactive-joined|--interactive-eligible|--interactive-hold-motion\n"
         "Requires a ready user; posts no input. Annotated mode observes a later event stage; production Core stays at "
         "HID.\n",
         stderr
@@ -604,7 +655,7 @@ int main(int argc, char **argv)
     [NSApplication sharedApplication];
     [NSApp
         setActivationPolicy:eligible ? NSApplicationActivationPolicyProhibited : NSApplicationActivationPolicyRegular];
-    Probe probe(annotated, joined, eligible);
+    Probe probe(annotated, joined, eligible, holdMotion);
     if (!probe.start())
       return 2;
     [NSApp run];

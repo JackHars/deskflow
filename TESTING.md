@@ -6,6 +6,45 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **P5 motion/placement implementation, physical test deferred by the user:**
+  movement-only capture gating preserves every original button transition and
+  retains raw deltas for the sole Session consumer. Signed Mac gate and capture
+  tests pass (`p5-motion-hold-tests.json`); the production Core builds with the
+  feature enabled and disabled. The new hold probe is prepared but **NOT_RUN**.
+- **Private GNOME placement/watcher protocol passes on Linux:** normal and
+  AddressSanitizer/UndefinedBehaviorSanitizer builds of the production provider
+  client pass its private D-Bus suite, including exact native placement echoes,
+  watcher events, missing capability, substituted/duplicate fields and continued
+  independent viewport requests (`p5-drag-channel-ubuntu-2/result.json`). The
+  first image lacked `dbus-daemon` and skipped; the passing run mounted only
+  that executable and its missing AppArmor library read-only, with its own bus
+  configuration, no desktop bus, no network and disposable filesystem.
+- **Actual GNOME 50 compositor placement and ordinary move-grab pass:**
+  `p5-native-gnome-drag-2/result.json` records an exact owned 640x400 window
+  moved from (320,176) to (350,196), restored, and verified against replay,
+  foreign caller and substituted association requests. The same isolated
+  headless compositor reports native titlebar grab 1, begin/motion/end sequences
+  1/2/3 and button release at (710,223). All source files, Shell logs and the
+  native report are retained. This is fixture EIS input, **not physical Mac
+  input or H07**. The first native run exposed non-enumerable GI rectangle
+  fields; explicit field copying fixes it and has a regression test. The
+  combined JS suite passes 39 tests; the Linux package suite passes 11.
+- **Viewer preview placement requires fresh paint:** the new controller joins
+  exact native placement → an actual later Qt paint → native position recheck.
+  Signed Mac preview tests cover coalesced final movement/drop, missing paint,
+  identity/position changes, expiry, cancellation and late callbacks. Existing
+  Viewer, Bridge and private drag-coordinator tests also pass
+  (`p5-placement-tests.json`, `p5-placement-bridge-tests.json`,
+  `p5-coordinator-hold-tests.json`). The first coordinator run expected Hold
+  never to reach native placement; its assertion now distinguishes stationary
+  verification from new motion. Production still awaits the local release and
+  cursor transfer coordinator; **P5/H07 remain open**.
+- **Linux application build and five affected suites pass:**
+  `p5-linux-placement-build/result.json` records a frozen complete source tree,
+  successful Ubuntu Qt application build, and passing drag coordinator,
+  preview controller, viewport endpoint, Viewer and Bridge suites (25.01 s).
+  The container had no network, user display socket or physical input devices;
+  the temporary source/build directory was removed after collecting evidence.
 - **Native ordinary-titlebar eligibility passes physically:** the user returned
   and requested physical testing. `owned-titlebar-eligible-physical-20261014T194753Z`
   records exact owned window **10482**, source PID **64457**, native event **521**,

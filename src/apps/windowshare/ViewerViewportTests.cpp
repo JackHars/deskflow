@@ -277,6 +277,7 @@ struct Pair
   std::unique_ptr<ViewerViewportEndpoint> endpoint;
   GnomeViewportDecoder decoder;
   std::vector<GnomeViewportReply> replies;
+  std::vector<QJsonObject> drags;
   Pair()
   {
     int sockets[2];
@@ -306,8 +307,12 @@ struct Pair
       if (count < 0)
         break;
       decoder.append(QByteArray(bytes, count));
-      while (auto reply = decoder.take())
-        replies.push_back(parseGnomeViewportReply(*reply));
+      while (auto reply = decoder.take()) {
+        if (isGnomeWindowDrag(*reply))
+          drags.push_back(*reply);
+        else
+          replies.push_back(parseGnomeViewportReply(*reply));
+      }
     }
   }
   GnomeViewportReply reply(std::uint64_t request)
@@ -325,6 +330,108 @@ struct Pair
     throw std::runtime_error("No reply");
   }
 };
+void windowDragChannel()
+{
+  GnomeWindowDragRequest request{0, 7, 18, fixtureState().windowAssociation, GnomeWindowDragAction::Place, -300, 45};
+  auto encoded = request;
+  encoded.request = 1;
+  check(parseGnomeWindowDragRequest(gnomeWindowDragJson(encoded)) == encoded, "Native drag binding did not roundtrip");
+  for (const auto &bad : {QJsonValue("01"), QJsonValue(1), QJsonValue("9007199254740992")}) {
+    auto object = gnomeWindowDragJson(encoded);
+    object.insert("request", bad);
+    rejects([&] { (void)parseGnomeWindowDragRequest(object); });
+  }
+  for (const auto &key : {"cutoff", "inputLease", "extra"}) {
+    auto object = gnomeWindowDragJson(encoded);
+    object.insert(QLatin1String(key), 1);
+    rejects([&] { (void)parseGnomeWindowDragRequest(object); });
+  }
+  const auto send = [](Pair &pair, const auto &value) {
+    const auto frame = gnomeViewportFrame(gnomeWindowDragJson(value));
+    check(::send(pair.peer, frame.constData(), frame.size(), 0) == frame.size(), "Native drag fixture write failed");
+  };
+  const auto take = [](Pair &pair, std::size_t count) {
+    check(
+        waitUntil([&] {
+          pair.drain();
+          return pair.drags.size() == count;
+        }),
+        "Native drag request did not arrive"
+    );
+    return parseGnomeWindowDragRequest(pair.drags.back());
+  };
+  Pair pair;
+  std::vector<GnomeWindowDragReply> results;
+  check(
+      pair.endpoint->requestWindowDrag(request, [&](const auto &value) { results.push_back(value); }),
+      "Native placement request refused"
+  );
+  check(!pair.endpoint->requestWindowDrag(request, [](const auto &) {}), "Concurrent same-window request accepted");
+  auto binding = take(pair, 1);
+  const QRect actual(-300, 45, 640, 480);
+  send(pair, GnomeWindowDragReply{binding, true, actual, 1});
+  check(
+      waitUntil([&] { return results.size() == 1; }) && results[0].ok && results[0].frame == actual,
+      "Exact compositor placement did not reach caller"
+  );
+  request.action = GnomeWindowDragAction::Watch;
+  request.x = request.y = 0;
+  check(
+      pair.endpoint->requestWindowDrag(request, [&](const auto &value) { results.push_back(value); }),
+      "Native watcher request refused"
+  );
+  binding = take(pair, 2);
+  send(pair, GnomeWindowDragReply{binding, true, {}, 0});
+  check(waitUntil([&] { return results.size() == 2; }) && results.back().ok, "Native watcher not acknowledged");
+  std::vector<GnomeWindowDragEvent> events;
+  pair.endpoint->onWindowDrag = [&](const auto &value) { events.push_back(value); };
+  GnomeWindowDragEvent event{request.association, 11, 1, GnomeWindowDragEvent::Phase::Begin, 80, 60, actual, false};
+  send(pair, event);
+  event.phase = GnomeWindowDragEvent::Phase::Motion;
+  ++event.sequence;
+  send(pair, event);
+  event.phase = GnomeWindowDragEvent::Phase::End;
+  event.buttonReleased = true;
+  ++event.sequence;
+  send(pair, event);
+  check(
+      waitUntil([&] { return events.size() == 3; }) && events.back().buttonReleased,
+      "Native ordinary grab lost ordered movement/release"
+  );
+  send(pair, event);
+  check(waitUntil([&] { return !pair.endpoint->live(); }), "Duplicate native grab end accepted");
+
+  Pair late;
+  unsigned callbacks = 0;
+  check(
+      late.endpoint->requestWindowDrag(
+          request,
+          [&](const auto &value) {
+            ++callbacks;
+            check(!value.ok, "Expired native placement renewed its deadline");
+          }
+      ),
+      "Expiry fixture request refused"
+  );
+  const auto expired = take(late, 1);
+  check(waitUntil([&] { return callbacks == 1; }), "Native drag request did not expire");
+  send(late, GnomeWindowDragReply{expired, true, {}, 0});
+  QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+  check(late.endpoint->live() && callbacks == 1, "Late exact reply revived expired native placement");
+  check(late.endpoint->requestWindowDrag(request, [](const auto &) {}), "Fresh native request refused after expiry");
+  auto substituted = take(late, 2);
+  ++substituted.drag;
+  send(late, GnomeWindowDragReply{substituted, true, {}, 0});
+  check(waitUntil([&] { return !late.endpoint->live(); }), "Changed native placement binding was accepted");
+
+  Pair destroyed;
+  check(
+      destroyed.endpoint->requestWindowDrag(request, [&](const auto &) { destroyed.endpoint.reset(); }),
+      "Destruction fixture request refused"
+  );
+  send(destroyed, GnomeWindowDragReply{take(destroyed, 1), false, {}, 0});
+  check(waitUntil([&] { return !destroyed.endpoint; }), "Destructive native drag callback failed");
+}
 void preparationGatePromotionAndCleanup()
 {
   Pair pair;
@@ -1211,6 +1318,7 @@ int main(int argc, char **argv)
   try {
     protocol();
     inputDrainProtocol();
+    windowDragChannel();
     preparationGatePromotionAndCleanup();
     prefixSealMaps();
     prefixMapBatches();

@@ -1155,6 +1155,7 @@ struct NativeHost::Impl
     NativeAssociatedReturn associatedReturn;
     std::shared_ptr<NativeSourceTransaction> sourceTransaction = std::make_shared<NativeSourceTransaction>();
     std::shared_ptr<WindowDragTransaction> windowDrag;
+    QPointF dragAnchor;
     QPointF pointer;
     std::map<std::uint32_t, std::pair<std::int64_t, int>> buttons;
     ~Entry()
@@ -1806,6 +1807,8 @@ struct NativeHost::Impl
         {"phase", e.session.phase == Phase::Remote ? "remote" : "preparing"},
         {"sourceVisible", !e.moved},
         {"windowDrag", e.windowDrag ? double(e.windowDrag->binding().drag) : 0},
+        {"dragAnchorX", e.dragAnchor.x()},
+        {"dragAnchorY", e.dragAnchor.y()},
         {"resizeRequest", double(e.resizeRequest)},
         {"hardwareEncoder", e.capture && e.capture->hardware.load()}
     };
@@ -2232,6 +2235,15 @@ struct NativeHost::Impl
         error("Titlebar identity changed before drag preparation; preserving the source window");
         return;
       }
+      if (!titlebarPress || !observed->initial.valid())
+        return;
+      e->dragAnchor = {
+          (titlebarPress->x - observed->initial.x) / observed->initial.width,
+          (titlebarPress->y - observed->initial.y) / observed->initial.height
+      };
+      if (!std::isfinite(e->dragAnchor.x()) || !std::isfinite(e->dragAnchor.y()) || e->dragAnchor.x() < 0 ||
+          e->dragAnchor.y() < 0 || e->dragAnchor.x() > 1 || e->dragAnchor.y() > 1)
+        return;
     }
     CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
     if (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) {

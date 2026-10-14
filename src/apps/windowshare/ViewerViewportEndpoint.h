@@ -4,6 +4,7 @@
  */
 #pragma once
 #include "GnomeViewportProtocol.h"
+#include "GnomeWindowDragProtocol.h"
 #include "WaylandViewport.h"
 #include <QDeadlineTimer>
 #include <QObject>
@@ -11,6 +12,7 @@
 #include <QSocketNotifier>
 #include <QTimer>
 #include <functional>
+#include <map>
 #include <memory>
 
 namespace deskflow::windowshare {
@@ -53,6 +55,10 @@ public:
   std::function<bool(const GnomeViewportState &, const InputCutoffBinding &, QDeadlineTimer, std::function<void(bool)>)>
       onInputDrain;
   std::function<void()> onClosed;
+  // Native placement/ordinary move observations have no input lease. Replies
+  // must echo the exact per-window request; late/changed bindings cannot pass.
+  bool requestWindowDrag(GnomeWindowDragRequest, std::function<void(const GnomeWindowDragReply &)>);
+  std::function<void(const GnomeWindowDragEvent &)> onWindowDrag;
   std::function<std::optional<GnomePreparationInventory>(const InputPreparationBinding &)> onPreparationInventory;
   std::function<bool(const InputPreparationBinding &, const GnomePreparationTarget &)> onPreparationCheck;
   std::function<std::optional<QPointF>(const InputPreparationBinding &, const GnomePreparationTarget &, QPointF)>
@@ -87,6 +93,9 @@ private:
   bool currentPreparation(const GnomePreparationTarget &target);
   void replyPreparation(const GnomeViewportRequest &request, bool ok, const QString &reason = {});
   bool send(const GnomeViewportReply &reply);
+  bool sendObject(const QJsonObject &);
+  void handleWindowDrag(const QJsonObject &);
+  void expireWindowDrags();
   bool current(std::uint64_t snapshot);
   bool currentInputDrain(const GnomeViewportRequest &request, QDeadlineTimer deadline);
   void finishQtQueue(const GnomeViewportRequest &request, bool observed);
@@ -132,5 +141,21 @@ private:
   std::optional<GnomeViewportRequest> m_preparationPending;
   QDeadlineTimer m_preparationOperationDeadline;
   QTimer m_preparationPoll, m_preparationExpiry;
+  struct DragPending
+  {
+    GnomeWindowDragRequest binding;
+    QDeadlineTimer deadline;
+    std::function<void(const GnomeWindowDragReply &)> finished;
+  };
+  struct DragWatch
+  {
+    std::uint64_t grab = 0, sequence = 0;
+    bool active = false, enabled = false;
+  };
+  std::uint64_t m_dragRequest = 0;
+  std::map<std::uint64_t, DragPending> m_dragPending;
+  std::map<std::uint64_t, GnomeWindowDragRequest> m_dragRetired;
+  std::map<QString, DragWatch> m_dragWatches;
+  QTimer m_dragExpiry;
 };
 } // namespace deskflow::windowshare

@@ -25,12 +25,12 @@ RUNTIME = "libexec/deskflow-seamless-experimental"
 SHARE = "share/deskflow-seamless-experimental"
 PROVIDER = f"{SHARE}/gnome-provider"
 PROVIDER_FILES = (
-    "README.md", "extension.js", "interface.xml", "launcher.js", "logic.js", "ordering.js",
+    "README.md", "extension.js", "interface.xml", "launcher.js", "logic.js", "ordering.js", "window-drag.js",
     "metadata.json", "metadata.json.license", "package.json", "package.json.license",
     # Offline provenance and explicit diagnostics are inert; the runtime uses
     # only the closed allowlist in logic.js, never this evidence manifest.
     "ordering-builds.json", "ordering-builds.json.license", "verify-ordering-build.py",
-    "tests/ordering-native.js", "tests/logic.test.js", "tests/launcher.gjs.js", "tests/launcher-native.py",
+    "tests/ordering-native.js", "tests/logic.test.js", "tests/window-drag.test.js", "tests/launcher.gjs.js", "tests/launcher-native.py",
 )
 DOCUMENT_FILES = ("package-linux.md", "app-compatibility.md", "focused-clipboard.md")
 MAX_ARCHIVE_MEMBER = 128 * 1024 * 1024

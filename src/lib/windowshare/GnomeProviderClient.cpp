@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "GnomeProviderClient.h"
+#include "GnomeWindowDragProtocol.h"
 
 #include <algorithm>
 #include <array>
@@ -11,10 +12,12 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <fcntl.h>
 #include <gio/gio.h>
 #include <gio/gunixfdlist.h>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <poll.h>
 #include <set>
@@ -417,6 +420,17 @@ struct GnomeProviderClient::Impl
   std::uint64_t nativeInvalidations = 0;
   std::string lastNativeInvalidation;
   std::string windowAssociation;
+  bool windowDragSupported = false;
+  guint windowDragSignal = 0;
+  std::uint64_t lastWindowDragRequest = 0;
+  struct PendingWindowDrag
+  {
+    GnomeWindowDragRequest binding;
+    Clock::time_point deadline;
+  };
+  std::deque<PendingWindowDrag> windowDragRequests;
+  std::deque<QByteArray> windowDragOutput;
+  std::map<QString, bool> windowDragWatches;
 
   Impl(GnomeProviderConfig config, std::function<void()> notify)
       : configuration(std::move(config)),
@@ -630,6 +644,24 @@ struct GnomeProviderClient::Impl
     routedPointSupported.store(boolean(values, "routedPointObservation"), std::memory_order_release);
     routedPointsSupported.store(boolean(values, "routedPointsObservation"), std::memory_order_release);
     stageUpdatesSupported = boolean(values, "stageUpdateSequence");
+    windowDragSupported = boolean(values, "windowDragPlacement") && boolean(values, "ownedWindowMoveObservation");
+    if (windowDragSupported) {
+      windowDragSignal = g_dbus_connection_signal_subscribe(
+          bus, owner.c_str(), interface, "WindowDragChanged", object, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+          [](GDBusConnection *, const gchar *, const gchar *, const gchar *, const gchar *, GVariant *parameters,
+             gpointer data) {
+            auto &self = *static_cast<Impl *>(data);
+            try {
+              self.windowDragChanged(parameters);
+            } catch (const std::exception &error) {
+              self.fail(error.what());
+            } catch (...) {
+              self.fail("Invalid native window drag observation");
+            }
+          },
+          this, nullptr
+      );
+    }
     if (boolean(values, "inputDrainSegment")) {
       orderingContract = uniqueOrderingCapability(values, "inputDrainOrderingContract");
       const auto limit = uniqueOrderingCapability(values, "inputDrainOrderingLimit");
@@ -831,11 +863,201 @@ struct GnomeProviderClient::Impl
     // POLLHUP is consumed by recv(), after any final buffered invalidation.
     checkpoint(deadline);
   }
+  void queueWindowDrag(const QJsonObject &object)
+  {
+    const auto request = parseGnomeWindowDragRequest(object);
+    if (request.request <= lastWindowDragRequest || windowDragRequests.size() >= 16)
+      throw ChannelError("Replayed or excessive native window drag request");
+    lastWindowDragRequest = request.request;
+    windowDragRequests.push_back({request, Clock::now() + std::chrono::milliseconds(200)});
+  }
+  void queueWindowDragOutput(const QJsonObject &object)
+  {
+    if (windowDragOutput.size() >= 16)
+      throw ChannelError("Native window drag output queue exceeded its bound");
+    windowDragOutput.push_back(gnomeViewportFrame(object));
+  }
+  void windowDragChanged(GVariant *parameters)
+  {
+    if (!g_variant_is_of_type(parameters, G_VARIANT_TYPE("(susa{sv})")))
+      throw ChannelError("Malformed native window drag signal");
+    const char *id = nullptr, *association = nullptr;
+    guint nativeGeneration = 0;
+    GVariant *values = nullptr;
+    g_variant_get(parameters, "(&su&s@a{sv})", &id, &nativeGeneration, &association, &values);
+    Variant dictionary(values);
+    if (session != id || generation != nativeGeneration || terminal)
+      return;
+    static constexpr std::array<std::pair<const char *, const char *>, 11> schema{
+        {{"viewer", "s"},
+         {"phase", "s"},
+         {"grab", "t"},
+         {"sequence", "t"},
+         {"x", "i"},
+         {"y", "i"},
+         {"frameX", "i"},
+         {"frameY", "i"},
+         {"width", "i"},
+         {"height", "i"},
+         {"buttonReleased", "b"}}
+    };
+    if (!exactFields(values, schema))
+      throw ChannelError("Malformed native window drag fields");
+    const char *nativeViewer = nullptr, *phase = nullptr;
+    g_variant_lookup(values, "viewer", "&s", &nativeViewer);
+    if (viewer != nativeViewer)
+      return;
+    const auto watching = windowDragWatches.find(QString::fromUtf8(association));
+    if (watching == windowDragWatches.end() || !watching->second)
+      return;
+    GnomeWindowDragEvent event;
+    event.association = QString::fromUtf8(association);
+    guint64 grab = 0, sequence = 0;
+    gint x = 0, y = 0, width = 0, height = 0;
+    g_variant_lookup(values, "grab", "t", &grab);
+    g_variant_lookup(values, "sequence", "t", &sequence);
+    g_variant_lookup(values, "phase", "&s", &phase);
+    g_variant_lookup(values, "x", "i", &event.x);
+    g_variant_lookup(values, "y", "i", &event.y);
+    g_variant_lookup(values, "frameX", "i", &x);
+    g_variant_lookup(values, "frameY", "i", &y);
+    g_variant_lookup(values, "width", "i", &width);
+    g_variant_lookup(values, "height", "i", &height);
+    event.grab = grab;
+    event.sequence = sequence;
+    event.frame = QRect(x, y, width, height);
+    event.buttonReleased = boolean(values, "buttonReleased");
+    if (!std::strcmp(phase, "begin"))
+      event.phase = GnomeWindowDragEvent::Phase::Begin;
+    else if (!std::strcmp(phase, "motion"))
+      event.phase = GnomeWindowDragEvent::Phase::Motion;
+    else if (!std::strcmp(phase, "end"))
+      event.phase = GnomeWindowDragEvent::Phase::End;
+    else if (std::strcmp(phase, "cancel"))
+      throw ChannelError("Unknown native window drag phase");
+    queueWindowDragOutput(gnomeWindowDragJson(event));
+  }
+  void processWindowDrags()
+  {
+    // This worker owns both directions of the inherited stream. Run only
+    // between viewport operations, so native placement cannot split a prefix
+    // seal/drain or interleave bytes into an in-flight viewport frame.
+    if (!windowDragRequests.empty()) {
+      const auto pending = windowDragRequests.front();
+      windowDragRequests.pop_front();
+      const auto &request = pending.binding;
+      GnomeWindowDragReply result{request, false, {}, 0};
+      try {
+        bool inputBusy = false;
+        {
+          const std::lock_guard lock(mutex);
+          inputBusy = viewportBusy || prefixSeal.has_value() ||
+                      (preparation && preparation->state->load() != InputPreparationState::Released &&
+                       preparation->state->load() != InputPreparationState::Failed);
+        }
+        if (!windowDragSupported || inputBusy || Clock::now() >= pending.deadline || terminal || stopping.load())
+          throw std::runtime_error("Native window drag unavailable");
+        const auto association = request.association.toUtf8();
+        Error error;
+        const auto action = request.action;
+        if (action == GnomeWindowDragAction::Watch || action == GnomeWindowDragAction::Unwatch) {
+          if (!windowDragWatches.contains(request.association) && windowDragWatches.size() >= 16)
+            throw ChannelError("Too many native window drag watches");
+          Variant reply(g_dbus_connection_call_sync(
+              bus, owner.c_str(), object, interface, "WatchWindowDrag",
+              g_variant_new(
+                  "(sussb)", session.c_str(), generation, viewer.c_str(), association.constData(),
+                  action == GnomeWindowDragAction::Watch
+              ),
+              G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 100, cancel, &error.value
+          ));
+          result.ok = reply.value && Clock::now() < pending.deadline;
+          if (result.ok)
+            windowDragWatches[request.association] = action == GnomeWindowDragAction::Watch;
+        } else {
+          const auto name = gnomeWindowDragActionName(action).toUtf8();
+          Variant reply(g_dbus_connection_call_sync(
+              bus, owner.c_str(), object, interface, "WindowDragPreview",
+              g_variant_new(
+                  "(sussttsii)", session.c_str(), generation, viewer.c_str(), association.constData(),
+                  guint64(request.drag), guint64(request.sequence), name.constData(), request.x, request.y
+              ),
+              G_VARIANT_TYPE("(a{sv})"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 100, cancel, &error.value
+          ));
+          if (!reply.value || Clock::now() >= pending.deadline)
+            throw std::runtime_error("Native window placement timed out or failed");
+          Variant values(g_variant_get_child_value(reply.value, 0));
+          static constexpr std::array<std::pair<const char *, const char *>, 12> schema{
+              {{"available", "b"},
+               {"session", "s"},
+               {"generation", "u"},
+               {"viewer", "s"},
+               {"association", "s"},
+               {"drag", "t"},
+               {"sequence", "t"},
+               {"x", "i"},
+               {"y", "i"},
+               {"width", "i"},
+               {"height", "i"},
+               {"revision", "u"}}
+          };
+          if (!exactFields(values.value, schema))
+            throw ChannelError("Malformed native window placement reply");
+          const char *id = nullptr, *nativeViewer = nullptr, *nativeAssociation = nullptr;
+          guint nativeGeneration = 0, revision = 0;
+          guint64 drag = 0, sequence = 0;
+          gint x = 0, y = 0, width = 0, height = 0;
+          g_variant_lookup(values.value, "session", "&s", &id);
+          g_variant_lookup(values.value, "viewer", "&s", &nativeViewer);
+          g_variant_lookup(values.value, "association", "&s", &nativeAssociation);
+          g_variant_lookup(values.value, "generation", "u", &nativeGeneration);
+          g_variant_lookup(values.value, "drag", "t", &drag);
+          g_variant_lookup(values.value, "sequence", "t", &sequence);
+          g_variant_lookup(values.value, "revision", "u", &revision);
+          g_variant_lookup(values.value, "x", "i", &x);
+          g_variant_lookup(values.value, "y", "i", &y);
+          g_variant_lookup(values.value, "width", "i", &width);
+          g_variant_lookup(values.value, "height", "i", &height);
+          if (!boolean(values.value, "available") || session != id || generation != nativeGeneration ||
+              viewer != nativeViewer || request.association != QString::fromUtf8(nativeAssociation) ||
+              request.drag != drag || request.sequence != sequence ||
+              (action == GnomeWindowDragAction::Place && (x != request.x || y != request.y)))
+            throw ChannelError("Native window placement changed its exact binding");
+          result.frame = QRect(x, y, width, height);
+          result.revision = revision;
+          result.ok = true;
+        }
+      } catch (const ChannelError &) {
+        throw;
+      } catch (...) {
+        result.ok = false;
+      }
+      queueWindowDragOutput(gnomeWindowDragJson(result));
+    }
+    // Signal callbacks enqueue only, including during checkpoint reentrancy.
+    // All writes complete one framed message before the next writer runs.
+    unsigned sent = 0;
+    while (!windowDragOutput.empty()) {
+      if (++sent > 16)
+        throw ChannelError("Native drag notifications exceeded their bound");
+      const auto frame = std::move(windowDragOutput.front());
+      windowDragOutput.pop_front();
+      writeViewportFrame(frame, Clock::now() + std::chrono::milliseconds(100));
+    }
+  }
+  std::optional<GnomeViewportReply> readViewportObject(const QJsonObject &object)
+  {
+    if (isGnomeWindowDrag(object)) {
+      queueWindowDrag(object);
+      return std::nullopt;
+    }
+    return parseGnomeViewportReply(object);
+  }
   std::optional<GnomeViewportReply> readViewportReply()
   {
     try {
       if (const auto object = viewportDecoder.take())
-        return parseGnomeViewportReply(*object);
+        return readViewportObject(*object);
       char bytes[4096];
       const auto count = ::recv(viewportDescriptor.value, bytes, sizeof(bytes), MSG_DONTWAIT);
       if (count == 0)
@@ -847,7 +1069,7 @@ struct GnomeProviderClient::Impl
       }
       viewportDecoder.append(QByteArray(bytes, static_cast<qsizetype>(count)));
       if (const auto object = viewportDecoder.take())
-        return parseGnomeViewportReply(*object);
+        return readViewportObject(*object);
       return std::nullopt;
     } catch (const std::exception &error) {
       throw ChannelError(error.what());
@@ -898,6 +1120,33 @@ struct GnomeProviderClient::Impl
     }
     throw ChannelError("GNOME viewport reply queue exceeded its bound");
   }
+  void writeViewportFrame(const QByteArray &frame, Clock::time_point deadline)
+  {
+    qsizetype sent = 0;
+    try {
+      while (sent < frame.size()) {
+        checkpoint(deadline);
+        int flags = 0;
+#ifdef MSG_NOSIGNAL
+        flags = MSG_NOSIGNAL;
+#endif
+        const auto count = ::send(
+            viewportDescriptor.value, frame.constData() + sent, static_cast<std::size_t>(frame.size() - sent), flags
+        );
+        if (count > 0) {
+          sent += count;
+        } else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
+          waitSocket(POLLOUT, deadline);
+        } else {
+          throw ChannelError("GNOME viewport write failed");
+        }
+      }
+    } catch (...) {
+      if (sent > 0 && sent < frame.size())
+        throw ChannelError("GNOME viewport write ended within a frame");
+      throw;
+    }
+  }
   GnomeViewportReply viewportCall(
       GnomeViewportOperation operation, Clock::time_point deadline, std::uint64_t snapshot = 0, double x = 0,
       double y = 0, const InputCutoffBinding *cutoff = nullptr, std::uint64_t seal = 0,
@@ -923,30 +1172,7 @@ struct GnomeProviderClient::Impl
         request.target = *target;
     }
     const auto frame = gnomeViewportFrame(gnomeViewportJson(request));
-    qsizetype sent = 0;
-    try {
-      while (sent < frame.size()) {
-        checkpoint(deadline);
-        int flags = 0;
-#ifdef MSG_NOSIGNAL
-        flags = MSG_NOSIGNAL;
-#endif
-        const auto count = ::send(
-            viewportDescriptor.value, frame.constData() + sent, static_cast<std::size_t>(frame.size() - sent), flags
-        );
-        if (count > 0) {
-          sent += count;
-        } else if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
-          waitSocket(POLLOUT, deadline);
-        } else {
-          throw ChannelError("GNOME viewport write failed");
-        }
-      }
-    } catch (...) {
-      if (sent > 0 && sent < frame.size())
-        throw ChannelError("GNOME viewport write ended within a frame");
-      throw;
-    }
+    writeViewportFrame(frame, deadline);
     unsigned received = 0;
     for (;;) {
       checkpoint(deadline);
@@ -1929,6 +2155,7 @@ struct GnomeProviderClient::Impl
       }
     } unwind{processingViewport};
     drainViewport();
+    processWindowDrags();
     processPreparation();
     std::optional<Request> request;
     bool admissionDenied = false;
@@ -2178,6 +2405,8 @@ struct GnomeProviderClient::Impl
         g_dbus_connection_signal_unsubscribe(bus, closeSignal);
       if (invalidationSignal)
         g_dbus_connection_signal_unsubscribe(bus, invalidationSignal);
+      if (windowDragSignal)
+        g_dbus_connection_signal_unsubscribe(bus, windowDragSignal);
       if (sessionCreated && !g_dbus_connection_is_closed(bus)) {
         // Cleanup is bounded independently of the canceled request lifetime.
         auto *reply = g_dbus_connection_call_sync(

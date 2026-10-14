@@ -1845,6 +1845,11 @@ CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType ty
         source->completeCapture(scope.translation());
     }
   } completeTranslation{source, stampScope};
+  // The original native press/release remain local. Only explicitly admitted
+  // held motion is consumed, after raw capture and before legacy translation.
+  // The existing Session consumer supplies that movement to the drag preview.
+  if (source && source->suppressWindowDragMotion())
+    return nullptr;
 #endif
 
   switch (type) {

@@ -112,6 +112,8 @@ ViewerViewportEndpoint::ViewerViewportEndpoint(int fd, QObject *parent) : QObjec
     m_write->setEnabled(false);
     connect(m_read.get(), &QSocketNotifier::activated, this, [this] { read(); });
     connect(m_write.get(), &QSocketNotifier::activated, this, [this] { write(); });
+    m_dragExpiry.setInterval(25);
+    connect(&m_dragExpiry, &QTimer::timeout, this, [this] { expireWindowDrags(); });
     m_expiry.setSingleShot(true);
     connect(&m_expiry, &QTimer::timeout, this, [this] { invalidateSnapshot(QStringLiteral("snapshot-expired")); });
     m_preparationPoll.setInterval(1);
@@ -161,6 +163,10 @@ void ViewerViewportEndpoint::close()
   m_queueExpiry.stop();
   m_preparationPoll.stop();
   m_preparationExpiry.stop();
+  m_dragExpiry.stop();
+  m_dragPending.clear();
+  m_dragRetired.clear();
+  m_dragWatches.clear();
   m_preparationPending.reset();
   m_preparation.reset();
   m_queueWitness.cancel();
@@ -180,10 +186,14 @@ void ViewerViewportEndpoint::close()
 }
 bool ViewerViewportEndpoint::send(const GnomeViewportReply &reply)
 {
+  return sendObject(gnomeViewportJson(reply));
+}
+bool ViewerViewportEndpoint::sendObject(const QJsonObject &object)
+{
   if (!live())
     return false;
   try {
-    const auto frame = gnomeViewportFrame(gnomeViewportJson(reply));
+    const auto frame = gnomeViewportFrame(object);
     if (m_output.size() + frame.size() > 2 * (gnomeViewportMaximumPayload + 4)) {
       close();
       return false;
@@ -196,6 +206,104 @@ bool ViewerViewportEndpoint::send(const GnomeViewportReply &reply)
     close();
     return false;
   }
+}
+bool ViewerViewportEndpoint::requestWindowDrag(
+    GnomeWindowDragRequest request, std::function<void(const GnomeWindowDragReply &)> finished
+)
+{
+  if (!live() || !finished || request.request || m_dragPending.size() >= 16 ||
+      m_dragRequest == ((std::uint64_t{1} << 53) - 1))
+    return false;
+  for (const auto &[id, pending] : m_dragPending)
+    if (pending.binding.association == request.association)
+      return false;
+  if (!m_dragWatches.contains(request.association) && m_dragWatches.size() >= 16)
+    return false;
+  request.request = ++m_dragRequest;
+  try {
+    const auto object = gnomeWindowDragJson(request);
+    m_dragPending.emplace(request.request, DragPending{request, QDeadlineTimer(250), std::move(finished)});
+    m_dragExpiry.start();
+    return sendObject(object);
+  } catch (...) {
+    m_dragPending.erase(request.request);
+    return false;
+  }
+}
+void ViewerViewportEndpoint::expireWindowDrags()
+{
+  const QPointer<ViewerViewportEndpoint> alive(this);
+  for (auto it = m_dragPending.begin(); it != m_dragPending.end();) {
+    if (!it->second.deadline.hasExpired()) {
+      ++it;
+      continue;
+    }
+    auto pending = std::move(it->second);
+    it = m_dragPending.erase(it);
+    m_dragRetired.emplace(pending.binding.request, pending.binding);
+    if (m_dragRetired.size() > 16)
+      m_dragRetired.erase(m_dragRetired.begin());
+    pending.finished(GnomeWindowDragReply{pending.binding, false, {}, 0});
+    if (!alive || !live())
+      return;
+    // A callback may modify the map, including the next entry.
+    it = m_dragPending.begin();
+  }
+  if (m_dragPending.empty())
+    m_dragExpiry.stop();
+}
+void ViewerViewportEndpoint::handleWindowDrag(const QJsonObject &object)
+{
+  if (object.value("kind") == QJsonValue("event")) {
+    const auto event = parseGnomeWindowDragEvent(object);
+    const auto found = m_dragWatches.find(event.association);
+    if (found == m_dragWatches.end())
+      throw std::runtime_error("Unrequested native window drag observation");
+    auto &watch = found->second;
+    if (!watch.enabled)
+      return; // The retired watcher cannot grant authority through a late event.
+    if (event.phase == GnomeWindowDragEvent::Phase::Begin) {
+      if (watch.active || event.grab <= watch.grab)
+        throw std::runtime_error("Replayed native window drag begin");
+      watch = {event.grab, event.sequence, true, true};
+    } else {
+      if (!watch.active || event.grab != watch.grab || event.sequence < watch.sequence ||
+          (event.sequence == watch.sequence && event.phase != GnomeWindowDragEvent::Phase::Cancel))
+        throw std::runtime_error("Changed native window drag observation");
+      watch.sequence = event.sequence;
+      if (event.phase != GnomeWindowDragEvent::Phase::Motion)
+        watch.active = false;
+    }
+    const auto callback = onWindowDrag;
+    if (callback)
+      callback(event);
+    return;
+  }
+  const auto reply = parseGnomeWindowDragReply(object);
+  const auto found = m_dragPending.find(reply.binding.request);
+  if (found == m_dragPending.end()) {
+    const auto retired = m_dragRetired.find(reply.binding.request);
+    if (retired == m_dragRetired.end() || retired->second != reply.binding)
+      throw std::runtime_error("Unexpected native window drag reply");
+    m_dragRetired.erase(retired);
+    return;
+  }
+  if (found->second.binding != reply.binding)
+    throw std::runtime_error("Native window drag reply changed its binding");
+  auto pending = std::move(found->second);
+  m_dragPending.erase(found);
+  auto result = reply;
+  if (pending.deadline.hasExpired())
+    result.ok = false;
+  if (result.ok) {
+    if (reply.binding.action == GnomeWindowDragAction::Watch)
+      m_dragWatches[reply.binding.association].enabled = true;
+    else if (reply.binding.action == GnomeWindowDragAction::Unwatch) {
+      auto &watch = m_dragWatches[reply.binding.association];
+      watch.enabled = watch.active = false;
+    }
+  }
+  pending.finished(result);
 }
 void ViewerViewportEndpoint::write()
 {
@@ -825,7 +933,10 @@ void ViewerViewportEndpoint::read()
           close();
           return;
         }
-        handle(parseGnomeViewportRequest(*object));
+        if (isGnomeWindowDrag(*object))
+          handleWindowDrag(*object);
+        else
+          handle(parseGnomeViewportRequest(*object));
         if (!alive || !live())
           return;
       }

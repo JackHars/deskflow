@@ -71,7 +71,7 @@ int main(int argc, char **argv)
         break;
       case EI_EVENT_SEAT_ADDED:
         ei_seat_bind_capabilities(
-            ei_event_get_seat(event), EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_KEYBOARD, NULL
+            ei_event_get_seat(event), EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_KEYBOARD, NULL
         );
         break;
       case EI_EVENT_DEVICE_ADDED:
@@ -172,6 +172,11 @@ int main(int argc, char **argv)
       ei_device_frame(keyboard, ei_now(ei));
       ei_device_keyboard_key(keyboard, 1, false);
       ei_device_frame(keyboard, ei_now(ei));
+    } else if ((kind == 'D' || kind == 'U') && fields == 2 && ei_device_has_capability(pointer, EI_DEVICE_CAP_BUTTON)) {
+      // Owned headless fixture only: exercise the compositor's ordinary move
+      // operation. This process never connects to the user's input session.
+      ei_device_button_button(pointer, 272, kind == 'D');
+      ei_device_frame(pointer, ei_now(ei));
     } else if (!(kind == 'S' && fields == 2)) {
       break;
     }
