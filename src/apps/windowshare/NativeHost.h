@@ -7,7 +7,9 @@
 #include "Core.h"
 #include "KeyboardRoute.h"
 #include "LocalInputMapping.h"
+#include "LocalWindowPointer.h"
 #include "OriginalInput.h"
+#include "WindowDragTransaction.h"
 #include <QByteArray>
 #include <QJsonObject>
 #include <QObject>
@@ -40,6 +42,14 @@ public:
   // after wake/activation plus exact durable restoration. Emergency return is
   // terminal for this host instance; explicit new host startup re-enables it.
   void exportWindow(std::uint32_t windowId);
+  void observeWindowPointer(const LocalWindowPointer &pointer);
+  // Private local coordinator only. The coordinator retains the joined real
+  // press, titlebar eligibility and configured edge. These calls never post a
+  // button event. Ready from the network can only acknowledge the preview;
+  // the exact local release is additionally required before source mutation.
+  std::optional<Owner> prepareWindowDrag(const WindowDragBinding &binding);
+  bool releaseWindowDrag(const WindowDragBinding &binding, const WindowDragRelease &release);
+  void cancelWindowDrag(const WindowDragBinding &binding);
   void ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry);
   void input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event);
   void resizeWindow(std::uint64_t session, std::uint64_t epoch, int width, int height, std::uint64_t request = 0);

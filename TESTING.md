@@ -6,6 +6,53 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Same-event HID/annotated identity join passes physically:**
+  `owned-titlebar-joined-physical-20261014T174302Z` records the exact owned
+  window **10383** on both joined down and up, native event number **516**,
+  raw sequences **211/425**, **213 drag events**, **147 frame changes** and
+  a real zero-click release **3.828392286 seconds** after down. HID window
+  fields remain zero; they are not replaced with fixture identity. Exit 0,
+  `physical-release`, no rejection, no input posted/suppressed and owned probe
+  cleanup are recorded. `p5-pointer-join-evidence.json` binds the tested source
+  and binary; the run has raw logs, `evidence.json` and `analysis.json`.
+  Production keeps the sole raw consumer and a separate bounded passive
+  annotation queue. The 32-slot, 50ms join rejects mismatches/duplicates and
+  expires missing metadata without delaying ordinary input. This verifies the
+  owned same-event join, **not cross-machine dragging or native grab transfer**.
+- **Private pointer observations and drag preparation are implemented:** private
+  Core/Host protocol **v6** adds separately negotiated, 72-byte window-pointer
+  metadata and canonical loss notification. Input lease counters/admission are
+  unchanged. The existing Session consumer sends joined observations; the Host
+  retains an exact standard AX window, process birth, native titlebar hit and
+  physical layout, and requires actual source movement before preparation.
+  Missing/ambiguous identity, content/control hits, a replacement press and
+  observation loss deny/cancel provisional work. `WindowDragTransaction` and
+  NativeHost gate source mutation on a matching local release plus a produced
+  and painted current geometry. Old geometry, changed identity, timeout and
+  reentrant cancellation cannot commit; existing source journaling owns rollback.
+  The post-release frame query/timer is **not** a native grab-completion receipt.
+  No configured-edge trigger or GNOME drag-back controller calls this preparation
+  API yet; the ordinary explicit export path is unchanged.
+- **Current automated validation:** the enabled Mac Core/Host build and ordinary
+  feature-OFF Core build pass. **10/10** scoped Mac integration suites pass
+  (`p5-integrated-tests.*`); the IPC and transaction sanitizer suites pass
+  (`p5-private-sanitize-tests.*`, `p5-transaction-sanitize-tests.*`). Earlier
+  join/capture normal and sanitizer checks pass (`p5-pointer-join-*`). The home
+  Ubuntu machine passes join/transaction normal plus ASan/UBSan (**4 executions**,
+  `p5-join-transaction-ubuntu/result.json`). Its host lacks Qt development files;
+  private v6 IPC normal and ASan/UBSan tests instead pass in a new disposable
+  Ubuntu build container using Qt 6.10.2, with exact transferred source hashes
+  (`p5-private-ubuntu/container-result.json`). No desktop input, installed app,
+  existing container or machine setting was changed by these runs. The failed
+  direct-host Qt dependency check remains recorded in `p5-private-ubuntu`.
+- **Next physical check is prepared, not run:** `--interactive-eligible` uses
+  one separately owned AppKit test window and the production read-only native
+  titlebar observer. A separate source process keeps AX queries independent of
+  the observer's event loop. Fresh readiness is pending. The default invocation
+  exits 2 without opening a window or tap. P5/H07 remain **NOT_RUN** for actual
+  edge crossing, continuous native drag cutover, destination preview/drop and
+  drag-back. See `deploy/windowshare/native-titlebar-probe.md`.
+
 - **Annotated-stage window identity passes in the owned fixture:** the separate
   `--interactive-annotated` mode builds and default/invalid invocations exit 2
   without a window or tap (`titlebar-annotated-*`). Fresh physical run
@@ -18,7 +65,7 @@ SPDX-License-Identifier: MIT
   tap is at the application-annotated stage; production Core's HID tap is
   unchanged. These separate single-tap runs do not prove same-event correlation
   across stages, arbitrary-app titlebar eligibility or native grab authority.
-  A bounded verified join to the original HID press remains next; P5/H07 is open.
+  The later joined run above supersedes this correlation gap; P5/H07 is open.
 - **Normal titlebar capture passes on the Mac:** with fresh user readiness and
   both capture fixes, `owned-titlebar-physical-20261014T171313Z` records one
   ordinary titlebar down, **226 drag events, 150 owned-frame changes and one

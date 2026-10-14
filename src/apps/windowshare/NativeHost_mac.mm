@@ -11,6 +11,7 @@
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
 #include "NativeSourceTransaction.h"
+#include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
 #include "platform/OriginalInput_mac.h"
 
@@ -1150,9 +1151,10 @@ struct NativeHost::Impl
     std::uint64_t resizeRequest = 0;
     std::uint64_t focusRequest = 0;
     std::uint64_t producedGeometry = 0;
-    bool visible = true, moved = false, relocating = false;
+    bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
     NativeAssociatedReturn associatedReturn;
     std::shared_ptr<NativeSourceTransaction> sourceTransaction = std::make_shared<NativeSourceTransaction>();
+    std::shared_ptr<WindowDragTransaction> windowDrag;
     QPointF pointer;
     std::map<std::uint32_t, std::pair<std::int64_t, int>> buttons;
     ~Entry()
@@ -1205,6 +1207,11 @@ struct NativeHost::Impl
   // Snapshot taken before any new export. A disconnection/hotplug/scale change
   // invalidates all old Viewer geometry and input ownership before restoration.
   std::optional<std::vector<PhysicalOutputSignature>> physicalAtExport;
+  std::optional<std::vector<PhysicalOutputSignature>> titlebarOutputs;
+  std::shared_ptr<NativeTitlebarObservation> titlebar;
+  std::optional<LocalWindowPointer> titlebarPress;
+  std::uint64_t titlebarObservationRevision = 0;
+  WindowDragTransaction::Clock::time_point titlebarDeadline;
   QJsonArray recovery;
   InputLedger ledger;
   FocusLease focus;
@@ -1228,6 +1235,7 @@ struct NativeHost::Impl
   HoldingDisplay holding;
   unsigned callbackDepth = 0;
   std::uint64_t exportGeneration = 0;
+  std::uint64_t lastWindowDrag = 0;
   std::int64_t mouseSequence = 0;
   struct CallbackScope
   {
@@ -1734,8 +1742,10 @@ struct NativeHost::Impl
         return deny();
       number = buttonDown ? mouseSequence + 1 : target->buttons[*buttonSlot];
       clicks = int(button->clickCount);
-    } else if (const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
-               motion && motion->dragButton < originalInputButtonCount) {
+    } else if (
+        const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
+        motion && motion->dragButton < originalInputButtonCount
+    ) {
       number = target->buttons[motion->dragButton];
       clicks = int(std::get<OriginalInputButton>(prepared->press->payload).clickCount);
     }
@@ -1795,6 +1805,7 @@ struct NativeHost::Impl
         {"codec", "h264"},
         {"phase", e.session.phase == Phase::Remote ? "remote" : "preparing"},
         {"sourceVisible", !e.moved},
+        {"windowDrag", e.windowDrag ? double(e.windowDrag->binding().drag) : 0},
         {"resizeRequest", double(e.resizeRequest)},
         {"hardwareEncoder", e.capture && e.capture->hardware.load()}
     };
@@ -2131,7 +2142,7 @@ struct NativeHost::Impl
                 }];
     capture->forceKeyframe = true;
   }
-  void exportWindow(std::uint32_t id, unsigned attempt = 0)
+  void exportWindow(std::uint32_t id, unsigned attempt = 0, std::optional<WindowDragBinding> drag = std::nullopt)
   {
     const auto admitted = lifecycle->admission();
     const QPointer<NativeHost> alive(q);
@@ -2196,7 +2207,7 @@ struct NativeHost::Impl
     if (!alive || !lifecycle->current(admitted))
       return;
     if (!e->window) {
-      if (retryable && attempt < 3) {
+      if (!drag && retryable && attempt < 3) {
         const auto generation = exportGeneration;
         QTimer::singleShot(250, q, [this, id, attempt, generation, admitted] {
           if (generation == exportGeneration && lifecycle->current(admitted))
@@ -2209,6 +2220,18 @@ struct NativeHost::Impl
                 .arg(current->pid)
                 .arg(diagnostic));
       return;
+    }
+    if (drag) {
+      const auto retainedTitlebar = titlebar;
+      const auto observed = retainedTitlebar ? retainedTitlebar->read() : std::nullopt;
+      if (!alive || !lifecycle->current(admitted))
+        return;
+      if (!observed || titlebar != retainedTitlebar || observed->process != current->pid ||
+          !retainedTitlebar->matchesNativeWindow(e->window) ||
+          WindowDragTransaction::Clock::now() >= titlebarDeadline) {
+        error("Titlebar identity changed before drag preparation; preserving the source window");
+        return;
+      }
     }
     CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
     if (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) {
@@ -2230,6 +2253,11 @@ struct NativeHost::Impl
     e->session.original = *axFrame;
     e->session.journaled = true;
     e->session.prepare(1, *axFrame, *axFrame);
+    if (drag) {
+      e->windowDrag = std::make_shared<WindowDragTransaction>();
+      if (!e->windowDrag->begin(*drag, e->session.geometry))
+        return;
+    }
     e->started = QDateTime::currentMSecsSinceEpoch();
     e->capture = std::make_shared<Capture>();
     e->capture->receiver = q;
@@ -2240,6 +2268,8 @@ struct NativeHost::Impl
           (entry->session.phase != Phase::Preparing && entry->session.phase != Phase::Remote))
         return;
       entry->producedGeometry = geometry;
+      if (entry->windowDrag && entry->session.phase == Phase::Preparing && !entry->windowDrag->produced(geometry))
+        return;
       if (!entry->session.firstFrame)
         entry->session.frameReady(epoch);
       if (q->onFrame) {
@@ -2318,6 +2348,11 @@ struct NativeHost::Impl
     if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame || !paintedGeometry ||
         paintedGeometry != e->session.geometry || e->producedGeometry != paintedGeometry || e->relocating)
       return;
+    const auto drag = e->windowDrag;
+    if (drag) {
+      if (!drag->painted(paintedGeometry) || !e->dragReleaseFrameObserved || !drag->reserveCommit(drag->binding()))
+        return; // A painted preview cannot end the original native drag.
+    }
     const QPointer<NativeHost> alive(q);
     const auto expected = e->identity;
     const auto paintedSource = e->session.source;
@@ -2331,6 +2366,7 @@ struct NativeHost::Impl
         return nullptr;
       auto *item = entry(session, epoch);
       return item && item->session.phase == Phase::Preparing && item->relocating && item->visible &&
+                     item->windowDrag == drag && (!drag || drag->committing(drag->binding())) &&
                      item->session.geometry == paintedGeometry && item->producedGeometry == paintedGeometry &&
                      item->capture == capture && item->sourceTransaction == sourceTransaction && !capture->stopped &&
                      !capture->failurePending && item->identity.id == expected.id &&
@@ -2463,6 +2499,10 @@ struct NativeHost::Impl
     if (!e || e->sourceTransaction != sourceTransaction || e->session.phase != Phase::Preparing || !e->relocating ||
         !sourceTransaction->commit())
       return;
+    if (drag && !drag->committed(drag->binding())) {
+      failed("Window drag expired during source relocation; restoring source");
+      return;
+    }
     e->relocating = false;
     e->session.commit(epoch);
     opened(*e);
@@ -2935,6 +2975,8 @@ struct NativeHost::Impl
     if (found == entries.end())
       return;
     const auto &e = *found->second;
+    if (e.windowDrag)
+      e.windowDrag->cancel();
     const Owner owner{session, e.session.epoch};
     const auto transaction = e.sourceTransaction;
     const auto expected = e.identity;
@@ -3008,6 +3050,11 @@ struct NativeHost::Impl
   {
     const QPointer<NativeHost> alive(q);
     ++exportGeneration; // cancel pending AX-startup retries on disconnect/restore
+    if (titlebarObservationRevision != std::numeric_limits<std::uint64_t>::max())
+      ++titlebarObservationRevision;
+    titlebar.reset();
+    titlebarPress.reset();
+    titlebarOutputs.reset();
     releases(std::nullopt, reason);
     if (!alive)
       return;
@@ -3024,6 +3071,11 @@ struct NativeHost::Impl
   {
     if (!recovered || !lifecycle->admission())
       return;
+    if (titlebar && WindowDragTransaction::Clock::now() >= titlebarDeadline) {
+      titlebar.reset();
+      titlebarPress.reset();
+      titlebarOutputs.reset();
+    }
     if (entries.empty())
       physicalAtExport.reset();
     else {
@@ -3066,6 +3118,10 @@ struct NativeHost::Impl
     for (auto &[id, e] : entries) {
       if (e->associatedReturn.blocked())
         continue; // One separately queued, exact-parent return owns this entry.
+      if (e->windowDrag && e->session.phase == Phase::Preparing && !e->windowDrag->current(e->windowDrag->binding())) {
+        restoreIds.push_back(id);
+        continue;
+      }
       if (e->moved && !holding.available()) {
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         error("Holding display configuration changed; restoring source windows");
@@ -3073,7 +3129,7 @@ struct NativeHost::Impl
         continue;
       }
       if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
-          (e->session.phase == Phase::Preparing && now - e->started > prepareTimeoutMs)) {
+          (e->session.phase == Phase::Preparing && !e->windowDrag && now - e->started > prepareTimeoutMs)) {
         releases(
             Owner{id, e->session.epoch},
             e->session.phase == Phase::Preparing ? KeyboardRouteReason::Timeout : KeyboardRouteReason::AuthorityLost
@@ -3116,6 +3172,8 @@ struct NativeHost::Impl
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::GeometryChanged);
         e->session.source = *actual;
         ++e->session.geometry;
+        if (e->windowDrag && e->session.phase == Phase::Preparing)
+          e->windowDrag->geometryChanged(e->session.geometry);
         updateCapture(*e);
         opened(*e);
       }
@@ -3183,6 +3241,149 @@ void NativeHost::refresh()
 void NativeHost::exportWindow(std::uint32_t id)
 {
   m_impl->exportWindow(id);
+}
+void NativeHost::observeWindowPointer(const LocalWindowPointer &pointer)
+{
+  if (QThread::currentThread() != thread())
+    return;
+  const QPointer<NativeHost> alive(this);
+  m_impl->titlebar.reset();
+  m_impl->titlebarPress.reset();
+  m_impl->titlebarOutputs.reset();
+  const bool canObserve = m_impl->titlebarObservationRevision != std::numeric_limits<std::uint64_t>::max();
+  const auto revision = canObserve ? ++m_impl->titlebarObservationRevision : m_impl->titlebarObservationRevision;
+  // There is one physical left button. A new down, lost annotation or
+  // mismatched up cancels old provisional work before observing another press.
+  std::vector<WindowDragBinding> pending;
+  for (const auto &[id, entry] : m_impl->entries)
+    if (entry->windowDrag && entry->session.phase == Phase::Preparing)
+      pending.push_back(entry->windowDrag->binding());
+  for (const auto &binding : pending) {
+    const WindowDragRelease release{
+        pointer.captureEpoch, pointer.sequence, pointer.sourceTime, pointer.window, pointer.eventNumber
+    };
+    if (!canObserve || !validLocalWindowPointer(pointer) || pointer.kind != LocalWindowPointer::Kind::Up ||
+        !releaseWindowDrag(binding, release))
+      cancelWindowDrag(binding);
+    if (!alive)
+      return;
+  }
+  if (!canObserve || !validLocalWindowPointer(pointer) || pointer.kind != LocalWindowPointer::Kind::Down ||
+      !pointer.window || pointer.clicks != 1 ||
+      (pointer.flags & (originalKey::shiftFlag | originalKey::controlFlag | originalKey::optionFlag |
+                        originalKey::commandFlag | originalKey::functionFlag)) ||
+      !m_impl->lifecycle->admission() || m_impl->destroying)
+    return;
+  auto observation = NativeTitlebarObservation::begin(pointer.window, {pointer.x, pointer.y});
+  const auto outputs = physicalOutputSnapshot();
+  if (!alive || !observation || !outputs || m_impl->titlebarObservationRevision != revision ||
+      !m_impl->lifecycle->admission() ||
+      !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft))
+    return;
+  m_impl->titlebar = std::move(observation);
+  m_impl->titlebarPress = pointer;
+  m_impl->titlebarOutputs = outputs;
+  m_impl->titlebarDeadline = WindowDragTransaction::Clock::now() + WindowDragTransaction::dragBudget;
+}
+std::optional<Owner> NativeHost::prepareWindowDrag(const WindowDragBinding &binding)
+{
+  if (QThread::currentThread() != thread() || !validWindowDragBinding(binding) ||
+      binding.direction != WindowDragDirection::Export || binding.drag > maxJsonInteger ||
+      binding.drag <= m_impl->lastWindowDrag || !m_impl->lifecycle->admission() || m_impl->destroying)
+    return std::nullopt;
+  // Retire the request even when capture/identity admission fails. A delayed
+  // retry must not export a later window that happens to reuse the native ID.
+  m_impl->lastWindowDrag = binding.drag;
+  const QPointer<NativeHost> alive(this);
+  const auto press = m_impl->titlebarPress;
+  if (!press || !m_impl->titlebar || !m_impl->titlebarOutputs ||
+      WindowDragTransaction::Clock::now() >= m_impl->titlebarDeadline || press->captureEpoch != binding.captureEpoch ||
+      press->sequence != binding.pressSequence || press->sourceTime != binding.pressTime ||
+      press->window != binding.window || press->eventNumber != binding.eventNumber)
+    return std::nullopt;
+  const auto retainedTitlebar = m_impl->titlebar;
+  const auto observed = retainedTitlebar->read();
+  const auto outputs = physicalOutputSnapshot();
+  if (!alive || !observed || !observed->moved || m_impl->titlebar != retainedTitlebar || !outputs ||
+      !m_impl->titlebarOutputs || !samePhysicalOutputLayout(*m_impl->titlebarOutputs, *outputs) ||
+      m_impl->titlebarPress != press ||
+      !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft))
+    return std::nullopt;
+  m_impl->exportWindow(binding.window, 0, binding);
+  if (!alive)
+    return std::nullopt;
+  for (const auto &[id, entry] : m_impl->entries)
+    if (entry->windowDrag && entry->windowDrag->binding() == binding && entry->windowDrag->current(binding) &&
+        entry->session.phase == Phase::Preparing)
+      return Owner{id, entry->session.epoch};
+  return std::nullopt;
+}
+bool NativeHost::releaseWindowDrag(const WindowDragBinding &binding, const WindowDragRelease &release)
+{
+  if (QThread::currentThread() != thread() || !m_impl->lifecycle->admission())
+    return false;
+  for (const auto &[id, entry] : m_impl->entries) {
+    const auto drag = entry->windowDrag;
+    if (!drag || drag->binding() != binding || entry->session.phase != Phase::Preparing)
+      continue;
+    if (!drag->release(binding, release))
+      return false;
+    const Owner owner{id, entry->session.epoch};
+    // Let the original release finish normal native dispatch before querying
+    // the source frame. This timer is not a fabricated native receipt:
+    // exact identity/layout/frame are rechecked by ready before any mutation.
+    QTimer::singleShot(32, this, [this, owner, binding, drag] {
+      auto *item = m_impl->entry(owner.session, owner.epoch);
+      if (!item || item->windowDrag != drag || item->session.phase != Phase::Preparing || !drag->current(binding))
+        return;
+      const auto expected = item->identity;
+      CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(item->window)));
+      const QPointer<NativeHost> alive(this);
+      const auto actual = bounds(window.get());
+      const auto observed = identity(expected.id);
+      if (!alive)
+        return;
+      item = m_impl->entry(owner.session, owner.epoch);
+      if (!item || item->windowDrag != drag || !drag->current(binding))
+        return;
+      if (!actual || !observed || observed->pid != expected.pid || observed->launch != expected.launch ||
+          !closeEnough(*actual, observed->frame)) {
+        cancelWindowDrag(binding);
+        return;
+      }
+      // If cancellation later needs native rollback, recover the observed
+      // local frame, not a stale position from the moving preview's creation.
+      item->session.original = *actual;
+      item->dragReleaseFrameObserved = true;
+      if (!sameGeometry(*actual, item->session.source)) {
+        item->session.source = *actual;
+        ++item->session.geometry;
+        if (!drag->geometryChanged(item->session.geometry)) {
+          cancelWindowDrag(binding);
+          return;
+        }
+        m_impl->updateCapture(*item);
+        m_impl->opened(*item);
+        return; // Wait for a newly produced and painted current frame.
+      }
+      if (drag->paintedGeometry())
+        m_impl->ready(owner.session, owner.epoch, drag->paintedGeometry());
+    });
+    return true;
+  }
+  return false;
+}
+void NativeHost::cancelWindowDrag(const WindowDragBinding &binding)
+{
+  if (QThread::currentThread() != thread())
+    return;
+  for (const auto &[id, entry] : m_impl->entries) {
+    if (!entry->windowDrag || entry->windowDrag->binding() != binding)
+      continue;
+    entry->windowDrag->cancel(); // Revoke before a deferred/reentrant return.
+    restore(id);
+    return;
+  }
 }
 void NativeHost::ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
 {

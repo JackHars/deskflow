@@ -299,6 +299,11 @@ public:
     updateControls();
   }
   std::function<void()> onQuitRequested;
+  void observeWindowPointer(const LocalWindowPointer &pointer)
+  {
+    if (m_native && !m_shuttingDown)
+      m_native->observeWindowPointer(pointer);
+  }
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
   void attachViewportEndpoint(ViewerViewportEndpoint &endpoint)
   {
@@ -2114,6 +2119,9 @@ int main(int argc, char **argv)
                                   lease.focusRevision,          lease.geometryRevision,        lease.scope};
     };
     if (coreInput && hosting && !inputBootstrap.peerPolicy().empty()) {
+      coreInput->onWindowPointer = [&bridge](const LocalWindowPointer &pointer) {
+        bridge.observeWindowPointer(pointer);
+      };
       LocalInputPreflight::Checks checks;
       checks.codeAdmission = [&](const LocalInputLease &) {
         const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
@@ -2198,6 +2206,7 @@ int main(int argc, char **argv)
       bridge.onKeyboardQuiesced = {};
       bridge.onKeyboardResumed = {};
       if (coreInput) {
+        coreInput->onWindowPointer = {};
         coreInput->onOriginal = {};
         coreInput->onMappedOriginal = {};
       }

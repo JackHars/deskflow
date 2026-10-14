@@ -6,6 +6,7 @@
 
 #include "LocalInputCompanion.h"
 #include "OriginalInputRoute.h"
+#include "OriginalPointerJoin.h"
 #include "SelectedPeerMailbox.h"
 
 namespace deskflow::windowshare {
@@ -37,6 +38,7 @@ public:
   // join (or denial); it neither suppresses legacy input nor grants delivery.
   // It may stop/destroy the session synchronously.
   std::function<void(const OriginalInputRouted &)> onRoutedInput;
+  std::function<void(const OriginalPointerJoin::Match &)> onPointerWindow;
 #endif
   std::function<void(QString)> onStopped;
 
@@ -51,9 +53,11 @@ private:
   // Terminal even if the underlying epoch was already revoked by overflow or
   // discontinuity. Capture-timer shutdown never enters stop()'s bounded wait.
   bool m_captureEmergencyHandled = false;
+  bool m_pointerNotificationsStopped = false;
   std::shared_ptr<OriginalInputCaptureSource> m_captureSource;
   std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;
   std::unique_ptr<OriginalInputRouteJoin> m_captureJoin;
+  std::unique_ptr<OriginalPointerJoin> m_pointerJoin;
   std::shared_ptr<bool> m_callbackLifetime = std::make_shared<bool>(true);
   QTimer m_captureTimer;
 #endif

@@ -93,6 +93,9 @@ void NativeHost::exportWindow(std::uint32_t id)
 {
   exportedWindows.push_back(id);
 }
+void NativeHost::observeWindowPointer(const LocalWindowPointer &)
+{
+}
 void NativeHost::ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
 {
   nativePaintedReady.push_back({session, epoch, paintedGeometry});
@@ -1030,8 +1033,9 @@ void reconnectRefusedThenAvailable(const Identity &hostIdentity, const Identity 
   const auto port = unusedPort();
   viewer.connectTo("127.0.0.1", port);
   check(
-      waitUntil([&] { return BridgeTestAccess::generation(viewer) >= 7 && BridgeTestAccess::reconnectWaiting(viewer); }
-      ),
+      waitUntil([&] {
+        return BridgeTestAccess::generation(viewer) >= 7 && BridgeTestAccess::reconnectWaiting(viewer);
+      }),
       "Refused connections did not keep retrying to the backoff cap"
   );
   check(

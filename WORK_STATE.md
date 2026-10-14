@@ -2,6 +2,47 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+P5 is in progress, not complete. The latest working checkpoint adds the bounded
+HID/annotated pointer join, private v6 observation transport, exact native
+standard-titlebar observation and the NativeHost preparation/drop gate. The
+owned physical join passes (`owned-titlebar-joined-physical-20261014T174302Z`):
+window 10383, native event 516, sequences 211/425, 213 drags, 147 frame changes,
+real release 3.828 seconds later, clean exit and no posted/suppressed input.
+
+The sole original-input consumer remains `LocalInputCoreSession`; optional
+annotation/identity failure must not stop ordinary input or emergency return.
+The native titlebar observer uses the event-time ID, exact AX hit/window,
+process birth and unchanged size with movement; it never guesses a foreground
+window. Joined observations are metadata, not input or native grab authority.
+The private protocol is now v6; Core network IPC5 is unchanged. Production
+Session -> private channel -> Host observation is wired. The preparation API
+requires that retained native observation, a matching press and physical layout.
+
+Ten scoped Mac integration suites pass, as do IPC/transaction sanitizer tests,
+prior join/capture sanitizers, the enabled Core/Host build and feature-OFF Core
+build. The home Ubuntu join/transaction tests pass normally and under ASan/UBSan;
+private v6 tests pass normally and under ASan/UBSan in a disposable Ubuntu build
+container on that machine (the host has no Qt development files). Full native
+Ubuntu/GNOME acceptance has not been rerun for this checkpoint.
+
+The pending fresh-readiness question is for `--interactive-eligible`, a passive
+30-second titlebar eligibility check. It now uses a separate owned AppKit source
+process so AX queries cannot block their own application's main loop. Do not
+reuse readiness from the completed join test. Keep failed runs and bind each
+physical result to its frozen source/binary. No user response has arrived for
+this next test at the time this checkpoint is written.
+
+Remaining P5 integration: configured-edge/authenticated destination controller,
+proven native drag/cursor cutover, moving/painted preview and real-release commit,
+GNOME-owned Viewer drag-back, connected cancellation/recovery and H07. The
+new preparation gate is not yet invoked by an edge controller. A fixed frame
+query delay is not a native grab-completion receipt, and a remote preview alone
+does not prove seamless ownership. Do not mark P5 complete or silently substitute
+thumbnail dragging for the user's ordinary-titlebar requirement.
+
+Earlier evidence and implementation history follow; newer entries above supersede
+statements below describing the same-event join as the next missing step.
+
 The next P5 prerequisite is implemented in the production capture path:
 `OriginalPointerObservation` retains the original pointer position, both native
 window-under-pointer fields and reported source metadata beside the exact

@@ -7,6 +7,7 @@
 #include "NativeHost.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeSourceTransaction.h"
+#include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
 #include "platform/OriginalInput_mac.h"
 #include <CoreGraphics/CoreGraphics.h>
@@ -19,6 +20,7 @@
 #include <array>
 #include <cmath>
 #include <dlfcn.h>
+#include <limits>
 #include <string>
 #include <unistd.h>
 
@@ -1049,6 +1051,31 @@ int main(int argc, char **argv)
     NativeHost host(path);
     check(host.recover(), "empty journal recovers without OS permissions");
     check(host.recover(), "successful synchronous recovery is idempotent");
+    using namespace deskflow::windowshare;
+    int opened = 0, errors = 0;
+    host.onOpened = [&](auto, auto, const auto &) { ++opened; };
+    host.onError = [&](const auto &) { ++errors; };
+    check(!host.prepareWindowDrag({}), "Incomplete drag cannot start native capture");
+    const WindowDragBinding unseen{7, 9, 11, 3, 211, 1000, 10383, 516};
+    check(!host.prepareWindowDrag(unseen), "An unobserved titlebar cannot be exported by a field tuple");
+    check(!host.releaseWindowDrag(unseen, {3, 425, 4000, 10383, 516}), "An unowned release cannot commit capture");
+    host.cancelWindowDrag(unseen);
+    host.observeWindowPointer({});
+    auto malformed = LocalWindowPointer{LocalWindowPointer::Kind::Down, 3, 211, 1000, 0, 10383, 0, 516, 0, 0};
+    host.observeWindowPointer(malformed);
+    malformed.clicks = 1;
+    malformed.x = std::numeric_limits<double>::quiet_NaN();
+    host.observeWindowPointer(malformed);
+    check(opened == 0 && errors == 0, "Rejected drag observations reached capture or native mutation");
+    QString diagnostic;
+    check(
+        !native::NativeTitlebarObservation::begin(0, {0, 0}, &diagnostic) && !diagnostic.isEmpty(),
+        "Missing native window cannot create a titlebar observer"
+    );
+    check(
+        !native::NativeTitlebarObservation::begin(10383, {malformed.x, 0}),
+        "Non-finite press cannot query a native titlebar"
+    );
   }
   const auto document = QJsonDocument::fromJson(read(path));
   check(

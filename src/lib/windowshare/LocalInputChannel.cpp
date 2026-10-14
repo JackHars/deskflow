@@ -437,7 +437,8 @@ enum class LocalInputChannel::Type : std::uint8_t
   CancelOffer,
   InputTarget,
   MappedOriginal,
-  Released
+  Released,
+  WindowPointer
 };
 
 LocalInputChannel::LocalInputChannel(
@@ -546,6 +547,27 @@ std::optional<LocalInputAuthenticatedIdentity> LocalInputChannel::authenticatedI
 bool LocalInputChannel::supportsMappedInput() const
 {
   return supports(ForwardingScope::All) && (m_capabilities & localInputMappedCapability);
+}
+bool LocalInputChannel::supportsWindowPointer() const
+{
+  return authenticatedIdentity().has_value() && (m_capabilities & localInputWindowPointerCapability);
+}
+bool LocalInputChannel::sendWindowPointer(const LocalWindowPointer &pointer)
+{
+  if (QThread::currentThread() != thread() || !fresh() || m_role != LocalInputRole::Core || !supportsWindowPointer() ||
+      !m_windowPointerGate.accept(pointer))
+    return false;
+  Writer out;
+  out.number(static_cast<unsigned>(pointer.kind), 1);
+  out.number(0, 7);
+  for (auto value : {pointer.captureEpoch, pointer.sequence, pointer.sourceTime, pointer.flags})
+    out.number(value, 8);
+  out.number(pointer.window, 4);
+  out.number(pointer.clicks, 4);
+  out.number(static_cast<std::uint64_t>(pointer.eventNumber), 8);
+  out.number(std::bit_cast<std::uint64_t>(pointer.x), 8);
+  out.number(std::bit_cast<std::uint64_t>(pointer.y), 8);
+  return send(Type::WindowPointer, out.data);
 }
 LocalInputPhase LocalInputChannel::phase() const
 {
@@ -696,7 +718,9 @@ void LocalInputChannel::read()
       Reader header{m_incoming};
       require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
       const auto typeNumber = header.number(1);
-      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::Released), "Unknown local input message");
+      require(
+          typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::WindowPointer), "Unknown local input message"
+      );
       const auto type = static_cast<Type>(typeNumber);
       require(
           header.number(1) ==
@@ -923,6 +947,27 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     return;
   }
   Reader in{payload};
+  if (type == Type::WindowPointer) {
+    require(m_role == LocalInputRole::Host && supportsWindowPointer(), "Invalid window pointer sender or capability");
+    LocalWindowPointer pointer;
+    pointer.kind = static_cast<LocalWindowPointer::Kind>(in.number(1));
+    require(in.number(7) == 0, "Noncanonical window pointer flags");
+    pointer.captureEpoch = in.number(8);
+    pointer.sequence = in.number(8);
+    pointer.sourceTime = in.number(8);
+    pointer.flags = in.number(8);
+    pointer.window = static_cast<std::uint32_t>(in.number(4));
+    pointer.clicks = static_cast<std::uint32_t>(in.number(4));
+    const auto eventNumber = in.number(8);
+    require(eventNumber <= INT64_MAX, "Invalid native window event number");
+    pointer.eventNumber = static_cast<std::int64_t>(eventNumber);
+    pointer.x = std::bit_cast<double>(in.number(8));
+    pointer.y = std::bit_cast<double>(in.number(8));
+    in.end();
+    require(m_windowPointerGate.accept(pointer), "Invalid, replayed or discontinuous window pointer observation");
+    notify(this, onWindowPointer, pointer);
+    return;
+  }
   if (type == Type::Released) {
     require(
         m_role == LocalInputRole::Core && supportsMappedInput(), "Invalid mapped input release sender or capability"

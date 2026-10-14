@@ -508,6 +508,8 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     frame[0] = 'X';
   else if (mode == "raw-version")
     frame[5] = 3; // A v3 lease has no scope/capability evidence and must not negotiate.
+  else if (mode == "raw-version-five")
+    frame[5] = 5; // Window-pointer metadata requires the explicit v6 contract.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -518,7 +520,7 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     frame[75] = static_cast<char>(frame[75] ^ 1);
   else if (mode.startsWith("raw-capabilities-")) {
     frame.replace(76, 8, QByteArray(8, '\0'));
-    frame[83] = mode.endsWith("unknown") ? 7 : mode.endsWith("no-keyboard") ? 2 : 0;
+    frame[83] = mode.endsWith("unknown") ? char(0x81) : mode.endsWith("no-keyboard") ? 2 : 0;
   } else if (mode == "raw-sequence")
     frame.replace(12, 8, QByteArray(8, '\0'));
   else if (mode == "raw-oversize") {
@@ -910,6 +912,26 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       host->revoke();
   };
   host->onClosed = [&](QString) { application.quit(); };
+  if (mode == "window-pointer") {
+    host->authorize = {}; // Metadata must never prepare or authorize input.
+    host->onWindowPointer = [&](const LocalWindowPointer &pointer) {
+      ++callbackEvents;
+      LocalWindowPointer expected{LocalWindowPointer::Kind::Down, 3, 211, 1000, 0, 10383, 1, 516, -100.5, 83.25};
+      if (callbackEvents == 2) {
+        expected.kind = LocalWindowPointer::Kind::Up;
+        expected.sequence = 425;
+        expected.sourceTime = 4000;
+        expected.clicks = 0;
+      } else if (callbackEvents == 3)
+        expected = {};
+      check(callbackEvents <= 3 && pointer == expected, "Window pointer wire fields changed");
+      check(host->phase() == LocalInputPhase::Idle && !host->lease(), "Window metadata acquired an input lease");
+      check(!host->sendWindowPointer(pointer), "Host impersonated the original capture source");
+      check(LocalInputChannelTestAccess::captureEpoch(*host) == 0, "Window metadata altered input capture admission");
+      if (callbackEvents == 3)
+        host->close();
+    };
+  }
   if (mode == "preflight" || mode.startsWith("offer-callback-")) {
     host->authorize = {};
     host->onOffer = [&, marker = QString(256, 'f')](const LocalInputOffer &offer) {
@@ -971,6 +993,10 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(retiredDelivered, "Host cancellation prevented the next route from activating");
   if (mode == "preflight")
     check(callbackEvents == 2 && originalEvents == 0, "Preflight did not remain an unauthorizing exchange");
+  if (mode == "window-pointer")
+    check(
+        callbackEvents == 3 && originalEvents == 0, "Window observations did not remain separate from input delivery"
+    );
   if (mode.startsWith("offer-callback-"))
     check(callbackEvents == 1 && originalEvents == 0, "Offer callback did not run exactly once without input");
   return status;
@@ -984,7 +1010,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 5);
+  static_assert(LocalInputChannel::version == 6);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 320);
   static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
   static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
@@ -1061,6 +1087,123 @@ void preflightValues()
       lease.windowShareClientIncarnation = {};
     check(!validLocalInputLease(lease), "An empty preflight identity was accepted");
     check(validLocalInputOffer(lease) == (field == 3), "Offer validity depended on host-only fields");
+  }
+}
+void windowPointer()
+{
+  LocalWindowPointer down{LocalWindowPointer::Kind::Down, 3, 211, 1000, 0, 10383, 1, 516, -100.5, 83.25};
+  {
+    Fixture fixture("window-pointer");
+    fixture.establish();
+    fixture.core->authorize = {};
+    check(fixture.core->supportsWindowPointer(), "Window metadata capability missing");
+    auto invalid = down;
+    invalid.x = std::numeric_limits<double>::quiet_NaN();
+    check(!fixture.core->sendWindowPointer(invalid), "Non-finite native point was sent");
+    invalid = down;
+    invalid.clicks = 0;
+    check(!fixture.core->sendWindowPointer(invalid), "Zero-click down was sent");
+    check(fixture.core->sendWindowPointer(down), "Joined down was not sent");
+    check(!fixture.core->sendWindowPointer(down), "Duplicate joined down was sent");
+    auto up = down;
+    up.kind = LocalWindowPointer::Kind::Up;
+    up.sequence = 425;
+    up.sourceTime = 4000;
+    up.clicks = 0;
+    auto foreign = up;
+    ++foreign.captureEpoch;
+    check(!fixture.core->sendWindowPointer(foreign), "Capture epoch changed without a new source connection");
+    check(fixture.core->sendWindowPointer(up), "Real zero-click release was not sent");
+    check(fixture.core->sendWindowPointer({}), "Source loss was not sent");
+    up.sequence++;
+    up.sourceTime++;
+    check(!fixture.core->sendWindowPointer(up), "Stopped metadata source revived");
+    check(
+        !fixture.core->lease() && fixture.core->phase() == LocalInputPhase::Idle &&
+            LocalInputChannelTestAccess::captureEpoch(*fixture.core) == 0,
+        "Window metadata changed input admission"
+    );
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture legacy("keyboard-only");
+    legacy.establish();
+    check(
+        !legacy.core->supportsWindowPointer() && !legacy.core->sendWindowPointer(down),
+        "Unnegotiated window metadata escaped"
+    );
+  }
+  // Exercise the receiver independently of the sender validator. The golden
+  // layout has no native struct padding and keeps signed desktop coordinates.
+  QByteArray wire;
+  number(wire, 1, 1);
+  number(wire, 0, 7);
+  for (auto value : {down.captureEpoch, down.sequence, down.sourceTime, down.flags})
+    number(wire, value, 8);
+  number(wire, down.window, 4);
+  number(wire, down.clicks, 4);
+  number(wire, down.eventNumber, 8);
+  number(wire, std::bit_cast<std::uint64_t>(down.x), 8);
+  number(wire, std::bit_cast<std::uint64_t>(down.y), 8);
+  check(wire.size() == 72, "Window pointer wire size changed");
+  for (int fault = 0; fault < 9; ++fault) {
+    Fixture fixture;
+    fixture.establish();
+    auto malformed = wire;
+    switch (fault) {
+    case 0:
+      malformed[0] = 4;
+      break;
+    case 1:
+      malformed[1] = 1;
+      break;
+    case 2:
+      malformed.replace(8, 8, QByteArray(8, '\0'));
+      break;
+    case 3:
+      malformed.replace(44, 4, QByteArray(4, '\0'));
+      break;
+    case 4:
+      malformed[48] = char(0xff);
+      break;
+    case 5:
+      malformed.chop(1);
+      break;
+    case 6:
+      malformed.append('x');
+      break;
+    case 7:
+      malformed[0] = 3; // Lost has one canonical empty representation.
+      break;
+    case 8:
+      malformed.replace(56, 8, QByteArray::fromHex("7ff8000000000000"));
+      break;
+    }
+    check(LocalInputChannelTestAccess::raw(*fixture.core, 19, malformed), "Malformed metadata fixture could not send");
+    check(
+        until([&] { return fixture.closed; }) && !fixture.core->lease(),
+        "Malformed window metadata reached native observation"
+    );
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture fixture;
+    fixture.establish();
+    check(
+        fixture.core->sendWindowPointer(down) && LocalInputChannelTestAccess::raw(*fixture.core, 19, wire),
+        "Cannot send receiver replay fixture"
+    );
+    check(until([&] { return fixture.closed; }), "Receiver accepted a replayed pointer stamp");
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture fixture("synthetic");
+    fixture.establish();
+    int received = 0;
+    fixture.core->onWindowPointer = [&](const auto &) { ++received; };
+    LocalInputChannelTestAccess::incoming(*fixture.core, 19, wire);
+    check(fixture.closed && received == 0, "Host-forged capture observation reached the Core");
+    fixture.childExitedCleanly();
   }
 }
 void mappedInput()
@@ -1539,8 +1682,8 @@ void negotiatedScope()
 void malformedBootstrap()
 {
   for (const auto *mode :
-       {"magic", "version", "role", "incarnation", "zero-incarnation", "process", "sequence", "oversize",
-        "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent", "capabilities-zero",
+       {"magic", "version", "version-five", "role", "incarnation", "zero-incarnation", "process", "sequence",
+        "oversize", "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent", "capabilities-zero",
         "capabilities-unknown", "capabilities-no-keyboard"}) {
     Fixture fixture(QStringLiteral("raw-") + mode);
     check(until([&] { return fixture.closed; }), "Malformed bootstrap did not fail closed");
@@ -2446,6 +2589,8 @@ int main(int argc, char **argv)
     exclusiveInheritance();
     QTextStream(stdout) << "RUN: preflightValues\n" << Qt::flush;
     preflightValues();
+    QTextStream(stdout) << "RUN: windowPointer\n" << Qt::flush;
+    windowPointer();
     QTextStream(stdout) << "RUN: mappedInput\n" << Qt::flush;
     mappedInput();
     QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;

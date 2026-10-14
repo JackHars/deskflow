@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 **Local implementation resumed on 2026-10-13.** The production coordinator is
-now wired from Server through private protocol v5, negotiated Core IPC5,
+now wired from Server through private protocol v6 (including P5 observation metadata), negotiated Core IPC5,
 EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
 sender-ordering prerequisite; a retained prefix supports bounded exact point
 batches without reopening the full forwarding gate. Original input requires
@@ -370,35 +370,35 @@ continuous interaction. Selecting a source and dragging its thumbnail is not
 an accepted substitute. A provisional remote preview may be an internal part
 of the same ordinary drag, but must not require a separate user action.
 
-- [ ] Detect an eligible source-window drag across a configured Deskflow edge
-  and identify the exact destination from topology, without polling a guessed
-  foreground window or converting ordinary pointer motion into export.
-  The existing capture/completion path now retains local event-time pointer
-  position and native window fields, with exact stamp validation and no second
-  raw consumer. This is a prerequisite, not titlebar/grab authority. The passive
-  [normal-titlebar probe](deploy/windowshare/native-titlebar-probe.md) is built;
-  initial physical attempts exposed rejection of the trackpad's documented
-  touch-mouse subtype, now modeled as mouse pointer semantics. The next run
-  records normal titlebar down/drag but rejects its zero-click release. That
-  release is now preserved without relaxing retained-press/route ownership.
-  The corrected physical repeat passes down/226 drag events/real release,
-  with 150 owned-frame changes and clean shutdown. Both native window IDs at
-  HID-head remain zero in the actual titlebar down. Preserve them as unavailable;
-  the fixture's known identity is not arbitrary-app drag detection. Raw touch,
-  pressure and gesture reconstruction remain unsupported.
-  A separate passive annotated-stage run now supplies both native window IDs
-  equal to the owned fixture, with 167 drags and a real zero-click release.
-  Next verify and implement a bounded same-event join between that observation
-  and the original HID press; separate single-tap runs do not establish the
-  correlation. Preserve HID capture/emergency behavior and reject missing,
-  ambiguous or stale identities. This does not establish titlebar eligibility
-  or native grab authority for arbitrary applications.
-- [ ] Implement prepare/first-frame/ownership-transfer/commit or rollback, with
-  continuous drag ownership and one button-up destination.
+- [x] Preserve touch-origin pointer input, zero-click real release and original
+  event-time pointer metadata through the existing sole raw consumer.
+- [x] Join passive application-annotated window identity to the original HID
+  down/up with bounded storage/deadlines. The physical owned-window run passes
+  both joins, 213 drag events and the real release; raw HID IDs remain unavailable.
+- [x] Carry joined pointer observations/loss over separately negotiated private
+  v6 metadata without acquiring an input lease. The native Host retains exact
+  AX/native window identity, titlebar hit, process birth and physical layout.
+- [x] Implement the bounded preparation/drop transaction and NativeHost gate:
+  a preview Ready alone cannot mutate the source; matching local release and
+  current produced/painted geometry are required. Existing durable recovery
+  handles cancellation after mutation; untouched preparation leaves the source
+  alone. Automated identity, stale-frame, timeout and reentrancy cases pass.
+- [ ] Physically verify the exact native titlebar eligibility observer. The
+  `--interactive-eligible` probe is prepared, with a separate owned source app;
+  it does not post input. A passing owned join is not yet arbitrary-app eligibility.
+- [ ] Detect crossing a configured Deskflow edge and bind the authenticated
+  destination and live topology to the retained original press. The titlebar
+  observer and preparation API exist; this Core edge controller is not wired.
+- [ ] Integrate preview motion, native drag cutover, painted readiness and drop
+  commit as one continuous ordinary drag with exactly one button-up owner.
+  The post-release frame query is not a native grab-completion receipt. Keeping
+  the native source drag alive while showing a remote preview still needs a
+  proven cursor/drag ownership transition; do not enable it on an assumed timer.
 - [ ] Implement dragging the Viewer back to the Mac edge, restoring the source
   position/focus and retiring the remote session without closing the source app.
-- [ ] Handle canceled drags, mismatched topology, disconnect, output changes,
-  late first frames and timeout at every transition.
+- [ ] Exercise canceled drags, topology changes, disconnect, output changes,
+  late first frames and timeout at every connected transition. Portable
+  transaction tests cover both direction tags; they do not implement drag-back.
 
 Acceptance: deterministic transaction/fault tests and harness support for H07.
 Do not call ordinary opening/closing of a Viewer "edge-drag support."

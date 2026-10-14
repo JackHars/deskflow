@@ -2,7 +2,10 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "NativeTitlebarObservation.h"
 #include "platform/OriginalInputCaptureSource_mac.h"
+#include <QJsonDocument>
+#include <QJsonObject>
 
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
@@ -24,11 +27,57 @@ using namespace deskflow::windowshare;
 // or suppressed. The production capture source has exactly one raw consumer.
 namespace {
 using Clock = std::chrono::steady_clock;
+NSWindow *makeWindow()
+{
+  NSWindow *window;
+  window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 340)
+                                       styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                         backing:NSBackingStoreBuffered
+                                           defer:NO];
+  window.releasedWhenClosed = NO;
+  window.title = @"Deskflow normal titlebar test - drag this title bar";
+  window.movableByWindowBackground = NO;
+  auto label = [NSTextField
+      wrappingLabelWithString:
+          @"Drag the normal title bar above this text.\nKeep moving for three seconds, then release.\n"
+          @"This test only observes. It will not stop your drag.\nThe window closes after release or 30 seconds."];
+  label.frame = NSMakeRect(28, 90, 584, 180);
+  label.font = [NSFont systemFontOfSize:21];
+  [window.contentView addSubview:label];
+  [window center];
+  [window makeKeyAndOrderFront:nil];
+  [NSApp activateIgnoringOtherApps:YES];
+  return window;
+}
+int ownedTitlebarFixture()
+{
+  @autoreleasepool {
+    [NSApplication sharedApplication];
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+    auto window = makeWindow();
+    const auto content = [window contentRectForFrameRect:window.frame];
+    std::printf(
+        "{\"window\":%ld,\"pid\":%d,\"titleHeight\":%.3f}\n", (long)window.windowNumber, getpid(),
+        NSHeight(window.frame) - NSHeight(content)
+    );
+    std::fflush(stdout);
+    dispatch_after(
+        dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+          std::_Exit(124);
+        }
+    );
+    [NSApp run];
+  }
+  return 0;
+}
+
 class Probe final
 {
 public:
-  explicit Probe(bool annotated)
+  explicit Probe(bool annotated, bool joined, bool eligible)
       : m_location(annotated ? kCGAnnotatedSessionEventTap : kCGHIDEventTap),
+        m_joinedMode(joined),
+        m_eligibleMode(eligible),
         m_deadline(Clock::now() + std::chrono::seconds(30))
   {
     m_watchdog = std::thread([this] {
@@ -49,33 +98,62 @@ public:
   }
   bool start()
   {
-    if (!CGPreflightListenEventAccess()) {
-      std::fputs("NOT_RUN: existing Input Monitoring permission required\n", stderr);
+    if (!CGPreflightListenEventAccess() || (m_eligibleMode && !AXIsProcessTrusted())) {
+      std::fputs(
+          "NOT_RUN: existing Input Monitoring and (for eligibility) Accessibility permission required\n", stderr
+      );
       return false;
     }
-    m_window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 640, 340)
-                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
-                                             backing:NSBackingStoreBuffered
-                                               defer:NO];
-    m_window.releasedWhenClosed = NO;
-    m_window.title = @"Deskflow normal titlebar test - drag this title bar";
-    m_window.movableByWindowBackground = NO;
-    auto label = [NSTextField
-        wrappingLabelWithString:
-            @"Drag the normal title bar above this text.\nKeep moving for three seconds, then release.\n"
-            @"This test only observes. It will not stop your drag.\nThe window closes after release or 30 seconds."];
-    label.frame = NSMakeRect(28, 90, 584, 180);
-    label.font = [NSFont systemFontOfSize:21];
-    [m_window.contentView addSubview:label];
-    [m_window center];
-    [m_window makeKeyAndOrderFront:nil];
-    [NSApp activateIgnoringOtherApps:YES];
-    m_windowId = CGWindowID(m_window.windowNumber);
+    if (m_eligibleMode) {
+      // Query a separate owned application, as the production Host does.
+      // A main-thread AX RPC into this same process could block its own reply.
+      m_fixture = [[NSTask alloc] init];
+      m_fixture.executableURL = [NSURL fileURLWithPath:NSProcessInfo.processInfo.arguments[0]];
+      m_fixture.arguments = @[ @"--owned-titlebar-fixture" ];
+      auto output = [NSPipe pipe];
+      m_fixture.standardOutput = output;
+      m_fixture.standardError = [NSFileHandle fileHandleWithStandardError];
+      NSError *failure = nil;
+      if (![m_fixture launchAndReturnError:&failure])
+        return false;
+      auto data = [output.fileHandleForReading availableData];
+      const auto info =
+          QJsonDocument::fromJson(QByteArray(static_cast<const char *>(data.bytes), data.length)).object();
+      m_windowId = CGWindowID(info["window"].toInteger());
+      m_windowProcess = pid_t(info["pid"].toInteger());
+      m_titleHeight = info["titleHeight"].toDouble();
+      if (m_windowProcess != m_fixture.processIdentifier || m_titleHeight <= 0 || m_titleHeight > 80)
+        return false;
+    } else {
+      m_window = makeWindow();
+      m_windowId = CGWindowID(m_window.windowNumber);
+      m_windowProcess = getpid();
+      const auto content = [m_window contentRectForFrameRect:m_window.frame];
+      m_titleHeight = NSHeight(m_window.frame) - NSHeight(content);
+    }
     m_lastFrame = frame();
     m_frameTime = Clock::now();
     if (!m_windowId || !m_lastFrame || !m_capture.start())
       return false;
     m_epoch = m_capture.epoch();
+    if (m_joinedMode) {
+      m_join = std::make_unique<OriginalPointerJoin>(m_epoch);
+      m_annotationTap = CGEventTapCreate(
+          kCGAnnotatedSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
+          CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp),
+          [](CGEventTapProxy, CGEventType type, CGEventRef event, void *context) -> CGEventRef {
+            static_cast<Probe *>(context)->m_capture.captureAnnotation(type, event);
+            return event;
+          },
+          this
+      );
+      if (!m_annotationTap || !m_capture.startAnnotations())
+        return false;
+      m_annotationSource = CFMachPortCreateRunLoopSource(nullptr, m_annotationTap, 0);
+      if (!m_annotationSource)
+        return false;
+      CFRunLoopAddSource(CFRunLoopGetMain(), m_annotationSource, kCFRunLoopCommonModes);
+    }
     const auto mask = CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp) |
                       CGEventMaskBit(kCGEventLeftMouseDragged) | CGEventMaskBit(kCGEventMouseMoved) |
                       CGEventMaskBit(kCGEventRightMouseDown) | CGEventMaskBit(kCGEventOtherMouseDown) |
@@ -95,9 +173,12 @@ public:
                                        }];
     [NSRunLoop.mainRunLoop addTimer:m_timer forMode:NSRunLoopCommonModes];
     std::printf(
-        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"deadlineSeconds\":30,"
+        "{\"event\":\"ready\",\"pid\":%d,\"window\":%u,\"sourcePid\":%d,\"deadlineSeconds\":30,"
         "\"nativeTitlebar\":true,\"observationTap\":\"%s\",\"inputPosted\":false}\n",
-        getpid(), m_windowId, m_location == kCGHIDEventTap ? "hid-head" : "annotated-session-head"
+        getpid(), m_windowId, m_windowProcess,
+        m_joinedMode                   ? "hid-with-annotation-join"
+        : m_location == kCGHIDEventTap ? "hid-head"
+                                       : "annotated-session-head"
     );
     std::fflush(stdout);
     return true;
@@ -150,7 +231,7 @@ private:
   }
   std::optional<CGRect> frame() const
   {
-    if (!m_window.visible || CGWindowID(m_window.windowNumber) != m_windowId)
+    if (m_fixture ? !m_fixture.running : (!m_window.visible || CGWindowID(m_window.windowNumber) != m_windowId))
       return {};
     auto rows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, m_windowId);
     if (!rows)
@@ -164,7 +245,7 @@ private:
       std::int64_t observedPid = 0, observedId = 0;
       CGRect value;
       if (pid && id && bounds && CFNumberGetValue(pid, kCFNumberSInt64Type, &observedPid) &&
-          CFNumberGetValue(id, kCFNumberSInt64Type, &observedId) && observedPid == getpid() &&
+          CFNumberGetValue(id, kCFNumberSInt64Type, &observedId) && observedPid == m_windowProcess &&
           observedId == m_windowId && CGRectMakeWithDictionaryRepresentation(bounds, &value) && !CGRectIsEmpty(value) &&
           !CGRectIsInfinite(value) && !CGRectIsNull(value))
         result = value;
@@ -200,10 +281,22 @@ private:
       finish("capture-revoked");
       return;
     }
+    if (m_join) {
+      if (!m_capture.annotationsLive())
+        m_join->revoke();
+      for (std::size_t n = 0; n < OriginalPointerJoin::capacity; ++n) {
+        const auto annotation = m_capture.popAnnotation();
+        if (!annotation)
+          break;
+        m_join->annotate(*annotation);
+      }
+    }
     for (std::size_t i = 0; i < OriginalInputStream::capacity; ++i) {
       auto item = m_capture.popCaptured();
       if (!item)
         break;
+      if (m_join)
+        m_join->capture(*item);
       const auto &record = item->input.record;
       const auto *button = std::get_if<OriginalInputButton>(&record.payload);
       const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
@@ -222,10 +315,12 @@ private:
         // Geometry is known from this retained fixture, not inferred for an
         // arbitrary application. Preserve unavailable event window fields as
         // unavailable instead of substituting this fixture's known ID.
-        const auto content = [m_window contentRectForFrameRect:m_window.frame];
-        const auto titleHeight = NSHeight(m_window.frame) - NSHeight(content);
-        if (!m_lastFrame || Clock::now() - m_frameTime > std::chrono::milliseconds(100) || !NSApp.active ||
-            NSApp.keyWindow != m_window || button->clickCount != 1 ||
+        const auto titleHeight = m_titleHeight;
+        const bool active = m_fixture
+                                ? NSWorkspace.sharedWorkspace.frontmostApplication.processIdentifier == m_windowProcess
+                                : NSApp.active && NSApp.keyWindow == m_window;
+        if (!m_lastFrame || Clock::now() - m_frameTime > std::chrono::milliseconds(100) || !active ||
+            button->clickCount != 1 ||
             record.flags & (originalKey::shiftFlag | originalKey::controlFlag | originalKey::optionFlag |
                             originalKey::commandFlag | originalKey::functionFlag) ||
             titleHeight <= 0 || p.x < m_lastFrame->origin.x + 90 || p.x >= CGRectGetMaxX(*m_lastFrame) - 10 ||
@@ -234,6 +329,7 @@ private:
           return;
         }
         m_down = true;
+        m_downSequence = record.sequence;
         m_eventWindowsMatch = p.windowUnderPointer == m_windowId && p.windowHandlingPointer == m_windowId;
         std::printf(
             "{\"event\":\"titlebar-down\",\"epoch\":%llu,\"sequence\":%llu,\"sourceTime\":%llu,"
@@ -252,6 +348,7 @@ private:
           return;
         }
         m_up = true;
+        m_upSequence = record.sequence;
         std::printf(
             "{\"event\":\"physical-up\",\"sequence\":%llu,\"sourceTime\":%llu,"
             "\"clicks\":%u,\"mouseSubtype\":%lld,\"eventNumber\":%lld}\n",
@@ -260,6 +357,46 @@ private:
         );
       } else if (!m_up && motion->dragButton == 0) {
         ++m_dragged;
+      }
+    }
+    if (m_join) {
+      if (!m_join->live()) {
+        finish("pointer-join-revoked");
+        return;
+      }
+      for (std::size_t n = 0; n < OriginalPointerJoin::capacity; ++n) {
+        const auto match = m_join->pop();
+        if (!match)
+          break;
+        const auto sequence = match->captured.input.record.sequence;
+        if (sequence != m_downSequence && sequence != m_upSequence)
+          continue;
+        const auto &p = *match->captured.pointer;
+        const auto &a = match->annotation;
+        const bool exact = match->window() == m_windowId;
+        if (sequence == m_downSequence) {
+          m_joinedDown = exact;
+          if (exact && m_eligibleMode) {
+            QString diagnostic;
+            m_titlebar = native::NativeTitlebarObservation::begin(match->window(), {p.x, p.y}, &diagnostic);
+            const QJsonObject result{
+                {"event", "native-titlebar-candidate"}, {"accepted", bool(m_titlebar)}, {"diagnostic", diagnostic}
+            };
+            const auto line = QJsonDocument(result).toJson(QJsonDocument::Compact);
+            std::printf("%s\n", line.constData());
+          }
+        } else {
+          m_joinedReleaseDone = true;
+          m_joinedUp = exact;
+        }
+        std::printf(
+            "{\"event\":\"pointer-window-join\",\"sequence\":%llu,\"sourceTime\":%llu,"
+            "\"eventNumber\":%lld,\"hidUnderPointer\":%u,\"annotatedUnderPointer\":%u,"
+            "\"annotatedHandlingPointer\":%u,\"exactOwnedWindow\":%s,\"annotationPresent\":%s}\n",
+            static_cast<unsigned long long>(sequence), static_cast<unsigned long long>(p.sourceTimestampNs),
+            static_cast<long long>(p.eventNumber), p.windowUnderPointer, a ? a->windowUnderPointer : 0,
+            a ? a->windowHandlingPointer : 0, exact ? "true" : "false", a ? "true" : "false"
+        );
       }
     }
     std::fflush(stdout);
@@ -272,6 +409,21 @@ private:
       finish("owned-window-unavailable");
       return;
     }
+    if (m_titlebar) {
+      const auto observed = m_titlebar->read();
+      if (!observed) {
+        finish("native-titlebar-identity-lost");
+        return;
+      }
+      if (!m_up && observed->moved && m_dragged > 0 && !m_eligibleDrag) {
+        m_eligibleDrag = true;
+        std::printf(
+            "{\"event\":\"native-titlebar-moved\",\"window\":%u,\"process\":%lld,\"processBirth\":%llu}\n",
+            observed->window, static_cast<long long>(observed->process),
+            static_cast<unsigned long long>(observed->processBirth)
+        );
+      }
+    }
     if (m_down && m_lastFrame && !CGRectEqualToRect(*current, *m_lastFrame)) {
       ++m_frameChanges;
       std::printf(
@@ -282,7 +434,7 @@ private:
     m_lastFrame = current;
     m_frameTime = Clock::now();
     std::fflush(stdout);
-    if (m_up)
+    if (m_up && (!m_join || m_joinedReleaseDone))
       finish("physical-release");
   }
   void finish(const char *reason)
@@ -293,9 +445,12 @@ private:
     std::printf(
         "{\"event\":\"complete\",\"reason\":\"%s\",\"titlebarDown\":%s,\"physicalUp\":%s,"
         "\"eventWindowsMatchOwned\":%s,\"draggedEvents\":%llu,\"frameChanges\":%llu,"
+        "\"joinedDown\":%s,\"joinedUp\":%s,"
+        "\"eligibleSourceDrag\":%s,"
         "\"inputPosted\":false,\"productionDragAuthorized\":false}\n",
         reason, m_down ? "true" : "false", m_up ? "true" : "false", m_eventWindowsMatch ? "true" : "false",
-        static_cast<unsigned long long>(m_dragged), static_cast<unsigned long long>(m_frameChanges)
+        static_cast<unsigned long long>(m_dragged), static_cast<unsigned long long>(m_frameChanges),
+        m_joinedDown ? "true" : "false", m_joinedUp ? "true" : "false", m_eligibleDrag ? "true" : "false"
     );
     std::fflush(stdout);
     teardown();
@@ -315,6 +470,19 @@ private:
   {
     [m_timer invalidate];
     m_timer = nil;
+    if (m_annotationTap) {
+      CGEventTapEnable(m_annotationTap, false);
+      CFMachPortInvalidate(m_annotationTap);
+    }
+    if (m_annotationSource) {
+      CFRunLoopRemoveSource(CFRunLoopGetMain(), m_annotationSource, kCFRunLoopCommonModes);
+      CFRelease(m_annotationSource);
+      m_annotationSource = nullptr;
+    }
+    if (m_annotationTap) {
+      CFRelease(m_annotationTap);
+      m_annotationTap = nullptr;
+    }
     if (m_tap) {
       CGEventTapEnable(m_tap, false);
       CFMachPortInvalidate(m_tap);
@@ -329,23 +497,45 @@ private:
       m_tap = nullptr;
     }
     m_capture.stop();
+    if (m_fixture.running) {
+      [m_fixture terminate];
+      [m_fixture waitUntilExit];
+      std::printf(
+          "{\"event\":\"owned-fixture-exit\",\"pid\":%d,\"status\":%d}\n", m_windowProcess,
+          int(m_fixture.terminationStatus)
+      );
+      std::fflush(stdout);
+    }
+    m_fixture = nil;
     [m_window close];
     m_window = nil;
   }
   OriginalInputCaptureSource m_capture;
   OriginalInputEpoch m_epoch;
+  std::unique_ptr<OriginalPointerJoin> m_join;
+  std::unique_ptr<native::NativeTitlebarObservation> m_titlebar;
   std::optional<RejectedEvent> m_rejected;
   std::uint64_t m_callbackCount = 0, m_previousTimestamp = 0;
   const CGEventTapLocation m_location;
+  const bool m_joinedMode;
+  const bool m_eligibleMode;
   const Clock::time_point m_deadline;
   Clock::time_point m_frameTime;
   NSWindow *m_window = nil;
+  NSTask *m_fixture = nil;
+  pid_t m_windowProcess = 0;
+  double m_titleHeight = 0;
   NSTimer *m_timer = nil;
   CGWindowID m_windowId = 0;
   CFMachPortRef m_tap = nullptr;
   CFRunLoopSourceRef m_source = nullptr;
+  CFMachPortRef m_annotationTap = nullptr;
+  CFRunLoopSourceRef m_annotationSource = nullptr;
   std::optional<CGRect> m_lastFrame;
   std::uint64_t m_dragged = 0, m_frameChanges = 0;
+  std::uint64_t m_downSequence = 0, m_upSequence = 0;
+  bool m_joinedDown = false, m_joinedUp = false, m_joinedReleaseDone = false;
+  bool m_eligibleDrag = false;
   bool m_down = false, m_up = false, m_eventWindowsMatch = false, m_stopping = false;
   std::mutex m_mutex;
   std::condition_variable m_finished;
@@ -356,10 +546,15 @@ private:
 
 int main(int argc, char **argv)
 {
+  if (argc == 2 && std::strcmp(argv[1], "--owned-titlebar-fixture") == 0)
+    return ownedTitlebarFixture();
   const bool annotated = argc == 2 && std::strcmp(argv[1], "--interactive-annotated") == 0;
-  if (argc != 2 || (std::strcmp(argv[1], "--interactive") != 0 && !annotated)) {
+  const bool eligible = argc == 2 && std::strcmp(argv[1], "--interactive-eligible") == 0;
+  const bool joined = eligible || (argc == 2 && std::strcmp(argv[1], "--interactive-joined") == 0);
+  if (argc != 2 || (std::strcmp(argv[1], "--interactive") != 0 && !annotated && !joined)) {
     std::fputs(
-        "Usage: windowshare-native-titlebar-probe --interactive|--interactive-annotated\n"
+        "Usage: windowshare-native-titlebar-probe "
+        "--interactive|--interactive-annotated|--interactive-joined|--interactive-eligible\n"
         "Requires a ready user; posts no input. Annotated mode observes a later event stage; production Core stays at "
         "HID.\n",
         stderr
@@ -368,8 +563,9 @@ int main(int argc, char **argv)
   }
   @autoreleasepool {
     [NSApplication sharedApplication];
-    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
-    Probe probe(annotated);
+    [NSApp
+        setActivationPolicy:eligible ? NSApplicationActivationPolicyProhibited : NSApplicationActivationPolicyRegular];
+    Probe probe(annotated, joined, eligible);
     if (!probe.start())
       return 2;
     [NSApp run];

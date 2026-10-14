@@ -319,6 +319,8 @@ private:
   std::atomic<CGEventType> m_eventTapDisabled{kCGEventNull};
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   std::shared_ptr<deskflow::windowshare::OriginalInputCaptureSource> m_originalInputCapture;
+  CFMachPortRef m_pointerAnnotationTap = nullptr;
+  CFRunLoopSourceRef m_pointerAnnotationSource = nullptr;
 #endif
 
   // for double click coalescing.

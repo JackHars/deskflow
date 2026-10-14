@@ -16,7 +16,8 @@ source PID/state.
 `OriginalPointerObservation` is local metadata beside the input record, bound
 to its epoch, sequence and source timestamp. The existing completed-capture
 queue and Session/Server copy conduit carry it; there is no additional raw
-consumer or wire-protocol change. Values are captured before legacy translation
+consumer. Private v6 carries joined window observations separately from input
+leases; the network input protocol is unchanged. Values are captured before legacy translation
 can mutate the CGEvent. Checkpoints and keys cannot inherit pointer metadata.
 
 Zero window IDs remain unavailable. These fields do not identify a native grab
@@ -58,6 +59,36 @@ with its result: an annotated-stage observation cannot be claimed as HID
 capture continuity or a correlation between the two stages. The fixed deadline
 still closes the window if WindowServer consumes drag/release events before
 they reach this later tap.
+
+`--interactive-joined` keeps the production HID capture and adds a passive
+annotation-only tap for left down/up. The same sole consumer correlates both
+observations using source time, event number, direction and the remaining
+scalar fields. Its 32 slots and absolute 50ms deadline cannot delay ordinary
+input. Duplicate, inconsistent or overflowing metadata revokes optional window
+identity; late/missing annotations cannot manufacture an ID or revive it.
+`pointer-window-join` logs the raw stamp and the independently annotated ID.
+The owned physical run on 2026-10-14 passes both joins, 213 drags and the real
+release (see `TESTING.md`); no input is posted or suppressed.
+
+`--interactive-eligible` additionally runs `NativeTitlebarObservation`, the
+read-only observer used by NativeHost. It launches one separately owned source
+application with a normal AppKit titlebar. The source reports only its own ID,
+PID and titlebar height, and has an independent 30-second watchdog. The observer
+uses the joined event-time ID to retain an exact AX window/process birth, hit
+test the native titlebar, exclude controls/content, and observe movement with
+unchanged size. Fixture geometry is used only to grade the test, not as the
+production eligibility decision. `ready.sourcePid` identifies the source;
+`ready.pid` identifies the observer. `native-titlebar-candidate`,
+`native-titlebar-moved` and `complete.eligibleSourceDrag` record the result.
+On completion, the observer terminates only its own fixture and reports
+`owned-fixture-exit`. Existing Accessibility permission is also required.
+This next physical check has not run; obtain fresh readiness before launch.
+
+The source preparation/drop gate exists, but the configured-edge controller,
+native drag/cursor cutover, remote preview motion and GNOME drag-back are not
+wired. A painted preview, a timer, a source frame query or an eligibility
+observation is not a native grab-completion receipt. Keep P5/H07 open until
+continuous transfer and return are implemented and tested.
 
 Preserve stdout, stderr, exit status, OS version, source/binary hashes and the
 user's observation. `titlebar-down` reports both event-time native IDs and

@@ -7,6 +7,7 @@
 #include "OriginalInput_mac.h"
 #include "windowshare/OriginalInputCapturedInbox.h"
 #include "windowshare/OriginalInputRoute.h"
+#include "windowshare/OriginalPointerJoin.h"
 
 namespace deskflow::windowshare {
 
@@ -30,6 +31,12 @@ public:
   void completeCapture(OriginalInputTranslation translation) noexcept;
   void capture(CGEventType type, CGEventRef event) noexcept;
   bool checkpoint(std::uint64_t timestampNs, std::uint64_t flags) noexcept;
+  // Optional passive application-stage observer. Both tap callbacks run on
+  // the same producer thread; the existing Session is the only consumer.
+  bool startAnnotations() noexcept;
+  void captureAnnotation(CGEventType type, CGEventRef event) noexcept;
+  std::optional<OriginalPointerAnnotation> popAnnotation() noexcept;
+  bool annotationsLive() const noexcept;
 
   // Exactly one consumer, outside the tap. Check live evidence on every use.
   std::optional<OriginalInputCaptured> popCaptured() noexcept;
@@ -60,6 +67,9 @@ private:
   };
   OriginalInputStream m_stream;
   std::atomic<State> m_state{State::Ready};
+  std::atomic<State> m_annotationState{State::Ready};
+  std::array<OriginalPointerAnnotation, OriginalPointerJoin::capacity> m_annotations;
+  std::atomic<std::uint64_t> m_annotationsWritten{0}, m_annotationsRead{0};
   std::uint64_t m_sequence = 0;
   OriginalInputStamp m_openStamp;
   OriginalInputTransitionEvidence m_openTransition;

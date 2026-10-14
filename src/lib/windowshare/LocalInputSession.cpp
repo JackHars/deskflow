@@ -196,17 +196,44 @@ void LocalInputCoreSession::drainCapturedInput()
     return;
   }
   const auto epoch = source->epoch();
+  const auto pointerLost = [&] {
+    if (m_pointerNotificationsStopped)
+      return;
+    m_pointerNotificationsStopped = true;
+    if (m_channel && m_channel->supportsWindowPointer())
+      m_channel->sendWindowPointer({});
+  };
   if (!epoch.live()) {
     // Source::epoch() is also empty before producer startup. The conduit owns
     // the underlying epoch and can distinguish that state from continuity loss.
     (void)source->completedInput()->live();
     m_captureBarrier.reset();
+    if (m_pointerJoin) {
+      m_pointerJoin->revoke();
+      pointerLost();
+    }
     return;
   }
   if (!m_captureBarrier)
     m_captureBarrier = std::make_unique<OriginalInputNeutralBarrier>(epoch);
   if (!m_captureJoin)
     m_captureJoin = std::make_unique<OriginalInputRouteJoin>(epoch, source->routes());
+  if (source->annotationsLive()) {
+    if (!m_pointerJoin)
+      m_pointerJoin = std::make_unique<OriginalPointerJoin>(epoch);
+    for (std::size_t count = 0; count < OriginalPointerJoin::capacity; ++count) {
+      const auto annotation = source->popAnnotation();
+      if (!annotation)
+        break;
+      m_pointerJoin->annotate(*annotation);
+    }
+  } else if (m_pointerJoin) {
+    m_pointerJoin->revoke();
+    const auto lifetime = m_callbackLifetime;
+    pointerLost();
+    if (!*lifetime)
+      return;
+  }
   // Core dispatch can win the race with capture completion, or lose it. Drain
   // both bounded streams on this same consumer and join explicit stamps only.
   for (std::size_t count = 0; count < OriginalInputRoutes::capacity; ++count) {
@@ -224,11 +251,15 @@ void LocalInputCoreSession::drainCapturedInput()
       // Keep the native observer alive for a later raw emergency.
       m_captureBarrier.reset();
       m_captureJoin->revoke();
+      if (m_pointerJoin)
+        m_pointerJoin->revoke();
       source->completedInput()->revoke();
       break;
     }
     if (m_captureJoin->live())
       m_captureJoin->capture(*captured);
+    if (m_pointerJoin)
+      m_pointerJoin->capture(*captured);
     // Keep the sole raw consumer and all continuity/diagnostic observations.
     // A stalled Server revokes only this bounded copy conduit; capture draining
     // and the independent sticky emergency path continue unchanged.
@@ -246,6 +277,50 @@ void LocalInputCoreSession::drainCapturedInput()
       callback(*joined);
     if (!*lifetime)
       return;
+  }
+  if (m_pointerJoin) {
+    if (!m_pointerJoin->live()) {
+      const auto lifetime = m_callbackLifetime;
+      pointerLost();
+      if (!*lifetime)
+        return;
+    }
+    for (std::size_t count = 0; count < OriginalPointerJoin::capacity; ++count) {
+      const auto pointer = m_pointerJoin->pop();
+      if (!pointer)
+        break;
+      const auto callback = onPointerWindow;
+      const auto lifetime = m_callbackLifetime;
+      if (!m_pointerNotificationsStopped && m_channel && m_channel->supportsWindowPointer()) {
+        const auto &record = pointer->captured.input.record;
+        const auto &position = *pointer->captured.pointer;
+        const auto &button = std::get<OriginalInputButton>(record.payload);
+        const LocalWindowPointer observation{
+            button.down ? LocalWindowPointer::Kind::Down : LocalWindowPointer::Kind::Up,
+            record.epoch,
+            record.sequence,
+            record.sourceTimestampNs,
+            record.flags,
+            pointer->window(),
+            button.clickCount,
+            position.eventNumber,
+            position.x,
+            position.y
+        };
+        const bool sent = m_channel->sendWindowPointer(observation);
+        if (!*lifetime)
+          return;
+        if (!sent) {
+          pointerLost();
+          if (!*lifetime)
+            return;
+        }
+      }
+      if (callback)
+        callback(*pointer);
+      if (!*lifetime)
+        return;
+    }
   }
   // A joined dispatch is not a remote cursor/viewport acknowledgment, a
   // physical-neutral proof, or input authority. Original posting stays off.

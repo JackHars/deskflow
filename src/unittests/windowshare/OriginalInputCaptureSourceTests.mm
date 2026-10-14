@@ -220,6 +220,48 @@ void transitionModifiersAndButtons()
   check(checkpoint && !acquires(*checkpoint), "checkpoint cannot mint transition or physical-neutral evidence");
 }
 
+void pointerAnnotationLifecycle()
+{
+  OriginalInputCaptureSource source;
+  EventFixture event;
+  check(
+      !source.startAnnotations() && source.start() && source.startAnnotations(),
+      "annotation starts only with the live HID source"
+  );
+  event.button(0, true);
+  const auto input = captureCompleted(source, event);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointer, 71);
+  CGEventSetIntegerValueField(event.event, kCGMouseEventWindowUnderMousePointerThatCanHandleThisEvent, 71);
+  source.captureAnnotation(kCGEventLeftMouseDown, event.event);
+  const auto annotation = source.popAnnotation();
+  OriginalPointerJoin join(source.epoch());
+  check(
+      annotation && join.capture(input) && join.annotate(*annotation),
+      "independent passive queue joins existing raw consumer"
+  );
+  const auto match = join.pop();
+  check(match && match->window() == 71 && !source.popCaptured(), "annotation never creates another raw input record");
+  source.captureAnnotation(kCGEventTapDisabledByTimeout, nullptr);
+  check(
+      !source.annotationsLive() && source.epoch().live() && !source.startAnnotations(),
+      "annotation loss is terminal only for identity observation"
+  );
+  event.key(0);
+  check(captureCompleted(source, event).input.live(), "normal input capture continues after annotation loss");
+  source.stop();
+  check(!match->live(), "source shutdown revokes retained joined identity");
+
+  OriginalInputCaptureSource overflow;
+  check(overflow.start() && overflow.startAnnotations(), "bounded annotation fixture starts");
+  event.button(0, true);
+  for (std::size_t n = 0; n <= OriginalPointerJoin::capacity; ++n)
+    overflow.captureAnnotation(kCGEventLeftMouseDown, event.event);
+  check(
+      !overflow.annotationsLive() && overflow.epoch().live() && !overflow.popAnnotation(),
+      "annotation overflow cannot revoke raw emergency capture or overwrite pending identity"
+  );
+}
+
 void touchDragZeroClickRelease()
 {
   OriginalInputCaptureSource source;
@@ -634,6 +676,7 @@ int main()
     transitionKeyOwnership();
     transitionModifiersAndButtons();
     touchDragZeroClickRelease();
+    pointerAnnotationLifecycle();
     transitionScrollOwnership();
     discontinuitiesAndEmergency();
     emergencyRecognition();

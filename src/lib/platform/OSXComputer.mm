@@ -763,6 +763,22 @@ void OSXComputer::enable()
   if (m_eventTapPort) {
     m_eventTapRLSR = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, m_eventTapPort, 0);
     if (m_eventTapRLSR) {
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+      if (m_originalInputCapture) {
+        m_pointerAnnotationTap = CGEventTapCreate(
+            kCGAnnotatedSessionEventTap, kCGHeadInsertEventTap, kCGEventTapOptionListenOnly,
+            CGEventMaskBit(kCGEventLeftMouseDown) | CGEventMaskBit(kCGEventLeftMouseUp),
+            [](CGEventTapProxy, CGEventType type, CGEventRef event, void *context) -> CGEventRef {
+              auto *computer = static_cast<OSXComputer *>(context);
+              computer->m_originalInputCapture->captureAnnotation(type, event);
+              return event;
+            },
+            this
+        );
+        if (m_pointerAnnotationTap)
+          m_pointerAnnotationSource = CFMachPortCreateRunLoopSource(nullptr, m_pointerAnnotationTap, 0);
+      }
+#endif
       // Run the event tap on a dedicated thread with its own CFRunLoop so it fires
       // independently of whatever event loop the calling thread runs (e.g. QCoreApplication).
       // Use a semaphore to ensure m_eventTapRunLoop is set before enable() returns.
@@ -779,12 +795,16 @@ void OSXComputer::enable()
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
         if (m_originalInputCapture)
           m_originalInputCapture->start();
+        if (m_pointerAnnotationSource && m_originalInputCapture->startAnnotations())
+          CFRunLoopAddSource(m_eventTapRunLoop, m_pointerAnnotationSource, kCFRunLoopDefaultMode);
 #endif
         dispatch_semaphore_signal(sem);
         CFRunLoopRun();
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
         if (m_originalInputCapture)
           m_originalInputCapture->stop();
+        if (m_pointerAnnotationSource)
+          CFRunLoopRemoveSource(m_eventTapRunLoop, m_pointerAnnotationSource, kCFRunLoopDefaultMode);
 #endif
         CFRunLoopRemoveSource(CFRunLoopGetCurrent(), m_eventTapRLSR, kCFRunLoopDefaultMode);
         // The owner retains this handle through stop/join. Clearing it here
@@ -825,6 +845,18 @@ void OSXComputer::disable()
     m_eventTapRunLoop = nullptr;
   }
   m_eventTapDisabled.store(kCGEventNull, std::memory_order_release);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (m_pointerAnnotationSource) {
+    CFRelease(m_pointerAnnotationSource);
+    m_pointerAnnotationSource = nullptr;
+  }
+  if (m_pointerAnnotationTap) {
+    CGEventTapEnable(m_pointerAnnotationTap, false);
+    CFMachPortInvalidate(m_pointerAnnotationTap);
+    CFRelease(m_pointerAnnotationTap);
+    m_pointerAnnotationTap = nullptr;
+  }
+#endif
 
   if (m_eventTapRLSR) {
     CFRelease(m_eventTapRLSR);

@@ -41,6 +41,20 @@ void NativeHost::refresh()
 void NativeHost::exportWindow(std::uint32_t)
 {
 }
+void NativeHost::observeWindowPointer(const LocalWindowPointer &)
+{
+}
+std::optional<Owner> NativeHost::prepareWindowDrag(const WindowDragBinding &)
+{
+  return std::nullopt;
+}
+bool NativeHost::releaseWindowDrag(const WindowDragBinding &, const WindowDragRelease &)
+{
+  return false;
+}
+void NativeHost::cancelWindowDrag(const WindowDragBinding &)
+{
+}
 void NativeHost::ready(std::uint64_t, std::uint64_t, std::uint64_t)
 {
 }
