@@ -832,17 +832,19 @@ void Viewer::committed()
   m_committed = true;
   if (endingPreview) {
     const QPointer<Viewer> alive(this);
-    const bool visible = isVisible();
     setAttribute(Qt::WA_ShowWithoutActivating, false);
-    // Keep QWidget's flags consistent too: a later native-surface recreation
-    // must not silently restore the provisional no-focus flag.
-    setWindowFlag(Qt::WindowDoesNotAcceptFocus, false);
+    // QWidget::setWindowFlag reparents/hides an existing top-level window.
+    // On Wayland that destroys the exact placed surface and GNOME recenters
+    // its replacement. Change this hint on the live QWindow, and mirror it in
+    // QWidget so a later legitimate recreation cannot restore no-focus.
+    const auto flags = windowFlags() & ~Qt::WindowDoesNotAcceptFocus;
+    overrideWindowFlags(flags);
+    if (auto *native = windowHandle())
+      native->setFlags(flags);
     if (!alive)
       return;
     setFocusPolicy(Qt::StrongFocus);
     invalidateViewport();
-    if (visible)
-      show();
     if (!alive)
       return;
   }

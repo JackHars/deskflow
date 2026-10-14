@@ -386,6 +386,7 @@ private:
   void invalidateSelectedPeer() noexcept;
   void publishSelectedPeer() noexcept;
   void invalidateWindowDragEdge(bool forgetPress = false) noexcept;
+  void drainWindowDragTransfer();
   bool observeWindowDragEdge(
       BaseClientProxy *destination, Direction direction, int32_t x, int32_t y, int32_t sourceX, int32_t sourceY,
       double waitSeconds

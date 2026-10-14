@@ -15,6 +15,7 @@
 #include "Viewer.h"
 #include "WindowDragPreviewController.h"
 #include "WindowDragPreviewProtocol.h"
+#include "WindowDragWatcher.h"
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
 #include "ViewerViewportEndpoint.h"
 #endif
@@ -243,7 +244,10 @@ public:
         if (m_shuttingDown)
           return;
         m_hostSessions[session] = epoch;
+        if (m_hostGeometries.contains(session) && m_hostGeometries.at(session) != integer(metadata, "geometry"))
+          m_hostMoveGates[session].cancel();
         m_hostGeometries[session] = integer(metadata, "geometry");
+        m_hostMetadata[session] = metadata;
         if (metadata.value("windowDrag").toDouble(0) > 0)
           m_dragAnchors[session] =
               QPointF(metadata.value("dragAnchorX").toDouble(-1), metadata.value("dragAnchorY").toDouble(-1));
@@ -255,8 +259,13 @@ public:
       };
       m_native->onFrame =
           [this](std::uint64_t session, std::uint64_t epoch, std::uint64_t geometry, const QByteArray &frame) {
+            const QPointer<Bridge> alive(this);
             const auto found = m_hostSessions.find(session);
             if (!m_channel || !m_established || found == m_hostSessions.end() || found->second != epoch)
+              return;
+            if (m_returnDrag && m_returnDrag->owner == Owner{session, epoch} && m_returnDrag->preview)
+              m_returnDrag->preview->receiveFrame(frame, geometry);
+            if (!alive || m_shuttingDown || !m_channel || !m_established)
               return;
             // Once an access unit is dropped, no dependent frame may pass until
             // a deferred keyframe request invalidates the old GOP. Polling the
@@ -270,7 +279,14 @@ public:
             }
           };
       m_native->onCommitted = [this](std::uint64_t session, std::uint64_t epoch) {
-        send(MessageType::Accepted, {{"kind", "committed"}}, session, epoch);
+        const QPointer<Bridge> alive(this);
+        const auto drag = m_hostDrag && m_hostDrag->owner == Owner{session, epoch} ? std::optional(m_hostDrag->binding)
+                                                                                   : std::nullopt;
+        if (send(MessageType::Accepted, {{"kind", "committed"}}, session, epoch) && alive && drag) {
+          const auto callback = onWindowDragCommitted;
+          if (callback)
+            callback(*drag);
+        }
       };
       m_native->onFocused = [this](
                                 std::uint64_t session, std::uint64_t epoch, std::uint64_t revision,
@@ -286,13 +302,26 @@ public:
           withdrawOriginalKeyboard(reason);
       };
       m_native->onClosed = [this](std::uint64_t session) {
+        const QPointer<Bridge> alive(this);
         if (m_keyboardRoute && m_keyboardRoute->binding.owner.session == session)
           withdrawOriginalKeyboard(KeyboardRouteReason::Returned, false);
         m_pendingKeyframes.erase(session);
         m_hostGeometries.erase(session);
+        m_hostMetadata.erase(session);
+        m_nativeMoves.erase(session);
+        if (m_returnDrag && m_returnDrag->owner.session == session && !m_returnDrag->committing) {
+          const auto binding = m_returnDrag->binding;
+          cancelWindowReturn(binding);
+          const auto callback = onWindowDragCancelled;
+          if (callback)
+            callback(binding);
+          if (!alive)
+            return;
+        }
+        m_hostMoveGates.erase(session);
         m_dragAnchors.erase(session);
-        if (m_hostDrag && m_hostDrag->owner.session == session)
-          m_hostDrag.reset();
+        const auto drag =
+            m_hostDrag && m_hostDrag->owner.session == session ? std::exchange(m_hostDrag, {}) : std::nullopt;
         m_mediaRecoveryRequests.erase(session);
         if (m_pendingKeyframes.empty())
           m_keyframeRetry.stop();
@@ -302,6 +331,11 @@ public:
           m_hostSessions.erase(found);
           send(MessageType::Closed, {}, session, epoch);
         }
+        if (!alive)
+          return;
+        const auto callback = onWindowDragCancelled;
+        if (drag && callback)
+          callback(drag->binding);
       };
       m_native->refresh();
     }
@@ -331,6 +365,8 @@ public:
   }
   bool prepareWindowDrag(const WindowDragBinding &binding, const LocalWindowDrag &command)
   {
+    if (binding.direction == WindowDragDirection::Return)
+      return prepareWindowReturn(binding, command);
     const auto peer = authenticatedPeerObservation();
     if (!m_native || !m_windowDragMotionCapable || !peer || peer->ticket().incarnation() != binding.connection ||
         m_hostDrag)
@@ -342,13 +378,48 @@ public:
       m_native->cancelWindowDrag(binding);
       return false;
     }
-    m_hostDrag = HostDrag{binding, *owner, {}, {}};
+    m_hostDrag = HostDrag{binding, *owner, {}, {}, {}, false};
     moveWindowDrag(binding, command);
     return m_hostDrag.has_value();
   }
   std::function<void(const WindowDragBinding &, const WindowDragPreviewReply &)> onWindowDragPreview;
+  std::function<void(std::uint32_t, Owner, const WindowDragMove &)> onWindowMove;
+  std::function<void(const WindowDragBinding &)> onWindowDragCommitted, onWindowDragCancelled;
+  bool
+  dropWindowDrag(const WindowDragBinding &binding, const LocalWindowDrag &command, const WindowDragRelease &release)
+  {
+    if (binding.direction == WindowDragDirection::Return) {
+      if (!m_returnDrag || m_returnDrag->binding != binding || m_returnDrag->drop ||
+          command.kind != LocalWindowDrag::Kind::Drop || release.sequence != command.releaseSequence)
+        return false;
+      m_returnDrag->command = command;
+      m_returnDrag->drop = true;
+      return true;
+    }
+    if (!m_hostDrag || m_hostDrag->binding != binding || m_hostDrag->release ||
+        command.kind != LocalWindowDrag::Kind::Drop || !m_windowDragMotionCapable)
+      return false;
+    m_hostDrag->release = release;
+    const QPointer<Bridge> alive(this);
+    moveWindowDrag(binding, command);
+    return alive && m_hostDrag && m_hostDrag->binding == binding;
+  }
+  void finishWindowDrag(const WindowDragBinding &binding)
+  {
+    if (binding.direction == WindowDragDirection::Return)
+      return cancelWindowReturn(binding);
+    if (m_hostDrag && m_hostDrag->binding == binding)
+      m_hostDrag.reset();
+  }
   void moveWindowDrag(const WindowDragBinding &binding, const LocalWindowDrag &command)
   {
+    if (binding.direction == WindowDragDirection::Return) {
+      if (m_returnDrag && m_returnDrag->binding == binding && !m_returnDrag->drop) {
+        m_returnDrag->command = command;
+        placeWindowReturn();
+      }
+      return;
+    }
     if (!m_hostDrag || m_hostDrag->binding != binding || !m_windowDragMotionCapable)
       return;
     const auto owner = m_hostDrag->owner;
@@ -357,8 +428,9 @@ public:
     if (anchor == m_dragAnchors.end() || geometry == m_hostGeometries.end())
       return cancelWindowDrag(binding);
     WindowDragPreviewCommand move{
-        command.kind == LocalWindowDrag::Kind::Hold ? WindowDragPreviewCommand::Kind::Hold
-                                                    : WindowDragPreviewCommand::Kind::Move,
+        command.kind == LocalWindowDrag::Kind::Drop   ? WindowDragPreviewCommand::Kind::Drop
+        : command.kind == LocalWindowDrag::Kind::Hold ? WindowDragPreviewCommand::Kind::Hold
+                                                      : WindowDragPreviewCommand::Kind::Move,
         binding.drag,
         command.sequence,
         geometry->second,
@@ -373,6 +445,8 @@ public:
   }
   void cancelWindowDrag(const WindowDragBinding &binding)
   {
+    if (binding.direction == WindowDragDirection::Return)
+      return cancelWindowReturn(binding);
     if (m_hostDrag && m_hostDrag->binding == binding) {
       const auto old = std::exchange(m_hostDrag, {});
       if (old->command.drag) {
@@ -384,12 +458,203 @@ public:
     if (m_native)
       m_native->cancelWindowDrag(binding);
   }
+  bool prepareWindowReturn(const WindowDragBinding &binding, const LocalWindowDrag &command)
+  {
+    const QPointer<Bridge> alive(this);
+    const auto peer = authenticatedPeerObservation();
+    if (m_shuttingDown || !m_native || !m_windowDragMoveCapable || m_returnDrag || m_hostDrag || !peer ||
+        peer->ticket().incarnation() != binding.connection || !command.returnOffer)
+      return false;
+    for (const auto &[session, observed] : m_nativeMoves) {
+      const auto observation = observed;
+      const auto metadata = m_hostMetadata.find(session);
+      if (metadata == m_hostMetadata.end() || integer(metadata->second, "windowId", UINT32_MAX) != binding.window ||
+          metadata->second.value("phase") != QJsonValue("remote") ||
+          observation.geometry != integer(metadata->second, "geometry") ||
+          (observation.native.phase != GnomeWindowDragEvent::Phase::Begin &&
+           observation.native.phase != GnomeWindowDragEvent::Phase::Motion))
+        continue;
+      const auto &frame = observation.native.frame;
+      const Point anchor{
+          std::clamp(double(observation.native.x - frame.x()) / frame.width(), 0., 1.),
+          std::clamp(double(observation.native.y - frame.y()) / frame.height(), 0., 1.)
+      };
+      const Owner owner{session, m_hostSessions.at(session)};
+      auto description = metadata->second;
+      const auto rectangle = m_native->windowReturnFrame(
+          owner, observation.geometry, {double(command.destinationX), double(command.destinationY)}, anchor
+      );
+      if (!alive || m_shuttingDown || !rectangle || m_returnDrag || !m_hostSessions.contains(owner.session) ||
+          m_hostSessions.at(owner.session) != owner.epoch)
+        return false;
+      description.insert("phase", "preparing");
+      description.insert("windowDrag", number(binding.drag));
+      const QPointer<Viewer> preview = new Viewer(owner.session, owner.epoch, description);
+      preview->setWindowFlags(
+          Qt::Tool | Qt::FramelessWindowHint | Qt::WindowDoesNotAcceptFocus | Qt::WindowTransparentForInput
+      );
+      preview->setAttribute(Qt::WA_ShowWithoutActivating);
+      preview->setAttribute(Qt::WA_DeleteOnClose);
+      preview->onSend = [](MessageType type, const QJsonObject &object, std::uint64_t, std::uint64_t) {
+        return type == MessageType::Ready ||
+               (type == MessageType::Input && object.value("kind") == QJsonValue("visibility"));
+      };
+      preview->onError = [this, binding](const QString &) { failWindowReturn(binding); };
+      m_returnDrag = ReturnDrag{binding, owner, observation, command, anchor, *rectangle, preview};
+      connect(preview, &QObject::destroyed, this, [this, binding] {
+        // QWidget emits destroyed after Viewer members are gone, before the
+        // QObject base clears QPointer. Never call back into that partial object.
+        if (m_returnDrag && m_returnDrag->binding == binding) {
+          m_returnDrag->preview.clear();
+          failWindowReturn(binding);
+        }
+      });
+      auto *poll = new QTimer(preview);
+      connect(poll, &QTimer::timeout, this, [this, binding] { pollWindowReturn(binding); });
+      poll->start(25);
+      preview->resize(qRound(rectangle->width), qRound(rectangle->height));
+      if (!alive || !preview || !m_returnDrag || m_returnDrag->binding != binding)
+        return false;
+      preview->move(qRound(rectangle->x), qRound(rectangle->y));
+      if (!alive || !preview || !m_returnDrag || m_returnDrag->binding != binding)
+        return false;
+      preview->show();
+      if (!alive || !preview || !m_returnDrag || m_returnDrag->binding != binding)
+        return false;
+      m_native->requestKeyframe(owner.session, owner.epoch);
+      return alive && m_returnDrag && m_returnDrag->binding == binding;
+    }
+    return false;
+  }
+  void cancelWindowReturn(const WindowDragBinding &binding)
+  {
+    if (!m_returnDrag || m_returnDrag->binding != binding)
+      return;
+    const auto old = std::exchange(m_returnDrag, {});
+    if (old->preview) {
+      old->preview->onSend = {};
+      old->preview->onError = {};
+      old->preview->disconnected();
+      old->preview->close();
+    }
+  }
+  void failWindowReturn(const WindowDragBinding &binding)
+  {
+    if (!m_returnDrag || m_returnDrag->binding != binding)
+      return;
+    const QPointer<Bridge> alive(this);
+    cancelWindowReturn(binding);
+    if (alive) {
+      const auto callback = onWindowDragCancelled;
+      if (callback)
+        callback(binding);
+    }
+  }
+  void placeWindowReturn()
+  {
+    if (!m_returnDrag || !m_returnDrag->preview || !m_native)
+      return;
+    const QPointer<Bridge> alive(this);
+    const auto drag = *m_returnDrag;
+    const auto frame = m_native->windowReturnFrame(
+        drag.owner, drag.native.geometry, {double(drag.command.destinationX), double(drag.command.destinationY)},
+        drag.anchor
+    );
+    if (!alive || !m_returnDrag || m_returnDrag->binding != drag.binding || m_returnDrag->command != drag.command)
+      return;
+    if (!frame || !drag.preview)
+      return failWindowReturn(drag.binding);
+    if (!sameReturnFrame(drag.frame, *frame)) {
+      m_returnDrag->beforePaint = drag.preview->framePaintSerial();
+      m_returnDrag->frame = *frame;
+      drag.preview->move(qRound(frame->x), qRound(frame->y));
+      if (alive && drag.preview && m_returnDrag && m_returnDrag->binding == drag.binding)
+        drag.preview->update();
+    }
+  }
+  static bool sameReturnFrame(Rect a, Rect b)
+  {
+    return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
+  }
+  void pollWindowReturn(const WindowDragBinding &binding)
+  {
+    if (!m_returnDrag || m_returnDrag->binding != binding || m_returnDrag->committing)
+      return;
+    const QPointer<Bridge> alive(this);
+    const auto peer = authenticatedPeerObservation();
+    const auto drag = *m_returnDrag;
+    const auto current = m_nativeMoves.find(drag.owner.session);
+    if (!drag.preview || !peer || peer->ticket().incarnation() != binding.connection ||
+        current == m_nativeMoves.end() || current->second.geometry != drag.native.geometry ||
+        current->second.surface != drag.native.surface || current->second.native.grab != drag.native.native.grab ||
+        current->second.native.phase == GnomeWindowDragEvent::Phase::Cancel)
+      return failWindowReturn(binding);
+    const auto nativeSequence = current->second.native.sequence;
+    const bool nativeReleased =
+        current->second.native.phase == GnomeWindowDragEvent::Phase::End && current->second.native.buttonReleased;
+    const auto frame = m_native->windowReturnFrame(
+        drag.owner, drag.native.geometry, {double(drag.command.destinationX), double(drag.command.destinationY)},
+        drag.anchor
+    );
+    if (!alive || !m_returnDrag || m_returnDrag->binding != binding || m_returnDrag->command != drag.command)
+      return;
+    const auto latest = m_nativeMoves.find(drag.owner.session);
+    if (latest == m_nativeMoves.end() || latest->second.native.sequence != nativeSequence)
+      return;
+    if (!frame || !sameReturnFrame(*frame, drag.frame))
+      return failWindowReturn(binding);
+    if (drag.preview->framePaintSerial() <= drag.beforePaint ||
+        !NativeHost::windowReturnPreviewCurrent(drag.preview->internalWinId(), drag.frame))
+      return;
+    if (drag.drop) {
+      if (!nativeReleased)
+        return;
+      m_returnDrag->committing = true;
+      const auto owner = drag.owner;
+      const auto geometry = drag.native.geometry;
+      const auto destination = drag.frame;
+      const bool restored = m_native->returnWindowDrag(owner, geometry, destination);
+      if (!alive || !m_returnDrag || m_returnDrag->binding != binding)
+        return;
+      if (!restored)
+        return failWindowReturn(binding);
+      const auto callback = onWindowDragCommitted;
+      if (callback)
+        callback(binding);
+      return;
+    }
+    if (drag.acknowledged == drag.command.sequence)
+      return;
+    m_returnDrag->acknowledged = drag.command.sequence;
+    const WindowDragPreviewReply ready{
+        {WindowDragPreviewCommand::Kind::Move, binding.drag, drag.command.sequence, drag.native.geometry,
+         drag.command.destinationX, drag.command.destinationY, drag.anchor.x, drag.anchor.y},
+        true,
+        {qRound(frame->x), qRound(frame->y), qRound(frame->width), qRound(frame->height)},
+        drag.preview->framePaintSerial(),
+        1
+    };
+    const auto callback = onWindowDragPreview;
+    if (callback)
+      callback(binding, ready);
+  }
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
   void attachViewportEndpoint(ViewerViewportEndpoint &endpoint)
   {
     require(!m_hosting && !m_viewportEndpoint, "Viewport endpoint requires one viewer controller");
     m_viewportEndpoint = &endpoint;
     const QPointer<Bridge> alive(this);
+    endpoint.onWindowDrag = [alive](const GnomeWindowDragEvent &event) {
+      if (!alive || alive->m_shuttingDown)
+        return;
+      std::vector<QPointer<WindowDragWatcher>> watchers;
+      for (const auto &[id, view] : alive->m_viewers)
+        if (view.watcher)
+          watchers.push_back(view.watcher);
+      for (const auto &watcher : watchers)
+        if (alive && watcher)
+          watcher->receive(event);
+    };
     endpoint.onSnapshot = [alive] { return alive ? alive->viewportState() : std::nullopt; };
     endpoint.onCheck = [alive](const GnomeViewportState &expected) {
       return alive && alive->viewportState() == std::optional(expected);
@@ -1443,15 +1708,19 @@ private:
       m_negotiating = true;
       if (!m_hosting)
         channel->send(
-            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
-                                 {"role", "viewer"},
-                                 {"codec", "h264"},
-                                 {"capabilities", windowDragMotionCapabilities(
-                                                      windowDragPreviewCapabilities(clipboardTextCapabilities(
-                                                          keyboardRouteCapabilities(true, true, true), m_clipboardPolicy
-                                                      )),
-                                                      nativeWindowDragAvailable()
-                                                  )}}
+            MessageType::Hello,
+            {{"version", static_cast<int>(protocolVersion)},
+             {"role", "viewer"},
+             {"codec", "h264"},
+             {"capabilities", windowDragMoveCapabilities(
+                                  windowDragMotionCapabilities(
+                                      windowDragPreviewCapabilities(clipboardTextCapabilities(
+                                          keyboardRouteCapabilities(true, true, true), m_clipboardPolicy
+                                      )),
+                                      nativeWindowDragAvailable()
+                                  ),
+                                  nativeWindowDragAvailable()
+                              )}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1507,6 +1776,9 @@ private:
         }
         m_hostSessions.clear();
         m_hostGeometries.clear();
+        m_hostMetadata.clear();
+        m_nativeMoves.clear();
+        m_hostMoveGates.clear();
         m_mediaRecoveryRequests.clear();
         m_mediaRecoveryCapable = false;
         m_cleaning = false;
@@ -1541,6 +1813,7 @@ private:
       m_clipboardCapable = m_clipboardPolicy && peerSupportsClipboardText(object);
       m_windowDragCapable = peerSupportsWindowDragPreview(object);
       m_windowDragMotionCapable = m_windowDragCapable && peerSupportsWindowDragMotion(object);
+      m_windowDragMoveCapable = m_windowDragMotionCapable && peerSupportsWindowDragMove(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
@@ -1550,18 +1823,21 @@ private:
                  {"role", "host"},
                  {"codec", "h264"},
                  {"capabilities",
-                  windowDragMotionCapabilities(
-                      windowDragPreviewCapabilities(
-                          clipboardTextCapabilities(
-                              m_keyboardCapable ? keyboardRouteCapabilities(
-                                                      m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable
-                                                  )
-                                                : QJsonArray{},
-                              m_clipboardCapable
+                  windowDragMoveCapabilities(
+                      windowDragMotionCapabilities(
+                          windowDragPreviewCapabilities(
+                              clipboardTextCapabilities(
+                                  m_keyboardCapable ? keyboardRouteCapabilities(
+                                                          m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable
+                                                      )
+                                                    : QJsonArray{},
+                                  m_clipboardCapable
+                              ),
+                              m_windowDragCapable
                           ),
-                          m_windowDragCapable
+                          m_windowDragMotionCapable
                       ),
-                      m_windowDragMotionCapable
+                      m_windowDragMoveCapable
                   )}}
             ))
           return;
@@ -1624,6 +1900,23 @@ private:
       return;
     if (packet.type == MessageType::WindowDrag) {
       require(m_windowDragMotionCapable, "Window drag motion was not negotiated");
+      if (object.value("kind") == QJsonValue("native-move")) {
+        require(m_windowDragMoveCapable, "Native move observations were not negotiated");
+        const auto observation = parseWindowDragMove(object);
+        const auto geometry = m_hostGeometries.find(packet.session);
+        if (geometry == m_hostGeometries.end() || geometry->second != observation.geometry)
+          return;
+        require(m_hostMoveGates[packet.session].accept(observation), "Native move changed its retained grab");
+        m_nativeMoves[packet.session] = observation;
+        const auto metadata = m_hostMetadata.find(packet.session);
+        const auto callback = onWindowMove;
+        if (callback && metadata != m_hostMetadata.end())
+          callback(
+              static_cast<std::uint32_t>(integer(metadata->second, "windowId", UINT32_MAX)),
+              {packet.session, packet.epoch}, observation
+          );
+        return;
+      }
       const auto reply = parseWindowDragPreviewReply(object);
       if (!m_hostDrag || m_hostDrag->owner != Owner{packet.session, packet.epoch})
         return;
@@ -1637,12 +1930,31 @@ private:
         return; // A coalesced older position cannot acknowledge the current drop.
       require(reply.command.samePosition(command), "Window drag preview reply changed its position");
       const auto binding = m_hostDrag->binding;
+      const QPointer<Bridge> alive(this);
+      if (reply.ok && reply.command.kind == WindowDragPreviewCommand::Kind::Drop) {
+        require(
+            command.kind == WindowDragPreviewCommand::Kind::Drop && m_hostDrag->release,
+            "Unrequested window drag drop reply"
+        );
+        if (m_hostDrag->dropAccepted)
+          return;
+        m_hostDrag->dropAccepted = true;
+        const auto release = *m_hostDrag->release;
+        if (!m_native->releaseWindowDrag(binding, release)) {
+          cancelWindowDrag(binding);
+          return;
+        }
+        if (!alive)
+          return;
+        m_native->ready(packet.session, packet.epoch, reply.command.geometry);
+        return;
+      }
       if (reply.ok)
         m_hostDrag->painted = reply;
       const auto callback = onWindowDragPreview;
       if (callback)
         callback(binding, reply);
-      if (!reply.ok)
+      if (alive && !reply.ok)
         cancelWindowDrag(binding);
       return;
     }
@@ -1764,6 +2076,27 @@ private:
       });
       m_viewers.emplace(id, View{packet.epoch, viewer, viewer});
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      if (m_windowDragMoveCapable && m_viewportEndpoint) {
+        const QPointer<Bridge> alive(this);
+        const QPointer<Viewer> target(viewer);
+        auto *watcher = new WindowDragWatcher(
+            {[alive, target]() -> std::optional<GnomePreparationTarget> {
+               if (!alive || !target || !alive->m_viewportEndpoint || !alive->m_viewportEndpoint->live())
+                 return {};
+               return target->waylandPreparationTarget();
+             },
+             [alive](auto request, auto complete) {
+               return alive && alive->m_viewportEndpoint &&
+                      alive->m_viewportEndpoint->requestWindowDrag(request, std::move(complete));
+             },
+             [alive, target, generation, id, epoch = packet.epoch](const WindowDragMove &observation) {
+               if (alive && target && alive->currentViewer(id, epoch, target, generation))
+                 alive->send(MessageType::WindowDrag, windowDragMoveJson(observation), id, epoch);
+             }},
+            viewer
+        );
+        m_viewers.at(id).watcher = watcher;
+      }
       if (m_preparationRoute && !viewer->beginInputPreparation(m_preparationRoute->binding)) {
         if (m_viewportEndpoint)
           m_viewportEndpoint->close();
@@ -1907,6 +2240,8 @@ private:
   }
   void stopViewers()
   {
+    if (m_returnDrag)
+      cancelWindowReturn(m_returnDrag->binding);
     auto viewers = std::move(m_viewers);
     m_viewers.clear();
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
@@ -1949,6 +2284,7 @@ private:
     // identity for comparison only; a delayed callback cannot erase a successor.
     const Viewer *identity;
     QPointer<WindowDragPreviewController> drag{};
+    QPointer<WindowDragWatcher> watcher{};
   };
   bool m_hosting, m_established = false, m_cleaning = false, m_catalogReady = false;
   const bool m_clipboardPolicy;
@@ -1986,6 +2322,7 @@ private:
   bool m_clipboardCapable = false;
   bool m_windowDragCapable = false;
   bool m_windowDragMotionCapable = false;
+  bool m_windowDragMoveCapable = false;
   std::unique_ptr<FocusedClipboard> m_clipboard;
   QMetaObject::Connection m_clipboardConnection;
   bool m_reservingKeyboard = false;
@@ -2001,6 +2338,22 @@ private:
   std::unique_ptr<NativeHost> m_native;
   std::map<std::uint64_t, std::uint64_t> m_hostSessions;
   std::map<std::uint64_t, std::uint64_t> m_hostGeometries;
+  std::map<std::uint64_t, WindowDragMoveGate> m_hostMoveGates;
+  std::map<std::uint64_t, QJsonObject> m_hostMetadata;
+  std::map<std::uint64_t, WindowDragMove> m_nativeMoves;
+  struct ReturnDrag
+  {
+    WindowDragBinding binding;
+    Owner owner;
+    WindowDragMove native;
+    LocalWindowDrag command;
+    Point anchor;
+    Rect frame;
+    QPointer<Viewer> preview;
+    std::uint64_t beforePaint = 0, acknowledged = 0;
+    bool drop = false, committing = false;
+  };
+  std::optional<ReturnDrag> m_returnDrag;
   std::map<std::uint64_t, QPointF> m_dragAnchors;
   struct HostDrag
   {
@@ -2008,6 +2361,8 @@ private:
     Owner owner;
     WindowDragPreviewCommand command;
     std::optional<WindowDragPreviewReply> painted;
+    std::optional<WindowDragRelease> release;
+    bool dropAccepted = false;
   };
   std::optional<HostDrag> m_hostDrag;
   std::map<std::uint64_t, std::uint64_t> m_mediaRecoveryRequests;
@@ -2309,9 +2664,49 @@ int main(int argc, char **argv)
               [&](const WindowDragBinding &binding, const LocalWindowDrag &command) {
                 bridge.moveWindowDrag(binding, command);
               },
-              [&](const WindowDragBinding &binding) { bridge.cancelWindowDrag(binding); }
+              [&](const WindowDragBinding &binding) { bridge.cancelWindowDrag(binding); },
+              [&](const WindowDragBinding &binding, const LocalWindowDrag &command, const WindowDragRelease &release) {
+                return bridge.dropWindowDrag(binding, command, release);
+              },
+              [&](const WindowDragBinding &binding) { bridge.finishWindowDrag(binding); }
           }
       );
+      bridge.onWindowMove = [&windowDrag](std::uint32_t window, Owner owner, const WindowDragMove &move) {
+        if (!windowDrag)
+          return;
+        const auto &native = move.native;
+        windowDrag->moved(
+            {static_cast<LocalWindowMove::Phase>(static_cast<unsigned>(native.phase) + 1),
+             window,
+             0,
+             owner.session,
+             owner.epoch,
+             move.geometry,
+             native.grab,
+             native.sequence,
+             {},
+             native.x,
+             native.y,
+             {native.frame.x(), native.frame.y(), native.frame.width(), native.frame.height()}}
+        );
+      };
+      bridge.onWindowDragPreview =
+          [&windowDrag](const WindowDragBinding &binding, const WindowDragPreviewReply &reply) {
+            if (!windowDrag)
+              return;
+            if (reply.ok)
+              windowDrag->ready(binding, reply.command.sequence);
+            else
+              windowDrag->cancelled(binding);
+          };
+      bridge.onWindowDragCommitted = [&windowDrag](const WindowDragBinding &binding) {
+        if (windowDrag)
+          windowDrag->committed(binding);
+      };
+      bridge.onWindowDragCancelled = [&windowDrag](const WindowDragBinding &binding) {
+        if (windowDrag)
+          windowDrag->cancelled(binding);
+      };
       coreInput->onWindowPointer = [&bridge, &windowDrag](const LocalWindowPointer &pointer) {
         if (windowDrag)
           windowDrag->pointer(pointer);
@@ -2397,6 +2792,10 @@ int main(int argc, char **argv)
     const auto stopInput = qScopeGuard([&] {
       if (windowDrag)
         windowDrag->stop();
+      bridge.onWindowMove = {};
+      bridge.onWindowDragPreview = {};
+      bridge.onWindowDragCommitted = {};
+      bridge.onWindowDragCancelled = {};
       if (inputPreflight)
         inputPreflight->stop();
       bridge.revokeOriginalKeyboard = {};

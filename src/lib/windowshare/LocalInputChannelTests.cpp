@@ -307,6 +307,28 @@ QByteArray dragPayload(const LocalWindowDrag &value)
       number(bytes, std::uint32_t(point), 4);
   for (auto point : {value.sourceX, value.sourceY, value.destinationX, value.destinationY})
     number(bytes, std::uint32_t(point), 4);
+  number(bytes, value.releaseSequence, 8);
+  number(bytes, value.releaseTime, 8);
+  number(bytes, value.returnOffer, 8);
+  return bytes;
+}
+LocalWindowMove fixtureMove()
+{
+  LocalWindowMove value{LocalWindowMove::Phase::Begin, 812, 5, 9, 10, 11, 12, 1, {}, -100, 20, {-500, 0, 640, 480}};
+  value.peer.fill(0x32);
+  return value;
+}
+QByteArray movePayload(const LocalWindowMove &value)
+{
+  QByteArray bytes;
+  number(bytes, static_cast<unsigned>(value.phase), 1);
+  number(bytes, 0, 3);
+  number(bytes, value.window, 4);
+  for (auto token : {value.offer, value.session, value.epoch, value.geometry, value.grab, value.sequence})
+    number(bytes, token, 8);
+  bytes.append(reinterpret_cast<const char *>(value.peer.data()), value.peer.size());
+  for (auto point : {value.x, value.y, value.frame.x, value.frame.y, value.frame.width, value.frame.height})
+    number(bytes, std::uint32_t(point), 4);
   return bytes;
 }
 QByteArray originalPayload(const LocalInputLease &lease, const OriginalInputRecord &event)
@@ -558,6 +580,10 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     frame[5] = 5; // Window-pointer metadata requires the explicit v6 contract.
   else if (mode == "raw-version-six")
     frame[5] = 6; // Drag preparation uses the explicit v7 contract.
+  else if (mode == "raw-version-seven")
+    frame[5] = 7; // Real-release/drop status requires the explicit v8 contract.
+  else if (mode == "raw-version-eight")
+    frame[5] = 8; // Native return observations require the explicit v9 contract.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -960,11 +986,44 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       host->revoke();
   };
   host->onClosed = [&](QString) { application.quit(); };
+  if (mode == "window-move") {
+    host->authorize = {};
+    host->onAuthenticated = [&] {
+      auto value = fixtureMove();
+      check(host->sendWindowMove(value) && !host->sendWindowMove(value), "Native move sender replay guard failed");
+      value.phase = LocalWindowMove::Phase::Motion;
+      ++value.sequence;
+      value.x += 10;
+      value.frame.x += 10;
+      check(host->sendWindowMove(value), "Native move continuation failed");
+      value.phase = LocalWindowMove::Phase::End;
+      ++value.sequence;
+      check(host->sendWindowMove(value) && !host->sendWindowMove(value), "Native move terminal guard failed");
+      check(!host->lease() && host->phase() == LocalInputPhase::Idle, "Native move created an input lease");
+      QTimer::singleShot(30, &application, [&] { host->close(); });
+    };
+  }
   if (mode.startsWith("window-drag")) {
     host->authorize = {};
     host->onWindowDrag = [&](const LocalWindowDrag &drag) {
       ++callbackEvents;
       auto expected = fixtureDrag();
+      if (mode == "window-drag-drop") {
+        if (callbackEvents > 1) {
+          expected.kind = callbackEvents == 2 ? LocalWindowDrag::Kind::Drop : LocalWindowDrag::Kind::Cancel;
+          expected.releaseSequence = 220;
+          expected.releaseTime = 2000;
+        }
+        check(callbackEvents <= 3 && drag == expected, "Explicit release/drop binding changed on the wire");
+        const auto kind = callbackEvents == 1   ? LocalWindowDragStatus::Kind::Ready
+                          : callbackEvents == 2 ? LocalWindowDragStatus::Kind::Committed
+                                                : LocalWindowDragStatus::Kind::Cancelled;
+        check(host->sendWindowDragStatus({kind, drag}), "Host could not acknowledge exact issued drag");
+        check(!host->lease() && host->phase() == LocalInputPhase::Idle, "Drop metadata acquired an input lease");
+        if (callbackEvents == 3)
+          QTimer::singleShot(20, &application, [&] { host->close(); });
+        return;
+      }
       if (callbackEvents > 1) {
         ++expected.sequence;
         ++expected.destinationY;
@@ -1074,7 +1133,10 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     );
   if (mode.startsWith("window-drag"))
     check(
-        callbackEvents == (mode == "window-drag" ? 4 : 1) && originalEvents == 0,
+        callbackEvents == (mode == "window-drag"        ? 4
+                           : mode == "window-drag-drop" ? 3
+                                                        : 1) &&
+            originalEvents == 0,
         "Window drag observer callback count or input isolation changed"
     );
   if (mode.startsWith("offer-callback-"))
@@ -1090,7 +1152,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 7);
+  static_assert(LocalInputChannel::version == 9);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 320);
   static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
   static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
@@ -1286,6 +1348,124 @@ void windowPointer()
     fixture.childExitedCleanly();
   }
 }
+void windowMove()
+{
+  const auto begin = fixtureMove();
+  const auto wire = movePayload(begin);
+  check(
+      wire.size() == 112 && wire.mid(88, 16) == QByteArray::fromHex("ffffff9c00000014fffffe0c00000000"),
+      "Native move fixed-width signed layout changed"
+  );
+  {
+    Fixture fixture("window-move");
+    unsigned received = 0;
+    fixture.core->onWindowMove = [&](const LocalWindowMove &value) {
+      auto expected = begin;
+      if (received) {
+        expected.phase = received == 1 ? LocalWindowMove::Phase::Motion : LocalWindowMove::Phase::End;
+        expected.sequence += received;
+        expected.x += 10;
+        expected.frame.x += 10;
+      }
+      check(received < 3 && value == expected, "Native move changed across the real inherited channel");
+      ++received;
+    };
+    fixture.establish();
+    check(!fixture.core->sendWindowMove(begin), "Core forged a Host native observation");
+    check(
+        until([&] { return fixture.closed; }) && received == 3 && !fixture.core->lease(),
+        "Native move did not terminate without input authority"
+    );
+    fixture.childExitedCleanly();
+  }
+  for (int fault = 0; fault != 15; ++fault) {
+    Fixture fixture("synthetic");
+    fixture.establish();
+    auto malformed = wire;
+    if (fault == 0)
+      malformed[0] = 5;
+    if (fault == 1)
+      malformed[1] = 1;
+    if (fault == 2)
+      malformed.replace(4, 4, QByteArray(4, '\0'));
+    if (fault >= 3 && fault <= 8)
+      malformed.replace(8 + (fault - 3) * 8, 8, QByteArray(8, '\0'));
+    if (fault == 9)
+      malformed.replace(56, 32, QByteArray(32, '\0'));
+    if (fault == 10)
+      malformed.replace(104, 4, QByteArray(4, '\0'));
+    if (fault == 11)
+      malformed.replace(96, 4, QByteArray::fromHex("7fffffff"));
+    if (fault == 12)
+      malformed.replace(8, 8, QByteArray::fromHex("0020000000000000"));
+    if (fault == 13)
+      malformed.chop(1);
+    if (fault == 14)
+      malformed.append('x');
+    unsigned received = 0;
+    fixture.core->onWindowMove = [&](const auto &) { ++received; };
+    LocalInputChannelTestAccess::incoming(*fixture.core, 22, malformed);
+    check(fixture.closed && !received, "Malformed native move reached the Core observer");
+    fixture.childExitedCleanly();
+  }
+  for (int fault = 0; fault != 4; ++fault) {
+    Fixture fixture("synthetic");
+    fixture.establish();
+    unsigned received = 0;
+    fixture.core->onWindowMove = [&](const auto &) { ++received; };
+    LocalInputChannelTestAccess::incoming(*fixture.core, 22, wire);
+    auto changed = begin;
+    if (fault) {
+      changed.phase = LocalWindowMove::Phase::Motion;
+      ++changed.sequence;
+      if (fault == 1)
+        ++changed.window;
+      if (fault == 2)
+        ++changed.grab;
+      if (fault == 3)
+        ++changed.frame.width;
+    }
+    LocalInputChannelTestAccess::incoming(*fixture.core, 22, movePayload(changed));
+    check(fixture.closed && received == 1, "Replayed or rebound native move reached the observer");
+    fixture.childExitedCleanly();
+  }
+  {
+    auto reduced = limits;
+    reduced.capabilities &= ~localInputWindowMoveCapability;
+    Fixture fixture("synthetic", reduced);
+    fixture.establish();
+    check(!fixture.core->supportsWindowMove(), "Unnegotiated native move capability appeared");
+    auto drag = fixtureDrag();
+    drag.returnOffer = begin.offer;
+    check(!fixture.core->sendWindowDrag(drag), "Unnegotiated return command was sent");
+    LocalInputChannelTestAccess::incoming(*fixture.core, 22, wire);
+    check(fixture.closed, "Unnegotiated native move was accepted");
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture fixture;
+    fixture.establish();
+    check(LocalInputChannelTestAccess::raw(*fixture.core, 22, wire), "Wrong-role fixture write failed");
+    check(until([&] { return fixture.closed; }), "Host accepted a Core-forged native observation");
+    fixture.childExitedCleanly();
+  }
+  for (bool destroy : {false, true}) {
+    Fixture fixture("synthetic");
+    fixture.establish();
+    unsigned received = 0;
+    fixture.core->onWindowMove = [&](const auto &) {
+      ++received;
+      if (destroy)
+        fixture.core.reset();
+      else
+        throw std::runtime_error("Native observer failed");
+    };
+    LocalInputChannelTestAccess::incoming(*fixture.core, 22, wire);
+    check(received == 1 && (!fixture.core || fixture.closed), "Destructive native observer was not contained");
+    fixture.childExitedCleanly();
+  }
+}
+
 void windowDrag()
 {
   const auto begin = fixtureDrag();
@@ -1299,9 +1479,57 @@ void windowDrag()
   cancel.kind = LocalWindowDrag::Kind::Cancel;
   const auto wire = dragPayload(begin);
   check(
-      wire.size() == 208 && wire.mid(160, 16) == QByteArray::fromHex("fffffb5000000000000004b000000320"),
+      wire.size() == 232 && wire.mid(160, 16) == QByteArray::fromHex("fffffb5000000000000004b000000320"),
       "Window drag fixed-width signed screen layout changed"
   );
+  {
+    auto drop = begin;
+    drop.kind = LocalWindowDrag::Kind::Drop;
+    LocalWindowDragGate gate;
+    check(gate.accept(begin) && !gate.accept(drop), "Drop without an explicit later release was accepted");
+    drop.releaseSequence = 220;
+    drop.releaseTime = 2000;
+    auto wrong = drop;
+    wrong.releaseSequence = begin.sequence;
+    check(!gate.accept(wrong), "Drop reused a motion sequence as a release");
+    check(gate.accept(drop) && !gate.accept(drop) && !gate.accept(hold), "Drop was replayed or revived held movement");
+    auto cancelled = drop;
+    cancelled.kind = LocalWindowDrag::Kind::Cancel;
+    check(
+        gate.accept(cancelled) && gate.matchesReply(drop), "Late exact status could not be retired after cancellation"
+    );
+    wrong = drop;
+    ++wrong.releaseTime;
+    check(!gate.matchesReply(wrong), "Drop status substituted its original release");
+    Fixture fixture("window-drag-drop");
+    fixture.establish();
+    unsigned statuses = 0;
+    fixture.core->onWindowDragStatus = [&](const LocalWindowDragStatus &status) {
+      ++statuses;
+      check(
+          status.command == (statuses == 1   ? begin
+                             : statuses == 2 ? drop
+                                             : cancelled),
+          "Host status changed its Core-issued binding"
+      );
+    };
+    check(
+        !fixture.core->sendWindowDragStatus({LocalWindowDragStatus::Kind::Ready, begin}),
+        "Core forged native preview readiness"
+    );
+    check(
+        fixture.core->sendWindowDrag(begin) && until([&] { return statuses == 1; }),
+        "Native readiness did not reach Core"
+    );
+    check(
+        fixture.core->sendWindowDrag(drop) && until([&] { return statuses == 2; }),
+        "Exact drop commit did not reach Core"
+    );
+    check(fixture.core->sendWindowDrag(cancelled), "Committed fixture could not clean up exact drag");
+    check(until([&] { return statuses == 3; }), "Final cancellation status did not arrive before cleanup");
+    fixture.childExitedCleanly();
+    check(statuses == 3, "Final cancellation status was lost");
+  }
   {
     Fixture fixture("window-drag");
     fixture.establish();
@@ -1903,9 +2131,27 @@ void negotiatedScope()
 void malformedBootstrap()
 {
   for (const auto *mode :
-       {"magic", "version", "version-five", "version-six", "role", "incarnation", "zero-incarnation", "process",
-        "sequence", "oversize", "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent",
-        "capabilities-zero", "capabilities-unknown", "capabilities-no-keyboard"}) {
+       {"magic",
+        "version",
+        "version-five",
+        "version-six",
+        "version-seven",
+        "version-eight",
+        "role",
+        "incarnation",
+        "zero-incarnation",
+        "process",
+        "sequence",
+        "oversize",
+        "partial-header",
+        "partial-payload",
+        "trailing",
+        "unknown",
+        "replay",
+        "silent",
+        "capabilities-zero",
+        "capabilities-unknown",
+        "capabilities-no-keyboard"}) {
     Fixture fixture(QStringLiteral("raw-") + mode);
     check(until([&] { return fixture.closed; }), "Malformed bootstrap did not fail closed");
     check(
@@ -2812,6 +3058,8 @@ int main(int argc, char **argv)
     preflightValues();
     QTextStream(stdout) << "RUN: windowPointer\n" << Qt::flush;
     windowPointer();
+    QTextStream(stdout) << "RUN: windowMove\n" << Qt::flush;
+    windowMove();
     QTextStream(stdout) << "RUN: windowDrag\n" << Qt::flush;
     windowDrag();
     QTextStream(stdout) << "RUN: mappedInput\n" << Qt::flush;

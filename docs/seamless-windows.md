@@ -2,8 +2,16 @@
 
 ## Current implementation — 2026-10-14
 
+P5 bidirectional ordinary-titlebar dragging now has integrated motion-only holding,
+exact native preview placement/paint, real-release/drop joining, durable source
+relocation and ordinary Core cursor transfer. Mac and isolated Ubuntu tests
+pass, including actual GNOME native-window continuity across commit. Ordinary
+Ubuntu-to-Mac return joins native/Core release before journaled restoration.
+Physical H07 remains open. The user deferred
+physical testing; see the newest `TESTING.md` and `WORK_STATE.md` entries.
+
 The configured Mac Core now connects original captured input to the exact
-exported source through the production coordinator. Private protocol v5 and
+exported source through the production coordinator. Private protocol v9 and
 Core IPC5 retain the authenticated selections, full forwarding gate, native
 queue seal, mapped point/deadline and completed cleanup. Up to 16 independently
 mapped records share one closed prefix; held input survives point expiry while

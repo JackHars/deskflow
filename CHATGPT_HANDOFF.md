@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 **Local implementation resumed on 2026-10-13.** The production coordinator is
-now wired from Server through private protocol v7 (including P5 observation/preparation metadata), negotiated Core IPC5,
+now wired from Server through private protocol v9 (including P5 native-drag/return metadata), negotiated Core IPC5,
 EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
 sender-ordering prerequisite; a retained prefix supports bounded exact point
 batches without reopening the full forwarding gate. Original input requires
@@ -20,7 +20,7 @@ This checklist records implementation, not physical acceptance. The newest
 limits. Multiple-window association, focused text clipboard and native
 lifecycle/child-return changes are part of the current working candidate;
 first-click preparation now passes actual Core/GNOME integration at both Qt
-scales. Natural edge dragging and final acceptance remain open. Historical
+scales. Bidirectional edge-drag code is integrated; final physical acceptance remains open. Historical
 results below do not cover later source changes.
 
 As of 2026-10-14, queue/admission commit `a2aa7a5e8` passes the home Ubuntu
@@ -376,7 +376,7 @@ of the same ordinary drag, but must not require a separate user action.
   down/up with bounded storage/deadlines. The physical owned-window run passes
   both joins, 213 drag events and the real release; raw HID IDs remain unavailable.
 - [x] Carry joined pointer observations/loss over separately negotiated private
-  pointer metadata (introduced in v6, retained in v7) without acquiring an input
+  pointer metadata (introduced in v6, retained in v9) without acquiring an input
   lease. The native Host retains exact
   AX/native window identity, titlebar hit, process birth and physical layout.
 - [x] Implement the bounded preparation/drop transaction and NativeHost gate:
@@ -406,33 +406,33 @@ of the same ordinary drag, but must not require a separate user action.
   admission or shutdown. A stationary held preview retains its boundary without
   turning an old motion sample into new movement. Painting cannot activate the
   Viewer or enable its input. Native callback failure and reentrancy are covered.
-- [ ] Integrate preview motion, native drag cutover, painted readiness and drop
-  commit as one continuous ordinary drag with exactly one button-up owner.
-  The current implementation has a movement-only raw capture gate (buttons
-  always pass), negotiated `window-drag-motion-v1` preview placement, and a
-  separate authenticated GNOME placement/watcher channel. The Viewer requires
-  native placement, a fresh actual paint, and a matching native recheck before
-  acknowledging a position. Source press/release/drop coordination is still
-  unfinished; production does not yet arm the motion gate. The intended path
-  retains the original native button owner throughout and commits after the
-  real release, without synthesizing an early mouse-up.
-  The post-release frame query is not a native grab-completion receipt. Keeping
-  the native source drag alive while showing a remote preview still needs a
-  proven cursor/drag ownership transition; do not enable it on an assumed timer.
-- [ ] Implement dragging the Viewer back to the Mac edge, restoring the source
-  position/focus and retiring the remote session without closing the source app.
-- [ ] Exercise canceled drags, topology changes, disconnect, output changes,
-  late first frames and timeout at every connected transition. Portable
-  transaction tests cover both direction tags; they do not implement drag-back.
+- [x] Integrate outbound preview motion, native placement/paint and real-release
+  drop with one original button owner. Core arms movement-only capture gating
+  after the exact preview acknowledgement; every original button passes.
+  Real up, joined annotation and Server dispatch precede final native/paint
+  verification, durable source relocation and ordinary cursor transfer. A
+  raw producer fence revokes a pending drop on subsequent input. The Mac and
+  Ubuntu integration suites pass; physical seamless behavior is still H07.
+  The actual GNOME Viewer retains its native surface and placed frame at commit.
+- [x] Connect ordinary Viewer dragging back to the Mac edge. Join the owned
+  GNOME move to the original Core press, exact remote dispatch and configured
+  return edge. Preserve the titlebar grip in an input-transparent Mac preview;
+  require paint/native-frame witnesses and both real-release observations
+  before journaled source restoration, focus, remote retirement and cursor return.
+- [x] Add connected return regressions: both release orderings, no native up,
+  native cancel, wrong route, newer input, failed cursor transfer, lost source,
+  closed preview, TLS loss and retained rollback/recovery. Actual Cocoa/window
+  behavior and output changes during real drags remain physical H07 cases.
+- [ ] Complete attended bidirectional physical acceptance, including cancellation,
+  recovery, cursor/grip continuity and repeated transfers. Follow
+  [H07](deploy/windowshare/h07-edge-drag.md); the user deferred this test.
 
 Acceptance: deterministic transaction/fault tests and harness support for H07.
 Do not call ordinary opening/closing of a Viewer "edge-drag support."
-The user returned on 2026-10-14 and requested physical testing; owned native
-titlebar eligibility now passes. Implement the remaining items without waiting
-for further physical readiness. Current
-preparation cancels on real up; `observeWindowPointer` cannot automatically commit
-a drop. The explicit release API awaits the native cutover owner. Production
-preview placement/motion and GNOME drag-back remain unfinished. See
+The owned native titlebar eligibility check passes. The latest user request
+is to keep building and test later; H07 is NOT_RUN. Do not launch physical
+fixtures or enable desktop routing without a new user request. Bidirectional
+drop coordination is implemented; P5 physical acceptance remains open. See
 `deploy/windowshare/window-drag-preparation.md` for the connected path and tests.
 
 ### P6 — Application compatibility

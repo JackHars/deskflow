@@ -63,6 +63,7 @@ private Q_SLOTS:
   void windowDragEdge_configuredMappingsKeepLocalOwner();
   void windowDragEdge_revokesOnReleaseAndTopology();
   void windowDragEdge_honorsDelaysCornersAndOriginalIdentity();
+  void windowDragDrop_realReleaseBeforeCursorTransfer();
 
 private:
   Arch m_arch;

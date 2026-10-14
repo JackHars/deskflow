@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include "OriginalInput.h"
 #include "OriginalInputStamp.h"
 #include "io/AuthenticatedPeerTicket.h"
 #include <atomic>
@@ -47,6 +48,7 @@ struct WindowDragEdge
   WindowDragScreen source, destination;
   std::int32_t sourceX = 0, sourceY = 0, destinationX = 0, destinationY = 0;
   AuthenticatedPeerTicket peer;
+  bool returning = false;
 
   bool valid() const noexcept
   {
@@ -56,8 +58,8 @@ struct WindowDragEdge
   }
   bool sameBoundary(const WindowDragEdge &other) const noexcept
   {
-    return server == other.server && recipient == other.recipient && press == other.press && side == other.side &&
-           source == other.source && destination == other.destination &&
+    return server == other.server && recipient == other.recipient && returning == other.returning &&
+           press == other.press && side == other.side && source == other.source && destination == other.destination &&
            peer.incarnation() == other.peer.incarnation() && peer.fingerprint() == other.peer.fingerprint();
   }
 };
@@ -74,6 +76,7 @@ class WindowDragEdgeMailbox final
 public:
   using Clock = std::chrono::steady_clock;
   static constexpr auto freshness = std::chrono::milliseconds(250);
+  static constexpr auto dropBudget = std::chrono::milliseconds(1500);
   class Observation final
   {
     friend class WindowDragEdgeMailbox;
@@ -116,6 +119,65 @@ public:
     Clock::time_point m_published;
   };
 
+  // Issued by Server only after resolving the original local press's real up.
+  // The raw producer's sequence fence revokes this on any subsequent input,
+  // without waiting for Qt or the Server worker to drain another queue.
+  class Release final
+  {
+    friend class WindowDragEdgeMailbox;
+
+  public:
+    const WindowDragEdge &edge() const noexcept
+    {
+      return m_boundary.edge();
+    }
+    std::uint64_t generation() const noexcept
+    {
+      return m_boundary.generation();
+    }
+    OriginalInputStamp up() const noexcept
+    {
+      return m_up;
+    }
+    bool live(Clock::time_point now = Clock::now()) const noexcept
+    {
+      return now < m_deadline && m_epoch.live() && edge().peer.live() && m_position &&
+             m_position->load(std::memory_order_acquire) == m_up.sequence &&
+             m_token->load(std::memory_order_acquire) == generation();
+    }
+
+  private:
+    Release(
+        Observation boundary, OriginalInputStamp up, OriginalInputEpoch epoch,
+        std::shared_ptr<const std::atomic<std::uint64_t>> position,
+        std::shared_ptr<const std::atomic<std::uint64_t>> token, Clock::time_point deadline
+    )
+        : m_boundary(std::move(boundary)),
+          m_up(up),
+          m_epoch(std::move(epoch)),
+          m_position(std::move(position)),
+          m_token(std::move(token)),
+          m_deadline(deadline)
+    {
+    }
+    Observation m_boundary;
+    OriginalInputStamp m_up;
+    OriginalInputEpoch m_epoch;
+    std::shared_ptr<const std::atomic<std::uint64_t>> m_position, m_token;
+    Clock::time_point m_deadline;
+  };
+  struct Transfer
+  {
+    Release release;
+    std::int32_t x = 0, y = 0;
+  };
+  struct TransferResult
+  {
+    std::uint64_t generation = 0;
+    OriginalInputStamp up;
+    bool switched = false;
+  };
+
   WindowDragEdgeMailbox() : m_token(std::make_shared<std::atomic<std::uint64_t>>(0))
   {
   }
@@ -125,6 +187,44 @@ public:
   }
   WindowDragEdgeMailbox(const WindowDragEdgeMailbox &) = delete;
   WindowDragEdgeMailbox &operator=(const WindowDragEdgeMailbox &) = delete;
+
+  // Startup only, before the capture producer or Server worker starts.
+  bool bindCapture(OriginalInputEpoch epoch, std::shared_ptr<const std::atomic<std::uint64_t>> position)
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_closed || m_position || !epoch.live() || !position)
+      return false;
+    m_epoch = std::move(epoch);
+    m_position = std::move(position);
+    return true;
+  }
+  std::optional<Release> readRelease() const
+  {
+    std::lock_guard lock(m_mutex);
+    return !m_closed && m_release && m_release->live() ? m_release : std::nullopt;
+  }
+  bool requestTransfer(const Release &release, std::int32_t x, std::int32_t y)
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_closed || m_transfer || m_inflight || !m_release || !release.live() || !m_release->live() ||
+        release.m_token != m_releaseToken || release.generation() != m_release->generation() ||
+        release.up() != m_release->up() || !release.edge().destination.contains(x, y))
+      return false;
+    m_result.reset();
+    m_transfer = Transfer{release, x, y};
+    return true;
+  }
+  std::optional<TransferResult> transferResult() const
+  {
+    std::lock_guard lock(m_mutex);
+    return m_result;
+  }
+  void cancelRelease(std::uint64_t generation)
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_release && m_release->generation() == generation)
+      clearReleaseLocked();
+  }
 
   std::optional<Observation> read() const
   {
@@ -139,6 +239,52 @@ public:
   }
 
 private:
+  bool release(OriginalInputStamp press, OriginalInputStamp up, Clock::time_point now = Clock::now())
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_closed || !m_value || !m_value->current() || m_value->edge().press != press || up.part != 1 ||
+        up.epoch != press.epoch || up.sequence <= m_value->edge().motion.sequence || !m_epoch.live() ||
+        m_epoch.id() != up.epoch || !m_position || m_position->load(std::memory_order_acquire) != up.sequence) {
+      clearLocked();
+      return false;
+    }
+    clearReleaseLocked();
+    m_releaseToken->store(m_value->generation(), std::memory_order_release);
+    m_release = Release{*m_value, up, m_epoch, m_position, m_releaseToken, now + dropBudget};
+    m_token->store(0, std::memory_order_release);
+    m_value.reset();
+    return true;
+  }
+  std::optional<Transfer> takeTransfer()
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_closed || !m_transfer || m_inflight)
+      return {};
+    if (!m_transfer->release.live()) {
+      clearReleaseLocked();
+      return {};
+    }
+    m_inflight = std::exchange(m_transfer, {});
+    return m_inflight;
+  }
+  void completeTransfer(const Transfer &request, bool switched)
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_inflight && m_inflight->release.generation() == request.release.generation() &&
+        m_inflight->release.up() == request.release.up()) {
+      m_result = TransferResult{request.release.generation(), request.release.up(), switched};
+      m_inflight.reset();
+      clearReleaseLocked();
+    }
+  }
+  void clearReleaseLocked() noexcept
+  {
+    m_releaseToken->store(0, std::memory_order_release);
+    m_release.reset();
+    if (m_transfer)
+      m_result = TransferResult{m_transfer->release.generation(), m_transfer->release.up(), false};
+    m_transfer.reset();
+  }
   bool bind(std::uint64_t server) noexcept
   {
     std::lock_guard lock(m_mutex);
@@ -180,11 +326,18 @@ private:
   }
   void clearLocked() noexcept
   {
+    clearReleaseLocked();
     m_token->store(0, std::memory_order_release);
     m_value.reset();
   }
   mutable std::mutex m_mutex;
   const std::shared_ptr<std::atomic<std::uint64_t>> m_token;
+  const std::shared_ptr<std::atomic<std::uint64_t>> m_releaseToken = std::make_shared<std::atomic<std::uint64_t>>(0);
+  OriginalInputEpoch m_epoch;
+  std::shared_ptr<const std::atomic<std::uint64_t>> m_position;
+  std::optional<Release> m_release;
+  std::optional<Transfer> m_transfer, m_inflight;
+  std::optional<TransferResult> m_result;
   std::optional<Observation> m_value;
   std::uint64_t m_server = 0, m_generation = 0;
   bool m_closed = false;

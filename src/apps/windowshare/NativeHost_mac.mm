@@ -1155,6 +1155,7 @@ struct NativeHost::Impl
     NativeAssociatedReturn associatedReturn;
     std::shared_ptr<NativeSourceTransaction> sourceTransaction = std::make_shared<NativeSourceTransaction>();
     std::shared_ptr<WindowDragTransaction> windowDrag;
+    std::optional<LocalWindowPointer> dragRealRelease;
     QPointF dragAnchor;
     QPointF pointer;
     std::map<std::uint32_t, std::pair<std::int64_t, int>> buttons;
@@ -2379,6 +2380,7 @@ struct NativeHost::Impl
       auto *item = entry(session, epoch);
       return item && item->session.phase == Phase::Preparing && item->relocating && item->visible &&
                      item->windowDrag == drag && (!drag || drag->committing(drag->binding())) &&
+                     (!drag || !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft)) &&
                      item->session.geometry == paintedGeometry && item->producedGeometry == paintedGeometry &&
                      item->capture == capture && item->sourceTransaction == sourceTransaction && !capture->stopped &&
                      !capture->failurePending && item->identity.id == expected.id &&
@@ -2479,6 +2481,10 @@ struct NativeHost::Impl
       } else {
         if (!alive)
           return;
+        if (drag) {
+          failed("Window drag requires verified holding-display placement; preserving source visibility");
+          return;
+        }
         error("Holding display unavailable; source remains visible: " + failure);
         if (!alive)
           return;
@@ -2980,12 +2986,12 @@ struct NativeHost::Impl
         encodeImage(capture, capture->lastImage, true);
     });
   }
-  void restore(std::uint64_t session, bool raise = true)
+  NativeSourceReturnResult restore(std::uint64_t session, bool raise = true, std::optional<Rect> requested = {})
   {
     const QPointer<NativeHost> alive(q);
     auto found = entries.find(session);
     if (found == entries.end())
-      return;
+      return NativeSourceReturnResult::Aborted;
     const auto &e = *found->second;
     if (e.windowDrag)
       e.windowDrag->cancel();
@@ -3003,6 +3009,15 @@ struct NativeHost::Impl
         return nullptr;
       auto *item = entry(owner.session, owner.epoch);
       return item && item->sourceTransaction == transaction && item->capture == capture ? item : nullptr;
+    };
+    const auto mayPlace = [&] {
+      if (!current())
+        return false;
+      if (!requested)
+        return true;
+      const auto outputs = physicalOutputSnapshot();
+      return !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft) && physicalAtExport &&
+             outputs && samePhysicalOutputLayout(*physicalAtExport, *outputs);
     };
     NativeSourceReturnAccess access;
     access.current = [&] { return current() != nullptr; };
@@ -3028,12 +3043,20 @@ struct NativeHost::Impl
         return true; // The old recipient is gone, never mutate its replacement.
       // A failed WindowServer query is not proof that the window disappeared.
       // Restoration can use retained AX identity only at the same process birth.
-      const auto destination = recoverFrame(original);
-      if (!current() || !destination || launchTime(expected.pid) != expected.launch || !current() ||
-          !setBounds(window.get(), *destination, [&] { return current() != nullptr; }))
+      const auto destination = requested ? requested : recoverFrame(original);
+      if (!current() || !destination || launchTime(expected.pid) != expected.launch || !current() || !mayPlace() ||
+          !setBounds(window.get(), *destination, mayPlace))
         return false;
-      if (current() && raise)
+      if (requested) {
+        const auto actual = bounds(window.get());
+        if (!current() || !actual || !sameGeometry(*actual, *requested))
+          return false;
+      }
+      if (mayPlace() && raise) {
         AXUIElementPerformAction(window.get(), kAXRaiseAction);
+        if (requested && mayPlace())
+          [[NSRunningApplication runningApplicationWithProcessIdentifier:expected.pid] activateWithOptions:0];
+      }
       return current() != nullptr;
     };
     access.retainFailure = [&] {
@@ -3056,7 +3079,7 @@ struct NativeHost::Impl
         q->onClosed(owner.session);
       }
     };
-    (void)returnNativeSource(*transaction, access);
+    return returnNativeSource(*transaction, access);
   }
   void restoreAll(KeyboardRouteReason reason = KeyboardRouteReason::Returned)
   {
@@ -3181,6 +3204,18 @@ struct NativeHost::Impl
         continue;
       }
       if (!sameGeometry(*actual, e->session.source)) {
+        if (e->windowDrag && e->session.phase == Phase::Preparing) {
+          // Desktop-independent capture does not change when the same window
+          // moves. Resize invalidates the drag; translation updates only the
+          // native pose used by commit/rollback, not the painted image identity.
+          if (std::abs(actual->width - e->session.source.width) >= 0.25 ||
+              std::abs(actual->height - e->session.source.height) >= 0.25) {
+            restoreIds.push_back(id);
+            continue;
+          }
+          e->session.source = *actual;
+          continue;
+        }
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::GeometryChanged);
         e->session.source = *actual;
         ++e->session.geometry;
@@ -3264,13 +3299,21 @@ void NativeHost::observeWindowPointer(const LocalWindowPointer &pointer)
   m_impl->titlebarOutputs.reset();
   const bool canObserve = m_impl->titlebarObservationRevision != std::numeric_limits<std::uint64_t>::max();
   const auto revision = canObserve ? ++m_impl->titlebarObservationRevision : m_impl->titlebarObservationRevision;
-  // A pointer observation alone never commits a preview. The coordinator must
-  // explicitly own native cutover and release before it can call releaseWindowDrag.
-  // Until then, every new transition cancels pending preparation, including up.
+  // Retain an exact real up for the coordinator's explicit Drop. It cannot
+  // commit on its own, and another transition cancels the pending transaction.
   std::vector<WindowDragBinding> pending;
-  for (const auto &[id, entry] : m_impl->entries)
-    if (entry->windowDrag && entry->session.phase == Phase::Preparing)
-      pending.push_back(entry->windowDrag->binding());
+  for (const auto &[id, entry] : m_impl->entries) {
+    if (!entry->windowDrag || entry->session.phase != Phase::Preparing)
+      continue;
+    const auto &binding = entry->windowDrag->binding();
+    if (validLocalWindowPointer(pointer) && pointer.kind == LocalWindowPointer::Kind::Up &&
+        pointer.captureEpoch == binding.captureEpoch && pointer.sequence > binding.pressSequence &&
+        pointer.sourceTime > binding.pressTime && pointer.window == binding.window &&
+        pointer.eventNumber == binding.eventNumber && !entry->dragRealRelease && entry->windowDrag->held())
+      entry->dragRealRelease = pointer;
+    else
+      pending.push_back(binding);
+  }
   for (const auto &binding : pending) {
     cancelWindowDrag(binding);
     if (!alive)
@@ -3297,7 +3340,8 @@ std::optional<Owner> NativeHost::prepareWindowDrag(const WindowDragBinding &bind
 {
   if (QThread::currentThread() != thread() || !validWindowDragBinding(binding) ||
       binding.direction != WindowDragDirection::Export || binding.drag > maxJsonInteger ||
-      binding.drag <= m_impl->lastWindowDrag || !m_impl->lifecycle->admission() || m_impl->destroying)
+      binding.drag <= m_impl->lastWindowDrag || !m_impl->lifecycle->admission() || m_impl->destroying ||
+      !m_impl->holdingEnabled)
     return std::nullopt;
   // Retire the request even when capture/identity admission fails. A delayed
   // retry must not export a later window that happens to reuse the native ID.
@@ -3334,13 +3378,18 @@ bool NativeHost::releaseWindowDrag(const WindowDragBinding &binding, const Windo
     const auto drag = entry->windowDrag;
     if (!drag || drag->binding() != binding || entry->session.phase != Phase::Preparing)
       continue;
+    const auto up = entry->dragRealRelease;
+    if (!up ||
+        release != WindowDragRelease{up->captureEpoch, up->sequence, up->sourceTime, up->window, up->eventNumber} ||
+        CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft))
+      return false;
     if (!drag->release(binding, release))
       return false;
     const Owner owner{id, entry->session.epoch};
-    // Let the original release finish normal native dispatch before querying
-    // the source frame. This timer is not a fabricated native receipt:
-    // exact identity/layout/frame are rechecked by ready before any mutation.
-    QTimer::singleShot(32, this, [this, owner, binding, drag] {
+    // Leave this IPC callback before revalidating the native pose. The proof
+    // is the joined real up plus the current released HID state and exact
+    // identity/layout, never the passage of a timer or app-consumption claim.
+    QTimer::singleShot(0, this, [this, owner, binding, drag] {
       auto *item = m_impl->entry(owner.session, owner.epoch);
       if (!item || item->windowDrag != drag || item->session.phase != Phase::Preparing || !drag->current(binding))
         return;
@@ -3355,31 +3404,103 @@ bool NativeHost::releaseWindowDrag(const WindowDragBinding &binding, const Windo
       if (!item || item->windowDrag != drag || !drag->current(binding))
         return;
       if (!actual || !observed || observed->pid != expected.pid || observed->launch != expected.launch ||
-          !closeEnough(*actual, observed->frame)) {
+          !closeEnough(*actual, observed->frame) ||
+          CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft) ||
+          std::abs(actual->width - item->session.source.width) >= 0.25 ||
+          std::abs(actual->height - item->session.source.height) >= 0.25) {
         cancelWindowDrag(binding);
         return;
       }
       // If cancellation later needs native rollback, recover the observed
       // local frame, not a stale position from the moving preview's creation.
       item->session.original = *actual;
+      item->session.source = *actual;
       item->dragReleaseFrameObserved = true;
-      if (!sameGeometry(*actual, item->session.source)) {
-        item->session.source = *actual;
-        ++item->session.geometry;
-        if (!drag->geometryChanged(item->session.geometry)) {
-          cancelWindowDrag(binding);
-          return;
-        }
-        m_impl->updateCapture(*item);
-        m_impl->opened(*item);
-        return; // Wait for a newly produced and painted current frame.
-      }
       if (drag->paintedGeometry())
         m_impl->ready(owner.session, owner.epoch, drag->paintedGeometry());
     });
     return true;
   }
   return false;
+}
+std::optional<Rect>
+NativeHost::windowReturnFrame(Owner owner, std::uint64_t geometry, Point pointer, Point anchor) const
+{
+  if (QThread::currentThread() != thread() || !std::isfinite(pointer.x) || !std::isfinite(pointer.y) ||
+      !std::isfinite(anchor.x) || !std::isfinite(anchor.y) || anchor.x < 0 || anchor.x > 1 || anchor.y < 0 ||
+      anchor.y > 1)
+    return {};
+  const QPointer<const NativeHost> alive(this);
+  const auto admitted = m_impl->lifecycle->admission();
+  const auto *entry = m_impl->entry(owner.session, owner.epoch);
+  if (!admitted || m_impl->destroying || m_impl->callbackDepth || !entry || !entry->moved ||
+      entry->session.phase != Phase::Remote || entry->session.geometry != geometry || !entry->visible ||
+      !entry->capture || entry->capture->stopped || entry->associatedReturn.blocked() || !m_impl->holding.available())
+    return {};
+  const auto expected = entry->identity;
+  const auto source = entry->session.source;
+  const auto capture = entry->capture;
+  CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(entry->window)));
+  const auto observed = identity(expected.id);
+  const auto actual = bounds(window.get());
+  const auto outputs = physicalOutputSnapshot();
+  if (!alive || !observed || observed->pid != expected.pid || observed->launch != expected.launch || !actual ||
+      !sameGeometry(*actual, source) || !closeEnough(*actual, observed->frame) || !outputs ||
+      !m_impl->physicalAtExport || !samePhysicalOutputLayout(*m_impl->physicalAtExport, *outputs) ||
+      !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() || !m_impl->lifecycle->current(admitted))
+    return {};
+  entry = m_impl->entry(owner.session, owner.epoch);
+  if (!entry || entry->capture != capture || entry->session.geometry != geometry ||
+      entry->session.phase != Phase::Remote)
+    return {};
+  const auto displays = physicalDisplays();
+  if (std::none_of(displays.begin(), displays.end(), [&](const Rect &r) { return r.contains(pointer); }))
+    return {};
+  return recoveryRect(
+      {std::round(pointer.x - anchor.x * source.width), std::round(pointer.y - anchor.y * source.height), source.width,
+       source.height},
+      displays
+  );
+}
+bool NativeHost::windowReturnPreviewCurrent(std::uintptr_t contentView, Rect frame)
+{
+  if (![NSThread isMainThread] || !contentView || !frame.valid())
+    return false;
+  // Qt Cocoa's WId is its NSView. Compare only with views actually owned by
+  // this process; never send an Objective-C message to an unchecked address.
+  for (NSWindow *window in NSApp.windows) {
+    if (reinterpret_cast<std::uintptr_t>((__bridge void *)window.contentView) != contentView)
+      continue;
+    if (!window.isVisible || window.isMiniaturized || !window.ignoresMouseEvents || window.windowNumber <= 0)
+      return false;
+    const auto native = identity(static_cast<CGWindowID>(window.windowNumber));
+    return native && native->pid == getpid() && sameGeometry(native->frame, frame);
+  }
+  return false;
+}
+bool NativeHost::returnWindowDrag(Owner owner, std::uint64_t geometry, Rect frame)
+{
+  if (!frame.valid() || CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft))
+    return false;
+  const auto expected =
+      windowReturnFrame(owner, geometry, {frame.x + frame.width / 2, frame.y + frame.height / 2}, {.5, .5});
+  if (!expected || !sameGeometry(*expected, frame))
+    return false;
+  auto *entry = m_impl->entry(owner.session, owner.epoch);
+  if (!entry)
+    return false;
+  const auto transaction = entry->sourceTransaction;
+  const auto previous = entry->session.original;
+  const QPointer<NativeHost> alive(this);
+  entry->session.original = frame; // Persist the new recovery target BEFORE native mutation.
+  if (!m_impl->writeJournal() || !alive) {
+    if (alive)
+      if (auto *current = m_impl->entry(owner.session, owner.epoch);
+          current && current->sourceTransaction == transaction)
+        current->session.original = previous;
+    return false;
+  }
+  return m_impl->restore(owner.session, true, frame) == NativeSourceReturnResult::Closed;
 }
 void NativeHost::cancelWindowDrag(const WindowDragBinding &binding)
 {

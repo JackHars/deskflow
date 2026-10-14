@@ -2,110 +2,169 @@
 SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
 SPDX-License-Identifier: MIT
 -->
-# Ordinary drag preparation
+# Ordinary window dragging
 
-The Core can now prepare a provisional remote window from the exact original
-titlebar press and configured Deskflow edge. This is the preparation portion of
-P5. Remote preview placement now joins actual compositor geometry, a later Qt
-paint and a final compositor recheck. The local release/cursor transfer and
-ordinary drag-back coordinators are still implementation work. A painted preview
-is not a completed transfer.
+P5's ordinary-titlebar paths are connected in both directions through real-release
+drop and ordinary Core cursor transfer. The original native press and its real up
+retain their owner throughout. A painted remote preview is an internal part of
+that same drag; no separate selection or thumbnail interaction is required.
+Physical bidirectional acceptance remains open. The latest user instruction is **“Keep building; test later.”** Do not
+launch a physical fixture or enable routing on the user's desktop.
 
-The user deferred physical testing on 2026-10-14. Automated tests use isolated
-callbacks, offscreen Qt or a disposable headless compositor with its own buses,
-settings and input fixture. Do not launch a physical fixture or enable input
-routing on the user's desktop while they are away.
+## Outbound production path
 
-## Production path
+1. The existing sole raw consumer joins the annotated native press to the
+   Server's configured boundary. `LocalWindowDragCore` requires live capture,
+   the exact press, Core TLS continuity, companion code admission and the
+   immutable explicit Core-pin → WindowShare-pin policy.
+2. Private protocol **v9** negotiates `localInputWindowDragCapability` (16),
+   which requires pointer observation (8). Message **20** is **232 bytes**,
+   Core → Host: Begin, Motion, Hold, Cancel, Drop or Finish. Message **21** is
+   **240 bytes**, Host → Core: Ready, Committed, Cancelled or Finished plus the
+   exact command binding. These have independent replay state; they do not
+   prepare an input lease or advance original-input delivery counters.
+3. Host independently matches the prior joined down, both configured pins and
+   its current authenticated WindowShare connection. NativeHost retains the
+   exact AX/native window, process birth, ordinary titlebar hit, unchanged
+   window extent and physical layout before starting provisional capture.
+4. Bridge requires negotiated `window-drag-preview-v1` and
+   `window-drag-motion-v1`. The Viewer paints with provisional no-focus/show
+   hints and denies all input before commit. Its grip offset comes from the
+   original native titlebar observation. Placement uses the inherited provider
+   socket and exact owned Wayland association. An acknowledgement requires
+   native placement, an actual later Qt paint and an exact native frame/revision
+   recheck. No peer-supplied PID or unrelated window can be addressed.
+5. Core arms the original capture adapter's movement-only gate after Ready.
+   Only held left-button movement for that exact press is withheld before
+   native/legacy dispatch. The preserved raw deltas still reach the sole
+   consumer and move the preview. Every original button transition passes.
+   The gate has a 350 ms deadman; Core polls every 25 ms and sends Hold at most
+   every 100 ms. The absolute drag budget is 30 seconds. Crossing back over the
+   entry edge cancels the preview and resumes the original native drag.
+6. Real up ends motion holding. Core joins that exact raw release to the
+   independently annotated window up and Server's Local button dispatch.
+   Server retains a bounded release reservation whose producer-sequence fence
+   revokes it on any later raw input. No timer or empty queue manufactures a
+   release. Drop has an absolute 1,500 ms budget.
+7. The remote Viewer finishes and verifies the final native placement/paint.
+   NativeHost additionally requires the matching retained real up, HID left-up,
+   current exact window/process/layout and unchanged extent. It journals the
+   source's latest frame before moving it to the holding display. Failure to
+   create the holding display cannot silently leave two active copies.
+8. Only after native commit does Core request ordinary Server cursor transfer.
+   Server rechecks the producer fence, exact peer/layout, no held inputs and no
+   pending dispatch, then performs its normal switch. Finish retires only the
+   drag coordinator; the exported window and recovery record remain alive.
+   Failed transfer cancels and restores the source.
 
-1. The existing sole raw consumer joins the annotated press to the Server's
-   configured boundary. `LocalWindowDragCore` accepts only a fresh candidate,
-   live capture/press/Core TLS continuity, verified companion code admission and
-   the immutable explicit Core-pin → WindowShare-pin policy.
-2. Private protocol **v7** negotiates `localInputWindowDragCapability` (16), which
-   requires pointer observation capability (8). Message **20** is exactly **208
-   bytes**, Core → Host only. Begin, Motion, Hold and Cancel have independent
-   replay state; none prepares an input lease or advances input capture counters.
-3. The Host matches the prior joined down, both locally configured pins and its
-   independently observed current WindowShare TLS connection. The native binding
-   uses that Host connection incarnation. Names, addresses and the remote peer's
-   assertions do not establish the pairing.
-4. Bridge also requires negotiated `window-drag-preview-v1` and
-   `window-drag-motion-v1` for production edge preparation. NativeHost performs
-   its existing exact AX/native window, process-birth, titlebar, movement and
-   physical-display checks before starting capture. The Viewer paints with
-   `WA_ShowWithoutActivating`, `WindowDoesNotAcceptFocus`, and no local input
-   admission until an explicit committed acknowledgement.
-   Its grip offset comes from the retained original native titlebar observation.
-   A separate WindowDrag message carries only preview controls. The Linux Viewer
-   uses its inherited provider socket and exact Wayland association to place its
-   native window. No network request names a PID or unrelated native window.
-   A native reply alone cannot acknowledge movement: a subsequent actual Qt
-   paint and exact native frame/revision recheck are also required.
-5. Core checks retained continuity every 25 ms and sends a Hold at most every
-   100 ms. A Hold cannot change coordinates or the original sequence. Host
-   silence of 350 ms cancels; total preparation is limited to 30 seconds. A
-   stationary press may retain an already-started preview, but an expired motion
-   cannot start a new one. Later real motion retains the same boundary identity.
-6. Real up, another press, missing pointer identity, Escape, capture loss,
-   topology/edge change, either TLS loss, private-channel loss, admission loss,
-   cancellation or shutdown cancels the exact preparation. Native callbacks are
-   rechecked after returning, including callbacks that stop/destroy the owner.
-   Cleanup also covers a late-created preview returned after cancellation.
+The post-release native query is not advertised as a fabricated native-grab
+completion receipt. This design preserves native button ownership and observes
+both the real release and HID-up state; physical behavior still needs H07.
+The Viewer commit changes the focus hint on the existing QWindow and mirrors
+QWidget's stored flags. Calling QWidget::setWindowFlag here recreates the
+Wayland surface and loses the compositor's placement; the actual GNOME
+regression explicitly checks that neither identity nor frame changes.
 
-The Mac capture gate can withhold only movement belonging to one exact retained
-left press. Every button transition passes normal native dispatch. The gate has
-a 350 ms coordinator heartbeat and cannot revive a retired press. It is tested
-in capture fixtures but production does not arm it yet. The remaining coordinator
-must retain the original native owner until real up, join its dispatched release,
-verify the final preview/drop and then switch the ordinary Core cursor. An early
-synthetic mouse-up is not part of this path.
+Escape, another press, lost capture/annotation, topology/peer/admission loss,
+private-channel loss, stale paint, resize, cancellation and shutdown all retire
+the exact attempt. Callbacks are rechecked after reentrancy. Untouched
+preparation cancellation does not move or raise the source. Durable recovery
+covers attempted native mutations.
 
-`NativeHost::observeWindowPointer` no longer automatically turns a matching up
-into `releaseWindowDrag`. Observing that up before the source application's
-native grab has finished cannot establish cutover. The explicit release API and
-painted-geometry transaction remain available for the future cutover owner.
-Current production preparation always cancels on up; it does not relocate the
-source, suppress input, synthesize a button release or switch the active Core peer.
+## Return production path
 
-Motion metadata reaches the Host coordinator, but the production Bridge has no
-preview-placement callback yet. In particular, Qt global positioning is not a
-replacement for an owned GNOME compositor placement receipt on Wayland.
+The GNOME provider observes the exact owned Viewer's normal native move grab,
+with ordered begin/motion/end/cancel metadata and the actual released state.
+`WindowDragWatcher` joins this to a committed painted Viewer and sends a strict
+`window-drag-move-observation-v1` message through the existing authenticated
+session/epoch envelope. Replaced geometry/surface, native denial, missing reply,
+retirement, replay and late callbacks cannot revive the retained observation.
+This metadata establishes the owned moving window, not the originating physical
+device or an original-input delivery permit. The provider and endpoint retain
+at most 16 concurrent watches; retiring windows releases capacity. Late events
+cannot revive a retired watch, and late successful Watch replies are cleaned up.
+
+1. Host resolves the exported native Mac ID locally, binds the authenticated
+   WindowShare pin and assigns a monotonic move offer. Private v9 capability
+   `localInputWindowMoveCapability` (32, requiring 16) carries message **22**:
+   **112 bytes**, Host → Core, Begin/Motion/End/Cancel plus exact session, epoch,
+   geometry, native grab/sequence, source frame and point. It is observation
+   metadata with independent replay state; it acquires no input lease.
+2. Core joins the native move to its independently retained original left down,
+   actual Server dispatch to the exact authenticated Ubuntu recipient, the
+   starting native frame, explicit dual-pin policy and a configured edge back
+   to the primary computer. It first waits for Session to enqueue that down's
+   private metadata. The command's nonzero `returnOffer` binds the direction.
+   Remote input is consumed at the HID tap, so the existing bounded pointer
+   join may expire without an application annotation and report window=0.
+   Return does not invent a Mac window-under-pointer: GNOME supplies the owned
+   Viewer identity, Host resolves its Mac source, and Core supplies the press.
+3. NativeHost revalidates the retained source identity, process birth, holding
+   frame, capture geometry, lifecycle and physical outputs. Bridge paints a
+   frameless, non-activating, input-transparent Mac preview using that source's
+   current capture. Ready requires a fresh Qt paint and the actual owned Cocoa
+   content view's exact visible WindowServer frame. Held raw deltas move this
+   preview; normal buttons still go to their original Ubuntu recipient.
+4. Drop requires the original Core release and its Server dispatch, the same
+   bounded raw-producer fence, and GNOME's matching native End with released
+   state. Both release orderings are supported. Missing release, new input,
+   native cancellation, lost preview, changed layout/identity or timeout cancels.
+5. NativeHost independently requires HID left-up and the exact destination,
+   persists the destination in the recovery journal, restores the retained
+   source and focuses its application, then retires its capture/remote session.
+   An attempted restoration failure retains recovery. Only after this commit
+   may Server transfer the cursor back to the Mac with no held inputs. If that
+   last transfer fails, the source remains available locally; no second press
+   is generated and no failed transfer is reported as successful.
+
+The return preview is an internal visual part of ordinary titlebar dragging.
+It requires no source-selection step and cannot emit keyboard or pointer input.
+A destroyed QWidget can emit its destruction signal before QPointer clears;
+cleanup explicitly retires that pointer before invoking any Viewer methods.
 
 ## Automated verification
 
-Build `windowshare-drag-coordinator-tests`, `windowshare-local-input-tests`,
-`windowshare-window-drag-edge-tests`, `windowshare-companion-tests`,
-`windowshare-viewer-tests`, `windowshare-bridge-tests` and `windowshare-native-tests`.
-Run the corresponding CTests from `build/mac-default/src/unittests`.
-Viewer/Bridge tests must use `QT_QPA_PLATFORM=offscreen`.
+Build the enabled Mac Core/WindowShare application and the disabled Core.
+Relevant test targets are `ServerTests`, `windowshare-drag-coordinator-tests`,
+`windowshare-local-input-tests`, `windowshare-window-drag-edge-tests`,
+`windowshare-window-drag-motion-gate-tests`, `windowshare-drag-preview-tests`,
+`windowshare-drag-watcher-tests`, `windowshare-viewer-tests`,
+`windowshare-bridge-tests` and `windowshare-native-tests`.
+Viewer/Bridge tests use `QT_QPA_PLATFORM=offscreen`; they post no desktop input.
+Use a separately ad-hoc-signed copy when macOS refuses an unsigned executable.
 
-The coordinator suite launches a private child process and exercises the actual
-authenticated socketpair and sender/receiver coordinators with fake native
-callbacks. It covers wrong policy, missing press, denied code admission,
-missing/replaced/revoked connections, native denial/throw/slow return/destruction,
-raw press/capture/topology loss, private disconnect, stop, stationary holds and
-Host timeout while the Core event loop is blocked. No desktop event is posted.
+The real private-channel coordinator suite has 36 child-process scenarios:
+preparation/ownership/lifetime failures plus normal drop, raw-up/Server ordering,
+wrong annotated window, wrong route, newer input, native denial, transfer failure
+and missing commit. Return cases also cover both native/Core release orderings,
+missing native release, native cancellation, original-route mismatch, newer input,
+failed final transfer and unannotated remote pointer metadata. Native callbacks in this suite are explicit fixtures;
+separate native tests establish their platform behavior.
 
-The wire suite independently injects malformed, truncated, oversized, stale,
-wrong-role and unsupported-capability messages. It verifies signed coordinates,
-the fixed byte layout, exact cancellation, Hold immutability and callback deletion.
-The Viewer suite checks painted readiness without focus or input, explicit commit
-transition, and immutable drag identity. Bridge tests check actual negotiated
-TLS connection matching and propagation of native denial.
+For native Viewer continuity, build Linux target
+`windowshare-gnome-drag-surface-fixture` and run:
 
-## Remaining implementation and deferred acceptance
+```sh
+python3 deploy/windowshare/gnome-window-drag-tests.py \
+  --fixture /absolute/build/windowshare-gnome-drag-surface-fixture \
+  --output /absolute/new-evidence-directory
+```
 
-- [ ] Native ordinary-titlebar eligibility acceptance on real macOS apps.
-- [ ] Cutover owner with an actual native-grab completion/ownership boundary,
-      virtual pointer motion, cancellation and exactly one real button-up owner.
-- [ ] Bind the existing Host motion callback to provisional network placement;
-      obtain exact owned GNOME MetaWindow placement and painted readiness.
-- [ ] Permit drop only with that cutover evidence, current peer/layout and
-      current produced/painted geometry; retain durable source recovery.
-- [ ] Detect the exact owned Viewer ordinary move grab and implement drag-back,
-      source position/focus restoration and remote-session retirement.
-- [ ] Connected fault tests at each new cutover/drop/return transition.
-- [ ] H07 physical Mac → Ubuntu → Mac, cancellation, reconnect, output changes,
-      delayed first frame and held-button behavior. Record source/binary hashes
-      and original down/up counts. Automated preparation tests do not satisfy H07.
+Use only the isolated GNOME 50 container described by
+`gnome-provider-container.sh`: private session/system buses, private settings,
+headless monitor and software rendering, with no user display or input mounts.
+The harness checks the actual production Viewer and native compositor tokens,
+not simulated Qt global positions. Its synthetic EI events remain inside that
+owned compositor. Results and exact source/binary hashes are in `TESTING.md`.
+
+## Remaining acceptance
+
+- [x] Ordinary Ubuntu-to-Mac edge return, source pose/focus and remote retirement code.
+- [x] Connected coordinator/Bridge/Server release, failure, timeout and topology regressions.
+- [ ] H07 physical Mac → Ubuntu → Mac, canceled drag, output/connection changes,
+      delayed first frame and exact original down/up counts.
+- [ ] Arbitrary native/browser/Electron application titlebar compatibility.
+
+Use [h07-edge-drag.md](h07-edge-drag.md) for the deferred attended verification.
+The owned AppKit native titlebar eligibility run passes physically. It does not
+satisfy the movement-hold or end-to-end H07 tests; those remain NOT_RUN.

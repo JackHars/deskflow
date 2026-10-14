@@ -917,7 +917,7 @@ struct Service
       gboolean enabled = false;
       g_variant_get(parameters, "(&su&s&sb)", &id, &value, &viewer, &association, &enabled);
       check(
-          std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(viewer, viewerId) == 0 && enabled &&
+          std::strcmp(id, sessionId) == 0 && value == generation && std::strcmp(viewer, viewerId) == 0 &&
               caller == g_dbus_method_invocation_get_sender(invocation),
           "Native drag watch changed exact owner"
       );
@@ -2762,6 +2762,22 @@ void nativeWindowDragChannel(const PrivateBus &bus)
                 service.dragEvents[0].phase == GnomeWindowDragEvent::Phase::Begin,
             "Native drag signal lost its exact association"
         );
+        for (unsigned cycle = 0; cycle != 24; ++cycle) {
+          // Retire the old window, including the original observed association,
+          // then watch a fresh one on the same authenticated private channel.
+          ++request.request;
+          request.action = GnomeWindowDragAction::Unwatch;
+          send(request);
+          waitUntil([&] { return service.dragReplies.size() == request.request; }, "Unwatch reply missing");
+          check(service.dragReplies.back().ok, "Unwatch failed");
+          ++request.request;
+          request.association =
+              QStringLiteral("org.deskflow.window.") + QString::number(cycle, 16).rightJustified(64, '0');
+          request.action = GnomeWindowDragAction::Watch;
+          send(request);
+          waitUntil([&] { return service.dragReplies.size() == request.request; }, "Replacement watch reply missing");
+          check(service.dragReplies.back().ok, "Retired windows exhausted the live native watcher bound");
+        }
         // Placement and observation use a separate counter from input viewport
         // operations. A fresh read remains usable after native drag traffic.
         const auto observation = client.requestViewportObservation();

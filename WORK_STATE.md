@@ -2,6 +2,63 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+P5 ordinary-titlebar drag code is integrated in both directions. Private
+protocol v9 carries 232-byte drag commands, 240-byte status messages and
+112-byte Host native-move observations. Normal button ownership stays with its
+original recipient; only held movement is gated after a native/painted preview.
+The outbound path joins real up, native annotation and Server Local dispatch,
+then journals holding relocation before ordinary cursor transfer. The return
+path joins Core's exact remote press/edge to GNOME's owned Viewer grab; it
+requires both real Core up/dispatch and native grab End before journaled Mac
+source placement/focus and remote retirement. Source identity is resolved by
+Host, never accepted as a remote native window ID.
+
+Remote input has no application-stage Mac annotation because the HID tap
+consumes it for Ubuntu. Return waits for the existing bounded join to publish
+its exact raw stamp with window=0; no annotation or release is synthesized.
+The Mac preview is frameless, input-transparent and non-activating. Readiness
+requires actual Qt paint and an exact owned Cocoa/WindowServer frame witness.
+Repeated GNOME watches release the concurrent 16-window capacity on retirement.
+
+Current signed Mac checks pass: 36 private-channel coordinator scenarios,
+private IPC (including v9 malformed/replay/role/capability cases), watcher and
+viewport suites, Bridge return/cleanup cases, 50 enabled Server tests and five
+feature-disabled Server tests. Both production Core build modes and the
+WindowShare app build. Evidence: `p5-return-order-tests.json`,
+`p5-return-wire-watcher-tests.json`, `p5-return-bridge-tests-3.json`,
+`p5-return-server-tests.json`, `p5-return-server-off-tests.json` and the matching
+build logs under `build/roadmap-completion-20261014`.
+
+The first Bridge return fixture exposed lingering state after preview deletion;
+a follow-up exposed QWidget's early destroyed signal while Viewer members were
+already gone. Cleanup now clears the retained preview pointer before cancellation;
+both failures are retained in `p5-return-bridge-tests*.json` and the scoped crash
+backtrace. The original Ubuntu build reproduced the cleanup regression; its
+seven other suites passed. The corrected frozen Ubuntu run
+`p5-linux-return-final/result.json` passes the full application build, all eight
+affected suites, actual headless GNOME continuity, and production Core/Server
+with the feature enabled and disabled. The later retirement-order change passes
+the full app rebuild and both affected suites in
+`p5-linux-watch-retirement/result.json`, plus signed Mac viewport/Bridge checks
+in `p5-return-retired-watches-tests.json`. These runs use disposable offline
+containers on home Ubuntu and remove only their own temporary directories.
+The actual GNOME check preserves the association, native surface/window and
+exact (160,90,642,520) frame through commit. All four focused Mac ASan/UBSan
+suites pass: Bridge, the 36-scenario coordinator, private IPC and viewport
+endpoint (`p5-return-sanitize-tests.json`). Leak detection was disabled; each
+sanitizer halts on its first reported error. These tests use offscreen Qt and
+fake native return witnesses, not physical Cocoa acceptance. The initial SDK
+link failure is retained in `p5-return-sanitize-build.log`; using the same
+MacOSX15.5 SDK as the production build succeeds in
+`p5-return-sanitize-sdk-build.log`.
+
+The user's latest instruction is **“Keep building; test later.”** No readiness
+question is pending, and no physical fixture or desktop input routing has been
+started. **H07 is NOT_RUN and P5 physical acceptance remains open.** Current
+fixtures do not establish arbitrary native/browser/Electron compatibility or
+real Cocoa preview/restore behavior. Older status paragraphs below are historical.
+
+
 The subsequent Core edge-observation checkpoint is implemented and tested.
 `WindowDragEdgeMailbox` carries only one bounded value from the Server event
 thread to `LocalInputCoreSession`; no second raw consumer or cross-thread Server

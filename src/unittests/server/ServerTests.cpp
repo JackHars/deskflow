@@ -2545,6 +2545,95 @@ void ServerTests::windowDragEdge_configuredMappingsKeepLocalOwner()
   }
 }
 
+void ServerTests::windowDragDrop_realReleaseBeforeCursorTransfer()
+{
+  using namespace deskflow::windowshare;
+  for (bool returning : {false, true})
+    for (int failure = 0; failure != 5; ++failure) {
+      RoutingFixture f;
+      auto &server = *f.server;
+      QVERIFY(
+          returning ? f.config.connect("first", Direction::Left, 0, 1, "primary", 0, 1)
+                    : f.config.connect("primary", Direction::Right, 0, 1, "first", 0, 1)
+      );
+      QVERIFY(server.setConfig(f.config));
+      server.m_disableLockToComputer = false;
+      f.platform->mouseHeld = true;
+      f.first->authenticate();
+      if (returning)
+        server.switchComputer(f.firstClient, 0, 500, false);
+      f.clear();
+      OriginalInputStream capture;
+      const auto epoch = capture.epoch().id();
+      auto position = std::make_shared<std::atomic<std::uint64_t>>(2);
+      auto mailbox = std::make_shared<WindowDragEdgeMailbox>();
+      QVERIFY(mailbox->bindCapture(capture.epoch(), position));
+      QVERIFY(server.setWindowDragEdgeMailbox(mailbox));
+      QVERIFY(server.setOriginalInputRoutes(std::make_shared<OriginalInputRoutes>()));
+      QVERIFY(server.setOriginalInputCapturedInbox(std::make_shared<OriginalInputCapturedInbox>(capture.epoch())));
+      IPlatformComputer::ButtonInfo button(1, 0);
+      IPlatformComputer::MotionInfo point =
+          returning ? IPlatformComputer::MotionInfo{-1, 0} : IPlatformComputer::MotionInfo{999, 500};
+      Event down(
+          EventTypes::PrimaryComputerButtonDown, f.primary.getEventTarget(), &button, Event::EventFlags::DontFreeData,
+          OriginalInputStamp{epoch, 1, 1}
+      );
+      Event move(
+          returning ? EventTypes::PrimaryComputerMotionOnSecondary : EventTypes::PrimaryComputerMotionOnPrimary,
+          f.primary.getEventTarget(), &point, Event::EventFlags::DontFreeData, OriginalInputStamp{epoch, 2, 1}
+      );
+      QVERIFY(f.events.dispatchEvent(down) && f.events.dispatchEvent(move));
+      const auto edge = mailbox->read();
+      QVERIFY(edge && !mailbox->readRelease());
+      QCOMPARE(edge->edge().returning, returning);
+      QCOMPARE(f.first->take().count("DMDN"), returning ? 1 : 0);
+      f.clear();
+      position->store(3);
+      Event up(
+          EventTypes::PrimaryComputerButtonUp, f.primary.getEventTarget(), &button, Event::EventFlags::DontFreeData,
+          OriginalInputStamp{epoch, 3, 1}
+      );
+      QVERIFY(f.events.dispatchEvent(up));
+      f.platform->mouseHeld = false;
+      const auto released = mailbox->readRelease();
+      QVERIFY(released && released->live() && !edge->current());
+      const auto upBytes = f.first->take();
+      QCOMPARE(upBytes.count("DMUP"), returning ? 1 : 0); // The original owner receives exactly one real up.
+      QVERIFY(!upBytes.contains("DMDN"));
+      QCOMPARE(server.selectedPeer().has_value(), returning);
+      QVERIFY(mailbox->requestTransfer(*released, 140, 520));
+      QVERIFY(!mailbox->requestTransfer(*released, 141, 520)); // One reservation.
+      if (failure == 1)
+        position->store(4); // New physical input before Qt wakes.
+      if (failure == 2)
+        QVERIFY(server.setConfig(f.config));
+      if (failure == 3)
+        f.first->identity->revoke();
+      if (failure == 4)
+        capture.revoke(OriginalInputRevocation::Stopped);
+      server.drainWindowDragTransfer();
+      const auto result = mailbox->transferResult();
+      QVERIFY(result && result->generation == released->generation() && result->up == released->up());
+      QCOMPARE(result->switched, failure == 0);
+      if (!failure) {
+        QCOMPARE(
+            server.m_active,
+            returning ? static_cast<BaseClientProxy *>(&f.primary) : static_cast<BaseClientProxy *>(f.firstClient)
+        );
+        QCOMPARE(server.selectedPeer().has_value(), !returning);
+        QCOMPARE(server.m_x, 140);
+        QCOMPARE(server.m_y, 520);
+      } else
+        QCOMPARE(
+            server.m_active,
+            returning ? static_cast<BaseClientProxy *>(f.firstClient) : static_cast<BaseClientProxy *>(&f.primary)
+        );
+      const auto bytes = f.first->take();
+      QVERIFY(!bytes.contains("DMDN") && !bytes.contains("DMUP"));
+      QVERIFY(!released->live() && !mailbox->requestTransfer(*released, 140, 520));
+    }
+}
+
 void ServerTests::windowDragEdge_revokesOnReleaseAndTopology()
 {
   using namespace deskflow::windowshare;

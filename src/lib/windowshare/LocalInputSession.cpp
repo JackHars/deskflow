@@ -49,6 +49,9 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
   auto result = std::unique_ptr<LocalInputCoreSession>(new LocalInputCoreSession);
 #ifdef __APPLE__
   result->m_captureSource = std::make_shared<OriginalInputCaptureSource>();
+  result->m_windowDragEdgeMailbox->bindCapture(
+      result->m_captureSource->completedInput()->epoch(), result->m_captureSource->capturePosition()
+  );
 #endif
   result->m_companion = LocalInputCompanion::create(std::move(pair), error, limits);
   if (!result->m_companion)
@@ -131,6 +134,8 @@ LocalInputCoreSession::~LocalInputCoreSession()
 #ifdef __APPLE__
   *m_callbackLifetime = false;
   onRoutedInput = {};
+  onCapturedInput = {};
+  onPointerWindow = {};
   onWindowDragEdge = {};
   m_windowDragEdgeJoin.revoke();
   m_captureTimer.stop();
@@ -285,6 +290,12 @@ void LocalInputCoreSession::drainCapturedInput()
     const auto completed = source->completedInput();
     if (completed->bound())
       completed->publish(*captured);
+    const auto callback = onCapturedInput;
+    const auto lifetime = m_callbackLifetime;
+    if (callback)
+      callback(*captured);
+    if (!*lifetime)
+      return;
   }
   for (std::size_t count = 0; count < OriginalInputStream::capacity; ++count) {
     const auto joined = m_captureJoin->pop();

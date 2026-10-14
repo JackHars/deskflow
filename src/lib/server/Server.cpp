@@ -2227,8 +2227,9 @@ void Server::retireOriginalCapture(const deskflow::windowshare::OriginalInputCap
       physical = found->second;
       m_originalKeyControls.erase(found);
     }
-  } else if (const auto *button = std::get_if<OriginalInputButton>(&captured.input.record.payload);
-             button && !button->down) {
+  } else if (
+      const auto *button = std::get_if<OriginalInputButton>(&captured.input.record.payload); button && !button->down
+  ) {
     const auto found = m_originalButtonControls.find(button->button);
     if (found != m_originalButtonControls.end()) {
       physical = found->second;
@@ -2476,10 +2477,10 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
   while (true) {
     const auto found = std::find_if(m_originalCompleted.begin(), m_originalCompleted.end(), [&](const auto &entry) {
       return (m_originalDispatchTerminal || now >= entry.second.deadline || !entry.second.captured.translation.parts) &&
-             (m_originalPending.empty() ||
-              entry.first <
-                  std::pair{m_originalPending.front().route.stamp.epoch, m_originalPending.front().route.stamp.sequence}
-             );
+             (m_originalPending.empty() || entry.first < std::pair{
+                                                             m_originalPending.front().route.stamp.epoch,
+                                                             m_originalPending.front().route.stamp.sequence
+                                                         });
     });
     if (found == m_originalCompleted.end())
       break;
@@ -2506,6 +2507,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
       return;
   }
   m_originalDraining = false;
+  drainWindowDragTransfer();
 }
 
 void Server::executeLegacyInput(const PendingInput &pending)
@@ -2976,32 +2978,80 @@ void Server::invalidateWindowDragEdge(bool forgetPress) noexcept
   }
 }
 
+void Server::drainWindowDragTransfer()
+{
+  using namespace deskflow::windowshare;
+  const auto mailbox = m_windowDragEdgeMailbox;
+  const auto request = mailbox ? mailbox->takeTransfer() : std::nullopt;
+  if (!request)
+    return;
+  const auto lifetime = m_originalLifetime;
+  const auto &release = request->release;
+  const auto &edge = release.edge();
+  auto *remote = inputRecipient(edge.recipient);
+  auto *destination = edge.returning ? m_primaryClient : remote;
+  auto *sourceClient = edge.returning ? remote : m_primaryClient;
+  bool switched = false;
+  if (release.live() && edge.server == m_serverIncarnation && !m_selectionShutdown && !m_selectionChanging &&
+      !m_selectionScreensaver && !m_activeSaver && !m_keyboardBroadcasting && !isLockedToComputerServer() &&
+      m_active == sourceClient && m_inputRoutes.size() == 0 && m_originalPending.empty() && remote &&
+      remote != m_primaryClient && m_clientSet.contains(remote) && m_originalInputRoutes &&
+      m_originalInputRoutes->live() && m_originalInputCaptured && m_originalInputCaptured->live()) {
+    WindowDragScreen source, target;
+    sourceClient->getShape(source.x, source.y, source.width, source.height);
+    destination->getShape(target.x, target.y, target.width, target.height);
+    const auto *stream = remote->getStream();
+    const auto peer = stream ? stream->authenticatedPeerTicket() : std::nullopt;
+    if (source == edge.source && target == edge.destination && target.contains(request->x, request->y) && peer &&
+        peer->live() && peer->incarnation() == edge.peer.incarnation() &&
+        peer->fingerprint() == edge.peer.fingerprint() && release.live()) {
+      try {
+        // No held press changes owner. SelectionChange invalidates the release
+        // at this reservation; completion uses the separately retained request.
+        switchComputer(destination, request->x, request->y, false);
+        switched = *lifetime && m_active == destination &&
+                   (edge.returning
+                        ? !m_selectedPeer
+                        : (m_selectedPeer && m_selectedPeer->live() && m_selectedPeer->recipient() == edge.recipient));
+      } catch (...) {
+        switched = false;
+      }
+    }
+  }
+  mailbox->completeTransfer(*request, switched);
+}
+
 bool Server::observeWindowDragEdge(
     BaseClientProxy *destination, Direction direction, int32_t x, int32_t y, int32_t sourceX, int32_t sourceY,
     double waitSeconds
 )
 {
   using namespace deskflow::windowshare;
+  const bool returning = m_active != m_primaryClient && destination == m_primaryClient;
+  auto *remote = returning ? m_active : destination;
   if (!m_windowDragEdgeMailbox || !m_windowDragPress || !m_windowDragPressIncarnation || m_selectionShutdown ||
       m_selectionChanging || m_selectionScreensaver || m_activeSaver || m_keyboardBroadcasting ||
-      isLockedToComputerServer() || m_active != m_primaryClient || !destination || destination == m_primaryClient ||
-      !m_clientSet.contains(destination) || !m_originalRouteObservation || !m_originalInputRoutes ||
-      !m_originalInputRoutes->live())
+      isLockedToComputerServer() || !destination || !remote || remote == m_primaryClient ||
+      (!returning && m_active != m_primaryClient) || !m_clientSet.contains(remote) || !m_originalRouteObservation ||
+      !m_originalInputRoutes || !m_originalInputRoutes->live())
     return false;
   const auto press = m_inputRoutes.repeat({InputRoutes::Kind::Button, 1});
-  const auto recipient = m_inputRecipients.find(destination);
+  const auto recipient = m_inputRecipients.find(remote);
   const auto &motion = m_originalRouteObservation->decision;
   if (!press || press->incarnation != m_windowDragPressIncarnation || press->originalOwner ||
-      !press->recipients.empty() ||
+      (returning
+           ? (recipient == m_inputRecipients.end() || press->recipients != InputRoutes::Recipients{recipient->second})
+           : !press->recipients.empty()) ||
       recipient == m_inputRecipients.end() || motion.kind != OriginalInputRouteKind::Motion ||
       motion.stamp.epoch != m_windowDragPress.epoch || motion.stamp.sequence <= m_windowDragPress.sequence ||
       motion.stamp.part != 1)
     return false;
-  const auto *stream = destination->getStream();
+  const auto *stream = remote->getStream();
   const auto ticket = stream ? stream->authenticatedPeerTicket() : std::nullopt;
   if (!ticket || !ticket->live())
     return false;
   WindowDragEdge edge;
+  edge.returning = returning;
   switch (direction) {
   case Direction::Left:
     edge.side = WindowDragEdgeSide::Left;
@@ -3027,7 +3077,7 @@ bool Server::observeWindowDragEdge(
   edge.destinationX = x;
   edge.destinationY = y;
   edge.peer = *ticket;
-  m_primaryClient->getShape(edge.source.x, edge.source.y, edge.source.width, edge.source.height);
+  m_active->getShape(edge.source.x, edge.source.y, edge.source.width, edge.source.height);
   destination->getShape(edge.destination.x, edge.destination.y, edge.destination.width, edge.destination.height);
   if (!edge.valid() || !std::isfinite(waitSeconds) || waitSeconds < 0)
     return false;
@@ -3364,7 +3414,9 @@ void Server::onMouseDown(ButtonID id)
   if (m_inputRoutes.repeat({InputRoutes::Kind::Button, id}))
     return;
   const auto route = m_inputRoutes.down({InputRoutes::Kind::Button, id}, 0, 0, id, std::move(recipients));
-  if (id == 1 && route && !route->originalOwner && m_active == m_primaryClient && route->recipients.empty() &&
+  if (id == 1 && route && !route->originalOwner && m_inputRoutes.size() == 1 &&
+      ((m_active == m_primaryClient && route->recipients.empty()) ||
+       (active != m_inputRecipients.end() && route->recipients == InputRoutes::Recipients{active->second})) &&
       m_originalRouteObservation && m_originalInputRoutes && m_originalInputRoutes->live()) {
     const auto stamp = m_originalRouteObservation->decision.stamp;
     if (stamp && stamp.part == 1) {
@@ -3392,8 +3444,6 @@ void Server::onMouseUp(ButtonID id)
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   const auto lifetime = m_originalLifetime;
-  if (id == 1)
-    invalidateWindowDragEdge(true);
   InputRoutes::Recipients recipients;
   const auto active = m_inputRecipients.find(m_active);
   if (active != m_inputRecipients.end())
@@ -3409,6 +3459,25 @@ void Server::onMouseUp(ButtonID id)
         if (!*lifetime)
           return;
       }
+  if (id == 1) {
+    const bool local = route && route->recipients.empty() && m_active == m_primaryClient;
+    const bool remote =
+        route && active != m_inputRecipients.end() && route->recipients == InputRoutes::Recipients{active->second};
+    const bool exactRelease = route && route->incarnation == m_windowDragPressIncarnation && !route->originalOwner &&
+                              (local || remote) && m_inputRoutes.size() == 0 && m_originalRouteObservation &&
+                              m_originalRouteObservation->decision.outcome ==
+                                  (local ? deskflow::windowshare::OriginalInputRouteOutcome::Local
+                                         : deskflow::windowshare::OriginalInputRouteOutcome::Dispatched);
+    if (!exactRelease || !m_windowDragEdgeMailbox ||
+        !m_windowDragEdgeMailbox->release(m_windowDragPress, m_originalRouteObservation->decision.stamp))
+      invalidateWindowDragEdge(true);
+    else {
+      m_windowDragEdgePending.reset();
+      m_windowDragPress = {};
+      m_windowDragPressIncarnation = 0;
+    }
+  } else
+    invalidateWindowDragEdge(true);
 #else
   m_active->mouseUp(id);
 #endif
@@ -3597,6 +3666,9 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
 
   // find direction of neighbor and get the neighbor
   bool jump = true;
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  bool edgeObserved = false;
+#endif
   BaseClientProxy *newComputer;
   do {
     // clamp position to computer
@@ -3669,12 +3741,22 @@ void Server::onMouseMoveSecondary(int32_t dx, int32_t dy)
     newComputer = mapToNeighbor(m_active, dir, m_x, m_y);
 
     // see if we should switch
-    if (!isSwitchOkay(newComputer, dir, m_x, m_y, xc, yc)) {
+    double dragWait = -1;
+    const bool switchOkay = isSwitchOkay(newComputer, dir, m_x, m_y, xc, yc, &dragWait);
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+    if (dragWait >= 0)
+      edgeObserved = observeWindowDragEdge(newComputer, dir, m_x, m_y, xc, yc, dragWait);
+#endif
+    if (!switchOkay) {
       newComputer = m_active;
       jump = false;
     }
   } while (false);
 
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  if (!edgeObserved)
+    invalidateWindowDragEdge();
+#endif
   if (jump) {
     int32_t newX = m_x;
     int32_t newY = m_y;

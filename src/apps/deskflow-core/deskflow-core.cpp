@@ -17,6 +17,7 @@
 #include "deskflow/ServerApp.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #ifdef WINDOWSHARE_CORE_COMPANION
+#include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/InputEvidenceRuntime.h"
 #include "windowshare/LocalInputBootstrap.h"
 #include "windowshare/LocalInputCodeAdmission.h"
@@ -218,11 +219,34 @@ int main(int argc, char **argv)
             }
         );
         windowDrag = std::make_unique<LocalWindowDragCore>(
-            *inputSession->channel(), inputHostConfiguration->peerPolicy(), [&inputAdmission] {
-              const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
-              return proof && proof->live();
+            *inputSession->channel(), inputHostConfiguration->peerPolicy(),
+            LocalWindowDragCore::Providers{
+                [&inputAdmission] {
+                  const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
+                  return proof && proof->live();
+                },
+                [source = inputSession->captureSource()](OriginalInputStamp press) {
+                  return source->epoch().live() && source->windowDragMotionGate().arm(press);
+                },
+                [source = inputSession->captureSource()](OriginalInputStamp press) {
+                  return source->epoch().live() && source->windowDragMotionGate().refresh(press);
+                },
+                [source = inputSession->captureSource()] { source->windowDragMotionGate().cancel(); },
+                inputSession->windowDragEdgeMailbox()
             }
         );
+        inputSession->onCapturedInput = [&windowDrag](const auto &input) {
+          if (windowDrag)
+            windowDrag->capture(input);
+        };
+        inputSession->onPointerWindow = [&windowDrag](const auto &pointer) {
+          if (windowDrag)
+            windowDrag->pointer(pointer);
+        };
+        inputSession->onRoutedInput = [&windowDrag](const auto &input) {
+          if (windowDrag)
+            windowDrag->routed(input);
+        };
         inputSession->onWindowDragEdge = [&windowDrag](const auto &candidate) {
           if (windowDrag)
             windowDrag->observe(candidate);

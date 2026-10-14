@@ -19,6 +19,9 @@ struct OriginalInputCaptured
   OriginalInputTranslation translation;
   OriginalInputTransitionEvidence transition{};
   std::optional<OriginalPointerObservation> pointer{};
+  // Producer's decision for this exact record, not a later gate snapshot.
+  // Only held movement can be withheld; every real button still dispatches.
+  bool windowDragMotionHeld = false;
 };
 
 enum class OriginalInputRouteKind : std::uint8_t

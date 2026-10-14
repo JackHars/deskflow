@@ -961,8 +961,13 @@ struct GnomeProviderClient::Impl
         Error error;
         const auto action = request.action;
         if (action == GnomeWindowDragAction::Watch || action == GnomeWindowDragAction::Unwatch) {
-          if (!windowDragWatches.contains(request.association) && windowDragWatches.size() >= 16)
+          if (action == GnomeWindowDragAction::Watch && !windowDragWatches.contains(request.association) &&
+              windowDragWatches.size() >= 16)
             throw ChannelError("Too many native window drag watches");
+          // Retire locally even if the compositor window was already destroyed
+          // or its unwatch call fails. Such signals can no longer leave this worker.
+          if (action == GnomeWindowDragAction::Unwatch)
+            windowDragWatches.erase(request.association);
           Variant reply(g_dbus_connection_call_sync(
               bus, owner.c_str(), object, interface, "WatchWindowDrag",
               g_variant_new(
@@ -972,8 +977,8 @@ struct GnomeProviderClient::Impl
               G_VARIANT_TYPE("()"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 100, cancel, &error.value
           ));
           result.ok = reply.value && Clock::now() < pending.deadline;
-          if (result.ok)
-            windowDragWatches[request.association] = action == GnomeWindowDragAction::Watch;
+          if (result.ok && action == GnomeWindowDragAction::Watch)
+            windowDragWatches[request.association] = true;
         } else {
           const auto name = gnomeWindowDragActionName(action).toUtf8();
           Variant reply(g_dbus_connection_call_sync(

@@ -7,6 +7,7 @@
 #include "KeyboardRoute.h"
 #include "LocalInputMapping.h"
 #include "LocalWindowDrag.h"
+#include "LocalWindowMove.h"
 #include "LocalWindowPointer.h"
 #include "OriginalInput.h"
 #include <QByteArray>
@@ -110,14 +111,14 @@ enum class LocalInputPhase
   Active
 };
 // Wire capabilities describe code support, never provider readiness/authority.
-// Every v7 endpoint supports keyboard leases; full-input and mapped delivery
+// Every v9 endpoint supports keyboard leases; full-input and mapped delivery
 // are separately negotiated. Mapped delivery additionally requires full input.
 inline constexpr std::uint64_t localInputKeyboardCapability = 1, localInputFullCapability = 2,
                                localInputMappedCapability = 4, localInputWindowPointerCapability = 8,
-                               localInputWindowDragCapability = 16;
+                               localInputWindowDragCapability = 16, localInputWindowMoveCapability = 32;
 inline constexpr std::uint64_t localInputKnownCapabilities =
     localInputKeyboardCapability | localInputFullCapability | localInputMappedCapability |
-    localInputWindowPointerCapability | localInputWindowDragCapability;
+    localInputWindowPointerCapability | localInputWindowDragCapability | localInputWindowMoveCapability;
 
 struct LocalInputLimits
 {
@@ -143,7 +144,7 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 7;
+  static constexpr std::uint16_t version = 9;
   static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 320, maxQueueBytes = 16 * 1024;
   static constexpr qsizetype offerPayloadBytes = 128, leasePayloadBytes = 192, maxOriginalPayloadBytes = 244;
   static constexpr qsizetype mappedPointBytes = 40, maxMappedOriginalPayloadBytes = 284;
@@ -164,6 +165,9 @@ public:
   bool sendWindowPointer(const LocalWindowPointer &pointer);
   bool supportsWindowDrag() const;
   bool sendWindowDrag(const LocalWindowDrag &drag);
+  bool sendWindowDragStatus(const LocalWindowDragStatus &status);
+  bool supportsWindowMove() const;
+  bool sendWindowMove(const LocalWindowMove &);
   // Owner Qt thread only; wrong-thread, stale and unauthenticated queries deny.
   // Does not invoke callbacks or refresh the authenticated-read deadline.
   std::optional<LocalInputAuthenticatedIdentity> authenticatedIdentity() const;
@@ -219,6 +223,8 @@ public:
   std::function<void()> onAuthenticated;
   std::function<void(const LocalWindowPointer &)> onWindowPointer;
   std::function<void(const LocalWindowDrag &)> onWindowDrag;
+  std::function<void(const LocalWindowDragStatus &)> onWindowDragStatus;
+  std::function<void(const LocalWindowMove &)> onWindowMove;
   std::function<void(const LocalInputOffer &)> onOffer;
   std::function<void(const LocalInputLease &)> onCandidate, onQuiesced;
   std::function<void(const LocalInputLease &, const LocalInputTarget &)> onInputTarget;
@@ -267,6 +273,7 @@ private:
   std::optional<LocalInputLease> m_lease, m_lastRevoked;
   LocalWindowPointerGate m_windowPointerGate;
   LocalWindowDragGate m_windowDragGate;
+  LocalWindowMoveGate m_windowMoveGate;
   QElapsedTimer m_lastRead, m_handshakeAge;
   QTimer m_timer;
 };

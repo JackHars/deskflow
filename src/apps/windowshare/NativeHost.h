@@ -47,11 +47,17 @@ public:
   // press, titlebar eligibility and configured edge. These calls never post a
   // button event. Ready from the network can only acknowledge the preview;
   // the exact local release is additionally required before source mutation.
-  // observeWindowPointer never calls releaseWindowDrag: an ordinary observed
-  // up cancels preparation. Drop requires an explicit native cutover owner.
+  // observeWindowPointer retains an exact real up without committing. Drop
+  // additionally requires the coordinator's explicit release and final paint.
   std::optional<Owner> prepareWindowDrag(const WindowDragBinding &binding);
   bool releaseWindowDrag(const WindowDragBinding &binding, const WindowDragRelease &release);
   void cancelWindowDrag(const WindowDragBinding &binding);
+  // Return preparation is read-only. The exact retained remote source and
+  // unchanged physical layout determine the candidate frame. The preview
+  // witness accepts only a live content view owned by this Cocoa process.
+  std::optional<Rect> windowReturnFrame(Owner, std::uint64_t geometry, Point pointer, Point anchor) const;
+  static bool windowReturnPreviewCurrent(std::uintptr_t contentView, Rect frame);
+  bool returnWindowDrag(Owner, std::uint64_t geometry, Rect frame);
   void ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry);
   void input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event);
   void resizeWindow(std::uint64_t session, std::uint64_t epoch, int width, int height, std::uint64_t request = 0);

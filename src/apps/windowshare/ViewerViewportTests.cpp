@@ -424,6 +424,38 @@ void windowDragChannel()
   send(late, GnomeWindowDragReply{substituted, true, {}, 0});
   check(waitUntil([&] { return !late.endpoint->live(); }), "Changed native placement binding was accepted");
 
+  // The 16-window bound is concurrent, not a lifetime limit. Retired native
+  // events must neither revive a watcher nor poison the next window's channel.
+  Pair repeated;
+  unsigned repeatedReplies = 0, retiredEvents = 0;
+  repeated.endpoint->onWindowDrag = [&](const auto &) { ++retiredEvents; };
+  for (unsigned n = 0; n != 24; ++n) {
+    request.association = QStringLiteral("org.deskflow.window.") + QString::number(24 - n, 16).rightJustified(64, '0');
+    for (auto action : {GnomeWindowDragAction::Watch, GnomeWindowDragAction::Unwatch}) {
+      request.action = action;
+      check(
+          repeated.endpoint->requestWindowDrag(request, [&](const auto &) { ++repeatedReplies; }),
+          "Retired native windows exhausted the live watcher bound"
+      );
+      const auto current = take(repeated, n * 2 + (action == GnomeWindowDragAction::Watch ? 1 : 2));
+      if (action == GnomeWindowDragAction::Unwatch) {
+        auto stale = event;
+        stale.association = request.association;
+        stale.phase = GnomeWindowDragEvent::Phase::Begin;
+        stale.sequence = 1;
+        stale.buttonReleased = false;
+        send(repeated, stale);
+      }
+      send(repeated, GnomeWindowDragReply{current, action == GnomeWindowDragAction::Watch || !(n % 2), {}, 0});
+      const auto expected = n * 2 + (action == GnomeWindowDragAction::Watch ? 1 : 2);
+      check(
+          waitUntil([&] { return repeatedReplies == expected; }) && repeated.endpoint->live(),
+          "Native watch retirement failed after success or a vanished window"
+      );
+    }
+  }
+  check(retiredEvents == 0, "Retired native events reached a new drag");
+
   Pair destroyed;
   check(
       destroyed.endpoint->requestWindowDrag(request, [&](const auto &) { destroyed.endpoint.reset(); }),

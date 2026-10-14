@@ -167,6 +167,8 @@ void ViewerViewportEndpoint::close()
   m_dragPending.clear();
   m_dragRetired.clear();
   m_dragWatches.clear();
+  m_dragRetiredWatches.clear();
+  m_dragRetiredWatchOrder.clear();
   m_preparationPending.reset();
   m_preparation.reset();
   m_queueWitness.cancel();
@@ -217,12 +219,31 @@ bool ViewerViewportEndpoint::requestWindowDrag(
   for (const auto &[id, pending] : m_dragPending)
     if (pending.binding.association == request.association)
       return false;
-  if (!m_dragWatches.contains(request.association) && m_dragWatches.size() >= 16)
-    return false;
+  if (request.action == GnomeWindowDragAction::Watch && !m_dragWatches.contains(request.association)) {
+    const auto pendingWatches = std::count_if(m_dragPending.begin(), m_dragPending.end(), [](const auto &item) {
+      return item.second.binding.action == GnomeWindowDragAction::Watch;
+    });
+    if (m_dragWatches.size() + pendingWatches >= 16)
+      return false;
+  }
   request.request = ++m_dragRequest;
   try {
     const auto object = gnomeWindowDragJson(request);
     m_dragPending.emplace(request.request, DragPending{request, QDeadlineTimer(250), std::move(finished)});
+    if (request.action == GnomeWindowDragAction::Unwatch) {
+      const auto old = m_dragWatches.find(request.association);
+      auto retired = old != m_dragWatches.end() ? old->second : DragWatch{};
+      retired.active = retired.enabled = false;
+      m_dragRetiredWatches[request.association] = retired;
+      std::erase(m_dragRetiredWatchOrder, request.association);
+      m_dragRetiredWatchOrder.push_back(request.association);
+      if (old != m_dragWatches.end())
+        m_dragWatches.erase(old);
+      if (m_dragRetiredWatchOrder.size() > 16) {
+        m_dragRetiredWatches.erase(m_dragRetiredWatchOrder.front());
+        m_dragRetiredWatchOrder.pop_front();
+      }
+    }
     m_dragExpiry.start();
     return sendObject(object);
   } catch (...) {
@@ -257,6 +278,8 @@ void ViewerViewportEndpoint::handleWindowDrag(const QJsonObject &object)
   if (object.value("kind") == QJsonValue("event")) {
     const auto event = parseGnomeWindowDragEvent(object);
     const auto found = m_dragWatches.find(event.association);
+    if (found == m_dragWatches.end() && m_dragRetiredWatches.contains(event.association))
+      return;
     if (found == m_dragWatches.end())
       throw std::runtime_error("Unrequested native window drag observation");
     auto &watch = found->second;
@@ -296,11 +319,13 @@ void ViewerViewportEndpoint::handleWindowDrag(const QJsonObject &object)
   if (pending.deadline.hasExpired())
     result.ok = false;
   if (result.ok) {
-    if (reply.binding.action == GnomeWindowDragAction::Watch)
-      m_dragWatches[reply.binding.association].enabled = true;
-    else if (reply.binding.action == GnomeWindowDragAction::Unwatch) {
+    if (reply.binding.action == GnomeWindowDragAction::Watch) {
+      auto retired = m_dragRetiredWatches.extract(reply.binding.association);
+      std::erase(m_dragRetiredWatchOrder, reply.binding.association);
       auto &watch = m_dragWatches[reply.binding.association];
-      watch.enabled = watch.active = false;
+      if (!retired.empty())
+        watch = retired.mapped();
+      watch.enabled = true;
     }
   }
   pending.finished(result);

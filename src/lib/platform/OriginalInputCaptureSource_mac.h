@@ -42,6 +42,10 @@ public:
   {
     return m_dragMotion;
   }
+  std::shared_ptr<const std::atomic<std::uint64_t>> capturePosition() const noexcept
+  {
+    return m_capturePosition;
+  }
   // Producer only, immediately after beginCapture for that same event.
   bool suppressWindowDragMotion() const noexcept
   {
@@ -76,6 +80,7 @@ private:
     Stopped
   };
   OriginalInputStream m_stream;
+  std::shared_ptr<std::atomic<std::uint64_t>> m_capturePosition = std::make_shared<std::atomic<std::uint64_t>>(0);
   WindowDragMotionGate m_dragMotion{m_stream.epoch().id()};
   bool m_suppressMotion = false;
   std::atomic<State> m_state{State::Ready};
@@ -96,6 +101,7 @@ private:
     OriginalInputTranslation translation;
     OriginalInputTransitionEvidence transition;
     std::optional<OriginalPointerObservation> pointer;
+    bool windowDragMotionHeld = false;
   };
   std::array<Completed, OriginalInputStream::capacity> m_completed;
   std::atomic<std::uint64_t> m_completedWritten{0}, m_completedRead{0};

@@ -40,6 +40,7 @@ public:
   // join (or denial); it neither suppresses legacy input nor grants delivery.
   // It may stop/destroy the session synchronously.
   std::function<void(const OriginalInputRouted &)> onRoutedInput;
+  std::function<void(const OriginalInputCaptured &)> onCapturedInput;
   std::function<void(const OriginalPointerJoin::Match &)> onPointerWindow;
   // Exact original press plus configured edge, or null when withdrawn. A
   // callback must recheck candidate.live(); this does not switch computers.

@@ -678,20 +678,30 @@ void heldWindowMotion()
   CGEventSetType(event.event, kCGEventLeftMouseDragged);
   const auto motion = captureCompleted(source, event, 0);
   check(source.suppressWindowDragMotion(), "admitted movement is withheld from native dispatch");
-  check(std::get<OriginalInputMotion>(motion.input.record.payload).dx == -7 &&
-            std::get<OriginalInputMotion>(motion.input.record.payload).dy == 12 &&
-            motion.translation.parts == 0 && motion.pointer && motion.pointer->matches(motion.input.record),
-        "sole consumer retains original deltas and event-time metadata for untranslated movement");
+  check(
+      std::get<OriginalInputMotion>(motion.input.record.payload).dx == -7 &&
+          std::get<OriginalInputMotion>(motion.input.record.payload).dy == 12 && motion.translation.parts == 0 &&
+          motion.windowDragMotionHeld && motion.pointer && motion.pointer->matches(motion.input.record),
+      "sole consumer retains original deltas and event-time metadata for untranslated movement"
+  );
   event.button(0, false);
   CGEventSetIntegerValueField(event.event, kCGMouseEventClickState, 0);
   const auto release = captureCompleted(source, event);
-  check(!source.suppressWindowDragMotion() && release.translation.parts == 1 &&
-            std::get<OriginalInputButton>(release.input.record.payload).clickCount == 0,
-        "the original zero-click up still passes through legacy/native dispatch once");
-  check(!source.windowDragMotionGate().active(press.translation.stamp) &&
-            !source.windowDragMotionGate().arm(press.translation.stamp),
-        "released motion hold cannot be revived");
+  check(
+      !source.suppressWindowDragMotion() && !release.windowDragMotionHeld && release.translation.parts == 1 &&
+          std::get<OriginalInputButton>(release.input.record.payload).clickCount == 0,
+      "the original zero-click up still passes through legacy/native dispatch once"
+  );
+  check(
+      !source.windowDragMotionGate().active(press.translation.stamp) &&
+          !source.windowDragMotionGate().arm(press.translation.stamp),
+      "released motion hold cannot be revived"
+  );
   check(!source.popCaptured(), "no second capture consumer or duplicate release");
+  check(
+      source.capturePosition()->load() == release.input.record.sequence,
+      "producer position fences a delayed cursor transfer"
+  );
   source.stop();
 }
 } // namespace

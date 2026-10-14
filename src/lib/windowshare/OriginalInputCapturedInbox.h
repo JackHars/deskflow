@@ -47,6 +47,10 @@ public:
   {
     return m_server.load(std::memory_order_acquire) != 0;
   }
+  OriginalInputEpoch epoch() const noexcept
+  {
+    return m_epoch;
+  }
   bool publish(const OriginalInputCaptured &captured) noexcept
   {
     // Session drains normally before Server registration; those records must

@@ -95,10 +95,12 @@ public:
       return false;
     }
     const auto press = m_press.load(std::memory_order_acquire);
+    auto requested = m_requested.load(std::memory_order_acquire);
     if (!active({m_epoch, press, 0}, now)) {
       // Preserve an unarmed press for later preview admission. An expired
       // request is retired, while a later heartbeat cannot rearm it.
-      cancel();
+      if (requested && ticks(now) >= m_deadline.load(std::memory_order_acquire))
+        m_requested.compare_exchange_strong(requested, 0, std::memory_order_acq_rel);
       return false;
     }
     m_lastSuppressed.store(record.sequence, std::memory_order_release);

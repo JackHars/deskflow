@@ -16,7 +16,7 @@ source PID/state.
 `OriginalPointerObservation` is local metadata beside the input record, bound
 to its epoch, sequence and source timestamp. The existing completed-capture
 queue and Session/Server copy conduit carry it; there is no additional raw
-consumer. Private v7 retains v6's joined window observations separately from input
+consumer. Private v8 retains v6's joined window observations separately from input
 leases; the network input protocol is unchanged. Values are captured before legacy translation
 can mutate the CGEvent. Checkpoints and keys cannot inherit pointer metadata.
 

@@ -68,6 +68,7 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
       m_openTransition = classifyTransition(*result.record);
       m_openPointer = result.pointer;
       ++m_sequence;
+      m_capturePosition->store(m_sequence, std::memory_order_release);
       m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
       return m_openStamp;
     }
@@ -155,7 +156,9 @@ void OriginalInputCaptureSource::completeCapture(OriginalInputTranslation transl
     return;
   }
   InputEvidenceMutation evidence(InputEvidenceQueue::Translation, this, 1, 0);
-  m_completed[written % m_completed.size()] = {translation, m_openTransition, m_openPointer};
+  m_completed[written % m_completed.size()] = {
+      translation, m_openTransition, m_openPointer, m_suppressMotion && !translation.uncertain && translation.parts == 0
+  };
   m_openStamp = {};
   m_openTransition = {};
   m_openPointer.reset();
@@ -168,6 +171,8 @@ void OriginalInputCaptureSource::capture(CGEventType type, CGEventRef event) noe
 
 bool OriginalInputCaptureSource::checkpoint(std::uint64_t timestampNs, std::uint64_t flags) noexcept
 {
+  m_suppressMotion = false;
+  m_dragMotion.cancel();
   if (m_state.load(std::memory_order_acquire) != State::Running || !m_stream.epoch().live())
     return false;
   if (m_openStamp) {
@@ -178,9 +183,14 @@ bool OriginalInputCaptureSource::checkpoint(std::uint64_t timestampNs, std::uint
     m_stream.revoke(OriginalInputRevocation::Exhausted);
     return false;
   }
-  if (!m_stream.push({m_stream.epoch().id(), m_sequence + 1, timestampNs, flags, OriginalInputBoundary::Checkpoint}))
+  const OriginalInputRecord checkpoint{
+      m_stream.epoch().id(), m_sequence + 1, timestampNs, flags, OriginalInputBoundary::Checkpoint
+  };
+  if (!m_stream.push(checkpoint))
     return false;
+  (void)m_dragMotion.observe(checkpoint);
   ++m_sequence;
+  m_capturePosition->store(m_sequence, std::memory_order_release);
   m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
   completeCapture({m_openStamp, 0, false});
   return m_stream.epoch().live();
@@ -256,7 +266,9 @@ std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() n
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return {};
   }
-  return OriginalInputCaptured{*input, translation, completed.transition, completed.pointer};
+  return OriginalInputCaptured{
+      *input, translation, completed.transition, completed.pointer, completed.windowDragMotionHeld
+  };
 }
 std::optional<OriginalInputDelivery> OriginalInputCaptureSource::pop() noexcept
 {

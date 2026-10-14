@@ -14,6 +14,7 @@
 #include <QMoveEvent>
 #include <QTextStream>
 #include <QWheelEvent>
+#include <QWindow>
 #include <cmath>
 #include <stdexcept>
 #include <vector>
@@ -288,11 +289,23 @@ void testProvisionalWindowDrag()
       recording.count(MessageType::Input) == 0 && viewer.provisionalWindowDrag(),
       "Painting and synthetic focus do not grant provisional preview input"
   );
+  struct VisibilityObserver final : QObject
+  {
+    bool hidden = false;
+    bool eventFilter(QObject *, QEvent *event) override
+    {
+      hidden |= event->type() == QEvent::Hide;
+      return false;
+    }
+  } visibility;
+  viewer.installEventFilter(&visibility);
+  const QPointer<QWindow> native = viewer.windowHandle();
   viewer.committed();
   check(
       !viewer.provisionalWindowDrag() && !viewer.testAttribute(Qt::WA_ShowWithoutActivating) &&
           !viewer.windowFlags().testFlag(Qt::WindowDoesNotAcceptFocus) && viewer.isVisible() &&
-          viewer.focusPolicy() == Qt::StrongFocus,
+          viewer.focusPolicy() == Qt::StrongFocus && native && native == viewer.windowHandle() &&
+          !native->flags().testFlag(Qt::WindowDoesNotAcceptFocus) && !visibility.hidden,
       "Explicit committed acknowledgement ends preview focus policy"
   );
   for (const auto &replacement : {QJsonValue(18), QJsonValue(0), QJsonValue("17"), QJsonValue(-1), QJsonValue(0.5)}) {

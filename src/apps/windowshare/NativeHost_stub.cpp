@@ -52,6 +52,18 @@ bool NativeHost::releaseWindowDrag(const WindowDragBinding &, const WindowDragRe
 {
   return false;
 }
+std::optional<Rect> NativeHost::windowReturnFrame(Owner, std::uint64_t, Point, Point) const
+{
+  return {};
+}
+bool NativeHost::windowReturnPreviewCurrent(std::uintptr_t, Rect)
+{
+  return false;
+}
+bool NativeHost::returnWindowDrag(Owner, std::uint64_t, Rect)
+{
+  return false;
+}
 void NativeHost::cancelWindowDrag(const WindowDragBinding &)
 {
 }

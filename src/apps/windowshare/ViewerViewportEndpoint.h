@@ -11,6 +11,7 @@
 #include <QPointF>
 #include <QSocketNotifier>
 #include <QTimer>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -156,6 +157,8 @@ private:
   std::map<std::uint64_t, DragPending> m_dragPending;
   std::map<std::uint64_t, GnomeWindowDragRequest> m_dragRetired;
   std::map<QString, DragWatch> m_dragWatches;
+  std::map<QString, DragWatch> m_dragRetiredWatches;
+  std::deque<QString> m_dragRetiredWatchOrder;
   QTimer m_dragExpiry;
 };
 } // namespace deskflow::windowshare

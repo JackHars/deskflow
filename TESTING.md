@@ -6,6 +6,91 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Bidirectional P5 code is integrated; physical acceptance is deferred:**
+  private v9 carries native move offers independently from original-input
+  leases. Return joins the exact remote Core press/edge/dispatch to the owned
+  GNOME grab and requires both real release observations before journaled
+  native restoration and ordinary cursor transfer. The input-transparent Mac
+  preview requires Qt paint plus an exact owned Cocoa/WindowServer witness.
+- **Current Mac return regressions pass:** `p5-return-order-tests.json` has
+  36 child-process scenarios, including zero-annotation remote input, ordered
+  metadata publication, both release orders, absent native release, native
+  cancel, wrong route, newer input and failed transfer. The wire/watcher/
+  endpoint suites pass in `p5-return-wire-watcher-tests.json` (15 malformed
+  native-offer variants, role/capability/replay/destructive callbacks, repeated
+  watcher retirement). `p5-return-server-tests.json` passes all 50 cases,
+  exercising real up before transfer in both directions and producer/layout/
+  TLS/capture loss. The feature-disabled Server passes five cases in
+  `p5-return-server-off-tests.json`; both production build modes pass.
+- **The Qt return preview failure cases are reproducible:**
+  `p5-return-bridge-tests.json` exposed pending return state after preview
+  destruction. `p5-return-bridge-tests-2.json` and the scoped crash backtrace
+  exposed QWidget emitting destroyed after Viewer members had been destroyed
+  but before QPointer cleared. Retiring that pointer before cancellation fixes
+  both. `p5-return-bridge-tests-3.json` passes normal paint/native-witness/drop,
+  denied restoration, native cancel, TLS loss, unavailable source and destroyed
+  preview with real TLS and offscreen Qt, explicit fake native witnesses.
+- **First Ubuntu return run:** `p5-linux-return-build/result.json` builds the
+  full app and passes seven suites; Bridge reproduces the same cleanup failure.
+  It is preserved as a failed run, not counted as a pass.
+- **Corrected Ubuntu verification passes:**
+  `p5-linux-return-final/result.json` records the full application build, all
+  eight affected suites (48.81 s), the actual headless GNOME production-Viewer
+  continuity check, and production Core/Server builds and tests with the
+  feature both enabled and disabled. Its frozen archive is
+  `629fcca6781af1ed3b861cdb79666575dbdaa889315014e1f10f2243f14d261d`.
+  The subsequent bounded watcher-retirement ordering change passes the full
+  app rebuild and Bridge/viewport suites (13.63 s) in
+  `p5-linux-watch-retirement/result.json`, archive
+  `cc40c2e4832c0d3ccdc8e3ee4feff7c526ea5e70c976da93feb103c2551c94a0`.
+  Signed Mac equivalents pass in `p5-return-retired-watches-tests.json`.
+  Both Linux runs use offline disposable image `65f389a94c05` on home Ubuntu,
+  with no desktop sockets/devices or network, and remove their temporary
+  directories after collecting source/binary hashes and logs.
+- **Current Mac ASan/UBSan checks pass:**
+  `p5-return-sanitize-tests.json` records four separately signed offscreen
+  suites: Bridge (including preview destruction), all 36 coordinator cases,
+  private IPC and viewport endpoint. Both sanitizers halt on error; leak
+  detection is disabled. Native return witnesses are fakes in these tests.
+  The initial default-SDK build could not link Qt's AGL dependency;
+  `p5-return-sanitize-sdk-build.log` records the successful build with the
+  production MacOSX15.5 SDK. The original failed build log is retained.
+
+- **Outbound P5 real-release/drop coordination passes automated checks:**
+  private v8 adds exact Drop/Finish and Host status messages. Core joins the
+  original real release, annotated identity and Server Local dispatch; a raw
+  producer fence cancels on newer input. Native holding relocation precedes
+  ordinary cursor transfer. No synthetic button is posted. Signed Mac tests:
+  `p5-drop-coordinator-tests-3.json` (29 scenarios), `p5-drop-tests-2.json`
+  (IPC/Bridge; its older coordinator failure is superseded),
+  `p5-drop-server-tests.json` (50 cases), `p5-drop-native-tests.json`,
+  `p5-drop-gate-tests.json` and `p5-drop-surface-viewer-tests.json` all pass.
+  `p5-drop-final-build.log` and `p5-drop-off-build.log` record enabled and
+  disabled production Core builds. The coordinator helper initially consumed
+  its transfer request twice; retaining its first read fixes the test.
+- **Ubuntu full application and six affected suites pass:**
+  `p5-linux-drop-build/result.json` records configure/build success and passing
+  private IPC, drag coordinator, preview, viewport, Viewer and Bridge tests
+  (41.11 s) in offline image `65f389a94c05`. Source and executable hashes are
+  retained; only the owned temporary source/build directory was removed.
+- **Actual GNOME 50 committed-window continuity passes:**
+  `p5-native-drag-surface-1/result.json` exposed QWidget flag changes replacing
+  the placed native window and moving it from (160,90) to (319,116).
+  The fix updates the existing QWindow hint without QWidget reparenting.
+  `p5-native-drag-surface-2/result.json` verifies identical association, Qt
+  surface incarnation/resource, native window/surface tokens and exact
+  (160,90,642,520) frame before/after commit. The resulting native window can
+  be watched for ordinary titlebar grabs. The tracked runner is
+  `deploy/windowshare/gnome-window-drag-tests.py`, with the actual production
+  Viewer fixture `windowshare-gnome-drag-surface-fixture`. Use only the private
+  GNOME container; this test does not route input on the real desktop.
+- **Physical testing remains deferred:** the latest user reply is “Keep
+  building; test later.” No physical movement-hold or bidirectional edge run
+  occurred. H07 remains **NOT_RUN**; bidirectional coordination is now implemented.
+
+Earlier entries below describe earlier checkpoints and are superseded where
+these newer results cover the same path.
+
 - **P5 motion/placement implementation, physical test deferred by the user:**
   movement-only capture gating preserves every original button transition and
   retains raw deltas for the sole Session consumer. Signed Mac gate and capture
@@ -1475,7 +1560,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |
 | H05 | Use both physical monitors with mixed compositor scaling, negative coordinates, different relative layouts, resize and output disconnect. Validate both destinations, edges, letterboxing, occlusion and correct source points. If only one monitor is connected, leave two-monitor cases unrun. | NOT_RUN |
 | H06 | Export multiple windows from same/different apps; hold sources on the helper display, overlap remote/local windows, switch focus, resize/minimize/close viewers. Verify continued source capture, exact input owner and per-window restoration after helper loss. | NOT_RUN |
-| H07 | Drag a real source window across a configured edge, continue/release the drag on Ubuntu, then drag back. Verify first-frame transfer, source location/focus, single button-up ownership and rollback for canceled drag/disconnect/layout change at each transfer phase. | NOT_RUN |
+| H07 | Follow [h07-edge-drag.md](deploy/windowshare/h07-edge-drag.md). Drag a real source window across a configured edge, continue/release the drag on Ubuntu, then drag back. Verify first-frame transfer, source location/focus, single button-up ownership and rollback for canceled drag/disconnect/layout change at each transfer phase. | NOT_RUN |
 | H08 | Test native dialogs, modal child windows, popup/context menus, browser and Electron app. Check intended window association, stacking, focus and input targeting; no unrelated application receives an event. Record app/OS versions. | NOT_RUN |
 | H09 | Verify copy/paste directions and focus policy; modifiers, shortcuts, key repeat, Unicode/composition and both scroll axes/momentum. Check clipboard feedback and unsupported IME behavior. | NOT_RUN |
 | H10 | Terminate only recorded owned experimental processes at defined host/core/viewer/helper stages; test connection loss and sleep/wake. Confirm automatic/journal recovery, no orphan display/process, no stuck input and no changes to ordinary Deskflow. | NOT_RUN |

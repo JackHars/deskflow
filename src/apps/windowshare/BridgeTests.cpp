@@ -36,6 +36,9 @@ std::function<void()> nativeQuiesceObserver;
 std::function<void()> nativeCandidateObserver;
 std::function<void()> nativeConstructObserver, nativeReleaseObserver, nativeRestoreObserver;
 bool nativeResumeSucceeds = true;
+bool nativeReturnAvailable = false, nativeReturnWitness = false, nativeReturnSucceeds = true;
+unsigned nativeReturnCommits = 0;
+std::optional<Rect> nativeReturnDestination;
 struct ClipboardFixtureData
 {
   QString text;
@@ -101,6 +104,31 @@ std::optional<Owner> NativeHost::prepareWindowDrag(const WindowDragBinding &)
 {
   ++nativeDragPreparations;
   return {};
+}
+bool NativeHost::releaseWindowDrag(const WindowDragBinding &, const WindowDragRelease &)
+{
+  return false;
+}
+std::optional<Rect> NativeHost::windowReturnFrame(Owner owner, std::uint64_t geometry, Point point, Point anchor) const
+{
+  if (!nativeReturnAvailable || owner != Owner{91, 2} || geometry != 1)
+    return {};
+  return Rect{std::round(point.x - anchor.x * 640), std::round(point.y - anchor.y * 480), 640, 480};
+}
+bool NativeHost::windowReturnPreviewCurrent(std::uintptr_t, Rect)
+{
+  return nativeReturnWitness;
+}
+bool NativeHost::returnWindowDrag(Owner owner, std::uint64_t geometry, Rect frame)
+{
+  if (!nativeReturnAvailable || owner != Owner{91, 2} || geometry != 1)
+    return false;
+  ++nativeReturnCommits;
+  nativeReturnDestination = frame;
+  const bool result = nativeReturnSucceeds;
+  if (result && onClosed)
+    onClosed(owner.session);
+  return result;
 }
 void NativeHost::cancelWindowDrag(const WindowDragBinding &)
 {
@@ -371,6 +399,24 @@ struct BridgeTestAccess
   static void dragCapable(Bridge &bridge, bool capable)
   {
     bridge.m_windowDragCapable = capable;
+  }
+  static void returnFixture(Bridge &bridge)
+  {
+    bridge.m_windowDragMoveCapable = bridge.m_windowDragMotionCapable = true;
+    bridge.m_hostMetadata[91]["windowId"] = 812;
+    bridge.m_hostMetadata[91]["phase"] = "remote";
+  }
+  static Viewer *returnPreview(Bridge &bridge)
+  {
+    return bridge.m_returnDrag ? bridge.m_returnDrag->preview.data() : nullptr;
+  }
+  static bool hasNativeMove(const Bridge &bridge)
+  {
+    return bridge.m_nativeMoves.contains(91);
+  }
+  static void returnTick(Bridge &bridge, const WindowDragBinding &binding)
+  {
+    bridge.pollWindowReturn(binding);
   }
   static void receive(Bridge &bridge, const Packet &packet)
   {
@@ -1571,6 +1617,144 @@ void windowDragPreparationBinding(const Identity &hostIdentity, const Identity &
       "Disconnected peer cannot reuse a prior drag binding"
   );
 }
+void windowReturnLifecycle(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  // The Qt paint and TLS connection are real; native source/WindowServer
+  // witnesses are explicit fakes. This does not claim physical acceptance.
+  for (unsigned fault = 0; fault != 6; ++fault) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    auto &host = fixture.host;
+    BridgeTestAccess::returnFixture(host);
+    nativeReturnAvailable = true;
+    nativeReturnWitness = false;
+    nativeReturnSucceeds = fault != 1;
+    nativeReturnCommits = 0;
+    nativeReturnDestination.reset();
+    const auto peer = host.authenticatedPeerObservation();
+    check(peer.has_value(), "No authenticated return fixture peer");
+    const WindowDragBinding binding{17,  peer->ticket().incarnation(), 9, 3, 211, 1000, 812,
+                                    516, WindowDragDirection::Return};
+    WindowDragMove observation{
+        1,
+        4,
+        5,
+        {QStringLiteral("org.deskflow.window.") + QString(64, 'a'),
+         7,
+         1,
+         GnomeWindowDragEvent::Phase::Begin,
+         120,
+         40,
+         {20, 28, 640, 480},
+         false}
+    };
+    const auto observe = [&] {
+      check(
+          BridgeTestAccess::channel(fixture.viewer)
+              ->send(MessageType::WindowDrag, windowDragMoveJson(observation), 91, 2),
+          "Could not send native move over authenticated TLS"
+      );
+    };
+    observe();
+    check(waitUntil([&] { return BridgeTestAccess::hasNativeMove(host); }), "No exact native move at Host");
+    LocalWindowDrag command;
+    command.kind = LocalWindowDrag::Kind::Begin;
+    command.returnOffer = 5;
+    command.sequence = 212;
+    command.destinationX = 300;
+    command.destinationY = 200;
+    unsigned ready = 0, committed = 0, cancelled = 0;
+    host.onWindowDragPreview = [&](const auto &value, const auto &reply) {
+      check(value == binding && reply.ok && reply.paint != 0, "Return lacked the exact painted preview");
+      ++ready;
+    };
+    host.onWindowDragCommitted = [&](const auto &value) {
+      check(value == binding, "Return committed another native source");
+      ++committed;
+    };
+    host.onWindowDragCancelled = [&](const auto &value) {
+      check(value == binding, "Return cancelled another native source");
+      ++cancelled;
+    };
+    auto foreign = binding;
+    ++foreign.connection;
+    check(!host.prepareWindowDrag(foreign, command), "Foreign return connection admitted");
+    foreign = binding;
+    ++foreign.window;
+    check(!host.prepareWindowDrag(foreign, command), "Foreign source window admitted");
+    check(host.prepareWindowDrag(binding, command), "Owned native return was not prepared");
+    QPointer<Viewer> preview = BridgeTestAccess::returnPreview(host);
+    check(
+        preview && preview->testAttribute(Qt::WA_ShowWithoutActivating) &&
+            preview->windowFlags().testFlag(Qt::WindowTransparentForInput),
+        "Return preview could steal input"
+    );
+    check(
+        !preview->onSend(MessageType::Input, {{"kind", "button"}, {"down", true}}, 91, 2),
+        "Return preview gained an input sender"
+    );
+    BridgeTestAccess::returnTick(host, binding);
+    check(!ready && !nativeReturnCommits, "Unpainted return was admitted");
+    const auto staleError = preview->onError;
+    BridgeTestAccess::frame(
+        host, 91, 2,
+        QByteArray::fromBase64(
+            "AAAAAWdCwAraEewEQAAAAwBAAAAPI8SJqAAAAAFozg/IAAAAAWWIhDoRigACGPHAAED2OAAIeUnJyddddddddeA="
+        )
+    );
+    check(waitUntil([&] { return preview && preview->firstFramePainted(); }), "Return preview did not paint");
+    BridgeTestAccess::returnTick(host, binding);
+    check(!ready, "Qt paint replaced the native frame witness");
+    nativeReturnWitness = true;
+    check(waitUntil([&] { return ready == 1; }), "Native witnessed return preview was not acknowledged");
+    command.kind = LocalWindowDrag::Kind::Motion;
+    ++command.sequence;
+    command.destinationX += 20;
+    host.moveWindowDrag(binding, command);
+    check(waitUntil([&] { return ready == 2; }), "Moved return preview was not repainted and acknowledged");
+    command.kind = LocalWindowDrag::Kind::Drop;
+    command.releaseSequence = 220;
+    command.releaseTime = 2000;
+    check(host.dropWindowDrag(binding, command, {3, 220, 2000, 812, 516}), "Exact return drop was refused");
+    BridgeTestAccess::returnTick(host, binding);
+    check(!nativeReturnCommits, "Core release alone restored a native source");
+    if (fault == 2) {
+      observation.native.phase = GnomeWindowDragEvent::Phase::Cancel;
+      observe();
+    } else if (fault == 3) {
+      BridgeTestAccess::channel(host)->close("Return disconnect fixture");
+    } else if (fault == 4) {
+      nativeReturnAvailable = false;
+    } else if (fault == 5) {
+      preview->close();
+      QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    } else {
+      observation.native.phase = GnomeWindowDragEvent::Phase::End;
+      observation.native.buttonReleased = true;
+      ++observation.native.sequence;
+      observe();
+    }
+    check(
+        waitUntil([&] { return committed || cancelled || !BridgeTestAccess::returnPreview(host); }),
+        "Return did not finish or cancel"
+    );
+    check(
+        committed == (fault == 0 ? 1u : 0u) && nativeReturnCommits == (fault < 2 ? 1u : 0u),
+        "Return restored a source without all final witnesses"
+    );
+    if (!fault) {
+      check(
+          nativeReturnDestination && nativeReturnDestination->x == 220 && nativeReturnDestination->y == 188,
+          "Return lost the titlebar grip at the final destination"
+      );
+      host.finishWindowDrag(binding);
+    }
+    const auto before = cancelled;
+    staleError("Retired return preview error");
+    check(cancelled == before && !BridgeTestAccess::returnPreview(host), "Retired preview revived a return");
+    nativeReturnAvailable = nativeReturnWitness = false;
+    nativeReturnSucceeds = true;
+  }
+}
 void fullInputLegacyNegotiation(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   for (bool keyboard : {false, true}) {
@@ -2572,6 +2756,7 @@ int main(int argc, char **argv)
     fullInputScopeSubstitution(hostIdentity, viewerIdentity);
     fullInputLegacyNegotiation(hostIdentity, viewerIdentity);
     windowDragPreparationBinding(hostIdentity, viewerIdentity);
+    windowReturnLifecycle(hostIdentity, viewerIdentity);
     keyboardReservation(hostIdentity, viewerIdentity);
     keyboardReservationInvalidation(hostIdentity, viewerIdentity);
     keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);
