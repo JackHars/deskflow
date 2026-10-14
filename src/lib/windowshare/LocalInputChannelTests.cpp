@@ -76,6 +76,27 @@ struct LocalInputChannelTestAccess
   {
     return channel.m_handshake;
   }
+  static QString handshakeDiagnostics(const LocalInputChannel &channel)
+  {
+    return QStringLiteral(
+               "stage=%1 authenticated=%2 closed=%3 handshakeElapsedMs=%4 handshakeBudgetMs=%5 "
+               "lastReadElapsedMs=%6 heartbeatBudgetMs=%7 socketState=%8 sent=%9 received=%10 "
+               "socketBufferedBytes=%11 frameBufferedBytes=%12 outputBufferedBytes=%13"
+    )
+        .arg(channel.m_handshake)
+        .arg(channel.m_authenticated)
+        .arg(channel.m_closed)
+        .arg(channel.m_handshakeAge.elapsed())
+        .arg(channel.m_limits.handshakeMs)
+        .arg(channel.m_lastRead.elapsed())
+        .arg(channel.m_limits.timeoutMs)
+        .arg(int(channel.m_socket.state()))
+        .arg(channel.m_sent)
+        .arg(channel.m_received)
+        .arg(channel.m_socket.bytesAvailable())
+        .arg(channel.m_incoming.size())
+        .arg(channel.m_socket.bytesToWrite());
+  }
   static void read(LocalInputChannel &channel)
   {
     channel.read();
@@ -287,6 +308,8 @@ struct Fixture
   int revoked = 0;
   QString reason;
   LocalInputLease expectedLease = fixtureLease();
+  bool identityFailureDiagnostics = false;
+  qint64 identityWaitElapsedMs = 0;
 
   explicit Fixture(const QString &mode = "passive", LocalInputLimits coreLimits = limits)
   {
@@ -328,6 +351,21 @@ struct Fixture
   }
   ~Fixture()
   {
+    const auto childStateBeforeCleanup = child.state();
+    bool cleanupKillRequested = false;
+    if (identityFailureDiagnostics) {
+      QTextStream(stderr) << "Identity authentication failure: waitElapsedMs=" << identityWaitElapsedMs
+                          << " waitBudgetMs=4000 ready=" << ready << " closed=" << closed
+                          << " closeReason=" << reason.left(4096) << '\n';
+      if (core)
+        QTextStream(stderr) << "Core channel: " << LocalInputChannelTestAccess::handshakeDiagnostics(*core) << '\n';
+      QTextStream(stderr) << "Child before cleanup: pid=" << child.processId()
+                          << " state=" << int(childStateBeforeCleanup) << " error=" << int(child.error())
+                          << " errorString=" << child.errorString().left(4096);
+      if (childStateBeforeCleanup == QProcess::NotRunning)
+        QTextStream(stderr) << " exitStatus=" << int(child.exitStatus()) << " exitCode=" << child.exitCode();
+      QTextStream(stderr) << '\n' << Qt::flush;
+    }
     if (core) {
       core->onRevoked = {};
       core->onClosed = {};
@@ -335,9 +373,38 @@ struct Fixture
       core.reset();
     }
     if (child.state() != QProcess::NotRunning) {
+      cleanupKillRequested = true;
       child.kill();
       child.waitForFinished(2000);
     }
+    if (identityFailureDiagnostics) {
+      // These reads never wait. Preserve output after the existing cleanup
+      // wait too, without extending its deadline or confusing our kill with
+      // an independently observed child crash.
+      QTextStream(stderr) << "Child after existing cleanup: state=" << int(child.state())
+                          << " cleanupKillRequested=" << cleanupKillRequested;
+      if (child.state() == QProcess::NotRunning)
+        QTextStream(stderr) << " exitStatus=" << int(child.exitStatus()) << " exitCode=" << child.exitCode();
+      QTextStream(stderr) << '\n';
+      for (const auto channel : {QProcess::StandardOutput, QProcess::StandardError}) {
+        child.setReadChannel(channel);
+        const auto available = child.bytesAvailable();
+        const auto output = child.read(16 * 1024);
+        QTextStream(stderr) << (channel == QProcess::StandardOutput ? "Child stdout" : "Child stderr")
+                            << " (available=" << available << " retained=" << output.size() << "):\n"
+                            << QString::fromUtf8(output) << '\n'
+                            << Qt::flush;
+      }
+    }
+  }
+  void requireAuthenticatedIdentity(const char *message)
+  {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    const bool authenticated = until([&] { return ready; });
+    identityWaitElapsedMs = elapsed.elapsed();
+    identityFailureDiagnostics = !authenticated;
+    check(authenticated, message);
   }
   void establish()
   {
@@ -2214,7 +2281,7 @@ void authenticatedIdentityValues()
 {
   Fixture fixture;
   check(!fixture.core->authenticatedIdentity(), "Pre-handshake channel exposed an authenticated identity");
-  check(until([&] { return fixture.ready; }), "Identity fixture did not authenticate");
+  fixture.requireAuthenticatedIdentity("Identity fixture did not authenticate");
   const auto identity = fixture.core->authenticatedIdentity();
   check(
       identity && identity->role == LocalInputRole::Core && identity->self == currentLocalInputProcess() &&
@@ -2243,7 +2310,7 @@ void authenticatedIdentityValues()
       "Closed channel retained authenticated identity"
   );
   Fixture replacement;
-  check(until([&] { return replacement.ready; }), "Replacement identity fixture did not authenticate");
+  replacement.requireAuthenticatedIdentity("Replacement identity fixture did not authenticate");
   const auto next = replacement.core->authenticatedIdentity();
   check(
       next && next->coreIncarnation != identity->coreIncarnation && next->hostIncarnation != identity->hostIncarnation,
