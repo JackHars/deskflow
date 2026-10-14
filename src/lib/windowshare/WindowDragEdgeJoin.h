@@ -17,6 +17,10 @@ struct WindowDragEdgeCandidate
   {
     return boundary.live() && press.live() && held && held->load(std::memory_order_acquire);
   }
+  bool current() const noexcept
+  {
+    return boundary.current() && press.live() && held && held->load(std::memory_order_acquire);
+  }
 };
 
 // Runs alongside the sole raw consumer. An edge cannot borrow a different
@@ -44,6 +48,12 @@ public:
   {
     const auto &record = captured.input.record;
     if (!captured.input.live()) {
+      revoke();
+      return;
+    }
+    if (const auto *key = std::get_if<OriginalInputKey>(&record.payload);
+        key && key->code == originalKey::escape && key->kind == OriginalKeyKind::Down) {
+      // Cancellation cannot wait for a stalled Server worker to dispatch Esc.
       revoke();
       return;
     }

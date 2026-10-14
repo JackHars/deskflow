@@ -65,7 +65,7 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     "${WS_ROOT}/LocalInputChannel.cpp" "${WS_ROOT}/ViewportLease.cpp" "${WS_ROOT}/LocalInputModulePolicy.cpp"
     "${WS_ROOT}/LocalInputLibraryConstraint.cpp" "${WS_ROOT}/LocalInputCodeAdmission.cpp"
     "${WS_ROOT}/LocalInputBootstrap.cpp" "${WS_ROOT}/LocalInputCompanion.cpp"
-    "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp"
+    "${WS_ROOT}/LocalInputSession.cpp" "${WS_ROOT}/LocalInputPreflight.cpp" "${WS_ROOT}/LocalWindowDragCoordinator.cpp"
     "${WS_ROOT}/OriginalInputCoordinator.cpp" "${WS_ROOT}/InputEvidenceRuntime.cpp")
   target_compile_features(windowshare-local-input PUBLIC cxx_std_20)
   target_compile_definitions(windowshare-local-input PUBLIC QT_NO_KEYWORDS WINDOWSHARE_LOCAL_INPUT=1)
@@ -141,6 +141,13 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
     set_tests_properties(windowshare-gnome-config PROPERTIES TIMEOUT 10)
   endif()
   if(TARGET windowshare-local-input)
+    add_executable(windowshare-drag-coordinator-tests "${WS_ROOT}/LocalWindowDragCoordinatorTests.cpp")
+    target_link_libraries(windowshare-drag-coordinator-tests PRIVATE windowshare-local-input)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+      target_compile_options(windowshare-drag-coordinator-tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    endif()
+    add_test(NAME windowshare-drag-coordinator COMMAND windowshare-drag-coordinator-tests)
+    set_tests_properties(windowshare-drag-coordinator PROPERTIES TIMEOUT 45)
     add_executable(windowshare-input-evidence-tests "${WS_ROOT}/InputEvidenceTests.cpp")
     target_link_libraries(windowshare-input-evidence-tests PRIVATE windowshare-local-input)
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")

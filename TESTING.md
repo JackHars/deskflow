@@ -6,6 +6,44 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Physical tests deferred at the user's request:** continue implementation and
+  automated verification while the user is away. No readiness question is
+  pending. Native ordinary-titlebar eligibility and H07 remain **NOT_RUN**;
+  physical fixtures must wait until the user returns.
+- **Private drag preparation is connected:** Core/Host **v7**, separately
+  negotiated capability 16 and fixed 208-byte message 20, carries Begin/Motion/
+  Hold/Cancel with the original press, boundary, bounds, both explicit pins and
+  Core connection identity. Host independently binds its current WindowShare
+  connection and code admission before NativeHost eligibility/capture. The
+  production Viewer negotiates `window-drag-preview-v1`, paints without activation
+  or input, and rejects a changed drag identity. Both coordinators retain only
+  one preparation, with 100 ms Hold traffic, 350 ms Host silence timeout and
+  30-second absolute budget. Source/peer/topology/press loss and shutdown revoke
+  it. Raw Escape cancels independently of a delayed Server worker.
+  `NativeHost::observeWindowPointer` now cancels held preparation on real up;
+  it never automatically invokes the explicit drop-release API. Native cutover,
+  production preview placement/drop and GNOME drag-back remain unfinished.
+  See `deploy/windowshare/window-drag-preparation.md`.
+- **Connected preparation validation passes:** **8/8** Mac Core/private suites
+  (`p5-preview-core-tests-2.*`: IPC, coordinator, code admission, preflight,
+  bootstrap, companion, Server and portable edge) and **3/3** Viewer/Bridge/native
+  suites (`p5-preview-ui-final-tests.*`). The coordinator exercises 21 real
+  socketpair child-process scenarios with fake native callbacks. Enabled
+  Core/Host and feature-OFF Core builds pass. On home Ubuntu, disposable offline
+  containers with GCC 15.2 / Qt 6.10.2 pass the IPC and coordinator suites normally
+  and under ASan/UBSan (`p5-preview-ubuntu-final/result.json`, four passing core
+  executions); the current Viewer suite also passes normally and under
+  ASan/UBSan (`p5-preview-viewer-ubuntu/result.json`, two executions). Viewer
+  tests use the offscreen platform; these are not physical Linux acceptance.
+  Container source hashes and owned temporary-directory removal are recorded.
+  The original Viewer fixture destroyed its recorder before the Viewer and
+  corrupted its test log storage; recorder lifetime is corrected. The initial
+  abort, compiler warnings/fixture error and failed runs remain preserved.
+  Some unsigned Mac test launches stalled in kernel wait. Ad-hoc signed owned
+  build test executables pass; signing manifests retain before/after hashes.
+  A terminated unsigned-copy launch was still in kernel wait at the final
+  diagnostic snapshot (`p5-preview-unsigned-launch-diagnostic.json`); do not
+  interpret that attempt as a test pass or blindly reuse its historical PID.
 - **Configured-edge observation and exact press join pass:** the Server now
   publishes the authenticated configured neighbor, screen bounds, mapped point
   and exact original local press through a one-value mailbox. Tests cover all
@@ -24,8 +62,9 @@ SPDX-License-Identifier: MIT
   on home Ubuntu, GCC 15.2, with transferred source hashes verified and owned
   temporary files removed (`p5-edge-ubuntu-2/result.json`). The earlier failed
   fixture/build/routing runs are retained, not reclassified. This is Core
-  observation only: no private drag command, source mutation, input switch,
-  moving preview or GNOME drag-back is enabled by this checkpoint.
+  observation only at that earlier checkpoint; private preparation was connected
+  subsequently as described above. Source mutation, input switch, moving preview
+  and GNOME drag-back are not enabled by the current preparation path.
 - **Same-event HID/annotated identity join passes physically:**
   `owned-titlebar-joined-physical-20261014T174302Z` records the exact owned
   window **10383** on both joined down and up, native event number **516**,
@@ -51,8 +90,8 @@ SPDX-License-Identifier: MIT
   and painted current geometry. Old geometry, changed identity, timeout and
   reentrant cancellation cannot commit; existing source journaling owns rollback.
   The post-release frame query/timer is **not** a native grab-completion receipt.
-  Neither the Core edge candidate nor a GNOME drag-back controller calls this preparation
-  API yet; the ordinary explicit export path is unchanged.
+  The later v7 Core coordinator now calls preparation; the GNOME drag-back
+  controller remains unfinished. The ordinary explicit export path is unchanged.
 - **Current automated validation:** the enabled Mac Core/Host build and ordinary
   feature-OFF Core build pass. **10/10** scoped Mac integration suites pass
   (`p5-integrated-tests.*`); the IPC and transaction sanitizer suites pass
@@ -68,7 +107,7 @@ SPDX-License-Identifier: MIT
 - **Next physical check is prepared, not run:** `--interactive-eligible` uses
   one separately owned AppKit test window and the production read-only native
   titlebar observer. A separate source process keeps AX queries independent of
-  the observer's event loop. Fresh readiness is pending. The default invocation
+  the observer's event loop. Physical execution is deferred. The default invocation
   exits 2 without opening a window or tap. P5/H07 remain **NOT_RUN** for actual
   edge crossing, continuous native drag cutover, destination preview/drop and
   drag-back. See `deploy/windowshare/native-titlebar-probe.md`.

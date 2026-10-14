@@ -271,7 +271,8 @@ OriginalInputRecord decodeOriginal(Reader &in, std::uint64_t epoch)
 bool validCapabilities(std::uint64_t value)
 {
   return (value & localInputKeyboardCapability) && !(value & ~localInputKnownCapabilities) &&
-         (!(value & localInputMappedCapability) || (value & localInputFullCapability));
+         (!(value & localInputMappedCapability) || (value & localInputFullCapability)) &&
+         (!(value & localInputWindowDragCapability) || (value & localInputWindowPointerCapability));
 }
 bool scopeAllows(ForwardingScope scope, const OriginalInputRecord &record)
 {
@@ -438,7 +439,8 @@ enum class LocalInputChannel::Type : std::uint8_t
   InputTarget,
   MappedOriginal,
   Released,
-  WindowPointer
+  WindowPointer,
+  WindowDrag
 };
 
 LocalInputChannel::LocalInputChannel(
@@ -568,6 +570,35 @@ bool LocalInputChannel::sendWindowPointer(const LocalWindowPointer &pointer)
   out.number(std::bit_cast<std::uint64_t>(pointer.x), 8);
   out.number(std::bit_cast<std::uint64_t>(pointer.y), 8);
   return send(Type::WindowPointer, out.data);
+}
+bool LocalInputChannel::supportsWindowDrag() const
+{
+  return supportsWindowPointer() && (m_capabilities & localInputWindowDragCapability);
+}
+bool LocalInputChannel::sendWindowDrag(const LocalWindowDrag &drag)
+{
+  if (QThread::currentThread() != thread() || !fresh() || m_role != LocalInputRole::Core || !supportsWindowDrag() ||
+      !m_windowDragGate.accept(drag))
+    return false;
+  Writer out;
+  out.number(static_cast<unsigned>(drag.kind), 1);
+  out.number(static_cast<unsigned>(drag.side), 1);
+  out.number(0, 6);
+  for (auto value :
+       {drag.drag, drag.server, drag.recipient, drag.boundary, drag.captureEpoch, drag.pressSequence, drag.pressTime,
+        drag.sequence, drag.coreConnection})
+    out.number(value, 8);
+  out.number(drag.window, 4);
+  out.number(0, 4);
+  out.number(static_cast<std::uint64_t>(drag.eventNumber), 8);
+  out.fixed(drag.corePin);
+  out.fixed(drag.windowSharePin);
+  for (const auto screen : {drag.source, drag.destination})
+    for (auto value : {screen.x, screen.y, screen.width, screen.height})
+      out.number(static_cast<std::uint32_t>(value), 4);
+  for (auto value : {drag.sourceX, drag.sourceY, drag.destinationX, drag.destinationY})
+    out.number(static_cast<std::uint32_t>(value), 4);
+  return send(Type::WindowDrag, out.data);
 }
 LocalInputPhase LocalInputChannel::phase() const
 {
@@ -718,9 +749,7 @@ void LocalInputChannel::read()
       Reader header{m_incoming};
       require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
       const auto typeNumber = header.number(1);
-      require(
-          typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::WindowPointer), "Unknown local input message"
-      );
+      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::WindowDrag), "Unknown local input message");
       const auto type = static_cast<Type>(typeNumber);
       require(
           header.number(1) ==
@@ -947,6 +976,33 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     return;
   }
   Reader in{payload};
+  if (type == Type::WindowDrag) {
+    require(m_role == LocalInputRole::Host && supportsWindowDrag(), "Invalid window drag sender or capability");
+    LocalWindowDrag drag;
+    drag.kind = static_cast<LocalWindowDrag::Kind>(in.number(1));
+    drag.side = static_cast<WindowDragEdgeSide>(in.number(1));
+    require(in.number(6) == 0, "Noncanonical window drag flags");
+    for (auto *value :
+         {&drag.drag, &drag.server, &drag.recipient, &drag.boundary, &drag.captureEpoch, &drag.pressSequence,
+          &drag.pressTime, &drag.sequence, &drag.coreConnection})
+      *value = in.number(8);
+    drag.window = static_cast<std::uint32_t>(in.number(4));
+    require(in.number(4) == 0, "Noncanonical window drag window flags");
+    const auto eventNumber = in.number(8);
+    require(eventNumber <= INT64_MAX, "Invalid window drag event number");
+    drag.eventNumber = static_cast<std::int64_t>(eventNumber);
+    drag.corePin = in.fixed<32>();
+    drag.windowSharePin = in.fixed<32>();
+    for (auto *screen : {&drag.source, &drag.destination})
+      for (auto *value : {&screen->x, &screen->y, &screen->width, &screen->height})
+        *value = static_cast<std::int32_t>(in.signed32());
+    for (auto *value : {&drag.sourceX, &drag.sourceY, &drag.destinationX, &drag.destinationY})
+      *value = static_cast<std::int32_t>(in.signed32());
+    in.end();
+    require(m_windowDragGate.accept(drag), "Invalid, replayed or discontinuous window drag");
+    notify(this, onWindowDrag, drag);
+    return;
+  }
   if (type == Type::WindowPointer) {
     require(m_role == LocalInputRole::Host && supportsWindowPointer(), "Invalid window pointer sender or capability");
     LocalWindowPointer pointer;

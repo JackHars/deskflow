@@ -593,6 +593,20 @@ void Viewer::applyMetadata(const QJsonObject &metadata)
     return;
   }
   const bool firstMetadata = m_geometry == 0;
+  const auto dragValue = metadata.value(QStringLiteral("windowDrag"));
+  const auto drag = revision(dragValue);
+  if ((!dragValue.isUndefined() && dragValue != QJsonValue(0) && !drag) || (!firstMetadata && drag != m_windowDrag)) {
+    fail(QStringLiteral("Window drag identity changed during the preview"));
+    return;
+  }
+  if (firstMetadata && drag) {
+    m_windowDrag = drag;
+    // The original press still belongs to the source. Painting a provisional
+    // window must not request activation or deliver keyboard/pointer input.
+    setAttribute(Qt::WA_ShowWithoutActivating);
+    setWindowFlag(Qt::WindowDoesNotAcceptFocus);
+    setFocusPolicy(Qt::NoFocus);
+  }
   if (!firstMetadata && geometry != m_geometry) {
     // The next access unit belongs to a different source geometry. Revoke
     // pending media recovery; a stale decoder completion cannot paint this
@@ -810,7 +824,24 @@ void Viewer::committed()
 {
   if (!m_connected || m_failed || m_returned)
     return;
+  const bool endingPreview = m_windowDrag && !m_committed;
   m_committed = true;
+  if (endingPreview) {
+    const QPointer<Viewer> alive(this);
+    const bool visible = isVisible();
+    setAttribute(Qt::WA_ShowWithoutActivating, false);
+    // Keep QWidget's flags consistent too: a later native-surface recreation
+    // must not silently restore the provisional no-focus flag.
+    setWindowFlag(Qt::WindowDoesNotAcceptFocus, false);
+    if (!alive)
+      return;
+    setFocusPolicy(Qt::StrongFocus);
+    invalidateViewport();
+    if (visible)
+      show();
+    if (!alive)
+      return;
+  }
   if (m_localActive)
     requestFocus();
 }

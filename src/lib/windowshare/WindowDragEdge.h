@@ -89,8 +89,14 @@ public:
     }
     bool live(Clock::time_point now = Clock::now()) const noexcept
     {
-      return now >= m_published && now - m_published < freshness && m_edge.peer.live() &&
-             m_token->load(std::memory_order_acquire) == m_generation;
+      return now >= m_published && now - m_published < freshness && current();
+    }
+    // Retained continuity of a preparation that already began from live().
+    // This does not refresh the motion sample or make it eligible to start a
+    // new drag. Release/topology/peer loss still revoke it synchronously.
+    bool current() const noexcept
+    {
+      return m_edge.peer.live() && m_token->load(std::memory_order_acquire) == m_generation;
     }
 
   private:
@@ -150,7 +156,7 @@ private:
       clearLocked();
       return false;
     }
-    const bool same = m_value && m_value->live(now) && m_value->edge().sameBoundary(edge);
+    const bool same = m_value && m_value->current() && m_value->edge().sameBoundary(edge);
     if (same && edge.motion.sequence <= m_value->edge().motion.sequence) {
       clearLocked();
       return false;

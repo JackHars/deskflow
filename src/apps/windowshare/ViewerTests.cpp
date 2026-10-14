@@ -266,6 +266,45 @@ void testFocusedClipboardLifetime()
   );
 }
 
+void testProvisionalWindowDrag()
+{
+  auto description = metadata();
+  description.insert("windowDrag", 17);
+  Recording recording;
+  Viewer viewer(1, 2, description);
+  recording.attach(viewer);
+  check(
+      viewer.provisionalWindowDrag() && viewer.testAttribute(Qt::WA_ShowWithoutActivating) &&
+          viewer.windowFlags().testFlag(Qt::WindowDoesNotAcceptFocus) && viewer.focusPolicy() == Qt::NoFocus,
+      "Provisional preview must not activate or accept focus on show"
+  );
+  makeReady(viewer, recording);
+  focus(viewer, true);
+  key(viewer, QEvent::KeyPress, Qt::Key_A, "a");
+  key(viewer, QEvent::KeyRelease, Qt::Key_A, "a");
+  mouse(viewer, QEvent::MouseButtonPress, viewer.videoRect().center());
+  mouse(viewer, QEvent::MouseButtonRelease, viewer.videoRect().center(), Qt::LeftButton, Qt::NoButton);
+  check(
+      recording.count(MessageType::Input) == 0 && viewer.provisionalWindowDrag(),
+      "Painting and synthetic focus do not grant provisional preview input"
+  );
+  viewer.committed();
+  check(
+      !viewer.provisionalWindowDrag() && !viewer.testAttribute(Qt::WA_ShowWithoutActivating) &&
+          !viewer.windowFlags().testFlag(Qt::WindowDoesNotAcceptFocus) && viewer.isVisible() &&
+          viewer.focusPolicy() == Qt::StrongFocus,
+      "Explicit committed acknowledgement ends preview focus policy"
+  );
+  for (const auto &replacement : {QJsonValue(18), QJsonValue(0), QJsonValue("17"), QJsonValue(-1), QJsonValue(0.5)}) {
+    Recording rejected;
+    Viewer guarded(3, 4, description);
+    rejected.attach(guarded);
+    auto changed = description;
+    changed.insert("windowDrag", replacement);
+    guarded.applyMetadata(changed);
+    check(rejected.errors.size() == 1, "Preview cannot change, erase or misencode its drag identity");
+  }
+}
 void testMappingAndReadiness()
 {
   Recording recording;
@@ -1411,6 +1450,7 @@ int main(int argc, char **argv)
     testInputMethodIsExplicitlyUnsupported();
     testFocusedClipboardLifetime();
     testMappingAndReadiness();
+    testProvisionalWindowDrag();
     testViewportLifecycle();
     testFocusQueueAndOwnership();
     testModifierRelease();

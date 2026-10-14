@@ -27,6 +27,7 @@ QVector<std::array<std::uint64_t, 3>> nativePaintedReady;
 std::function<void(NativeHost &, std::uint64_t, std::uint64_t)> keyframeReply;
 bool automaticNative = false;
 int nativeRefreshes = 0, nativeReleases = 0, nativeRestores = 0;
+int nativeDragPreparations = 0, nativeDragCancellations = 0;
 QVector<QJsonObject> nativeInputs;
 QSet<int> nativeHeldKeys;
 QSet<int> nativeHeldButtons;
@@ -95,6 +96,15 @@ void NativeHost::exportWindow(std::uint32_t id)
 }
 void NativeHost::observeWindowPointer(const LocalWindowPointer &)
 {
+}
+std::optional<Owner> NativeHost::prepareWindowDrag(const WindowDragBinding &)
+{
+  ++nativeDragPreparations;
+  return {};
+}
+void NativeHost::cancelWindowDrag(const WindowDragBinding &)
+{
+  ++nativeDragCancellations;
 }
 void NativeHost::ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
 {
@@ -357,6 +367,10 @@ struct BridgeTestAccess
   static bool mediaCapable(const Bridge &bridge)
   {
     return bridge.m_mediaRecoveryCapable;
+  }
+  static void dragCapable(Bridge &bridge, bool capable)
+  {
+    bridge.m_windowDragCapable = capable;
   }
   static void receive(Bridge &bridge, const Packet &packet)
   {
@@ -1525,6 +1539,38 @@ void fullInputScopeSubstitution(const Identity &hostIdentity, const Identity &vi
   check(!fixture.original && fixture.revokes == 1, "Mismatched scope preserved original ownership");
 }
 
+void windowDragPreparationBinding(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  KeyboardFixture fixture(hostIdentity, viewerIdentity);
+  const auto peer = fixture.host.authenticatedPeerObservation();
+  check(peer && peer->live(), "Drag fixture has a live authenticated network connection");
+  const WindowDragBinding drag{17, peer->ticket().incarnation(), 9, 3, 211, 1000, 10383, 516};
+  const auto before = nativeDragPreparations;
+  auto wrong = drag;
+  ++wrong.connection;
+  check(
+      !fixture.host.prepareWindowDrag(wrong) && nativeDragPreparations == before,
+      "Foreign connection cannot prepare an exact source window"
+  );
+  check(
+      !fixture.host.prepareWindowDrag(drag) && nativeDragPreparations == before + 1,
+      "Negotiated exact peer reaches native eligibility once, and native denial propagates"
+  );
+  BridgeTestAccess::dragCapable(fixture.host, false);
+  check(
+      !fixture.host.prepareWindowDrag(drag) && nativeDragPreparations == before + 1,
+      "Peer without preview capability cannot prepare a source"
+  );
+  const auto cancellations = nativeDragCancellations;
+  fixture.host.cancelWindowDrag(drag);
+  check(nativeDragCancellations == cancellations + 1, "Cleanup remains available after capability withdrawal");
+  BridgeTestAccess::dragCapable(fixture.host, true);
+  BridgeTestAccess::channel(fixture.host)->close("drag fixture disconnect");
+  check(
+      !fixture.host.prepareWindowDrag(drag) && nativeDragPreparations == before + 1,
+      "Disconnected peer cannot reuse a prior drag binding"
+  );
+}
 void fullInputLegacyNegotiation(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   for (bool keyboard : {false, true}) {
@@ -2525,6 +2571,7 @@ int main(int argc, char **argv)
     fullInputFenceRoundTrip(hostIdentity, viewerIdentity);
     fullInputScopeSubstitution(hostIdentity, viewerIdentity);
     fullInputLegacyNegotiation(hostIdentity, viewerIdentity);
+    windowDragPreparationBinding(hostIdentity, viewerIdentity);
     keyboardReservation(hostIdentity, viewerIdentity);
     keyboardReservationInvalidation(hostIdentity, viewerIdentity);
     keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);

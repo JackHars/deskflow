@@ -47,6 +47,8 @@ public:
   // press, titlebar eligibility and configured edge. These calls never post a
   // button event. Ready from the network can only acknowledge the preview;
   // the exact local release is additionally required before source mutation.
+  // observeWindowPointer never calls releaseWindowDrag: an ordinary observed
+  // up cancels preparation. Drop requires an explicit native cutover owner.
   std::optional<Owner> prepareWindowDrag(const WindowDragBinding &binding);
   bool releaseWindowDrag(const WindowDragBinding &binding, const WindowDragRelease &release);
   void cancelWindowDrag(const WindowDragBinding &binding);

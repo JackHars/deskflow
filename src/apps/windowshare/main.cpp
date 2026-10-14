@@ -12,6 +12,7 @@
 #include "NativeHost.h"
 #include "Transport.h"
 #include "Viewer.h"
+#include "WindowDragPreviewProtocol.h"
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
 #include "ViewerViewportEndpoint.h"
 #endif
@@ -20,6 +21,7 @@
 #include "LocalInputBootstrap.h"
 #include "LocalInputCodeAdmission.h"
 #include "LocalInputSession.h"
+#include "LocalWindowDragCoordinator.h"
 #endif
 #include <QApplication>
 #include <QClipboard>
@@ -303,6 +305,18 @@ public:
   {
     if (m_native && !m_shuttingDown)
       m_native->observeWindowPointer(pointer);
+  }
+  bool prepareWindowDrag(const WindowDragBinding &binding)
+  {
+    const auto peer = authenticatedPeerObservation();
+    if (!m_native || !m_windowDragCapable || !peer || peer->ticket().incarnation() != binding.connection)
+      return false;
+    return m_native->prepareWindowDrag(binding).has_value();
+  }
+  void cancelWindowDrag(const WindowDragBinding &binding)
+  {
+    if (m_native)
+      m_native->cancelWindowDrag(binding);
   }
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
   void attachViewportEndpoint(ViewerViewportEndpoint &endpoint)
@@ -1363,12 +1377,12 @@ private:
       m_negotiating = true;
       if (!m_hosting)
         channel->send(
-            MessageType::Hello,
-            {{"version", static_cast<int>(protocolVersion)},
-             {"role", "viewer"},
-             {"codec", "h264"},
-             {"capabilities",
-              clipboardTextCapabilities(keyboardRouteCapabilities(true, true, true), m_clipboardPolicy)}}
+            MessageType::Hello, {{"version", static_cast<int>(protocolVersion)},
+                                 {"role", "viewer"},
+                                 {"codec", "h264"},
+                                 {"capabilities", windowDragPreviewCapabilities(clipboardTextCapabilities(
+                                                      keyboardRouteCapabilities(true, true, true), m_clipboardPolicy
+                                                  ))}}
         );
       QTimer::singleShot(5000, channel, [this, channel, generation] {
         if (m_channel == channel && m_connectionGeneration == generation && !m_established)
@@ -1456,6 +1470,7 @@ private:
       m_mappedInputCapable = peerSupportsMappedInput(object);
       m_mediaRecoveryCapable = peerSupportsMediaRecovery(object);
       m_clipboardCapable = m_clipboardPolicy && peerSupportsClipboardText(object);
+      m_windowDragCapable = peerSupportsWindowDragPreview(object);
       if (m_hosting) {
         require(packet.type == MessageType::Hello && object["role"] == "viewer", "Expected viewer negotiation");
         m_established = true;
@@ -1465,11 +1480,14 @@ private:
                  {"role", "host"},
                  {"codec", "h264"},
                  {"capabilities",
-                  clipboardTextCapabilities(
-                      m_keyboardCapable
-                          ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable)
-                          : QJsonArray{},
-                      m_clipboardCapable
+                  windowDragPreviewCapabilities(
+                      clipboardTextCapabilities(
+                          m_keyboardCapable
+                              ? keyboardRouteCapabilities(m_inputCapable, m_mediaRecoveryCapable, m_mappedInputCapable)
+                              : QJsonArray{},
+                          m_clipboardCapable
+                      ),
+                      m_windowDragCapable
                   )}}
             ))
           return;
@@ -1599,6 +1617,10 @@ private:
     if (packet.type == MessageType::Opened) {
       require(packet.session > 0 && packet.epoch > 0, "Invalid window session");
       const auto metadata = parseObject(packet);
+      require(
+          metadata.value("windowDrag").toDouble(0) == 0 || m_windowDragCapable,
+          "Window drag previews were not negotiated"
+      );
       auto found = m_viewers.find(packet.session);
       if (found != m_viewers.end()) {
         require(found->second.epoch == packet.epoch, "Duplicate window session");
@@ -1820,6 +1842,7 @@ private:
   bool m_mappedInputCapable = false;
   bool m_mediaRecoveryCapable = false;
   bool m_clipboardCapable = false;
+  bool m_windowDragCapable = false;
   std::unique_ptr<FocusedClipboard> m_clipboard;
   QMetaObject::Connection m_clipboardConnection;
   bool m_reservingKeyboard = false;
@@ -2113,13 +2136,31 @@ int main(int argc, char **argv)
     shutdown.attach(bridge);
 #ifdef WINDOWSHARE_LOCAL_INPUT
     std::unique_ptr<LocalInputPreflight> inputPreflight;
+    std::unique_ptr<LocalWindowDragHost> windowDrag;
     std::optional<LocalInputLease> retiringInput;
     const auto inputBinding = [](const LocalInputLease &lease) {
       return KeyboardRouteBinding{{lease.session, lease.epoch}, lease.keyboardRouteGeneration, lease.focusRequest,
                                   lease.focusRevision,          lease.geometryRevision,        lease.scope};
     };
     if (coreInput && hosting && !inputBootstrap.peerPolicy().empty()) {
-      coreInput->onWindowPointer = [&bridge](const LocalWindowPointer &pointer) {
+      windowDrag = std::make_unique<LocalWindowDragHost>(
+          *coreInput, inputBootstrap.peerPolicy(),
+          LocalWindowDragHost::Providers{
+              [&] {
+                const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
+                return proof && proof->live();
+              },
+              [&] { return bridge.authenticatedPeerObservation(); },
+              [&](const WindowDragBinding &binding, const LocalWindowDrag &) {
+                return bridge.prepareWindowDrag(binding);
+              },
+              {},
+              [&](const WindowDragBinding &binding) { bridge.cancelWindowDrag(binding); }
+          }
+      );
+      coreInput->onWindowPointer = [&bridge, &windowDrag](const LocalWindowPointer &pointer) {
+        if (windowDrag)
+          windowDrag->pointer(pointer);
         bridge.observeWindowPointer(pointer);
       };
       LocalInputPreflight::Checks checks;
@@ -2200,6 +2241,8 @@ int main(int argc, char **argv)
       };
     }
     const auto stopInput = qScopeGuard([&] {
+      if (windowDrag)
+        windowDrag->stop();
       if (inputPreflight)
         inputPreflight->stop();
       bridge.revokeOriginalKeyboard = {};
@@ -2207,6 +2250,7 @@ int main(int argc, char **argv)
       bridge.onKeyboardResumed = {};
       if (coreInput) {
         coreInput->onWindowPointer = {};
+        coreInput->onWindowDrag = {};
         coreInput->onOriginal = {};
         coreInput->onMappedOriginal = {};
       }

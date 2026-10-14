@@ -263,6 +263,52 @@ QByteArray leasePayload(const LocalInputLease &lease)
     number(bytes, value, 8);
   return bytes;
 }
+LocalWindowDrag fixtureDrag()
+{
+  LocalWindowDrag value;
+  value.drag = 7;
+  value.server = 8;
+  value.recipient = 9;
+  value.boundary = 10;
+  value.captureEpoch = 3;
+  value.pressSequence = 211;
+  value.pressTime = 1000;
+  value.sequence = 212;
+  value.coreConnection = 12;
+  value.window = 10383;
+  value.eventNumber = 516;
+  value.corePin.fill(0x31);
+  value.windowSharePin.fill(0x32);
+  value.source = {-1200, 0, 1200, 800};
+  value.destination = {100, -50, 1600, 900};
+  value.sourceX = -1;
+  value.sourceY = 300;
+  value.destinationX = 100;
+  value.destinationY = 287;
+  return value;
+}
+QByteArray dragPayload(const LocalWindowDrag &value)
+{
+  QByteArray bytes;
+  number(bytes, static_cast<unsigned>(value.kind), 1);
+  number(bytes, static_cast<unsigned>(value.side), 1);
+  number(bytes, 0, 6);
+  for (auto token :
+       {value.drag, value.server, value.recipient, value.boundary, value.captureEpoch, value.pressSequence,
+        value.pressTime, value.sequence, value.coreConnection})
+    number(bytes, token, 8);
+  number(bytes, value.window, 4);
+  number(bytes, 0, 4);
+  number(bytes, value.eventNumber, 8);
+  for (const auto pin : {value.corePin, value.windowSharePin})
+    bytes.append(reinterpret_cast<const char *>(pin.data()), pin.size());
+  for (const auto screen : {value.source, value.destination})
+    for (auto point : {screen.x, screen.y, screen.width, screen.height})
+      number(bytes, std::uint32_t(point), 4);
+  for (auto point : {value.sourceX, value.sourceY, value.destinationX, value.destinationY})
+    number(bytes, std::uint32_t(point), 4);
+  return bytes;
+}
 QByteArray originalPayload(const LocalInputLease &lease, const OriginalInputRecord &event)
 {
   auto bytes = leasePayload(lease);
@@ -510,6 +556,8 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
     frame[5] = 3; // A v3 lease has no scope/capability evidence and must not negotiate.
   else if (mode == "raw-version-five")
     frame[5] = 5; // Window-pointer metadata requires the explicit v6 contract.
+  else if (mode == "raw-version-six")
+    frame[5] = 6; // Drag preparation uses the explicit v7 contract.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -912,6 +960,33 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       host->revoke();
   };
   host->onClosed = [&](QString) { application.quit(); };
+  if (mode.startsWith("window-drag")) {
+    host->authorize = {};
+    host->onWindowDrag = [&](const LocalWindowDrag &drag) {
+      ++callbackEvents;
+      auto expected = fixtureDrag();
+      if (callbackEvents > 1) {
+        ++expected.sequence;
+        ++expected.destinationY;
+      }
+      if (callbackEvents == 2)
+        expected.kind = LocalWindowDrag::Kind::Motion;
+      if (callbackEvents == 3)
+        expected.kind = LocalWindowDrag::Kind::Hold;
+      if (callbackEvents == 4)
+        expected.kind = LocalWindowDrag::Kind::Cancel;
+      check(callbackEvents <= 4 && drag == expected, "Window drag wire fields changed");
+      check(host->phase() == LocalInputPhase::Idle && !host->lease(), "Drag preview acquired input authority");
+      check(!host->sendWindowDrag(drag), "Host forged a Core edge");
+      if (mode == "window-drag-delete") {
+        host.reset();
+        application.quit();
+      } else if (mode == "window-drag-throw")
+        throw std::runtime_error("Drag observer failed");
+      else if (callbackEvents == 4)
+        host->close();
+    };
+  }
   if (mode == "window-pointer") {
     host->authorize = {}; // Metadata must never prepare or authorize input.
     host->onWindowPointer = [&](const LocalWindowPointer &pointer) {
@@ -997,6 +1072,11 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(
         callbackEvents == 3 && originalEvents == 0, "Window observations did not remain separate from input delivery"
     );
+  if (mode.startsWith("window-drag"))
+    check(
+        callbackEvents == (mode == "window-drag" ? 4 : 1) && originalEvents == 0,
+        "Window drag observer callback count or input isolation changed"
+    );
   if (mode.startsWith("offer-callback-"))
     check(callbackEvents == 1 && originalEvents == 0, "Offer callback did not run exactly once without input");
   return status;
@@ -1010,7 +1090,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 6);
+  static_assert(LocalInputChannel::version == 7);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 320);
   static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
   static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
@@ -1203,6 +1283,147 @@ void windowPointer()
     fixture.core->onWindowPointer = [&](const auto &) { ++received; };
     LocalInputChannelTestAccess::incoming(*fixture.core, 19, wire);
     check(fixture.closed && received == 0, "Host-forged capture observation reached the Core");
+    fixture.childExitedCleanly();
+  }
+}
+void windowDrag()
+{
+  const auto begin = fixtureDrag();
+  auto motion = begin;
+  motion.kind = LocalWindowDrag::Kind::Motion;
+  ++motion.sequence;
+  ++motion.destinationY;
+  auto hold = motion;
+  hold.kind = LocalWindowDrag::Kind::Hold;
+  auto cancel = motion;
+  cancel.kind = LocalWindowDrag::Kind::Cancel;
+  const auto wire = dragPayload(begin);
+  check(
+      wire.size() == 208 && wire.mid(160, 16) == QByteArray::fromHex("fffffb5000000000000004b000000320"),
+      "Window drag fixed-width signed screen layout changed"
+  );
+  {
+    Fixture fixture("window-drag");
+    fixture.establish();
+    fixture.core->authorize = {};
+    check(fixture.core->supportsWindowDrag(), "Separate drag capability negotiated");
+    check(!fixture.core->sendWindowDrag(motion), "Motion cannot start a drag");
+    check(fixture.core->sendWindowDrag(begin), "Begin carries exact Core observation");
+    check(!fixture.core->sendWindowDrag(begin), "Begin cannot replay");
+    auto wrong = motion;
+    ++wrong.boundary;
+    check(!fixture.core->sendWindowDrag(wrong), "Motion cannot change topology");
+    check(fixture.core->sendWindowDrag(motion), "Motion advances original sequence");
+    check(!fixture.core->sendWindowDrag(motion), "Motion cannot replay");
+    wrong = hold;
+    ++wrong.destinationY;
+    check(!fixture.core->sendWindowDrag(wrong), "Hold cannot fabricate motion");
+    check(fixture.core->sendWindowDrag(hold) && fixture.core->sendWindowDrag(cancel), "Hold then exact cancellation");
+    check(!fixture.core->sendWindowDrag(hold) && !fixture.core->sendWindowDrag(begin), "Cancelled ID cannot revive");
+    check(
+        !fixture.core->lease() && LocalInputChannelTestAccess::captureEpoch(*fixture.core) == 0,
+        "Drag traffic cannot advance input admission"
+    );
+    fixture.childExitedCleanly();
+  }
+  for (int fault = 0; fault < 18; ++fault) {
+    Fixture fixture;
+    fixture.establish();
+    auto malformed = wire;
+    switch (fault) {
+    case 0:
+      malformed[0] = 0;
+      break;
+    case 1:
+      malformed[1] = 5;
+      break;
+    case 2:
+      malformed[2] = 1;
+      break;
+    case 3:
+      malformed.replace(8, 8, QByteArray(8, '\0'));
+      break;
+    case 4:
+      malformed[8] = 1;
+      break;
+    case 5:
+      malformed.replace(16, 8, QByteArray(8, '\0'));
+      break;
+    case 6:
+      malformed.replace(40, 8, QByteArray(8, '\0'));
+      break;
+    case 7:
+      malformed.replace(64, 8, wire.mid(48, 8));
+      break;
+    case 8:
+      malformed.replace(72, 8, QByteArray(8, '\0'));
+      break;
+    case 9:
+      malformed.replace(80, 4, QByteArray(4, '\0'));
+      break;
+    case 10:
+      malformed[84] = 1;
+      break;
+    case 11:
+      malformed[88] = char(0xff);
+      break;
+    case 12:
+      malformed.replace(96, 32, QByteArray(32, '\0'));
+      break;
+    case 13:
+      malformed.replace(128, 32, QByteArray(32, '\0'));
+      break;
+    case 14:
+      malformed.replace(168, 4, QByteArray(4, '\0'));
+      break;
+    case 15:
+      malformed.replace(192, 4, QByteArray(4, '\0'));
+      break;
+    case 16:
+      malformed.chop(1);
+      break;
+    case 17:
+      malformed.append('x');
+      break;
+    }
+    check(LocalInputChannelTestAccess::raw(*fixture.core, 20, malformed), "Malformed drag fixture could send");
+    check(until([&] { return fixture.closed; }), "Malformed drag rejected before native callback");
+    fixture.childExitedCleanly();
+  }
+  for (const auto &record : {begin, hold, motion}) {
+    Fixture fixture;
+    fixture.establish();
+    if (record.kind != LocalWindowDrag::Kind::Hold)
+      check(
+          fixture.core->sendWindowDrag(record.kind == LocalWindowDrag::Kind::Motion ? motion : begin) ==
+              (record.kind == LocalWindowDrag::Kind::Begin),
+          "Sender independently gates replay fixture"
+      );
+    check(LocalInputChannelTestAccess::raw(*fixture.core, 20, dragPayload(record)), "Receiver replay injection");
+    check(until([&] { return fixture.closed; }), "Receiver rejects replay or missing Begin");
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture fixture("keyboard-only");
+    fixture.establish();
+    check(!fixture.core->supportsWindowDrag() && !fixture.core->sendWindowDrag(begin), "Unnegotiated drag denied");
+    check(LocalInputChannelTestAccess::raw(*fixture.core, 20, wire), "Receiver capability fixture could send");
+    check(until([&] { return fixture.closed; }), "Receiver capability independently checked");
+    fixture.childExitedCleanly();
+  }
+  {
+    Fixture fixture("synthetic");
+    fixture.establish();
+    int received = 0;
+    fixture.core->onWindowDrag = [&](const auto &) { ++received; };
+    LocalInputChannelTestAccess::incoming(*fixture.core, 20, wire);
+    check(fixture.closed && received == 0, "Wrong-role drag cannot reach Core callback");
+    fixture.childExitedCleanly();
+  }
+  for (const auto *mode : {"window-drag-delete", "window-drag-throw"}) {
+    Fixture fixture(QString::fromLatin1(mode));
+    fixture.establish();
+    check(fixture.core->sendWindowDrag(begin), "Destructive callback fixture sent");
     fixture.childExitedCleanly();
   }
 }
@@ -1682,9 +1903,9 @@ void negotiatedScope()
 void malformedBootstrap()
 {
   for (const auto *mode :
-       {"magic", "version", "version-five", "role", "incarnation", "zero-incarnation", "process", "sequence",
-        "oversize", "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent", "capabilities-zero",
-        "capabilities-unknown", "capabilities-no-keyboard"}) {
+       {"magic", "version", "version-five", "version-six", "role", "incarnation", "zero-incarnation", "process",
+        "sequence", "oversize", "partial-header", "partial-payload", "trailing", "unknown", "replay", "silent",
+        "capabilities-zero", "capabilities-unknown", "capabilities-no-keyboard"}) {
     Fixture fixture(QStringLiteral("raw-") + mode);
     check(until([&] { return fixture.closed; }), "Malformed bootstrap did not fail closed");
     check(
@@ -2591,6 +2812,8 @@ int main(int argc, char **argv)
     preflightValues();
     QTextStream(stdout) << "RUN: windowPointer\n" << Qt::flush;
     windowPointer();
+    QTextStream(stdout) << "RUN: windowDrag\n" << Qt::flush;
+    windowDrag();
     QTextStream(stdout) << "RUN: mappedInput\n" << Qt::flush;
     mappedInput();
     QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;

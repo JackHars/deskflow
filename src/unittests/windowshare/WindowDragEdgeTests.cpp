@@ -243,6 +243,30 @@ void concurrentRevocation()
   worker.join();
   check(!candidate.live() && !f.mailbox.read(), "worker shutdown invalidates reader copies");
 }
+void stationaryPreparation()
+{
+  Fixture f;
+  const auto value = f.candidate();
+  const auto later = WindowDragEdgeMailbox::Clock::now() + 251ms;
+  check(
+      !value.boundary.live(later) && value.current(),
+      "An expired motion cannot begin another drag but preserves existing press continuity"
+  );
+  ++f.edge.motion.sequence;
+  check(Access::publish(f.mailbox, f.edge, later), "New motion after pause refreshes the same configured edge");
+  check(value.current(), "Paused native drag must not replace its preview on the next motion");
+  f.join.capture(f.up());
+  check(!value.current(), "Real up independently revokes stationary preparation");
+  Fixture escaped;
+  const auto held = escaped.candidate();
+  const OriginalInputRecord escape{
+      escaped.stream.epoch().id(), 3, 300, 0,
+      OriginalInputKey{0, originalKey::escape, OriginalKeyKind::Down, OriginalKeyTransition::Down, false}
+  };
+  check(escaped.stream.push(escape), "Physical Escape captured before Core dispatch");
+  escaped.join.capture({*escaped.stream.pop(), {{escape.epoch, 3, 0}, 1, false}, {}, {}});
+  check(!held.current(), "Escape revokes retained preparation without waiting for Core worker");
+}
 } // namespace
 int main()
 {
@@ -251,6 +275,7 @@ int main()
     releaseAndRaces();
     invalidIdentity();
     concurrentRevocation();
+    stationaryPreparation();
     std::cout << "Window drag edge observation and exact press join passed\n";
     return 0;
   } catch (const std::exception &error) {

@@ -21,6 +21,7 @@
 #include "windowshare/LocalInputBootstrap.h"
 #include "windowshare/LocalInputCodeAdmission.h"
 #include "windowshare/LocalInputSession.h"
+#include "windowshare/LocalWindowDragCoordinator.h"
 #include "windowshare/OriginalInputCoordinator.h"
 #endif
 
@@ -161,6 +162,7 @@ int main(int argc, char **argv)
   std::unique_ptr<LocalInputCodeAdmission> inputAdmission;
   QTimer inputAdmissionTimer;
   std::unique_ptr<OriginalInputCoordinator> inputCoordinator;
+  std::unique_ptr<LocalWindowDragCore> windowDrag;
   if (inputBootstrap->pair) {
     try {
       if (parser.windowShareHostConfig() != inputBootstrap->hostConfig || !parser.serverMode())
@@ -215,6 +217,16 @@ int main(int argc, char **argv)
                 }
             }
         );
+        windowDrag = std::make_unique<LocalWindowDragCore>(
+            *inputSession->channel(), inputHostConfiguration->peerPolicy(), [&inputAdmission] {
+              const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
+              return proof && proof->live();
+            }
+        );
+        inputSession->onWindowDragEdge = [&windowDrag](const auto &candidate) {
+          if (windowDrag)
+            windowDrag->observe(candidate);
+        };
       }
       LOG_INFO(
           "trusted window host connected; original input requires explicit policy and live native handoff evidence"
@@ -262,6 +274,8 @@ int main(int argc, char **argv)
   QObject::connect(&coreThread, &QThread::finished, &app, [&] {
     // Drain the owned host while the Qt event loop can still service it. The
     // companion's aboutToQuit handler is only an emergency last resort.
+    if (windowDrag)
+      windowDrag->stop();
     if (inputSession)
       companionDrained = inputSession->stop();
     app.quit();
@@ -280,6 +294,8 @@ int main(int argc, char **argv)
   delete coreApp;
 
 #ifdef WINDOWSHARE_CORE_COMPANION
+  if (windowDrag)
+    windowDrag->stop();
   if (inputSession && (!inputSession->stop() || !companionDrained)) {
     LOG_WARN("experimental window host did not exit before the shutdown deadline");
     if (exitCode == s_exitSuccess)

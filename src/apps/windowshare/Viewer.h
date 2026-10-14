@@ -142,6 +142,10 @@ public:
   {
     return m_geometry;
   }
+  bool provisionalWindowDrag() const
+  {
+    return m_windowDrag != 0 && !m_committed;
+  }
 
 protected:
   bool event(QEvent *event) override;
@@ -205,6 +209,7 @@ private:
 
   const std::uint64_t m_session, m_epoch;
   std::uint64_t m_geometry = 0, m_frameGeometry = 0, m_paintedGeometry = 0;
+  std::uint64_t m_windowDrag = 0;
   std::uint64_t m_focusRevision = 0, m_focusRequest = 0;
   std::uint64_t m_resizeRequest = 0, m_resizeBaseGeometry = 0;
   std::uint64_t m_keyboardGeneration = 0;

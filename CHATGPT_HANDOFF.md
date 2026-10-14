@@ -7,7 +7,7 @@ SPDX-License-Identifier: MIT
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 **Local implementation resumed on 2026-10-13.** The production coordinator is
-now wired from Server through private protocol v6 (including P5 observation metadata), negotiated Core IPC5,
+now wired from Server through private protocol v7 (including P5 observation/preparation metadata), negotiated Core IPC5,
 EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
 sender-ordering prerequisite; a retained prefix supports bounded exact point
 batches without reopening the full forwarding gate. Original input requires
@@ -376,7 +376,8 @@ of the same ordinary drag, but must not require a separate user action.
   down/up with bounded storage/deadlines. The physical owned-window run passes
   both joins, 213 drag events and the real release; raw HID IDs remain unavailable.
 - [x] Carry joined pointer observations/loss over separately negotiated private
-  v6 metadata without acquiring an input lease. The native Host retains exact
+  pointer metadata (introduced in v6, retained in v7) without acquiring an input
+  lease. The native Host retains exact
   AX/native window identity, titlebar hit, process birth and physical layout.
 - [x] Implement the bounded preparation/drop transaction and NativeHost gate:
   a preview Ready alone cannot mutate the source; matching local release and
@@ -392,10 +393,16 @@ of the same ordinary drag, but must not require a separate user action.
   release, Escape, topology changes and disconnect revoke retained observations.
   The sole raw consumer joins the edge to the same annotated press and withdraws
   it immediately on real up, even if its annotation or Core release is delayed.
-- [ ] Connect that edge candidate through the private channel to the matching
-  WindowShare peer and NativeHost preparation. The explicit dual-pin policy,
-  live connection/layout and proven native cutover must still gate this action.
-  The Core candidate callback currently performs no transfer or input switch.
+- [x] Connect that edge candidate through private v7 to the matching WindowShare
+  peer and NativeHost preparation. Both endpoints check explicit dual-pin policy,
+  code admission and their own current connection; NativeHost checks exact
+  titlebar/window/layout. The Viewer negotiates provisional-preview support.
+  The original press and active Core computer remain locally owned.
+- [x] Bound preparation lifetime and revoke it on release, lost capture/press,
+  Escape, changed edge/topology, either peer loss, private channel loss, lost
+  admission or shutdown. A stationary held preview retains its boundary without
+  turning an old motion sample into new movement. Painting cannot activate the
+  Viewer or enable its input. Native callback failure and reentrancy are covered.
 - [ ] Integrate preview motion, native drag cutover, painted readiness and drop
   commit as one continuous ordinary drag with exactly one button-up owner.
   The post-release frame query is not a native grab-completion receipt. Keeping
@@ -409,6 +416,12 @@ of the same ordinary drag, but must not require a separate user action.
 
 Acceptance: deterministic transaction/fault tests and harness support for H07.
 Do not call ordinary opening/closing of a Viewer "edge-drag support."
+The user deferred physical tests on 2026-10-14 and requested continued code work.
+Do not wait for a readiness answer to implement the remaining items. Current
+preparation cancels on real up; `observeWindowPointer` cannot automatically commit
+a drop. The explicit release API awaits the native cutover owner. Production
+preview placement/motion and GNOME drag-back remain unfinished. See
+`deploy/windowshare/window-drag-preparation.md` for the connected path and tests.
 
 ### P6 — Application compatibility
 

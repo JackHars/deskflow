@@ -3252,19 +3252,15 @@ void NativeHost::observeWindowPointer(const LocalWindowPointer &pointer)
   m_impl->titlebarOutputs.reset();
   const bool canObserve = m_impl->titlebarObservationRevision != std::numeric_limits<std::uint64_t>::max();
   const auto revision = canObserve ? ++m_impl->titlebarObservationRevision : m_impl->titlebarObservationRevision;
-  // There is one physical left button. A new down, lost annotation or
-  // mismatched up cancels old provisional work before observing another press.
+  // A pointer observation alone never commits a preview. The coordinator must
+  // explicitly own native cutover and release before it can call releaseWindowDrag.
+  // Until then, every new transition cancels pending preparation, including up.
   std::vector<WindowDragBinding> pending;
   for (const auto &[id, entry] : m_impl->entries)
     if (entry->windowDrag && entry->session.phase == Phase::Preparing)
       pending.push_back(entry->windowDrag->binding());
   for (const auto &binding : pending) {
-    const WindowDragRelease release{
-        pointer.captureEpoch, pointer.sequence, pointer.sourceTime, pointer.window, pointer.eventNumber
-    };
-    if (!canObserve || !validLocalWindowPointer(pointer) || pointer.kind != LocalWindowPointer::Kind::Up ||
-        !releaseWindowDrag(binding, release))
-      cancelWindowDrag(binding);
+    cancelWindowDrag(binding);
     if (!alive)
       return;
   }
