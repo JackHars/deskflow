@@ -87,7 +87,7 @@ Do not substitute a success-returning stub for a missing platform capability.
 - Branch: **`feature/seamless-windows`**. Continue this branch or a clearly named
   descendant if your cloud workflow requires one. Never modify `master` or
   `main`, force-push, or merge into the default branch for this assignment.
-- Latest verified CI base: **`dbf1f07ef5c28dc898a4a5fa5762b54aca23506d`**.
+- Latest verified CI base: **`c748915ccb65c4b169188d3ae2d1ea326a288ff9`**.
   Test-tool and documentation commits may be newer; start from the branch tip.
 - Prior implementation: `eda21b39b19004af9f4abfaacb707bb9b380f6f8` adds Server
   ownership before legacy dispatch; `ef5145665` fixes portable core linkage.
@@ -432,7 +432,8 @@ Do not call ordinary opening/closing of a Viewer "edge-drag support."
 The owned native titlebar eligibility check passes. The latest user request
 is to keep building and test later; H07 is NOT_RUN. Do not launch physical
 fixtures or enable desktop routing without a new user request. Bidirectional
-drop coordination is implemented; P5 physical acceptance remains open. See
+drop coordination is implemented. All six hosted jobs pass at `c748915cc`
+([run 38645498688](https://github.com/JackHars/deskflow/actions/runs/38645498688)); P5 physical acceptance remains open. See
 `deploy/windowshare/window-drag-preparation.md` for the connected path and tests.
 
 ### P6 — Application compatibility

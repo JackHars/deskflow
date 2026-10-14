@@ -6,6 +6,13 @@ SPDX-License-Identifier: MIT
 
 ## Latest local evidence — 2026-10-14
 
+- **Final hosted checkpoint passes all six jobs:** commit
+  `c748915ccb65c4b169188d3ae2d1ea326a288ff9`, [run 38645498688](https://github.com/JackHars/deskflow/actions/runs/38645498688).
+  GCC/Clang sanitizer foundations, transport/private IPC, Linux and Mac
+  application/Core checks, feature-disabled compatibility, package verification
+  and actual headless GNOME integration all pass. The two fixture corrections
+  below are included. `p5-final-github-checks.json` preserves the exact job
+  results; this result does not turn the deferred physical H07 into a pass.
 - **Bidirectional P5 code is integrated; physical acceptance is deferred:**
   private v9 carries native move offers independently from original-input
   leases. Return joins the exact remote Core press/edge/dispatch to the owned

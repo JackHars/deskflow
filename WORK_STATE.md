@@ -2,6 +2,13 @@
 
 ## Latest verified checkpoint — 2026-10-14
 
+The implementation and fixture corrections are committed and pushed through
+`c748915ccb65c4b169188d3ae2d1ea326a288ff9` on `feature/seamless-windows`.
+[All six hosted jobs pass](https://github.com/JackHars/deskflow/actions/runs/38645498688): GCC and Clang
+sanitizer foundations, transport/private IPC, Linux application/Core/package,
+Mac application/Core/package and native headless GNOME integration. P5 code
+implementation is complete; **H07 physical acceptance remains NOT_RUN**.
+
 P5 ordinary-titlebar drag code is integrated in both directions. Private
 protocol v9 carries 232-byte drag commands, 240-byte status messages and
 112-byte Host native-move observations. Normal button ownership stays with its
