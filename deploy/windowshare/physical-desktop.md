@@ -9,6 +9,21 @@ neither its headless output nor its Mac preview tests the user's actual monitor.
 Obtain fresh user permission immediately before **each** physical launch.
 Configuration, read-only preflight and the tests below do not launch that test.
 
+## What appears on each monitor
+
+The default H04 input diagnostic deliberately leaves its original test window
+visible on the Mac. The app runs on the Mac; the Viewer on Ubuntu displays its
+captured contents and returns input to it. Seeing the same text on both monitors
+is expected in this diagnostic. Actual-desktop mode does not show an Ubuntu
+desktop preview on the Mac, and the Host's connection window remains hidden.
+
+The finished seamless-window behavior must remove the original from the Mac's
+visible desktop while it is used on Ubuntu, then restore it when returned.
+The separate H06 holding-display mode requests that behavior and retains a local
+control window. Its hiding and restoration need their own physical verification;
+a visible-source H04 result cannot establish either. Explain the selected mode
+before launch so duplicate content is not mistaken for another remote desktop.
+
 ## One-time preparation
 
 The logged-in user must have an active, unlocked local GNOME 50 Wayland session,

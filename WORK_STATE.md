@@ -1,5 +1,44 @@
 # Seamless Windows work state
 
+## Actual-desktop attempt seventeen and display clarification — 2026-10-15
+
+Fresh explicit permission launched `build/h04-r17-0zwgwnaz/` after the verified
+storage cleanup. It reached Active on jack's actual monitor. The user reports
+seeing the Mac test window, its sharing indicator, and the same contents inside
+an Ubuntu window. They require the original to be hidden on the Mac during
+normal seamless use; keep that requirement. They also saw a brief window
+underneath during closure; its identity is not established by these receipts.
+
+This H04 run intentionally configured `holdingDisplay:false`,
+`desktopPreview:false` and `separateControls:false`. The Mac source was PID 10023,
+window 11151, with no separate control window; the Host connection UI was
+headless. Ubuntu ran the Viewer on the existing desktop. No Ubuntu preview was
+launched on the Mac. H04 leaves the original visible to diagnose input; the
+separate H06 holding-display mode must prove hiding and restoration. This
+explains the duplicate content, not the input-readiness failure. The actual-
+desktop instructions now state that distinction before launch.
+
+The test ended with `Record was requested, but matching input readiness was
+unavailable before the recording cutoff`. The Record request exists, but no
+recorder armed: Core 0/926 and Host 0/858 ready rows, native 987/987. All three
+ended denied, zero measured rows, loss 0, drained true. This is not physical
+original-input acceptance. Unlike attempt sixteen, the run reached its
+recording cutoff; the previous capture interruption did not end this run.
+
+Mac Core/source exited 0 and the companion stopped. Local ports are released
+and ordinary configuration hashes match. The source frame returned to
+(400,190,640,448), but its final receipt retains one held key, so input restoration
+is not accepted. Preserve the unarmed-evidence and source-restoration cleanup
+errors and the Mac coordinator's Linux SSH exit 255. The copied Ubuntu results
+separately report Core/controller exit 0, owned processes stopped, desktop
+restored and ordinary state preserved. Collected Ubuntu evidence SHA-256:
+`730779f8a96ee11a26f125199034ea5e90db69470b602695c22da34a77bda827`.
+
+Human observations, cleanup checks and the unchanged failed result are retained
+with the run. Diagnose missing Core/Host input readiness before asking the user
+to repeat this diagnostic. No next attempt is prepared or authorized; obtain
+fresh permission immediately before any physical launch. H04/P5 remains open.
+
 ## Actual-desktop attempt sixteen — 2026-10-15
 
 Fresh permission launched `build/h04-r16-awg5w2ql/` from commit `50b61497b`.
@@ -50,13 +89,12 @@ points to the same backup. Actual free-space gain was 6,008,745,984 bytes
 (5.60 GiB), increasing available space from 8.20 to 13.80 GiB. This reduces
 storage pressure but does not establish capture recovery or physical acceptance.
 
-No physical test was launched by cleanup. Fresh attempt seventeen is prepared
-at `build/h04-r17-0zwgwnaz/`, using the unchanged current binaries, fresh private
-identities and jack's actual unlocked desktop session 2. Both plans validate;
-Mac permissions and ordinary-session conflict checks pass, and the packaged
-Core/Host admission probe passes in 20.16 seconds with native input hooks off.
-The shared-window test has not started and no new launch is authorized.
-Obtain fresh permission immediately before this physical launch.
+No physical test was launched by cleanup. Historical attempt-seventeen
+preparation at `build/h04-r17-0zwgwnaz/` used the unchanged current binaries,
+fresh private identities and jack's actual unlocked desktop session 2. Both
+plans validated; Mac permissions and conflict checks passed, and the packaged
+Core/Host admission probe passed in 20.16 seconds with native input hooks off.
+Its separately approved launch and failed result are recorded above.
 
 ## Actual-desktop attempt fifteen — 2026-10-15
 
