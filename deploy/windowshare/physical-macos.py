@@ -88,7 +88,9 @@ def atomic_json(path, value):
 class StatusPublisher:
     """A blocked SSH request cannot leave a stale active UI indefinitely."""
 
-    def __init__(self, path):
+    def __init__(self, path, session_seconds=120):
+        require(type(session_seconds) is int and session_seconds in (120, 150), 'Invalid manual session profile')
+        self.session_seconds = session_seconds
         self.path = path
         self.lock = threading.Lock()
         self.stopping = threading.Event()
@@ -102,7 +104,7 @@ class StatusPublisher:
     def set(self, state, seconds=0):
         require(state in ("preparing", "ready", "active", "stopped"), "Invalid manual state")
         require(type(seconds) is int and
-                (1 <= seconds <= 120 if state == "active" else seconds == 0),
+                (1 <= seconds <= self.session_seconds if state == "active" else seconds == 0),
                 "Invalid manual countdown")
         with self.lock:
             require(self.state != "stopped" or state == "stopped", "Manual session already stopped")
@@ -144,7 +146,9 @@ class StatusPublisher:
 class ReceiptHistory:
     """Merge the source's bounded rings without mistaking a gap for delivery."""
 
-    def __init__(self):
+    def __init__(self, session_seconds=120):
+        require(type(session_seconds) is int and session_seconds in (120, 150), 'Invalid receipt session profile')
+        self.session_seconds = session_seconds
         self.last = {"events": 0, "nativeEvents": 0}
         self.gaps = []
         self.records = 0
@@ -161,7 +165,8 @@ class ReceiptHistory:
                 manual.get("request") in ("none", "start", "stop") and
                 manual.get("state") in ("preparing", "ready", "active", "stopped") and
                 type(manual.get("statusValid")) is bool and
-                type(manual.get("remainingSeconds")) is int and 0 <= manual["remainingSeconds"] <= 120,
+                type(manual.get("remainingSeconds")) is int and
+                0 <= manual["remainingSeconds"] <= self.session_seconds,
                 "Source does not provide manual controls")
         sequence = manual.get("requestSequence")
         require(type(sequence) is int and self.manual_sequence <= sequence <= 2,
@@ -204,9 +209,9 @@ class ReceiptHistory:
 
 
 class Collector:
-    def __init__(self, path, pid, title, output):
+    def __init__(self, path, pid, title, output, session_seconds=120):
         self.path, self.pid, self.title = path, pid, title
-        self.history = ReceiptHistory()
+        self.history = ReceiptHistory(session_seconds)
         self.latest = None
         self.error = None
         self.publication_identity = None
@@ -435,6 +440,7 @@ def validate_plans(mac, plan, base, production=False, source=None, holding=False
         return support.validate(mac, plan, base, private_path, source, holding)
     require("routeMode" not in plan and "macOriginalInputConfigured" not in plan,
             "Legacy physical mode cannot consume a production plan")
+    require("recordingProfile" not in mac, "Legacy physical mode cannot select a production recording profile")
     return None
 
 
@@ -446,6 +452,8 @@ def run(arguments):
     holding = getattr(arguments, "holding_display", False)
     artifacts = validate_plans(mac, plan, base, production, arguments.source, holding)
     original = original_support() if production else None
+    recording_seconds, session_seconds = original.recording_times(mac) if production else (0, 120)
+    source_profile = ["--h11-input"] if production and mac.get("recordingProfile") == "h11" else []
     output = arguments.output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"version": 1, "status": "failed", "physicalAcceptance": "not-assessed",
@@ -456,6 +464,9 @@ def run(arguments):
         report.update({"version": 2, "routeMode": "production-original-input", "originalInputPolicyConfigured": True,
                        "originalDeliveryVerified": False, "frozenArtifacts": artifacts,
                        "holdingDisplayConfigured": holding, "holdingDisplayAcceptance": "not-assessed",
+                       "recordingProfile": mac.get("recordingProfile", "h04"),
+                       "predeclaredRecordingSeconds": recording_seconds,
+                       "maximumSessionSeconds": session_seconds,
                        "hostOwnership": "authenticated direct packaged Core companion"})
     atomic_json(output / "linux-plan.json", plan)
     atomic_json(output / "mac-plan.json", mac)
@@ -463,7 +474,7 @@ def run(arguments):
         report.update({"status": "plan-validated-native-not-run", "nativeProcessesStarted": False,
                        "physicalAcceptance": "not-assessed"})
         if production:
-            prospective = original.EvidenceSession(output / "evidence", atomic_json)
+            prospective = original.EvidenceSession(output / "evidence", atomic_json, recording_seconds=recording_seconds)
             configuration = output / "production-host.json"
             atomic_json(configuration, original.host_configuration(mac, plan, output / "restore.json", prospective))
             report["prospectiveCoreArgv"] = original.core_arguments(mac, configuration)
@@ -471,8 +482,8 @@ def run(arguments):
                                                str(output / "source.json"), "--manual-status",
                                                str(output / "manual-status.json"), "--input-evidence-config",
                                                str(prospective.configs["native"]), "--record-request",
-                                               str(prospective.record_request)] + (["--separate-controls"] if holding else [])
-            report["predeclaredRecordingSeconds"] = 30
+                                               str(prospective.record_request)] + source_profile + \
+                                              (["--separate-controls"] if holding else [])
         atomic_json(output / "result.json", report)
         print(json.dumps(report, allow_nan=False), flush=True)
         return 0
@@ -570,17 +581,16 @@ def run(arguments):
                 reservation.bind(("127.0.0.1", port))
         for endpoint in plan["remoteSockets"].values():
             remote(["test", "!", "-e", endpoint])
-        publisher = StatusPublisher(output / "manual-status.json")
+        publisher = StatusPublisher(output / "manual-status.json", session_seconds)
         source_argv = [str(source_executable), title, str(source_path), "--manual-status", str(publisher.path)]
         if production:
-            evidence = original.EvidenceSession(output / "evidence", atomic_json)
-            report["predeclaredRecordingSeconds"] = 30
+            evidence = original.EvidenceSession(output / "evidence", atomic_json, recording_seconds=recording_seconds)
             source_argv += ["--input-evidence-config", str(evidence.configs["native"]),
-                           "--record-request", str(evidence.record_request)]
+                           "--record-request", str(evidence.record_request)] + source_profile
             if holding:
                 source_argv += ["--separate-controls"]
         source = launch("source", source_argv, env=environment)
-        collector = Collector(source_path, source.pid, title, output / "receipts.jsonl")
+        collector = Collector(source_path, source.pid, title, output / "receipts.jsonl", session_seconds)
         def own_window():
             data = collector.snapshot()["receipt"]
             if not data or data.get("ready") is not True or data.get("windowId", 0) <= 0 or \
@@ -694,7 +704,8 @@ def run(arguments):
         report["linuxReady"] = driver.command("start")
         require(report["linuxReady"]["windowId"] == initial["windowId"] and
                 report["linuxReady"]["originalInputAuthorityGranted"] is False and
-                report["linuxReady"]["maximumRemainingSeconds"] >= 135, "Wrong or expired physical route")
+                report["linuxReady"]["maximumRemainingSeconds"] >= session_seconds + 15,
+                "Wrong or expired physical route")
         if production:
             require(report["linuxReady"].get("controlProtocol") == 3 and
                     report["linuxReady"].get("routeMode") == "production-original-input" and
@@ -702,9 +713,9 @@ def run(arguments):
                     report["linuxReady"].get("productionPrerequisites", {}).get("inputPreparation") is True,
                     "Linux native production prerequisites were not observed")
         report["baseline"] = {"source": collector.snapshot(), "linux": driver.command("baseline")}
-        publisher.set("active", 120)
-        emit({"event": "active", "secondsRemaining": 120, "title": title})
-        deadline, next_status = time.monotonic() + 120, time.monotonic() + 5
+        publisher.set("active", session_seconds)
+        emit({"event": "active", "secondsRemaining": session_seconds, "title": title})
+        deadline, next_status = time.monotonic() + session_seconds, time.monotonic() + 5
         evidence_deadline = evidence_arm_deadline = None
         if evidence:
             emit({"event": "evidence-priming", "runId": evidence.run_id,
@@ -716,7 +727,7 @@ def run(arguments):
                 break
             if evidence and not evidence.stopped:
                 if not evidence.attempted:
-                    require(time.monotonic() + 35 < deadline,
+                    require(time.monotonic() + recording_seconds + 5 < deadline,
                             "No visible Record request with enough time for recording and safe return")
                 if evidence.try_arm():
                     evidence_arm_deadline = time.monotonic() + 2
@@ -724,8 +735,8 @@ def run(arguments):
                 require(evidence.armed or evidence_arm_deadline is None or time.monotonic() < evidence_arm_deadline,
                         "Not every evidence recorder acknowledged its one-shot arm")
                 if evidence.armed and evidence_deadline is None:
-                    evidence_deadline = min(time.monotonic() + 30, deadline - 5)
-                    emit({"event": "evidence-recording", "seconds": 30, "runId": evidence.run_id})
+                    evidence_deadline = min(time.monotonic() + recording_seconds, deadline - 5)
+                    emit({"event": "evidence-recording", "seconds": recording_seconds, "runId": evidence.run_id})
                 if evidence_deadline is not None and time.monotonic() >= evidence_deadline:
                     evidence.stop()
                     wait(lambda: all(reader.end for reader in evidence.readers.values()),

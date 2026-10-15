@@ -47,9 +47,12 @@ Each of the three processes gets a separate six-field JSON configuration:
 Use `host` and `native` roles with separate output/control files. The duration is
 an integer from 1 to 180000 ms. Choose it before collection; do not shorten a
 failed interval or restart counters under the same run ID. Waiting for an arm
-request also has a 180-second bound. The current H04 physical harness uses a
-fixed **30-second** recording inside its existing 120-second visible session;
-that is deliberately insufficient for H11's 120-second workload.
+request also has a 180-second bound. The H04 physical harness defaults to a
+fixed **30-second** recording inside a 120-second visible session. For the
+two-minute H11 input interval, explicitly freeze `--recording-profile h11` as
+described in [original-input-physical.md](original-input-physical.md): all three
+recorders use 120 seconds inside a fixed 150-second session. Neither profile
+supplies physical acceptance, full queue certification or display latency.
 
 The explicitly launched Core's existing `--windowshare-host-config` JSON may
 contain:

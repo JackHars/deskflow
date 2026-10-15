@@ -70,22 +70,43 @@ class HistoryTests(unittest.TestCase):
 
 class StatusTests(unittest.TestCase):
     def test_countdown_cannot_extend_or_restart(self):
+        for session_seconds in (120, 150):
+            with self.subTest(session_seconds=session_seconds):
+                self.check_countdown(session_seconds)
+
+    def check_countdown(self, session_seconds):
         publisher = module.StatusPublisher.__new__(module.StatusPublisher)
+        publisher.session_seconds = session_seconds
         publisher.lock = threading.Lock()
         publisher.state, publisher.deadline, publisher.was_active = "preparing", None, False
         now = [100.0]
         with patch.object(module.time, "monotonic", side_effect=lambda: now[0]):
             publisher.set("ready")
-            publisher.set("active", 120)
+            with self.assertRaises(RuntimeError):
+                publisher.set("active", session_seconds + 1)
+            publisher.set("active", session_seconds)
             now[0] += 30
-            publisher.set("active", 120)
-            self.assertEqual(publisher.snapshot()["remainingSeconds"], 90)
+            publisher.set("active", session_seconds)
+            self.assertEqual(publisher.snapshot()["remainingSeconds"], session_seconds - 30)
             with self.assertRaises(RuntimeError):
                 publisher.set("preparing")
-            now[0] += 100
+            now[0] += session_seconds
             self.assertEqual(publisher.snapshot(), {"version": 1, "state": "stopped", "remainingSeconds": 0})
             with self.assertRaises(RuntimeError):
-                publisher.set("active", 120)
+                publisher.set("active", session_seconds)
+
+    def test_extended_receipts_require_the_explicit_session_profile(self):
+        value = receipt(request="start", request_sequence=1)
+        value["manual"].update(state="active", remainingSeconds=150)
+        with self.assertRaisesRegex(RuntimeError, "manual controls"):
+            module.ReceiptHistory().merge(value)
+        module.ReceiptHistory(150).merge(value)
+        value["manual"]["remainingSeconds"] = 151
+        with self.assertRaisesRegex(RuntimeError, "manual controls"):
+            module.ReceiptHistory(150).merge(value)
+        for invalid in (0, 121, 180, True, "150"):
+            with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                module.ReceiptHistory(invalid)
 
     def test_publications_are_private_and_change_file_identity(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -357,6 +378,39 @@ class ProductionPlans(unittest.TestCase):
         self.assertEqual(result['physicalAcceptance'], 'not-assessed')
         self.assertFalse(result['nativeProcessesStarted'])
         self.assertFalse(result['originalDeliveryVerified'])
+        self.assertEqual(result['predeclaredRecordingSeconds'], 30)
+        self.assertEqual(result['maximumSessionSeconds'], 120)
+        self.assertNotIn('--h11-input', result['prospectiveSourceArgv'])
+
+    def test_h11_plan_predeclares_all_recorders_and_source_without_native_execution(self):
+        mac_plan, linux_plan = self.base / 'h11-mac.json', self.base / 'linux.json'
+        mac = {**self.mac, 'recordingProfile': 'h11'}
+        module.atomic_json(mac_plan, mac)
+        module.atomic_json(linux_plan, self.linux)
+        args = SimpleNamespace(mac_plan=mac_plan, linux_plan=linux_plan, source=None,
+                               production_original_input=True, validate_only=True, output=self.base / 'h11-result')
+        with patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native process launched')), \
+                patch.object(module.subprocess, 'run', side_effect=AssertionError('External command launched')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.run(args), 0)
+        result = module.read_json(args.output / 'result.json')
+        self.assertEqual(result['recordingProfile'], 'h11')
+        self.assertEqual(result['predeclaredRecordingSeconds'], 120)
+        self.assertEqual(result['maximumSessionSeconds'], 150)
+        self.assertIn('--h11-input', result['prospectiveSourceArgv'])
+        self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+        self.assertFalse(result['nativeProcessesStarted'])
+        for role in ('core', 'host', 'native'):
+            config = module.read_json(args.output / 'evidence' / (role + '.json'))
+            self.assertEqual(config['durationMs'], 120000)
+        for invalid in ('h12', '', None, 120, True, []):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(RuntimeError, 'recording profile'):
+                module.validate_plans({**self.mac, 'recordingProfile': invalid}, self.linux, self.base, production=True)
+        legacy = {**mac, 'version': 1, 'originalInputEnabled': False}
+        linux = {k: v for k, v in self.linux.items() if k not in ('routeMode', 'macOriginalInputConfigured')}
+        linux.update(version=2, controlProtocol=2)
+        with self.assertRaisesRegex(RuntimeError, 'Legacy physical mode'):
+            module.validate_plans(legacy, linux, self.base)
 
     def test_same_pid_with_new_birth_is_not_the_owned_companion(self):
         inspector = object.__new__(self.support.ProcessInspector)
@@ -393,21 +447,30 @@ class ProductionPlans(unittest.TestCase):
             self.assertEqual(self.support.freeze_plan(args, module), 0)
         frozen = module.read_json(args.output)
         self.assertEqual(frozen['version'], 2)
+        self.assertEqual(frozen['recordingProfile'], 'h04')
         self.assertEqual(frozen['frozenArtifacts'], self.mac['frozenArtifacts'])
         self.assertEqual(args.output.stat().st_mode & 0o777, 0o600)
         module.validate_plans(frozen, self.linux, self.base, production=True)
         with self.assertRaises(RuntimeError):
             self.support.freeze_plan(args, module)
+        args.recording_profile, args.output = 'h11', self.base / 'h11-production.json'
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self.support.freeze_plan(args, module), 0)
+        frozen = module.read_json(args.output)
+        self.assertEqual(frozen['recordingProfile'], 'h11')
+        self.assertEqual(self.support.recording_times(frozen), (120, 150))
 
 
 class EvidenceTests(unittest.TestCase):
+    recording_seconds = 30
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.support = module.original_support()
         self.now = 100.0
         self.session = self.support.EvidenceSession(Path(self.temporary.name) / 'evidence', module.atomic_json,
-                                                    now=lambda: self.now)
+                                                    now=lambda: self.now, recording_seconds=self.recording_seconds)
         self.pids = {'core': 100, 'host': 101, 'native': 102}
         self.owners = {role: {'owner': ['1'] * 11, 'identity': 'ab' * 96} for role in self.session.roles}
         self.owners['native'] = {'owner': ['102', '7'] + ['0'] * 9, 'identity': '0' * 192}
@@ -448,8 +511,9 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(self.session.try_arm())
 
     def ends(self):
+        end_ns = 200 + self.recording_seconds * 1000000000
         for role in self.session.roles:
-            self.write(role, {'type': 'end', 'timeNs': '30250000200', 'sourceEndNs': '30000000200', 'state': 3,
+            self.write(role, {'type': 'end', 'timeNs': str(end_ns + 250000000), 'sourceEndNs': str(end_ns), 'state': 3,
                               'loss': 0, 'drained': True, 'rows': '0'})
 
     def test_fresh_matching_readiness_one_atomic_attempt_and_explicit_end(self):
@@ -463,7 +527,7 @@ class EvidenceTests(unittest.TestCase):
         for role in self.session.roles:
             config = module.read_json(self.session.configs[role])
             self.assertEqual(config['role'], role)
-            self.assertEqual(config['durationMs'], 30000)
+            self.assertEqual(config['durationMs'], self.recording_seconds * 1000)
             self.assertEqual(self.session.configs[role].stat().st_mode & 0o777, 0o600)
             self.assertEqual(module.read_json(self.session.controls[role])['command'], 'arm')
         self.arms()
@@ -472,6 +536,7 @@ class EvidenceTests(unittest.TestCase):
         self.ends()
         result = self.session.finish()
         self.assertTrue(result['recordersArmed'])
+        self.assertEqual(result['recordingSeconds'], self.recording_seconds)
         self.assertEqual(result['physicalAcceptance'], 'not-assessed')
         self.assertEqual(result['nativeFieldPreservation'], 'not-assessed')
 
@@ -596,7 +661,7 @@ class EvidenceTests(unittest.TestCase):
     def test_native_absolute_duration_survives_a_delayed_coordinator_status_reply(self):
         self.arm()
         self.ends()  # Native runtime reached its own immutable duration first.
-        self.now += 40
+        self.now += self.recording_seconds + 10
         self.session.poll()
         self.session.stop()
         self.assertTrue(self.session.finish()['recordersEnded'])
@@ -654,6 +719,21 @@ class EvidenceTests(unittest.TestCase):
             inspector.live.return_value = False
             with self.assertRaisesRegex(RuntimeError, 'exited before'):
                 support.stop_core(process, endpoint, inspector, {'pid': 200})
+
+
+class H11EvidenceTests(EvidenceTests):
+    """The full one-shot, ownership and early-stop contracts also hold at 120 seconds."""
+
+    recording_seconds = 120
+
+    def test_short_h04_tail_cannot_complete_an_h11_run(self):
+        self.arm()
+        self.session.stop()
+        self.ends()
+        self.session.poll()
+        self.session.readers['native'].end['sourceEndNs'] = '30000000200'
+        with self.assertRaisesRegex(RuntimeError, 'not fully armed'):
+            self.session.finish()
 
 
 if __name__ == "__main__":

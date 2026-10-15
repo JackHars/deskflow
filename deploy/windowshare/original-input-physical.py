@@ -62,7 +62,15 @@ def package_paths(core, host, source):
                     'libraryManifest': bundle / 'Contents/Resources/deskflow-exact-libraries.json'}
 
 
+def recording_times(mac):
+    """Frozen profiles, never an arbitrary duration supplied during a run."""
+    profile = mac.get('recordingProfile', 'h04')
+    require(isinstance(profile, str) and profile in ('h04', 'h11'), 'Unknown physical recording profile')
+    return (120, 150) if profile == 'h11' else (30, 120)
+
+
 def validate(mac, linux, base, private_path, source=None, holding=False):
+    recording_times(mac)
     require(mac.get('version') == 2 and mac.get('preparedOnly') is True and
             mac.get('originalInputEnabled') is True and mac.get('holdingDisplayEnabled') is holding and
             mac.get('separateControls', False) is holding,
@@ -219,9 +227,10 @@ class EvidenceSession:
     """One attempted arm, no clock comparison between processes, no acceptance claim."""
 
     roles = ('core', 'host', 'native')
-    duration_ms = 30000
-
-    def __init__(self, directory, atomic_json, now=time.monotonic):
+    def __init__(self, directory, atomic_json, now=time.monotonic, recording_seconds=30):
+        require(type(recording_seconds) is int and recording_seconds in (30, 120),
+                'Evidence requires a fixed physical recording duration')
+        self.duration_ms = recording_seconds * 1000
         self.directory, self.atomic_json, self.now = directory, atomic_json, now
         directory.mkdir(mode=0o700, exist_ok=False)
         self.run_id = 'physical-' + secrets.token_hex(12)
@@ -346,6 +355,7 @@ class EvidenceSession:
                                   for reader in self.readers.values()),
                 'Evidence was not fully armed, cleanly stopped and drained in every process')
         return {'runId': self.run_id, 'recordersArmed': True, 'recordersEnded': True,
+                'recordingSeconds': self.duration_ms // 1000,
                 'physicalAcceptance': 'not-assessed', 'nativeFieldPreservation': 'not-assessed',
                 'observerProvenance': 'not-assessed',
                 'logs': {role: str(reader.path) for role, reader in self.readers.items()}}
@@ -390,10 +400,13 @@ def freeze_plan(arguments, coordinator):
             'Freeze requires a separately prepared legacy v1 plan')
     require(len(mac.get('coreArgv', [])) == 5 and mac['coreArgv'][1:4] == ['server', '--new-instance', '--settings'] and
             len(mac.get('hostArgv', [])) == 3 and mac['hostArgv'][1] == '--identity', 'Unexpected prepared role arguments')
+    profile = getattr(arguments, 'recording_profile', 'h04')
+    recording_times({'recordingProfile': profile})
     bundle = arguments.bundle.resolve(strict=True)
     _, paths = package_paths(bundle / 'Contents/MacOS/deskflow-core',
                              bundle / 'Contents/MacOS/deskflow-windowshare', arguments.source)
     mac.update(version=2, originalInputEnabled=True, holdingDisplayEnabled=arguments.holding_display,
+               recordingProfile=profile,
                separateControls=arguments.holding_display, sourceExecutable=str(paths['source']),
                frozenArtifacts={name: sha(role) for name, role in paths.items()})
     mac['coreArgv'][0], mac['hostArgv'][0] = str(paths['core']), str(paths['host'])
@@ -484,6 +497,8 @@ if __name__ == '__main__':
         parser.add_argument('--bundle', type=Path, required=True)
         parser.add_argument('--source', type=Path, required=True)
         parser.add_argument('--holding-display', action='store_true')
+        parser.add_argument('--recording-profile', choices=('h04', 'h11'), default='h04',
+                            help='h04: 30-second recording; h11: 120-second recording in a 150-second session')
         parser.add_argument('--output', type=Path, required=True)
         raise SystemExit(freeze_plan(parser.parse_args(sys.argv[2:]), coordinator))
     if '--production-original-input' not in sys.argv:

@@ -525,6 +525,11 @@ or production original-input authority.
   134.65 MiB peak RSS and 10.44 MiB/h upper net growth. Retain failed earlier
   runs. This exercises loopback TLS, hardware decode and offscreen Qt paint;
   it does not complete H10/H11 native acceptance.
+- [x] Supply an explicit fixed H11 physical recording profile: 120 seconds of
+  evidence within a 150-second visible session, unchanged Linux resource caps,
+  one-shot arm and early-stop rejection. Keep the default H04 profile at 30/120
+  seconds. See `deploy/windowshare/original-input-physical.md`; a completed
+  recording still requires native workload/receipt review and is not H11 PASS.
 - [ ] Complete full native/library/OS/kernel queue certification on the frozen
   runtime and collect the actual stimulus/display measurements. Core admission
   cannot certify input buffered before it, compositor/device queues or a blocked
@@ -555,8 +560,8 @@ owned-process cases, sleep/wake and actual performance/soak in H10/H11.
   credentials are available. Otherwise provide the commit/patch and explain how
   to transfer it. Leave no essential code only in ignored build directories.
 
-Runtime candidate `e154f94e0` passes all six hosted jobs in run `38712601209`
-and the independently verified 1158-entry source archive. Its local Apple-issued
+Runtime candidate `8132c8554` passes all six hosted jobs in run `38744933197`
+and the independently verified 1160-entry source archive. Its local Apple-issued
 exact-library bundle passes staging/handshake checks. CI retains verified
 Linux and ad-hoc Mac archives for seven days. See `TESTING.md` for exact hashes,
 commands and remaining hardware tests; these checks do not complete H12.

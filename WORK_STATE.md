@@ -1,5 +1,28 @@
 # Seamless Windows work state
 
+## H11 physical recording interval implemented — 2026-10-15
+
+The final roadmap audit found that the physical recorder's fixed 30-second
+interval could not collect H11's required two minutes. The explicit frozen
+`h11` profile now records 120 seconds within a 150-second visible session;
+ordinary H04 remains 30/120 seconds. The source UI and receipt/status readers
+agree on that cap, and Linux keeps its existing independent 180/270-second
+deadlines. All three recorders enforce their original duration. A late arm,
+shortened tail or coordinator delay cannot reset or complete the interval.
+
+Local Mac source build and all 151 Python coordinator/normalizer/analyzer tests
+pass. Full-repository REUSE now passes (1132 files), and stale current roadmap
+references were corrected to the verified `8132c8554` runtime. Evidence lives
+under `build/p7-h11-profile-20261015/`. Core/Host runtime code is unchanged.
+Home Ubuntu is reachable with an active Wayland session; the staged Mac native
+capability probe passes. Readiness for attended tests has been requested, but
+not confirmed. No physical input, window transfer or sleep has been started.
+
+Full native/library/OS queue certification is still incomplete; the harness
+cannot turn unknown or unbounded upstream capacity into a guarantee. The
+applicable physical H02–H12 tests and observed installation remain open. Do
+not mark the roadmap complete from a longer recorder or synthetic fixtures.
+
 ## Independent Core dispatch expiration implemented — 2026-10-15
 
 Runtime `8132c85540b6c3f7f07acaeae0f61c98854df09d` arms an independent monitor before EventQueue producers

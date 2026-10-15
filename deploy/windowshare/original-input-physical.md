@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors -->
 <!-- SPDX-License-Identifier: MIT -->
 
-# Production original-input physical verification (H04, optional H06)
+# Production original-input physical verification (H04, optional H06/H11 input)
 
 This is an explicit opt-in mode. `physical-macos.py` and `physical-linux.py`
 retain their legacy defaults. The commands below enable the real production
@@ -12,9 +12,10 @@ authorization. Authentication or a preparation ACK is not an input receipt.
 
 No H04, H06, or H11 physical acceptance result is supplied by these scripts.
 An exit-zero result records a session awaiting human and receipt review. This
-mode records 30 seconds of input inside the visible 120-second session; it
-does **not** meet H11's 120-second sustained-input requirement or measure
-capture-to-display latency. Do not substitute these results for that workload.
+default profile records 30 seconds of input inside a visible 120-second session.
+The explicit `h11` profile records 120 seconds inside a 150-second session.
+Duration alone does **not** establish H11's input workload, native delivery,
+queue certification or capture-to-display latency.
 
 ## Prepare the exact artifacts
 
@@ -174,6 +175,39 @@ while Host is still alive. Those lifecycle observations are recorded separately
 from `holdingDisplayAcceptance:"not-assessed"`. A changed, hidden or moved
 control window fails the run and triggers owned cleanup. This is not an
 arbitrary-app compatibility test or proof of two physical monitors/edge drag.
+
+## H11 sustained-input collection profile
+
+For a separately predeclared H11 input run, add `--recording-profile h11` to
+the **freeze** command. The new private Mac plan names `recordingProfile:h11`;
+validation and execution derive every recorder's 120,000 ms duration and the
+source's 150-second session from that fixed profile. There is no live duration
+override. Old production plans without this field retain the H04 defaults.
+Legacy plans cannot select a production profile. Use the newly built frozen
+source with `--h11-input` support; the coordinator supplies that argument.
+
+Run `--validate-only` first. Its report must name `h11`,
+`predeclaredRecordingSeconds:120`, `maximumSessionSeconds:150` and three
+120,000 ms recorder configurations. Then follow the same visible Start/Record
+flow with the person present. Complete routing, priming and the Record request
+within the first 25 seconds of Active; arm requires more than 125 seconds left
+for the complete interval and safe return. A late or partial arm ends the run;
+it cannot reset the clock or select a shorter passing interval. Each recorder
+also enforces its own absolute duration if the coordinator stalls. An early
+Stop, including a 30-second tail, cannot complete an H11 recording.
+
+The Ubuntu controller's existing 180-second active and 270-second total
+resource deadlines stay fixed. The Mac requires at least 165 seconds remaining
+on the live Linux route before its 150-second countdown starts. File, row,
+ring and drain bounds are unchanged. A slow preparation can still expire.
+
+Predeclare and perform the complete mixed-input workload in
+[h11-evidence.md](h11-evidence.md), including the 120 Hz cadence, complete native
+receipts and queue traces. Normalize and review the retained logs with
+[input-evidence.md](input-evidence.md). A recorded session remains
+`physicalAcceptance:not-assessed`; it is not an H11 PASS. Full native/library/
+OS queue certification remains incomplete, and physical display latency needs
+its own common-clock evidence. This profile supplies neither result.
 
 ## Evidence and teardown
 

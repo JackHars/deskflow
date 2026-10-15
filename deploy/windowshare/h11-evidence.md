@@ -24,6 +24,14 @@ protocol observations establish specific functional assertions, not H11's
 120 Hz sustained workload or end-to-end latency. These files cannot be
 automatically converted into a passing H11 bundle.
 
+The production [original-input physical harness](original-input-physical.md)
+has an explicit `freeze --recording-profile h11` option for a fixed 120-second
+recording within a 150-second visible session. Its ordinary H04 profile remains
+30 seconds. The extended profile makes the required interval collectable; it
+does not supply the workload, native receipts, full queue certification or
+latency evidence. Review and normalize the actual three-process journals as
+described in [input-evidence.md](input-evidence.md), preserving all failures.
+
 ## Fixed acceptance checks
 
 The analyzer uses the targets declared in `TESTING.md` before measurement:

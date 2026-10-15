@@ -4,7 +4,38 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
-## Current candidate: independent Core dispatch expiration — 2026-10-15
+## H11 physical recording profile — 2026-10-15
+
+The physical harness now offers a frozen `h11` profile: a 120-second recording
+inside a 150-second visible session. The existing H04 profile remains 30/120
+seconds. Every role receives the same predeclared duration; the source,
+receipt collector and status publisher enforce the selected session cap.
+The Linux controller retains its 180-second active / 270-second resource caps.
+Late arm, early Stop, wrong profile, partial arm and owner changes cannot yield
+a completed recording. See [the procedure](deploy/windowshare/original-input-physical.md).
+
+Local evidence under `build/p7-h11-profile-20261015/`:
+
+- PASS: rebuilt `windowshare-smoke-source` on the Intel Mac / Qt 6.8.3.
+- PASS: 53 Mac coordinator, 23 Linux coordinator, 40 evidence normalizer and
+  35 H11 analyzer tests (**151 total**). The complete evidence coordinator suite
+  exercises both durations; a 30-second terminal row cannot complete H11.
+  Validate-only checks launch neither native processes nor SSH.
+- PASS: full-repository REUSE 3.3 lint, 1132/1132 licensed files, no errors;
+  C++ formatting and whitespace checks. Runtime Core/Host code is unchanged
+  from `8132c8554`; the source fixture and collection tools changed.
+- Read-only preflight: home Ubuntu `jack` is reachable; session 1 is active
+  Wayland on kernel `7.0.0-34-generic`. The existing frozen Ubuntu image is
+  available. The staged Mac package's native `--probe` reports Accessibility,
+  Screen Capture, holding display, exact window identity and targeted pointer
+  support. No input routing or physical test started.
+
+These are collection and preflight results, **not** physical acceptance. P5
+bidirectional dragging, P6 application behavior, P7 H10/H11 and P8 installation
+acceptance still need the applicable H tests. The native queue audit still
+identifies unbounded upstream queues and unknown OS/device capacities.
+
+## Independent Core dispatch expiration — 2026-10-15
 
 Runtime **`8132c85540b6c3f7f07acaeae0f61c98854df09d`** enforces the existing two-second event residence
 deadline even when a handler never returns. An independent thread scans 64
@@ -1983,7 +2014,7 @@ Implementation-to-test map (later commits include earlier runtime work):
 | P4 | `e461d2b31` and subsequent holding/recovery fixes | C04/C08/C10; H05/H06/H10 |
 | P5 | `63396d630`, `c748915cc` | C04/C07/C08; H07 |
 | P6 | `bfb9cb9e8` | C06/C07/C09; H08/H09 |
-| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `6108bd285`, `d57e78a0d`, `e154f94e0` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
+| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `6108bd285`, `d57e78a0d`, `e154f94e0`, `8132c8554` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
 | P8 | Existing package scripts and the current CI retention follow-up | C10–C12; installation/upgrade/removal H12 remains open |
 
 Use `PASS`, `FAIL`, `NOT_RUN` or `NOT_APPLICABLE` with a reason. A skipped case is
@@ -2145,18 +2176,18 @@ does not promote a native/physical H row or certify unknown upstream queues.
 
 | ID | Required check | Current candidate result / command / evidence |
 | --- | --- | --- |
-| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `e154f94e0`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
+| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `8132c8554`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
 | C02 | Actual Linux core with window sharing ON and OFF; ordinary protocol compatibility | PASS: current hosted integrated ON/OFF build/tests; independent home Ubuntu frozen Core and private EIS results are retained above. |
-| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `e154f94e0`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
+| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `8132c8554`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
 | C04 | Bounded async preparation, ownership, overflow, timeout, selection change, reentry and destruction | PASS: production coordinator, Core EventQueue and private channel regressions on Mac/Ubuntu, including overflow, expiry, reentry and exact cleanup. No physical delivery claim. |
 | C05 | Ordered cutoff/drain and exact point validation; delayed queues, duplicates and same-batch disconnect | PASS for implemented prefix, routed-point and private GNOME/Qt fixtures. Full native/OS queue capacities and actual physical delivery remain uncertified; see the native audit and H04. |
 | C06 | Actual Viewer/Bridge/transport; pending focus, pause/resume and old queued events | PASS: current Mac/Ubuntu Viewer, Bridge, viewport, transport and bounded media-load suites, plus image-ownership/hardware-transfer/color regressions, scoped Mac sanitizers and the earlier complete synthetic hour on unchanged media sources at `d57e78a0d`. |
-| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `e154f94e0`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
+| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `8132c8554`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
 | C08 | Multi-window/topology/holding lifecycle, drag transaction and failure regressions | PASS automated policy/transaction/native-fixture coverage for integrated bidirectional P5 dragging, holding restoration and watcher/helper lifecycle. Real-window transfer and failure acceptance remains H05–H07/H10. |
 | C09 | Dialog/clipboard/shortcut associations and resource scheduling/recovery tests | PASS component regressions, including actual private GNOME/X11 child surfaces and bounded overload/hidden recovery. Named app dialogs, clipboard and shortcut acceptance remains H08/H09. |
-| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `e154f94e0`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local Host stall/teardown and ASan/UBSan checks, Apple-issued exact-library package and private handshake also pass. |
-| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `e154f94e0`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
-| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `e154f94e0` source archive matches all 1158 Git tree entries and blob identities. Full-repository REUSE lint NOT_RUN. |
+| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `8132c8554`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local Core dispatch/Host stall/teardown and ASan/UBSan checks, Apple-issued exact-library package and private handshake also pass. |
+| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `8132c8554`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
+| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `8132c8554` source archive matches all 1160 Git tree entries and blob identities. Full-repository REUSE 3.3 lint PASS on 2026-10-15: 1132/1132 licensed files, no errors. |
 
 ### Reproducible baseline commands
 
@@ -2284,7 +2315,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 
 | ID | Procedure and required observations | Result / evidence |
 | --- | --- | --- |
-| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `e154f94e0`: current hosted Mac/Ubuntu tests, local Mac recovery checks and exact local Mac package/handshake pass as recorded above; the earlier home Ubuntu run remains attached to its recorded baseline. Final desktop capability and installation acceptance remains pending. |
+| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `8132c8554`: current hosted Mac/Ubuntu tests, local Mac recovery checks and exact local Mac package/handshake pass as recorded above; the earlier home Ubuntu run remains attached to its recorded baseline. Final desktop capability and installation acceptance remains pending. |
 | H02 | Repeat actual disposable Mac capture → Ubuntu viewer → Mac tagged native-receiver tests at Qt scales 1 and 1.25. Check frame identity/geometry, pointer/click/scroll/key receipts, no stuck input and restoration. This is synthetic, not physical acceptance. | NOT_RUN |
 | H03 | Run visible user-started physical flow. Confirm Start/Stop and countdown, actual Option hotkeys, type a/Shift+b/c, hold/release x, move/click/drag and scroll both axes, return to Mac. Match exact native source/host receipts and human result; no duplicate text or missing release. | NOT_RUN |
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |
@@ -2317,6 +2348,9 @@ schemas; do not fabricate or reuse expired preparation files:
   recording, strict raw-field normalization and separate latency/resource
   measurement prerequisites. The H04 recording is 30 seconds and cannot
   substitute for H11's two-minute input and 60-minute resource workloads.
+  An explicit frozen `h11` recording profile now supplies a 120-second input
+  interval within a fixed 150-second session; all workload, native receipt,
+  queue certification and physical display measurements still require evidence.
 - `deploy/windowshare/package-macos.sh`, `macos-bundle-tests.py` and
   `launch-smoke.py` for experimental packaging and handshake checks.
 

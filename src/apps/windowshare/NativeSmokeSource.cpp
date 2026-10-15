@@ -116,7 +116,7 @@ struct ManualStatus
   struct stat file{};
 };
 
-std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &name)
+std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &name, int sessionSeconds)
 {
   if (directory < 0)
     return std::nullopt;
@@ -146,7 +146,8 @@ std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &na
   const auto seconds = value.value("remainingSeconds");
   if (value.size() != 3 || !value.value("version").isDouble() || value.value("version").toDouble() != 1 ||
       !seconds.isDouble() || seconds.toDouble() != seconds.toInt(-1) || seconds.toInt(-1) < 0 ||
-      seconds.toInt() > 120 || (state != "preparing" && state != "ready" && state != "active" && state != "stopped") ||
+      seconds.toInt() > sessionSeconds ||
+      (state != "preparing" && state != "ready" && state != "active" && state != "stopped") ||
       (state == "active" ? seconds.toInt() == 0 : seconds.toInt() != 0))
     return std::nullopt;
   return ManualStatus{state, seconds.toInt(), after};
@@ -232,8 +233,9 @@ public:
       fields[4] = integer(kCGMouseEventDeltaX);
       fields[5] = integer(kCGMouseEventDeltaY);
       fields[6] = integer(kCGMouseEventButtonNumber);
-    } else if (fields[0] == 1 || fields[0] == 2 || fields[0] == 3 || fields[0] == 4 || fields[0] == 25 ||
-               fields[0] == 26) {
+    } else if (
+        fields[0] == 1 || fields[0] == 2 || fields[0] == 3 || fields[0] == 4 || fields[0] == 25 || fields[0] == 26
+    ) {
       fields[6] = integer(kCGMouseEventButtonNumber);
       fields[7] = integer(kCGMouseEventClickState);
     } else if (fields[0] == 22) {
@@ -505,9 +507,10 @@ private:
 class ManualAcceptance final : public QObject
 {
 public:
-  ManualAcceptance(const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field)
+  ManualAcceptance(const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field, bool h11Input)
       : m_recorder(recorder),
-        m_field(field)
+        m_field(field),
+        m_sessionSeconds(h11Input ? 150 : 120)
   {
     const QFileInfo location(path);
     if (location.isAbsolute() && !location.fileName().isEmpty()) {
@@ -592,7 +595,7 @@ private:
   }
   void poll()
   {
-    const auto status = readManualStatus(m_directory, m_name);
+    const auto status = readManualStatus(m_directory, m_name, m_sessionSeconds);
     const auto now = m_clock.elapsed();
     if (status) {
       if (m_seenFile && !sameStatusFile(m_lastFile, status->file)) {
@@ -645,11 +648,17 @@ private:
     if (m_state == "active") {
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
       m_instructions->setText(
-          "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
-          "2. Press Escape once. Type a, then Shift+b, then c.\n"
-          "3. Hold x for 1 second, then release it.\n"
-          "4. Move, click and drag inside the test window. Scroll vertically and horizontally.\n"
-          "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+          m_sessionSeconds == 150
+              ? "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
+                "2. Prime the planned controls, release them, then click Record in the Viewer.\n"
+                "3. Wait for Recording, then perform the planned two-minute mixed-input sequence.\n"
+                "4. Stay in this session until Recording complete.\n"
+                "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+              : "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
+                "2. Press Escape once. Type a, then Shift+b, then c.\n"
+                "3. Hold x for 1 second, then release it.\n"
+                "4. Move, click and drag inside the test window. Scroll vertically and horizontally.\n"
+                "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
       );
     } else if (m_state == "stopped") {
       m_status->setText("Test stopped");
@@ -660,7 +669,9 @@ private:
       );
     } else if (m_state == "ready") {
       m_status->setText("Ready — click Start when you are ready");
-      m_instructions->setText("The two-minute countdown starts only after the connection is ready.");
+      m_instructions->setText(
+          QStringLiteral("The %1-second countdown starts only after the connection is ready.").arg(m_sessionSeconds)
+      );
     } else {
       m_status->setText(
           m_request == "start" ? "Start requested — preparing the connection" : "Preparing the input test"
@@ -680,6 +691,7 @@ private:
   }
   Recorder &m_recorder;
   QLineEdit &m_field;
+  const int m_sessionSeconds;
   QLabel *m_status = nullptr;
   QLabel *m_instructions = nullptr;
   QPushButton *m_start = nullptr;
@@ -757,15 +769,19 @@ int main(int argc, char **argv)
   QApplication app(argc, argv);
   const auto arguments = app.arguments();
   QString manualPath, evidencePath, recordRequestPath;
-  bool separateControls = false;
+  bool separateControls = false, h11Input = false;
   if (arguments.size() < 3)
     return 2;
   for (int index = 3; index < arguments.size(); ++index) {
     const auto option = arguments.at(index);
     if (option == "--separate-controls" && !separateControls)
       separateControls = true;
-    else if ((option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
-             index + 1 < arguments.size()) {
+    else if (option == "--h11-input" && !h11Input)
+      h11Input = true;
+    else if (
+        (option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
+        index + 1 < arguments.size()
+    ) {
       auto &value = option == "--manual-status"    ? manualPath
                     : option == "--record-request" ? recordRequestPath
                                                    : evidencePath;
@@ -781,6 +797,8 @@ int main(int argc, char **argv)
   if ((separateControls || !evidencePath.isEmpty()) && !manualMode)
     return 2;
   if (!recordRequestPath.isEmpty() && evidencePath.isEmpty())
+    return 2;
+  if (h11Input && (!manualMode || evidencePath.isEmpty() || recordRequestPath.isEmpty()))
     return 2;
   std::unique_ptr<InputEvidenceRuntime> evidence;
   try {
@@ -810,7 +828,7 @@ int main(int argc, char **argv)
   }
   std::unique_ptr<ManualAcceptance> manual;
   if (manualMode) {
-    manual = std::make_unique<ManualAcceptance>(manualPath, recorder, *controlsLayout, *field);
+    manual = std::make_unique<ManualAcceptance>(manualPath, recorder, *controlsLayout, *field, h11Input);
     window.onManualClose = [guard = QPointer<ManualAcceptance>(manual.get())] {
       return !guard || guard->requestClose();
     };
