@@ -32,6 +32,15 @@ and ordinary processes/configurations were preserved. The evidence cleanup
 timeout remains recorded; no measurement or acceptance is claimed. A new
 attended Start is needed to capture the original live disconnect reason.
 
+The user confirmed that attempt five's window closed. Ready now has a visible
+five-minute one-shot countdown, independent of the unchanged active session
+and recording deadlines. The source and collector accept that longer value
+only in Ready; active limits and stale-coordinator checks remain unchanged.
+H04 evidence instructions now include the Record/wait/recording-complete steps,
+matching the existing recorder controls. The source builds and all 60 Python
+coordinator tests pass, including late Start, idle expiry, non-renewal and
+state-specific receipt limits. A fresh plan/source is required for the retry.
+
 ## Recorder publication overlap follow-up — 2026-10-15
 
 The third attended H04 attempt (`build/h04-r3-spns1sz_/session-1`) stopped

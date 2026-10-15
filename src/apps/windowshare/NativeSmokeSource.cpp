@@ -115,6 +115,7 @@ struct ManualStatus
   int remainingSeconds = 0;
   struct stat file{};
 };
+constexpr int manualStartSeconds = 300;
 
 std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &name, int sessionSeconds)
 {
@@ -146,9 +147,9 @@ std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &na
   const auto seconds = value.value("remainingSeconds");
   if (value.size() != 3 || !value.value("version").isDouble() || value.value("version").toDouble() != 1 ||
       !seconds.isDouble() || seconds.toDouble() != seconds.toInt(-1) || seconds.toInt(-1) < 0 ||
-      seconds.toInt() > sessionSeconds ||
+      seconds.toInt() > (state == "ready" ? manualStartSeconds : sessionSeconds) ||
       (state != "preparing" && state != "ready" && state != "active" && state != "stopped") ||
-      (state == "active" ? seconds.toInt() == 0 : seconds.toInt() != 0))
+      (state == "active" ? seconds.toInt() == 0 : state != "ready" && seconds.toInt() != 0))
     return std::nullopt;
   return ManualStatus{state, seconds.toInt(), after};
 }
@@ -507,10 +508,13 @@ private:
 class ManualAcceptance final : public QObject
 {
 public:
-  ManualAcceptance(const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field, bool h11Input)
+  ManualAcceptance(
+      const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field, bool h11Input, bool recordInput
+  )
       : m_recorder(recorder),
         m_field(field),
-        m_sessionSeconds(h11Input ? 150 : 120)
+        m_sessionSeconds(h11Input ? 150 : 120),
+        m_recordInput(recordInput)
   {
     const QFileInfo location(path);
     if (location.isAbsolute() && !location.fileName().isEmpty()) {
@@ -546,6 +550,7 @@ public:
         m_request = "start";
         ++m_requestSequence;
         m_state = "preparing";
+        m_remainingSeconds = 0;
         update();
       }
     });
@@ -635,9 +640,14 @@ private:
       return;
     } else {
       m_state = m_request == "start" ? QStringLiteral("preparing") : status->state;
+      if (m_state == "ready" && status->remainingSeconds) {
+        const auto proposed = now + status->remainingSeconds * 1000;
+        m_readyDeadline = m_readyDeadline ? std::min(m_readyDeadline, proposed) : proposed;
+      }
     }
-    m_remainingSeconds = m_state == "active" ? int(std::max<qint64>(0, m_deadline - now + 999) / 1000) : 0;
-    if (m_state == "active" && !m_remainingSeconds) {
+    const auto deadline = m_state == "active" ? m_deadline : m_state == "ready" ? m_readyDeadline : 0;
+    m_remainingSeconds = deadline ? int(std::max<qint64>(0, deadline - now + 999) / 1000) : 0;
+    if (deadline && !m_remainingSeconds) {
       requestStop();
       return;
     }
@@ -647,19 +657,29 @@ private:
   {
     if (m_state == "active") {
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
-      m_instructions->setText(
-          m_sessionSeconds == 150
-              ? "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
-                "2. Prime the planned controls, release them, then click Record in the Viewer.\n"
-                "3. Wait for Recording, then perform the planned two-minute mixed-input sequence.\n"
-                "4. Stay in this session until Recording complete.\n"
-                "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
-              : "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
-                "2. Press Escape once. Type a, then Shift+b, then c.\n"
-                "3. Hold x for 1 second, then release it.\n"
-                "4. Move, click and drag inside the test window. Scroll vertically and horizontally.\n"
-                "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
-      );
+      if (m_recordInput && m_sessionSeconds == 120)
+        m_instructions->setText(
+            "1. Ctrl+Option+Shift+Right, release all modifiers, then press Escape once.\n"
+            "2. Type a, Shift+b, c; hold x for 1 second. Click/drag inside this window and scroll both ways; release "
+            "everything.\n"
+            "3. Click Record in the Viewer and wait for Recording.\n"
+            "4. Repeat those inputs for 30 seconds; stay here until Recording complete.\n"
+            "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+        );
+      else
+        m_instructions->setText(
+            m_sessionSeconds == 150
+                ? "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
+                  "2. Prime the planned controls, release them, then click Record in the Viewer.\n"
+                  "3. Wait for Recording, then perform the planned two-minute mixed-input sequence.\n"
+                  "4. Stay in this session until Recording complete.\n"
+                  "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+                : "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
+                  "2. Press Escape once. Type a, then Shift+b, then c.\n"
+                  "3. Hold x for 1 second, then release it.\n"
+                  "4. Move, click and drag inside the test window. Scroll vertically and horizontally.\n"
+                  "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+        );
     } else if (m_state == "stopped") {
       m_status->setText("Test stopped");
       m_instructions->setText(
@@ -668,7 +688,10 @@ private:
               : "Release all keys and buttons. The coordinator will finish cleanup and close this window."
       );
     } else if (m_state == "ready") {
-      m_status->setText("Ready — click Start when you are ready");
+      m_status->setText(
+          m_remainingSeconds ? QStringLiteral("Ready — click Start within %1 seconds").arg(m_remainingSeconds)
+                             : QStringLiteral("Ready — click Start when you are ready")
+      );
       m_instructions->setText(
           QStringLiteral("The %1-second countdown starts only after the connection is ready.").arg(m_sessionSeconds)
       );
@@ -692,6 +715,7 @@ private:
   Recorder &m_recorder;
   QLineEdit &m_field;
   const int m_sessionSeconds;
+  const bool m_recordInput;
   QLabel *m_status = nullptr;
   QLabel *m_instructions = nullptr;
   QPushButton *m_start = nullptr;
@@ -702,7 +726,7 @@ private:
   QByteArray m_name;
   struct stat m_lastFile{};
   QString m_state = "preparing", m_request = "none";
-  qint64 m_changedAt = 0, m_deadline = 0;
+  qint64 m_changedAt = 0, m_deadline = 0, m_readyDeadline = 0;
   int m_requestSequence = 0, m_remainingSeconds = 0;
   bool m_seenFile = false, m_heartbeat = false, m_valid = false, m_ended = false;
 };
@@ -828,7 +852,9 @@ int main(int argc, char **argv)
   }
   std::unique_ptr<ManualAcceptance> manual;
   if (manualMode) {
-    manual = std::make_unique<ManualAcceptance>(manualPath, recorder, *controlsLayout, *field, h11Input);
+    manual = std::make_unique<ManualAcceptance>(
+        manualPath, recorder, *controlsLayout, *field, h11Input, !recordRequestPath.isEmpty()
+    );
     window.onManualClose = [guard = QPointer<ManualAcceptance>(manual.get())] {
       return !guard || guard->requestClose();
     };

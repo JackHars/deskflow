@@ -119,6 +119,7 @@ class StatusTests(unittest.TestCase):
         publisher.session_seconds = session_seconds
         publisher.lock = threading.Lock()
         publisher.state, publisher.deadline, publisher.was_active = "preparing", None, False
+        publisher.ready_deadline = None
         now = [100.0]
         with patch.object(module.time, "monotonic", side_effect=lambda: now[0]):
             publisher.set("ready")
@@ -134,6 +135,50 @@ class StatusTests(unittest.TestCase):
             self.assertEqual(publisher.snapshot(), {"version": 1, "state": "stopped", "remainingSeconds": 0})
             with self.assertRaises(RuntimeError):
                 publisher.set("active", session_seconds)
+
+    def test_ready_countdown_is_bounded_and_independent_from_active(self):
+        publisher = module.StatusPublisher.__new__(module.StatusPublisher)
+        publisher.session_seconds = 120
+        publisher.lock = threading.Lock()
+        publisher.state, publisher.deadline, publisher.was_active = "preparing", None, False
+        publisher.ready_deadline = None
+        now = [100.0]
+        with patch.object(module.time, "monotonic", side_effect=lambda: now[0]):
+            with self.assertRaises(RuntimeError):
+                publisher.set("ready", module.START_WAIT_SECONDS + 1)
+            publisher.set("ready", module.START_WAIT_SECONDS)
+            now[0] += module.START_WAIT_SECONDS - 1
+            publisher.set("ready", module.START_WAIT_SECONDS)
+            publisher.set("ready")
+            self.assertEqual(publisher.snapshot(), {"version": 1, "state": "ready", "remainingSeconds": 1})
+            # A late Start receives the original active budget, never the idle remainder.
+            publisher.set("active", 120)
+            self.assertEqual(publisher.snapshot()["remainingSeconds"], 120)
+            now[0] += 121
+            self.assertEqual(publisher.snapshot()["state"], "stopped")
+            with self.assertRaises(RuntimeError):
+                publisher.set("ready", module.START_WAIT_SECONDS)
+
+    def test_ready_expiration_is_terminal_and_receipt_bounds_are_state_specific(self):
+        publisher = module.StatusPublisher.__new__(module.StatusPublisher)
+        publisher.session_seconds = 120
+        publisher.lock = threading.Lock()
+        publisher.state, publisher.deadline, publisher.was_active = "preparing", None, False
+        publisher.ready_deadline = None
+        now = [100.0]
+        with patch.object(module.time, "monotonic", side_effect=lambda: now[0]):
+            publisher.set("ready", module.START_WAIT_SECONDS)
+            now[0] += module.START_WAIT_SECONDS
+            self.assertEqual(publisher.snapshot(), {"version": 1, "state": "stopped", "remainingSeconds": 0})
+            with self.assertRaises(RuntimeError):
+                publisher.set("active", 120)
+        value = receipt()
+        value["manual"].update(state="ready", remainingSeconds=module.START_WAIT_SECONDS)
+        module.ReceiptHistory().merge(value)
+        for state, seconds in (("ready", module.START_WAIT_SECONDS + 1), ("active", module.START_WAIT_SECONDS)):
+            value["manual"].update(state=state, remainingSeconds=seconds)
+            with self.subTest(state=state), self.assertRaisesRegex(RuntimeError, "manual controls"):
+                module.ReceiptHistory().merge(value)
 
     def test_extended_receipts_require_the_explicit_session_profile(self):
         value = receipt(request="start", request_sequence=1)

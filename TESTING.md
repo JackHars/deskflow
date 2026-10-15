@@ -58,6 +58,19 @@ cannot supply terminal evidence. This is not a successful recording or a
 reproduction of the earlier active-session failure. Source export run
 `38766497090` passed; hosted checks `38766497148` were still running when recorded.
 
+After the user confirmed the idle closure, the Ready wait was extended from
+90 to 300 seconds and made visible. It is independent from the unchanged
+120/150-second active profiles, 30/120-second recordings, native authority
+deadlines and 600-second total coordinator watchdog. Linux already permits
+600 seconds in prepared state before native startup. The native source clamps
+the local Ready countdown and the collector permits the larger receipt value
+only in Ready. H04 evidence-mode instructions now include Record and waiting
+for recording completion; legacy input-only instructions remain available.
+The source build and all 60 coordinator regressions pass. The four new checks
+cover idle expiry, non-renewal, independent late-Start active budget and
+state-specific bounds. Logs are `ready-coordinator-tests.log` and
+`source-ready-build.log` in the diagnostic evidence root.
+
 ## Recorder publication overlap repair — 2026-10-15
 
 Third attended H04 attempt: **failed setup, physical acceptance not assessed**.

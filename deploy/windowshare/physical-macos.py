@@ -38,6 +38,7 @@ MAX_SEQUENCE = 2**53 - 1
 # inspection has 30 seconds. Observe both plus scheduling grace; do not
 # shorten them to the generic ten-second polling timeout or renew either one.
 PRODUCTION_CORE_READY_SECONDS = 50
+START_WAIT_SECONDS = 300
 
 
 def core_ready(text, ipc_ready, production):
@@ -113,6 +114,7 @@ class StatusPublisher:
         self.stopping = threading.Event()
         self.state = "preparing"
         self.deadline = None
+        self.ready_deadline = None
         self.was_active = False
         self.error = None
         self.thread = threading.Thread(target=self.loop, daemon=True)
@@ -121,15 +123,20 @@ class StatusPublisher:
     def set(self, state, seconds=0):
         require(state in ("preparing", "ready", "active", "stopped"), "Invalid manual state")
         require(type(seconds) is int and
-                (1 <= seconds <= self.session_seconds if state == "active" else seconds == 0),
+                (1 <= seconds <= self.session_seconds if state == "active" else
+                 0 <= seconds <= START_WAIT_SECONDS if state == "ready" else seconds == 0),
                 "Invalid manual countdown")
         with self.lock:
             require(self.state != "stopped" or state == "stopped", "Manual session already stopped")
             require(not self.was_active or state in ("active", "stopped"), "Cannot rearm an active session")
-            deadline = time.monotonic() + seconds if state == "active" else None
+            deadline = time.monotonic() + seconds if seconds else None
+            if state == "ready":
+                if deadline is not None:
+                    self.ready_deadline = min(self.ready_deadline, deadline) if self.ready_deadline else deadline
+                deadline = self.ready_deadline
             if state == "active":
                 self.was_active = True
-                if self.deadline is not None:
+                if self.state == "active" and self.deadline is not None:
                     deadline = min(self.deadline, deadline)
             self.state = state
             self.deadline = deadline
@@ -137,10 +144,10 @@ class StatusPublisher:
     def snapshot(self):
         with self.lock:
             remaining = math.ceil(self.deadline - time.monotonic()) if self.deadline else 0
-            if self.state == "active" and remaining <= 0:
+            if self.deadline is not None and remaining <= 0:
                 self.state, self.deadline = "stopped", None
             return {"version": 1, "state": self.state,
-                    "remainingSeconds": max(0, remaining) if self.state == "active" else 0}
+                    "remainingSeconds": max(0, remaining) if self.state in ("ready", "active") else 0}
 
     def loop(self):
         try:
@@ -183,7 +190,8 @@ class ReceiptHistory:
                 manual.get("state") in ("preparing", "ready", "active", "stopped") and
                 type(manual.get("statusValid")) is bool and
                 type(manual.get("remainingSeconds")) is int and
-                0 <= manual["remainingSeconds"] <= self.session_seconds,
+                0 <= manual["remainingSeconds"] <=
+                (START_WAIT_SECONDS if manual["state"] == "ready" else self.session_seconds),
                 "Source does not provide manual controls")
         sequence = manual.get("requestSequence")
         require(type(sequence) is int and self.manual_sequence <= sequence <= 2,
@@ -642,10 +650,11 @@ def run(arguments):
                     report["prepared"].get("macOriginalInputConfigured") is True and
                     report["prepared"].get("windowId") == initial["windowId"],
                     "Linux did not prepare the exact production route and disposable source")
-        publisher.set("ready")
-        emit({"event": "waiting-for-start", "title": title, "routingStarted": False})
+        publisher.set("ready", START_WAIT_SECONDS)
+        emit({"event": "waiting-for-start", "title": title, "routingStarted": False,
+              "startWaitSeconds": START_WAIT_SECONDS})
         wait(lambda: collector.snapshot()["receipt"]["manual"]["request"] == "start",
-             "the visible Start button", seconds=90 if production else 300)
+             "the visible Start button", seconds=START_WAIT_SECONDS)
         if evidence:
             evidence.start_boundary()
         publisher.set("preparing")
