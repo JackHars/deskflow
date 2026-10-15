@@ -38,6 +38,12 @@ batch leaves its tail for teardown and terminates Core. A delay inside the
 actual library dispatch checks expiry before consuming the decoded event.
 There is no compositor, input device, desktop route or delivery permit.
 
+The later [Host progress monitor](host-recovery.md) bounds a stalled Mac Host
+event loop through self-exit and existing journal recovery, subject to OS
+scheduling. Its deadlines are independent of the Core event residence budget.
+This adds recovery coverage without establishing any of the missing upstream
+allocation limits or preempting a blocked Core/compositor/library process.
+
 The next native acceptance run must freeze its actual runtime and retain its
 queue coverage review beside the raw input traces. H10 still requires owned
 host/helper/core/viewer failures and sleep/wake with restoration observations.

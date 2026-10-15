@@ -6,13 +6,16 @@
 
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <libproc.h>
+#include <mutex>
 #include <poll.h>
+#include <signal.h>
 #include <spawn.h>
 #include <string>
 #include <sys/proc.h>
@@ -20,7 +23,6 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
-#include <signal.h>
 
 extern char **environ;
 
@@ -123,6 +125,62 @@ bool parentEnded(pid_t pid, std::uint64_t birth)
 }
 } // namespace
 
+// The independent recovery child observes EOF, not event-loop progress. Keep
+// this monitor inside the Host so expiration can terminate only this process,
+// without sending a signal to a reusable PID. It never calls Qt, native window
+// APIs, log sinks or user callbacks. The existing child then owns recovery.
+struct RecoveryWatchdog::Progress
+{
+  using Clock = std::chrono::steady_clock;
+  std::mutex mutex;
+  std::condition_variable changed;
+  const std::thread::id owner = std::this_thread::get_id();
+  Clock::time_point deadline = Clock::now() + std::chrono::seconds(15);
+  bool stopped = false;
+  std::thread monitor;
+
+  Progress()
+      : monitor([this] {
+          std::unique_lock lock(mutex);
+          while (!stopped) {
+            if (Clock::now() >= deadline) {
+              // No destructor or flushing path may block the watchdog. In particular,
+              // a full stderr pipe must not postpone journal recovery indefinitely.
+              _exit(progressTimeoutExitCode);
+            }
+            // Re-read the current deadline after notifications or spurious wakeups.
+            // Never hold the mutex across Host/native work.
+            const auto next = deadline;
+            changed.wait_until(lock, next);
+          }
+        })
+  {
+  }
+
+  ~Progress()
+  {
+    {
+      std::lock_guard lock(mutex);
+      stopped = true;
+    }
+    changed.notify_one();
+    monitor.join();
+  }
+
+  bool heartbeat()
+  {
+    if (std::this_thread::get_id() != owner)
+      return false;
+    std::lock_guard lock(mutex);
+    const auto now = Clock::now();
+    if (stopped || now >= deadline)
+      return false;
+    deadline = now + std::chrono::seconds(5);
+    changed.notify_one();
+    return true;
+  }
+};
+
 RecoveryWatchdog::RecoveryWatchdog(const std::string &executable, const std::string &journal, std::string *error)
 {
   const auto fail = [error](const char *reason) {
@@ -163,10 +221,9 @@ RecoveryWatchdog::RecoveryWatchdog(const std::string &executable, const std::str
   if (!code)
     code = posix_spawn_file_actions_addclose(&actions, ackWrite.fd);
   const std::string pidArg = std::to_string(getpid()), birthArg = std::to_string(birth);
-  char *arguments[] = {
-      const_cast<char *>(executable.c_str()), const_cast<char *>("--recovery-watchdog-private"),
-      const_cast<char *>(pidArg.c_str()), const_cast<char *>(birthArg.c_str()),
-      const_cast<char *>(journal.c_str()), nullptr};
+  char *arguments[] = {const_cast<char *>(executable.c_str()), const_cast<char *>("--recovery-watchdog-private"),
+                       const_cast<char *>(pidArg.c_str()),     const_cast<char *>(birthArg.c_str()),
+                       const_cast<char *>(journal.c_str()),    nullptr};
   posix_spawnattr_t attributes;
   if (!code)
     code = posix_spawnattr_init(&attributes);
@@ -194,9 +251,8 @@ RecoveryWatchdog::RecoveryWatchdog(const std::string &executable, const std::str
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(startupTimeoutMs);
   int polled = 0;
   for (;;) {
-    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now()
-    ).count();
+    const auto remaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
     if (remaining <= 0)
       break;
     polled = poll(&descriptor, 1, int(remaining));
@@ -210,18 +266,27 @@ RecoveryWatchdog::RecoveryWatchdog(const std::string &executable, const std::str
     // after the host exits, when its journal has no relocated windows.
     return;
   }
+  try {
+    // Thread creation failure must refuse export just like helper startup
+    // failure. Retain the pipe only after both recovery mechanisms are ready.
+    m_progress = std::make_unique<Progress>();
+  } catch (...) {
+    fail("Cannot start independent Host progress monitor");
+    return;
+  }
   m_write = hostWrite.release();
 }
 
 RecoveryWatchdog::~RecoveryWatchdog()
 {
+  m_progress.reset();
   if (m_write >= 0)
     close(m_write);
 }
 
 bool RecoveryWatchdog::armed() const
 {
-  return m_write >= 0 && m_pid > 0;
+  return m_write >= 0 && m_pid > 0 && m_progress;
 }
 
 bool RecoveryWatchdog::alive()
@@ -240,6 +305,11 @@ bool RecoveryWatchdog::alive()
   return waited == 0;
 }
 
+bool RecoveryWatchdog::heartbeat()
+{
+  return alive() && m_progress->heartbeat();
+}
+
 bool recoveryWatchdogMode(int argc, char **argv)
 {
   return argc >= 2 && std::strcmp(argv[1], "--recovery-watchdog-private") == 0;
@@ -252,7 +322,8 @@ int runRecoveryWatchdog(int argc, char **argv)
   if (argc != 5 || !recoveryWatchdogMode(argc, argv) || !argv[4] || argv[4][0] != '/')
     return 2;
   std::uint64_t pid = 0, birth = 0;
-  if (!parseUint(argv[2], pid) || !parseUint(argv[3], birth) || pid > INT32_MAX || !originalParentAlive(pid_t(pid), birth))
+  if (!parseUint(argv[2], pid) || !parseUint(argv[3], birth) || pid > INT32_MAX ||
+      !originalParentAlive(pid_t(pid), birth))
     return 2;
   char ready = 'R';
   if (write(childReady, &ready, 1) != 1)

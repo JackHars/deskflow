@@ -2917,8 +2917,12 @@ int main(int argc, char **argv)
     QTimer watchdogHealth;
     if (watchdog) {
       QObject::connect(&watchdogHealth, &QTimer::timeout, &shutdown, [&shutdown, &watchdog] {
-        if (!watchdog->alive()) {
-          QTextStream(stderr) << "Window sharing recovery watchdog exited; restoring all exports\n";
+        // A nested event loop during restoration must not keep extending a
+        // stuck shutdown. The monitor also outlives Bridge's native destructors.
+        if (shutdown.requested())
+          return;
+        if (!watchdog->heartbeat()) {
+          QTextStream(stderr) << "Window sharing recovery watchdog or Host progress lost; restoring all exports\n";
           shutdown.request();
         }
       });

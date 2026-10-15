@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <memory>
 #include <string>
 #include <sys/types.h>
 
@@ -23,8 +24,16 @@ public:
   RecoveryWatchdog &operator=(const RecoveryWatchdog &) = delete;
   bool armed() const;
   bool alive();
+  // Called only by the creating (Host event-loop) thread. A separate thread
+  // exits this process if startup takes 15 seconds, or progress stops for five
+  // seconds after the first heartbeat. A late heartbeat cannot renew the lease.
+  // Stop renewing when shutdown begins; the guard covers native destructors too.
+  bool heartbeat();
+  static constexpr int progressTimeoutExitCode = 70;
 
 private:
+  struct Progress;
+  std::unique_ptr<Progress> m_progress;
   int m_write = -1;
   pid_t m_pid = -1;
 };

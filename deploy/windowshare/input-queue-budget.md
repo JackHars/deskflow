@@ -35,10 +35,14 @@ release and keep routing. On Mac, the first failure synchronously stops the
 retained capture source, revoking its epoch, completed inbox and held-motion
 gate before the failing producer returns. The event loop exits unsuccessfully;
 the existing Core shutdown disconnects the peer and drains/restores the owned
-companion. Shutdown of a handler that never returns still relies on the
-independent watchdog. The two-second age limit cannot preempt a blocked handler
+companion. The two-second age limit cannot preempt a blocked handler
 or an OS/library call. A caller-retained Event is denied on reuse after the age
 limit; no separate expiry thread preempts its owner.
+
+The Mac Host separately has an independent event-loop progress monitor; see
+[host-recovery.md](host-recovery.md). A Host stall terminates that Host so its
+recovery child can reopen the journal. This does not preempt a blocked Core
+handler or certify the native queues before either process.
 
 Startup transfer and producer publication are serialized, preserving the
 pending prefix. Cleanup timers also run when the guarded queue remains busy.

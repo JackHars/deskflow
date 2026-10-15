@@ -477,6 +477,11 @@ or production original-input authority.
 
 - [x] Add crash-watchdog recovery to the existing restore journal, preserving
   unresolved records and kernel process-birth identities across restart.
+- [x] Add an independent Host progress monitor for stalled startup/event-loop
+  work. Stop heartbeat renewal during shutdown, expire only the current Host,
+  and let its existing recovery child reopen the journal. Real deadline,
+  blocked-owner, healthy-heartbeat and teardown regressions run without desktop
+  access; see [host-recovery.md](deploy/windowshare/host-recovery.md).
 - [x] Make teardown/recovery idempotent for disconnect, host/helper/viewer/core
   failure, sleep/wake, session deactivation and emergency return. Bound shutdown
   and retain diagnostics for hung owned children.
