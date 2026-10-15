@@ -414,37 +414,49 @@ void Channel::read()
         close("Data before authenticated TLS", CloseCause::Protocol);
         return;
       }
-      const auto bytes = m_socket.read(64 * 1024);
-      if (!alive || !fresh() || bytes.isEmpty())
-        return;
-      std::vector<Packet> packets;
-      m_decoder.feed(
-          {reinterpret_cast<const std::uint8_t *>(bytes.constData()), static_cast<std::size_t>(bytes.size())},
-          [this, &packets](Packet packet) {
-            if (!m_sequences.accept(packet.sequence))
-              throw std::runtime_error("Replayed or out-of-order packet");
-            packets.push_back(std::move(packet));
-          }
-      );
-      const auto acceptedAt = m_now();
-      if (!m_observation->liveAt(acceptedAt)) {
-        close("Peer heartbeat timed out", CloseCause::Network);
-        return;
-      }
-      m_observation = AuthenticatedPeerObservation(m_observation->ticket(), acceptedAt);
-      // Decode before callbacks so deleting the Channel cannot leave its member
-      // Decoder on the stack. Each read is bounded, and its authority is checked
-      // again between callbacks that could block or run a nested event loop.
-      for (auto &packet : packets) {
+      // A small byte batch can contain hundreds of input callbacks. Native
+      // work in those callbacks must not starve other channels' heartbeats.
+      // Leave the remaining bytes in the bounded socket/decoder buffers, and
+      // yield after either the byte, packet or elapsed-work budget is spent.
+      const auto started = Clock::now();
+      std::size_t remaining = 64 * 1024;
+      unsigned delivered = 0;
+      while (remaining && delivered < 32) {
         if (!alive || !fresh())
           return;
-        if (packet.type == MessageType::Ping) {
-          send(MessageType::Pong);
-        } else if (packet.type != MessageType::Pong) {
-          const auto callback = onPacket;
-          if (callback)
-            callback(std::move(packet));
+        const auto bytes = m_socket.read(static_cast<qint64>(std::min(remaining, m_decoder.bytesNeeded())));
+        if (!alive || !fresh() || bytes.isEmpty())
+          return;
+        remaining -= static_cast<std::size_t>(bytes.size());
+        std::optional<Packet> packet;
+        m_decoder.feed(
+            {reinterpret_cast<const std::uint8_t *>(bytes.constData()), static_cast<std::size_t>(bytes.size())},
+            [this, &packet](Packet decoded) {
+              if (!m_sequences.accept(decoded.sequence))
+                throw std::runtime_error("Replayed or out-of-order packet");
+              packet = std::move(decoded);
+            }
+        );
+        const auto acceptedAt = m_now();
+        if (!m_observation->liveAt(acceptedAt)) {
+          close("Peer heartbeat timed out", CloseCause::Network);
+          return;
         }
+        m_observation = AuthenticatedPeerObservation(m_observation->ticket(), acceptedAt);
+        // Decoder is off the stack before a callback can delete this Channel.
+        // The next iteration rechecks authority even after a nested event loop.
+        if (packet) {
+          ++delivered;
+          if (packet->type == MessageType::Ping) {
+            send(MessageType::Pong);
+          } else if (packet->type != MessageType::Pong) {
+            const auto callback = onPacket;
+            if (callback)
+              callback(std::move(*packet));
+          }
+        }
+        if (Clock::now() - started >= std::chrono::milliseconds(8))
+          return;
       }
     }();
   } catch (const std::exception &error) {

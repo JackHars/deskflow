@@ -2,12 +2,54 @@
 
 ## Attended-test permission — current user instruction, 2026-10-15
 
-The user is away from the computer. Ask for fresh permission immediately before
+The user returned and explicitly authorized attempt nine below. Ask for fresh permission immediately before
 executing the next physical test, and wait for an affirmative reply before
 opening its test window or starting its physical session. Earlier Start/Ready
 answers do not authorize another attempt. Unattended builds, unit tests and
 isolated headless GNOME fixtures can continue. Prepare the tested artifacts and
-plans before asking; do not ask while the user is known to be away.
+plans before asking. Do not ask while the user is known to be away.
+
+## Attempt nine: Host event-loop stall during physical input — 2026-10-15
+
+The user explicitly approved launch immediately beforehand, clicked Start,
+confirmed Active, and clicked Record at 13:23:13 local. They reported repeating
+the inputs before the window closed. Neither Core nor Host ever published a
+ready candidate, so no recorder armed. Host reported `Local input heartbeat
+expired (elapsed=3239ms, budget=2500ms)`; Core reported private-channel authority
+loss at 13:23:40. Readiness timestamps show a 3229 ms Host gap while Core and
+source stayed responsive (largest gaps 189 ms and 159 ms respectively).
+This identifies a Host event-loop stall, not its exact native stack.
+
+Evidence: `build/h04-r9-0q_whncg/`, with launch permission, human observation and
+copied Ubuntu results. All three recorders ended denied/unarmed, loss 0 and
+zero measured rows. All 1736 Qt receipt events were retained without sequence
+gaps; the routing Right key still lacks an observed release. Source geometry
+was restored, but neutral input remains unverified. Mac Core/source exited 0,
+the exact Host stopped, and the owned Ubuntu container/sockets are absent.
+Ordinary settings/processes were preserved. Ubuntu's failed private IPC stop,
+relay EOF and terminated Core remain recorded. H04/P5 is not accepted.
+
+The TLS reader could invoke hundreds of native input callbacks in one 64 KiB
+read before servicing other channels. It now consumes one decoder fragment at
+a time and yields after 32 packets, 8 ms of work or 64 KiB, without adding a
+decoded-packet queue. Every continuation rechecks existing authentication and
+deadlines. A single slow callback cannot be preempted; this repair does not
+establish that every possible native stall or missing readiness is resolved.
+
+Evidence: `build/h04-dispatch-_wdtca1j/`. A real TLS input-burst regression fails
+against the old code and passes after the repair, including slow callbacks,
+ordered lossless continuation and expiry during the yield. Mac transport,
+Bridge and viewport suites pass (2.31 s / 12.63 s / 2.63 s). Home Ubuntu passes
+the same suites (16.92 s total), core ASan/UBSan (0.17 s), and isolated real
+GNOME/QtWayland (12.70 s, clean client stop, no original-delivery authority).
+Temporary Linux build/container cleanup, formatting and full REUSE pass.
+The updated Mac Core/Host builds and Apple-issued exact-library package verify;
+the packaged admission/bootstrap smoke passes with native input disabled.
+Package ZIP SHA-256:
+`78959dd0b6a95ac9ca75c109d72b00096937c0bd2fc05feda0c58aa31d1e9ada`.
+Fresh attempt ten is prepared/validated under `build/h04-r10-f_dfkh1x/`, using
+the repaired Mac package and repaired Ubuntu Viewer. No physical process has
+started for that attempt; it needs fresh permission immediately before launch.
 
 ## Attempt eight: visible input, then Ubuntu viewport disconnect — 2026-10-15
 

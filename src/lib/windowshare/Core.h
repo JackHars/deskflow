@@ -106,6 +106,12 @@ public:
   {
     return m_buffer.size();
   }
+  // Feeding at most this many bytes cannot emit more than one packet. This
+  // lets a transport yield between callbacks without another decoded queue.
+  std::size_t bytesNeeded() const
+  {
+    return m_failed ? 0 : m_expected - m_buffer.size();
+  }
 
 private:
   std::vector<std::uint8_t> m_buffer;

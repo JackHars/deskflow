@@ -17,6 +17,7 @@
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTextStream>
+#include <QThread>
 #include <chrono>
 #include <memory>
 using namespace deskflow::windowshare;
@@ -255,6 +256,50 @@ void lateReadEvidence(const Identity &host, const Identity &client, bool expireB
           !pair.server->authenticatedPeerObservation(),
       "Queued data or a second callback revived expired authenticated authority"
   );
+}
+
+void packetBurstYield(const Identity &host, const Identity &client, bool slowCallback, bool expireAfterYield)
+{
+  EvidencePair pair(host, client);
+  ChannelTestAccess::pauseReads(*pair.server);
+  const auto retained = *pair.server->authenticatedPeerObservation();
+  const int total = slowCallback ? 8 : 128;
+  int delivered = 0, deliveredAtYield = 0, closed = 0;
+  bool yielded = false, ordered = true;
+  pair.server->onClosed = [&](QString, CloseCause) { ++closed; };
+  pair.server->onPacket = [&](Packet packet) {
+    ordered = ordered && parseObject(packet)["index"].toInt(-1) == delivered;
+    if (++delivered == 1) {
+      QTimer::singleShot(0, pair.server.get(), [&] {
+        yielded = true;
+        deliveredAtYield = delivered;
+        if (expireAfterYield)
+          *pair.serverNow += AuthenticatedPeerObservation::freshness;
+      });
+      if (slowCallback)
+        QThread::msleep(20);
+    }
+  };
+  qint64 expectedBytes = 0;
+  for (int i = 0; i < total; ++i) {
+    const QJsonObject object{{"index", i}};
+    expectedBytes += headerSize + jsonBytes(object).size();
+    check(pair.peer->send(MessageType::Input, object, 7, 2), "Cannot queue input burst");
+  }
+  waitFor(
+      [&] { return ChannelTestAccess::available(*pair.server) >= expectedBytes; },
+      "Input burst did not reach TLS receive buffer"
+  );
+  ChannelTestAccess::queueRead(*pair.server);
+  waitFor([&] { return yielded && (delivered == total || closed); }, "Input burst did not finish or expire");
+  check(ordered && deliveredAtYield > 0 && deliveredAtYield < total, "Input burst starved independent event-loop work");
+  if (expireAfterYield)
+    check(
+        closed == 1 && delivered == deliveredAtYield && !retained.ticket().live(),
+        "Queued burst revived authority after the event-loop yield"
+    );
+  else
+    check(delivered == total && closed == 0, "Yielding lost or terminated valid ordered input");
 }
 
 void terminalEvidence(const Identity &host, const Identity &client)
@@ -1122,6 +1167,9 @@ int main(int argc, char **argv)
     retainedEvidence(host, client);
     lateReadEvidence(host, client, false);
     lateReadEvidence(host, client, true);
+    packetBurstYield(host, client, false, false);
+    packetBurstYield(host, client, true, false);
+    packetBurstYield(host, client, false, true);
     terminalEvidence(host, client);
     destructiveEvidenceCallbacks(host, client);
     handshakeEvidence(host, client);

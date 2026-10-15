@@ -4,6 +4,43 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 Host stall and TLS input-burst regression — 2026-10-15
+
+Attempt nine (`build/h04-r9-0q_whncg/`) ran only after fresh explicit launch
+permission. The user confirmed Active and reported clicking Record and
+repeating input before closure. Record was requested at 13:23:13 local, but
+Core/Host never published readiness and none of the recorders armed. Host
+reported a 3239 ms heartbeat age against the unchanged 2500 ms limit; its
+readiness publications have a 3229 ms gap while Core/source remain responsive.
+The native stack causing that stall was not sampled. All measured row counts
+are zero, all terminal losses are zero, and physical acceptance is unassessed.
+
+All 1736 Qt receipt events were collected without gaps. The routing Right key
+still lacks an observed release; source geometry was restored but neutral
+input is unverified. All exact owned processes and forwarding sockets stopped,
+ordinary settings/processes were preserved, and failed Ubuntu IPC/relay/Core
+shutdown evidence remains retained.
+
+The TLS reader's 64 KiB batch previously dispatched every decoded packet before
+yielding, allowing a burst of costly native callbacks to starve other channels.
+It now limits each turn by bytes, packets and elapsed work, leaving remaining
+bytes in existing bounded socket/decoder buffers. A real TLS regression fails
+on the previous implementation and passes with the change. It verifies fair
+continuation for both large bursts and a slow callback, packet order, complete
+delivery, and refusal to revive expired authority after yielding. A single
+blocking native callback remains a limitation, and physical readiness still
+requires verification.
+
+Evidence: `build/h04-dispatch-_wdtca1j/`. Mac transport/Bridge/viewport suites
+pass (2.31 s / 12.63 s / 2.63 s); home Ubuntu passes the same suites (16.92 s),
+core ASan/UBSan (0.17 s), and isolated GNOME/QtWayland (12.70 s). The isolated
+fixture reports a clean client stop and no original-delivery authority; it
+uses no user desktop or physical input. Formatting and full REUSE pass.
+The Apple-issued exact-library Mac package verifies, and packaged admission/
+bootstrap smoke passes with native input disabled. Fresh attempt ten is
+prepared/validated under `build/h04-r10-f_dfkh1x/`; it requires fresh launch
+permission and has not run.
+
 ## H04 visible input and Ubuntu disconnect diagnostics — 2026-10-15
 
 Attempt eight (`build/h04-r8-5bjw64xh/`) stayed visible beyond three minutes,
