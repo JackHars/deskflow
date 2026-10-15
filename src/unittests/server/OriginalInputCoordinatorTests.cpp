@@ -113,7 +113,7 @@ void report(QJsonObject object)
 {
   QTextStream(stdout) << QJsonDocument(object).toJson(QJsonDocument::Compact) << Qt::endl;
 }
-int hostChild(int descriptor, bool decline)
+int hostChild(int descriptor, bool decline, bool lateTarget)
 {
   const auto parent = localInputProcess(getppid());
   require(parent.has_value(), "Fixture parent identity unavailable");
@@ -123,6 +123,7 @@ int hostChild(int descriptor, bool decline)
   const auto ticket = issuer.issue(pin(2));
   require(ticket.has_value(), "Fixture host TLS ticket unavailable");
   bool closed = false, quiesced = false, active = false;
+  std::optional<LocalInputLease> delayedTarget;
   std::uint64_t lastSequence = 0;
   QString failure;
   std::unique_ptr<LocalInputPreflight> preflight;
@@ -171,6 +172,11 @@ int hostChild(int descriptor, bool decline)
     require(binding == hostBinding(), "Host reservation binding changed");
     const auto lease = preflight->lease();
     require(lease.has_value(), "Host target has no pending lease");
+    if (std::exchange(lateTarget, false)) {
+      delayedTarget = lease;
+      report({{"type", "waiting-target"}});
+      return true;
+    }
     require(channel->sendInputTarget(*lease, hostTarget()), "Host could not send its exact mapped target");
     quiesced = true;
     preflight->quiesced(binding);
@@ -195,6 +201,13 @@ int hostChild(int descriptor, bool decline)
         "Host cleanup changed scope or owner"
     );
     active = quiesced = false;
+    if (delayedTarget && channel->authenticated()) {
+      // Model a valid reply already in flight when Core canceled its offer.
+      // Sending it before Released makes the crossed-message order deterministic.
+      require(channel->sendInputTarget(*delayedTarget, hostTarget()), "Late target was not sent");
+      delayedTarget.reset();
+      report({{"type", "late-target"}});
+    }
     if (channel->authenticated() && !channel->sendReleased(leaseOffer(lease))) {
       failure = "Host could not acknowledge its exact completed owner release";
       return false;
@@ -604,26 +617,34 @@ struct Fixture
   QByteArray childBytes;
   std::vector<QJsonObject> hostEvents;
   bool closed = false, admitted = true;
+  QString closeReason;
   int quiescences = 0;
   std::function<void()> afterQuiesce, afterStart, afterObserve, priorRevoked, afterPreparation, afterPromotion;
   std::function<void(OriginalInputStamp &, KeyboardRouteBinding &, InputCutoffPoint &)> changeStart;
   std::optional<InputCutoffObservation> lastObservation;
 
-  explicit Fixture(bool decline = false, bool firstClick = false, bool acknowledgePreparation = true)
+  explicit Fixture(
+      bool decline = false, bool firstClick = false, bool acknowledgePreparation = true, bool lateTarget = false
+  )
   {
     if (firstClick)
       wire.enablePreparation(acknowledgePreparation);
     auto pair = LocalInputSocketPair::create();
     pair.configureChild(child);
     child.start(
-        QCoreApplication::applicationFilePath(),
-        {"--coordinator-host", QString::number(pair.childDescriptor()), decline ? "decline" : "accept"}
+        QCoreApplication::applicationFilePath(), {"--coordinator-host", QString::number(pair.childDescriptor()),
+                                                  lateTarget ? "late-target"
+                                                  : decline  ? "decline"
+                                                             : "accept"}
     );
     require(child.waitForStarted(2000), "Coordinator Host child failed to start");
     const auto process = localInputProcess(child.processId());
     require(process.has_value(), "Coordinator Host process identity unavailable");
     channel = pair.adoptCore(*process);
-    channel->onClosed = [&](QString) { closed = true; };
+    channel->onClosed = [&](QString reason) {
+      closed = true;
+      closeReason = reason;
+    };
     channel->onRevoked = [&](const auto &, auto) {
       const auto callback = priorRevoked;
       if (callback)
@@ -917,6 +938,38 @@ void OriginalInputCoordinatorTests::emptyHostDeclinePreservesOrdinaryInput()
   QCOMPARE(f.count("quiesced"), 0u);
   QCOMPARE(f.count("mapped"), 0u);
   QVERIFY(f.wire.requests.empty());
+  f.finish();
+#endif
+}
+
+void OriginalInputCoordinatorTests::lateTargetAfterCancellationPreservesNextHandoff()
+{
+#if !defined(__APPLE__)
+  QSKIP("Positive source admission uses the actual Mac capture adapter");
+#else
+  Fixture f(false, false, true, true);
+  Capture source;
+  const auto pending = f.reserve(source.fresh());
+  QCOMPARE(pending.state, State::Pending);
+  QVERIFY(until([&] { return f.count("waiting-target") == 1; }));
+  f.dispatcher->cancelPreparation(pending.ticket);
+  QVERIFY(until([&] { return f.count("release") == 1 || f.closed; }));
+  QVERIFY2(!f.closed, qPrintable(f.closeReason));
+  QCOMPARE(f.count("late-target"), 1u);
+  QCOMPARE(f.count("prepare"), 0u);
+  QCOMPARE(f.count("mapped"), 0u);
+  QVERIFY(f.wire.requests.empty());
+
+  QVERIFY(until([&] { return f.dispatcher->legacyAcquisitionReady(f.selected.recipient()); }));
+  const auto next = f.reserve(source.fresh(1));
+  QCOMPARE(next.state, State::Pending);
+  f.started(next.ticket);
+  f.wire.complete(f.wire.result());
+  const auto ready = f.accepted(next.ticket);
+  QVERIFY(f.dispatcher->commit(*ready.reservation));
+  QVERIFY(until([&] { return f.count("mapped") == 1; }));
+  f.dispatcher->release(ready.reservation->owner);
+  QVERIFY(until([&] { return f.count("release") == 2; }));
   f.finish();
 #endif
 }
@@ -1514,7 +1567,7 @@ int main(int argc, char **argv)
   QCoreApplication application(argc, argv);
   try {
     if (child)
-      return hostChild(descriptor, std::string_view(argv[3]) == "decline");
+      return hostChild(descriptor, std::string_view(argv[3]) == "decline", std::string_view(argv[3]) == "late-target");
     OriginalInputCoordinatorTests tests;
     return QTest::qExec(&tests, argc, argv);
   } catch (const std::exception &error) {

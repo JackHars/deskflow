@@ -103,7 +103,7 @@ int child(int descriptor, const QString &mode)
   auto channel = LocalInputChannel::adoptHost(descriptor, *process);
   const bool unsupportedScope = mode.startsWith("full-scope-") || mode == "invalid-scope-reserve";
   auto expectedBinding = binding();
-  if (mode == "all-input" || mode == "deferred-all")
+  if (mode == "all-input" || mode == "deferred-all" || mode == "target-all")
     expectedBinding.scope = ForwardingScope::All;
   bool closed = false, quiescent = false, reserved = false, active = false, held = false, providerLost = false;
   int releases = 0, reads = 0, originals = 0, prepares = 0, activations = 0, neutralAfterActivation = 0,
@@ -165,7 +165,7 @@ int child(int descriptor, const QString &mode)
     ++starts;
     check(candidate == expectedBinding, "Host started a different reservation");
     check(channel->phase() == LocalInputPhase::Idle, "Preflight acquired channel authority");
-    if (mode == "no-quiescence")
+    if (mode == "no-quiescence" || mode == "target-all")
       return true;
     quiescent = true;
     coordinator->quiesced(candidate);
@@ -312,7 +312,7 @@ struct Fixture
 
   explicit Fixture(
       const QString &mode = "normal", LocalInputPreflight::Checks checks = allow(),
-      LocalInputPreflight::PreparationNotification preparation = {}
+      LocalInputPreflight::PreparationNotification preparation = {}, LocalInputPreflight::TargetNotification target = {}
   )
   {
     auto pair = LocalInputSocketPair::create();
@@ -354,7 +354,9 @@ struct Fixture
         return release(lease, reason);
       };
     channel->onRevoked = [&](const auto &, auto) { ++revokeNotifications; };
-    coordinator = LocalInputPreflight::core(*channel, mailbox, policy(), std::move(checks), std::move(preparation));
+    coordinator = LocalInputPreflight::core(
+        *channel, mailbox, policy(), std::move(checks), std::move(preparation), std::move(target)
+    );
   }
   ~Fixture()
   {
@@ -1030,6 +1032,127 @@ void deadlineAndQueue()
     f.finish();
   }
 }
+void mappedTargetRetirementAndOrdering()
+{
+  Fixture *fixture = nullptr;
+  int targets = 0, notifications = 0;
+  const LocalInputTarget target{27, pin(3)};
+  Fixture f(
+      "target-all", allow(), [&](const auto &, auto) { ++notifications; },
+      [&](const auto &lease, const auto &value) {
+        check(value == target, "Mapped target changed before notification");
+        ++targets;
+        // Nested callbacks must preserve target-before-quiescence ordering.
+        fixture->channel->onQuiesced(lease);
+        check(fixture->coordinator->phase() == Phase::Candidate, "Quiescence bypassed the control queue");
+      }
+  );
+  fixture = &f;
+  f.begin(ForwardingScope::All);
+  check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Missing mapped candidate");
+  const auto retired = *f.coordinator->lease();
+  f.coordinator->cancel();
+  f.channel->onInputTarget(retired, target);
+  f.channel->onQuiesced(retired);
+  check(!f.closed && targets == 0 && notifications == 0 && f.releases == 1, "Retired target changed authority");
+
+  f.begin(ForwardingScope::All);
+  check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Missing replacement candidate");
+  const auto current = *f.coordinator->lease();
+  check(current.routeGeneration > retired.routeGeneration, "Replacement did not advance generation");
+  f.channel->onInputTarget(retired, target);
+  check(!f.closed && targets == 0 && f.coordinator->lease() == current, "Old target affected its replacement");
+  f.channel->onInputTarget(current, target);
+  check(
+      !f.closed && targets == 1 && notifications == 1 && f.coordinator->phase() == Phase::Quiesced &&
+          f.channel->phase() == LocalInputPhase::Idle && f.preparedChecks == 0,
+      "Mapped attestation bypassed deferred authority checks or lost ordering"
+  );
+  f.finish();
+}
+void mappedTargetRejectsInvalidReplies()
+{
+  const LocalInputTarget validTarget{27, pin(3)};
+  for (const bool retired : {false, true}) {
+    for (int change = 0; change < 7; ++change) {
+      int targets = 0;
+      Fixture f("target-all", allow(), {}, [&](const auto &, const auto &) { ++targets; });
+      f.begin(ForwardingScope::All);
+      check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Missing invalid-target candidate");
+      auto lease = *f.coordinator->lease();
+      auto target = validTarget;
+      if (retired)
+        f.coordinator->cancel();
+      if (change == 0)
+        ++lease.focusRequest;
+      if (change == 1)
+        ++lease.routeGeneration;
+      if (change == 2)
+        ++lease.windowShareClientIncarnation[15];
+      if (change == 3)
+        lease.windowShareClientIncarnation[0] = 1;
+      if (change == 4)
+        lease.scope = ForwardingScope::Keyboard;
+      if (change == 5)
+        target.viewerConnection = 0;
+      if (change == 6)
+        target.viewerPeerFingerprint = {};
+      f.channel->onInputTarget(lease, target);
+      check(f.closed && targets == 0 && f.releases == 1, "Changed/future/invalid target did not fail closed");
+      f.finish();
+    }
+  }
+  for (int change = 0; change < 4; ++change) {
+    int targets = 0;
+    Fixture f("target-all", allow(), [](const auto &, auto) {}, [&](const auto &, const auto &) { ++targets; });
+    f.begin(ForwardingScope::All);
+    check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Missing target-order candidate");
+    auto lease = *f.coordinator->lease();
+    if (change < 2) {
+      f.channel->onInputTarget(lease, validTarget);
+      if (change == 1)
+        f.channel->onQuiesced(lease);
+      f.channel->onInputTarget(lease, validTarget);
+    } else if (change == 2) {
+      f.channel->onQuiesced(lease);
+    } else {
+      f.coordinator->cancel();
+      f.begin(ForwardingScope::All);
+      // Even an obsolete generation cannot hide a malformed target.
+      f.channel->onInputTarget(lease, {});
+    }
+    check(f.closed && targets == (change < 2 ? 1 : 0), "Missing/duplicate/out-of-order target was accepted");
+    f.finish();
+  }
+}
+void mappedTargetCallbackCancellation()
+{
+  for (const bool destroy : {false, true}) {
+    Fixture *fixture = nullptr;
+    int targets = 0;
+    Fixture f("target-all", allow(), {}, [&](const auto &lease, const auto &target) {
+      ++targets;
+      if (destroy) {
+        fixture->coordinator.reset();
+      } else {
+        fixture->coordinator->cancel();
+        fixture->channel->onInputTarget(lease, target);
+        fixture->channel->onQuiesced(lease);
+      }
+    });
+    fixture = &f;
+    f.begin(ForwardingScope::All);
+    check(until([&] { return f.coordinator->phase() == Phase::Candidate; }), "Missing reentrant-target candidate");
+    const auto lease = *f.coordinator->lease();
+    f.channel->onInputTarget(lease, {27, pin(3)});
+    check(
+        !f.closed && targets == 1 && f.releases == 1 && f.preparedChecks == 0 &&
+            (!f.coordinator || f.coordinator->phase() == Phase::Idle),
+        "Reentrant target callback revived a canceled owner"
+    );
+    f.finish();
+  }
+}
 void changedAndFutureBindings()
 {
   for (int change = 0; change < 5; ++change) {
@@ -1262,6 +1385,9 @@ int main(int argc, char **argv)
     activeProviderWatchdog();
     selectionAndEvidence();
     deadlineAndQueue();
+    mappedTargetRetirementAndOrdering();
+    mappedTargetRejectsInvalidReplies();
+    mappedTargetCallbackCancellation();
     changedAndFutureBindings();
     reentrantChecksAndPolicy();
     destructiveReleaseCallbacks();

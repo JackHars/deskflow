@@ -14,6 +14,7 @@ private Q_SLOTS:
   void initTestCase();
   void unknownAcquisitionDoesNotStartHandoff();
   void emptyHostDeclinePreservesOrdinaryInput();
+  void lateTargetAfterCancellationPreservesNextHandoff();
   void firstClickWaitsForFocusAndExactHostBeforeDelivery();
   void firstClickRejectsHostSubstitution_data();
   void firstClickRejectsHostSubstitution();

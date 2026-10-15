@@ -57,6 +57,10 @@ public:
   // deferred until continuePreparation(), within this existing absolute
   // deadline. The controller retains any native evidence independently.
   using PreparationNotification = std::function<void(const LocalInputLease &, std::chrono::steady_clock::time_point)>;
+  // Core-only mapped-target attestation, ordered with Candidate and Quiesced.
+  // It grants no authority. Valid retired replies are discarded before this
+  // notification; a current full-input attempt accepts exactly one target.
+  using TargetNotification = std::function<void(const LocalInputLease &, const LocalInputTarget &)>;
   enum class Phase
   {
     Idle,
@@ -126,7 +130,7 @@ public:
   };
   static std::unique_ptr<LocalInputPreflight> core(
       LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
-      Checks checks = {}, PreparationNotification preparation = {}
+      Checks checks = {}, PreparationNotification preparation = {}, TargetNotification target = {}
   );
   static std::unique_ptr<LocalInputPreflight>
   host(LocalInputChannel &channel, LocalInputPeerPolicy policy, Host host, Checks checks = {});

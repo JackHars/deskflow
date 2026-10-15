@@ -848,8 +848,8 @@ OriginalInputCoordinator::OriginalInputCoordinator(
             owner.selected.recipient() != lease.coreRecipient ||
             owner.selected.generation() != lease.coreSelectionGeneration || owner.capture.id() != lease.captureEpoch ||
             !owner.target ||
-            (owner.prepareFocus && (!owner.prepared || !preparedTargetMatches(*owner.prepared, lease, *owner.target))
-            )) {
+            (owner.prepareFocus &&
+             (!owner.prepared || !preparedTargetMatches(*owner.prepared, lease, *owner.target)))) {
           owner.revoked = true;
           return;
         }
@@ -858,31 +858,25 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         auto &operation = *alive->m_shared->operations.front();
         operation.deadline = std::min(operation.deadline, deadline);
         operation.phase = Shared::Phase::Preparing;
+      },
+      [alive](const LocalInputLease &lease, const LocalInputTarget &target) {
+        if (!alive)
+          return;
+        std::lock_guard lock(alive->m_shared->mutex);
+        if (!alive->m_shared->owner || alive->m_shared->owner->target) {
+          if (alive->m_shared->owner)
+            alive->m_shared->owner->revoked = true;
+          return;
+        }
+        const auto &owner = *alive->m_shared->owner;
+        if (owner.prepareFocus && (!owner.prepared || !preparedTargetMatches(*owner.prepared, lease, target))) {
+          alive->m_shared->owner->revoked = true;
+          return;
+        }
+        alive->m_shared->owner->target = target;
+        alive->m_shared->owner->lease = lease;
       }
   );
-  channel.onInputTarget = [alive](const LocalInputLease &lease, const LocalInputTarget &target) {
-    if (!alive)
-      return;
-    const auto expected = alive->m_preflight->lease();
-    if (expected != lease || lease.scope != ForwardingScope::All ||
-        alive->m_preflight->phase() != LocalInputPreflight::Phase::Candidate) {
-      alive->m_channel->close("Mapped target does not name the pending full-input lease");
-      return;
-    }
-    std::lock_guard lock(alive->m_shared->mutex);
-    if (!alive->m_shared->owner || alive->m_shared->owner->target) {
-      if (alive->m_shared->owner)
-        alive->m_shared->owner->revoked = true;
-      return;
-    }
-    const auto &owner = *alive->m_shared->owner;
-    if (owner.prepareFocus && (!owner.prepared || !preparedTargetMatches(*owner.prepared, lease, target))) {
-      alive->m_shared->owner->revoked = true;
-      return;
-    }
-    alive->m_shared->owner->target = target;
-    alive->m_shared->owner->lease = lease;
-  };
   channel.onReleased = [alive](const LocalInputOffer &offer) {
     if (!alive)
       return;

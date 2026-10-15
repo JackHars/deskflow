@@ -4,6 +4,44 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Actual-desktop attempt fifteen — 2026-10-15
+
+Fresh permission launched `build/h04-r15-b6shuoux/`. This attempt reached
+Active on jack's actual GNOME desktop. The user saw the Ubuntu pointer and
+the typed characters in both the source and shared window, then reported
+that only the Ubuntu pointer worked after typing and holding x.
+
+At 18:03:46 the Mac Core closed its private channel with
+`Mapped target does not name the pending full-input lease`; the Host and
+Ubuntu connection then closed. No recorder armed and no Record request was
+observed. Core/Host readiness remained zero. Mac Core/source exited 0 and
+the companion stopped; ordinary configuration hashes match. The source's
+final receipt retained one held key, so input restoration is not established.
+Ubuntu reports owned processes stopped, actual desktop restored and ordinary
+state preserved, but Core/controller exit 1. Preserve all failed receipts,
+including the coordinator's Linux SSH exit 255. Collected Ubuntu archive
+SHA-256: `5590214dfde941c7edd5454b288fd533050d653f57e1506876ffdbfec8bc9c6e`.
+
+An unattended real-private-channel regression reproduces the identical error
+by delivering an exact mapped-target reply after Core cancels its offer.
+Mapped targets now use the existing ordered preflight queue and retirement
+checks. Valid late replies cannot close or revive an owner; current targets
+still require the exact full-input candidate, one target, and all later
+authorization checks. Changed, future, malformed and duplicate current
+replies fail closed. Validation evidence: `build/h04-late-target-94wwqjc4/`.
+Mac private-channel/preflight suites pass (18.41/17.97 seconds), as do all
+29 coordinator cases after the fixture waits for both owners' release.
+The matching Ubuntu suites pass in 29.47 seconds; Mac capture cases are
+explicitly skipped there. Ubuntu ASan/UBSan preflight passes in 18.54 seconds.
+Core/Host builds and the separate Apple-signed package's inert admission and
+bootstrap checks pass. These checks neither use the user's desktop nor inject
+physical input. Both rebuilt Linux executables are retained with the evidence.
+
+Fresh actual-desktop preparation: `build/h04-r16-awg5w2ql/`, using the rebuilt
+binaries and fresh identities. Physical H04/P5 acceptance remains open.
+Attempt fifteen's permission is consumed; request fresh permission immediately
+before the next launch.
+
 ## Actual-desktop attempt fourteen — 2026-10-15
 
 After fresh explicit permission, attempt fourteen (`build/h04-r14-el4lnrkj/`)
@@ -26,8 +64,8 @@ the private trust-list location. The atomic public-pin write completes before
 opening the source window and its hash is rechecked after Start. Regression
 coverage verifies actual file creation and exact contents without native apps
 or SSH. All 72 Mac coordinator tests pass on Mac and home Ubuntu.
-Fresh preparation: `build/h04-r15-b6shuoux/`. Obtain fresh permission immediately
-before its physical launch. Actual-monitor input and H04/P5 remain unaccepted.
+Historical preparation: `build/h04-r15-b6shuoux/`; its separately approved
+launch and failed result are recorded above. H04/P5 remains unaccepted.
 
 ## Actual-desktop attempt thirteen — 2026-10-15
 

@@ -87,6 +87,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   {
     Offer,
     Candidate,
+    InputTarget,
     Quiesced,
     Cancel,
     Prepare,
@@ -101,6 +102,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     LocalInputOffer offer{};
     LocalInputLease lease{};
     LocalInputRevocation reason = LocalInputRevocation::Requested;
+    LocalInputTarget target{};
   };
   struct Attempt
   {
@@ -119,6 +121,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     Clock::time_point deadline = Clock::now() + preflightTimeout;
     Phase phase = Phase::Offered;
     bool hostActivationAttempted = false, hostActivated = false;
+    bool targetReceived = false;
     Continuation continuation = Continuation::Waiting;
   };
   QPointer<LocalInputChannel> channel;
@@ -126,6 +129,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   LocalInputPeerPolicy policy;
   Checks checks;
   PreparationNotification preparation;
+  TargetNotification target;
   Host host;
   std::shared_ptr<SelectedPeerMailbox> mailbox;
   std::optional<Attempt> attempt;
@@ -144,7 +148,8 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
         checks(std::move(gate))
   {
     if (input.thread() != QThread::currentThread() || input.authorize || input.onOffer || input.onCandidate ||
-        input.onQuiesced || input.onOfferCancelled || input.onPrepare || input.onPrepared || input.onActivated)
+        input.onQuiesced || input.onOfferCancelled || input.onPrepare || input.onPrepared || input.onActivated ||
+        input.onInputTarget)
       throw std::invalid_argument("Preflight requires an unowned channel on its Qt thread");
   }
   bool current(const LocalInputOffer &offer) const
@@ -169,6 +174,10 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     channel->onCandidate = [weak](const auto &lease) {
       if (auto self = weak.lock())
         self->dispatch({Kind::Candidate, leaseOffer(lease), lease});
+    };
+    channel->onInputTarget = [weak](const auto &lease, const auto &mappedTarget) {
+      if (auto self = weak.lock())
+        self->dispatch({Kind::InputTarget, leaseOffer(lease), lease, LocalInputRevocation::Requested, mappedTarget});
     };
     channel->onQuiesced = [weak](const auto &lease) {
       if (auto self = weak.lock())
@@ -373,7 +382,9 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     return validLocalInputOffer(control.offer) && canonical(control.offer.deskflowClientIncarnation) &&
            (control.kind == Kind::Offer || control.kind == Kind::Cancel ||
             (validLocalInputLease(control.lease) && leaseOffer(control.lease) == control.offer &&
-             canonical(control.lease.windowShareClientIncarnation)));
+             canonical(control.lease.windowShareClientIncarnation))) &&
+           (control.kind != Kind::InputTarget ||
+            (control.lease.scope == ForwardingScope::All && validLocalInputTarget(control.target)));
   }
   bool pendingAuthorityControl() const
   {
@@ -505,8 +516,23 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       attempt->lease = control.lease;
       attempt->phase = Phase::Candidate;
       break;
+    case Kind::InputTarget:
+      if (role != LocalInputRole::Core || attempt->phase != Phase::Candidate || !attempt->lease || !target ||
+          attempt->targetReceived) {
+        fail("Unexpected mapped preflight target");
+        return;
+      }
+      attempt->targetReceived = true;
+      {
+        const auto notify = target;
+        notify(control.lease, control.target);
+        if (current(offer) && !live())
+          cancel(LocalInputRevocation::AuthorityLost, true);
+      }
+      break;
     case Kind::Quiesced:
-      if (role != LocalInputRole::Core || attempt->phase != Phase::Candidate || !attempt->lease) {
+      if (role != LocalInputRole::Core || attempt->phase != Phase::Candidate || !attempt->lease ||
+          (target && control.lease.scope == ForwardingScope::All && !attempt->targetReceived)) {
         fail("Unexpected quiescence");
         return;
       }
@@ -752,7 +778,7 @@ LocalInputPreflight::LocalInputPreflight(std::shared_ptr<State> state) : m_state
 }
 std::unique_ptr<LocalInputPreflight> LocalInputPreflight::core(
     LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
-    Checks checks, PreparationNotification preparation
+    Checks checks, PreparationNotification preparation, TargetNotification target
 )
 {
   if (!mailbox)
@@ -760,6 +786,7 @@ std::unique_ptr<LocalInputPreflight> LocalInputPreflight::core(
   auto state = std::make_shared<State>(channel, LocalInputRole::Core, std::move(policy), std::move(checks));
   state->mailbox = std::move(mailbox);
   state->preparation = std::move(preparation);
+  state->target = std::move(target);
   state->attach();
   return std::unique_ptr<LocalInputPreflight>(new LocalInputPreflight(std::move(state)));
 }
