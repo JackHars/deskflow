@@ -118,11 +118,12 @@ int main(int argc, char **argv)
   QCommandLineParser parser;
   parser.addHelpOption();
   parser.addOptions(
-      {{"duration", "Measured workload seconds (2..3600).", "seconds", "3"},
+      {{"duration", "Measured workload seconds (2..3660).", "seconds", "3"},
        {"streams", "Concurrent independent Viewers (2..16).", "count", "4"},
        {"fps", "Offered frames/second/stream (1..60).", "rate", "30"},
        {"scenario", "steady or mixed (decoder burst injection and one hidden stream).", "name", "mixed"},
-       {"frame", "Optional single independent Annex B IDR; default 64x48 test image.", "path"}}
+       {"frame", "Optional single independent Annex B IDR; default 64x48 test image.", "path"},
+       {"progress", "Publish a workload-started JSON line on stderr after warm-up."}}
   );
   if (!parser.parse(arguments)) {
     QTextStream(stderr) << parser.errorText() << '\n';
@@ -143,7 +144,7 @@ int main(int argc, char **argv)
   try {
     require(QGuiApplication::platformName() == "offscreen", "Offscreen backend is required");
     require(parser.positionalArguments().isEmpty(), "Unexpected positional arguments");
-    const auto seconds = bounded(parser, "duration", 2, 3600);
+    const auto seconds = bounded(parser, "duration", 2, 3660);
     const auto streams = bounded(parser, "streams", 2, 16);
     const auto fps = bounded(parser, "fps", 1, 60);
     const auto scenario = parser.value("scenario");
@@ -309,6 +310,8 @@ int main(int argc, char **argv)
     );
     QElapsedTimer clock;
     clock.start();
+    if (parser.isSet("progress"))
+      QTextStream(stderr) << "{\"event\":\"workload-started\",\"durationSeconds\":" << seconds << "}\n" << Qt::flush;
     std::vector<std::uint64_t> paintedBefore;
     for (const auto &viewer : viewers)
       paintedBefore.push_back(viewer->mediaMetrics()->painted);

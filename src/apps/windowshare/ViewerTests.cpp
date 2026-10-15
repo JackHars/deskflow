@@ -268,6 +268,33 @@ void testDecoder()
   decoder.reset();
   decoded = decoder.decode(frame());
   check(decoded.error.isEmpty() && !decoded.image.isNull(), "Decoder failed after reset");
+
+  // Retain more results than the small conversion cache. Alternating source
+  // pixels detects reuse while an earlier Qt paint/result still owns an image.
+  const auto blue = QByteArray::fromBase64(
+      "AAAAAWdCwAraEewEQAAAAwBAAAAPI8SJqAAAAAFozg/IAAABZYiEOhGKAAIxccAAQ8o4AAgFycnJ111111114A=="
+  );
+  std::vector<QImage> retained;
+  for (unsigned i = 0; i != 20; ++i) {
+    auto result = decoder.decode(i % 2 ? blue : frame());
+    check(result.error.isEmpty() && !result.image.isNull(), "Conversion cache lost an in-flight frame");
+    retained.push_back(std::move(result.image));
+  }
+  decoder.reset();
+  for (unsigned i = 0; i != retained.size(); ++i) {
+    const auto value = retained[i].pixelColor(32, 24);
+    check(
+        value.green() < 20 && (i % 2 ? value.blue() > 230 && value.red() < 20 : value.red() > 230 && value.blue() < 20),
+        "Decoder overwrote a retained image or invalidated it during reset"
+    );
+  }
+  retained.clear();
+  for (unsigned i = 0; i != 20; ++i) {
+    const auto result = decoder.decode(i % 2 ? blue : frame());
+    check(result.error.isEmpty() && !result.image.isNull(), "Released conversion storage could not be reused");
+    const auto value = result.image.pixelColor(32, 24);
+    check(i % 2 ? value.blue() > 230 : value.red() > 230, "Reused conversion image has stale pixels");
+  }
 }
 
 void testMediaMetrics()

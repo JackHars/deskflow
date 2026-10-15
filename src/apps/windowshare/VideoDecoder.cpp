@@ -56,6 +56,13 @@ struct VideoDecoder::Impl
   SwsContext *scaler = nullptr;
   AVPixelFormat hardwareFormat = AV_PIX_FMT_NONE;
   QString name = QStringLiteral("software");
+  // Conversion is frequent and the GUI may still own previous results. Keep
+  // only three small, reusable images; never write through a shared image.
+  // Larger formats use the existing uncached allocation path. This avoids
+  // repeated 1080p malloc/free churn without retaining a large-frame pool.
+  static constexpr std::int64_t maxCachedImageBytes = 32 * 1024 * 1024;
+  std::array<QImage, 3> convertedImages;
+  QSize convertedSize;
 
   ~Impl()
   {
@@ -64,6 +71,8 @@ struct VideoDecoder::Impl
 
   void clear()
   {
+    convertedImages = {};
+    convertedSize = {};
     sws_freeContext(scaler);
     scaler = nullptr;
     av_packet_free(&packet);
@@ -190,8 +199,24 @@ struct VideoDecoder::Impl
           scaler, pixels->width, pixels->height, static_cast<AVPixelFormat>(pixels->format), pixels->width,
           pixels->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr
       );
-      QImage image(pixels->width, pixels->height, QImage::Format_RGBA8888);
-      if (!scaler || image.isNull()) {
+      const QSize size(pixels->width, pixels->height);
+      if (convertedSize != size) {
+        convertedImages = {};
+        convertedSize = size;
+      }
+      QImage uncached;
+      QImage *image = &uncached;
+      const auto bytes = std::int64_t(pixels->width) * pixels->height * 4;
+      if (bytes <= maxCachedImageBytes / std::int64_t(convertedImages.size())) {
+        for (auto &candidate : convertedImages)
+          if (candidate.isNull() || candidate.isDetached()) {
+            image = &candidate;
+            break;
+          }
+      }
+      if (image->isNull())
+        *image = QImage(size, QImage::Format_RGBA8888);
+      if (!scaler || image->isNull()) {
         output.error = QStringLiteral("Could not allocate the decoded window image");
         av_frame_unref(frame);
         return output;
@@ -203,17 +228,17 @@ struct VideoDecoder::Impl
       sws_setColorspaceDetails(
           scaler, coefficients, pixels->color_range == AVCOL_RANGE_JPEG, coefficients, 1, 0, 1 << 16, 1 << 16
       );
-      std::array<unsigned char *, 4> outputPlanes{image.bits(), nullptr, nullptr, nullptr};
-      std::array<int, 4> outputStrides{static_cast<int>(image.bytesPerLine()), 0, 0, 0};
+      std::array<unsigned char *, 4> outputPlanes{image->bits(), nullptr, nullptr, nullptr};
+      std::array<int, 4> outputStrides{static_cast<int>(image->bytesPerLine()), 0, 0, 0};
       const int rows = sws_scale(
           scaler, pixels->data, pixels->linesize, 0, pixels->height, outputPlanes.data(), outputStrides.data()
       );
       av_frame_unref(frame);
-      if (rows != image.height()) {
+      if (rows != image->height()) {
         output.error = QStringLiteral("Video conversion produced an incomplete image");
         return output;
       }
-      output.image = std::move(image);
+      output.image = *image;
     }
   }
 };

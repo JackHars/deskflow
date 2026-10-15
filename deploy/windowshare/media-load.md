@@ -46,9 +46,20 @@ build/media-load/windowshare-media-load --frame /absolute/private/new-frame.h264
 
 The tool validates an independent SPS/PPS/IDR and decodes its actual dimensions;
 it never labels the small default image 1080p. Limits are 2–16 streams, 1–60 fps,
-2–3600 seconds, one bounded access unit and at most 3840×2160 decoded pixels.
+2–3660 seconds, one bounded access unit and at most 3840×2160 decoded pixels.
 The source frame SHA-256, dimensions and requested workload appear in the report.
 Record the tested executable's SHA-256 separately. Retain failed reports too.
+
+For an hour of steady resource sampling, run `--duration 3630 --progress`.
+The optional JSON `workload-started` line on stderr is emitted only after all
+streams have painted their warm-up frame. Observe that line, wait ten seconds,
+then start the existing resource sampler for 3600 seconds against this exact
+process. The workload must remain alive throughout collection and then finish
+with its own complete report. This leaves a startup margin and a drain tail;
+do not silently shorten sampling if either fails. The extra 60-second maximum
+permits this collection envelope without turning startup growth into a claimed
+steady-state memory leak. Raw RSS and the fixed resource limits are unchanged.
+The combined fixture still cannot be interpreted as separate host/viewer costs.
 
 ## Workload and result contract
 
@@ -103,6 +114,14 @@ The maximum is measured directly. These values measure **local receiveFrame
 entry to completed Qt paint**; they exclude transport before admission,
 ScreenCaptureKit and physical/compositor display completion. They do not meet
 H11's separate capture-to-visible latency boundary.
+
+The production decoder reuses up to three conversion images only while no
+returned result or Viewer still shares them. Retained conversion storage is
+capped at 32 MiB per decoder; larger formats or an occupied cache use an
+uncached image. Reset and dimension changes release the cache's references
+without invalidating images already handed to the GUI. This reduces repeated
+1080p allocation churn without overwriting in-flight frames or increasing the
+existing pending-frame allowance.
 
 Use [resource-soak.md](resource-soak.md) for passive per-process samples and
 the fixed resource budget report. Use [h11-evidence.md](h11-evidence.md) for the

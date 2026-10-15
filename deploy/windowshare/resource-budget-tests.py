@@ -158,7 +158,11 @@ class ResourceBudgetTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])
         try:
             result = subprocess.run([sys.executable, str(SCRIPT.with_name('resource-soak.py')),
-                                     '--pid', f'viewer={child.pid}', '--duration', '1.1', '--interval', '1',
+                                     # One initial and one terminal sample. A
+                                     # 1.1-second run introduces an extra slot
+                                     # only 100 ms before its end, which a busy
+                                     # CI host can correctly skip and reject.
+                                     '--pid', f'viewer={child.pid}', '--duration', '1', '--interval', '1',
                                      '--output', str(self.path)], capture_output=True, text=True, timeout=6)
             self.assertEqual(result.returncode, 0, result.stderr)
             report = budget.analyze(self.path)

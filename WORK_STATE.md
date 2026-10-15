@@ -1,5 +1,36 @@
 # Seamless Windows work state
 
+## P7 decoder allocation follow-up — 2026-10-14
+
+The first offscreen hour attempt crossed the predeclared 1 GiB RSS comparison
+and was stopped after 1064 seconds, with a 1,193,361,408-byte peak. Its raw
+samples and incomplete result remain in `build/p7-completion-20261014`.
+Allocator inspection found substantial reusable resident storage; this is not
+proof of the absence of leaks. No resource threshold has been relaxed.
+
+The decoder now reuses at most three unshared conversion images, retaining at
+most 32 MiB per decoder. Shared in-flight results and larger formats use fresh
+storage; reset and dimension changes release cache references. Alternating-color
+tests retain more results than the cache can hold and verify that old frames
+survive subsequent conversion and reset. Viewer and mixed-load ASan/UBSan tests
+pass on Mac, and the full Ubuntu application build, eight Qt/Xvfb/load suites,
+16-stream and two-stream 1080p checks pass. The Ubuntu archive SHA-256 is
+`df0972a918df7a261b1e86c865e29602aa96714eca853041caa8b302c60b69a8`.
+
+Hosted run `38660677004` on `3c4263f03` passes five jobs, including GNOME.
+The Mac resource-parser fixture used a 1.1-second collection with a one-second
+interval, leaving an extra slot only 100 ms before the end. The sampler correctly
+rejected a skipped slot on the busy runner. The fixture now uses one initial and
+one terminal sample; production sampling and completeness rules are unchanged.
+All 15 budget tests pass locally on Mac and Ubuntu. Hosted retesting is pending.
+
+A replacement offscreen workload is running with a predeclared 3630-second
+duration, a post-warm-up start marker and 3600 seconds of resource sampling.
+`build/p7-completion-20261014/mac-image-reuse-hour` retains its plan, source/binary
+hashes and raw samples. It has no final verdict yet. This combined synthetic
+fixture cannot establish native H11 performance. The user explicitly requested
+unattended work and deferred all attended recovery/input/display tests.
+
 ## P7 native-batch audit and hosted checks resumed — 2026-10-14
 
 GitHub Actions accepts dispatch again. Run `38659292670` tested `cb506b6e1`:

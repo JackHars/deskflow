@@ -4,6 +4,41 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 decoder reuse and resource retest — 2026-10-14
+
+The production decoder retains at most three unshared conversion images within
+a 32 MiB cache. It never overwrites an image still owned by a returned result or
+the GUI. Alternating-color tests exercise cache exhaustion, reuse and reset.
+This addresses allocation churn observed during the first long offscreen load;
+it does not change queue capacities or resource acceptance thresholds.
+
+Evidence under `build/p7-completion-20261014`:
+
+- `mac-first-soak-stopped.json`: incomplete first attempt, stopped at 1064 seconds
+  after exceeding the 1 GiB diagnostic RSS comparison; peak 1,193,361,408 bytes.
+  `mac-hour-resources.jsonl` and allocator diagnostics retain the failure.
+- `mac-image-reuse-sanitizers.json`: Viewer and mixed four-stream load pass
+  ASan/UBSan as separately signed copies; leak detection is disabled.
+- `linux-image-reuse/result.json`: full standalone Ubuntu app build, eight
+  Qt/Xvfb/load suites, nine sampler tests, 15 budget tests, 16-stream steady load
+  and two 1080p streams pass. Archive SHA-256:
+  `df0972a918df7a261b1e86c865e29602aa96714eca853041caa8b302c60b69a8`.
+  The offline container has no host desktop/device/bus mounts and removes its
+  temporary directory.
+- `resource-budget-fixed-tests.log`: all 15 budget tests pass on Mac. The short
+  real-child fixture now has exactly an initial and terminal sample, avoiding
+  an unintended 100-ms final interval. Missing production slots still fail.
+- Hosted run [38660677004](https://github.com/JackHars/deskflow/actions/runs/38660677004)
+  on `3c4263f03`: five jobs pass, including the repaired GNOME report ordering;
+  Mac fails on the short resource fixture corrected above. A new run is needed.
+- `mac-image-reuse-hour/plan.json`: replacement steady workload and unchanged
+  limits declared before launch. Full-hour collection is still running; no
+  resource or native-performance pass is claimed from partial samples.
+
+The user requested unattended checks and attended testing later. Physical
+H07–H11 remain deferred. A complete synthetic hour would establish only this
+fixture's resource behavior, not native capture, display or input latency.
+
 ## P7 native-batch and hosted follow-up — 2026-10-14
 
 Native queue review: [`native-queue-audit.md`](deploy/windowshare/native-queue-audit.md).
