@@ -4,6 +4,78 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 quiet-hour failure and decoder follow-up — 2026-10-14
+
+The predeclared quiet hour on `6108bd2853c173ccba19b4913d95195a7f0e8110`
+**fails both steady workload and resource comparison**. No local builds,
+signing, other test suites, debugger or memory probe ran during collection.
+The first recovery occurs at workload elapsed 1892.38 seconds. This reproduces
+recovery without the earlier run's local test/probe interference; the exact
+cause of each native delay remains unknown.
+
+| Observation | Completed result |
+| --- | --- |
+| Resource samples | 1801 across the planned 3600 seconds |
+| Sampled peak RSS | 690,970,624 bytes (658.96 MiB) |
+| Upper net RSS growth | 522,240,554.63 bytes/hour (498.05 MiB/hour): FAIL |
+| Upper average CPU | 108.97% |
+| Stream 1 / stream 2 overflow and recovery counts | 70 / 68 |
+| Maximum decoder-queue wait | 593.55 / 585.65 ms |
+| Maximum decoder-worker elapsed time | 221.47 / 251.11 ms |
+| Maximum GUI-completion queue wait | 36.88 / 93.54 ms |
+| Final decode errors, pending frames and bytes | Zero on both streams |
+| Retained recovery transitions / omitted transitions | 64 / 212 |
+| Missed source offer slots | 42 |
+
+The separate workload and budget reports, full stream counters, bounded
+recovery timestamps and unchanged source/binary hashes are retained in
+`build/p7-completion-20261014/mac-media-phase-hour`. The resource trace SHA-256 is
+`68287cb52400933d2479cd8acb878a7901567c2c0b31c2f41622bd8e61d47fa9`.
+The workload stayed alive through sampling; the owned children exited and the
+temporary signed executable was removed. No threshold was relaxed.
+
+All six hosted jobs on that same commit pass in
+[run 38668714140](https://github.com/JackHars/deskflow/actions/runs/38668714140),
+and source export `38668714196` passes. Downloaded package checksums, source
+commit, archive inventory and executable architectures were independently
+checked without launching the downloaded binaries:
+
+- Linux x86_64 tar: `78989e88dae43a9c55fd144ff2e6a3e496f9ea9813b9dfe456b19591064ea565`.
+- Mac ARM64 ad-hoc Core ZIP: `c8df492e6c4b5ad7d93560b293363667c122f98e0f9bf85f13c7fcb47436718a`.
+- Mac ARM64 ad-hoc Viewer ZIP: `d899ff6a6d3a1d225250473ffa4b02a74a88052e99abaee0166c186eb57fef2e`.
+- Local Intel Apple-issued exact-library Core ZIP:
+  `dd30dd9e2655fe89b4707e15488f03cae63b34cf685d2bca2b01949d31df58ce`;
+  audit and private launch handshake pass, with original input disabled.
+
+A separate 70-second diagnostic run deliberately used `vmmap`, `heap` and
+`sample`; it is not performance acceptance. Its profile confirms VideoToolbox
+and repeated allocation/free work, including hardware-frame transfers and Qt
+pixel conversion. The decoder previously discarded its CPU transfer buffer on
+every hardware frame. The follow-up reuses one private buffer only with the
+same retained hardware context and display dimensions. Reset/context/dimension
+changes discard it; current source color metadata is read directly instead of
+copying accumulating frame properties. Opaque output uses native-endian RGB32
+to avoid the profiled RGBA-to-premultiplied conversion during Qt painting.
+
+Before the RGB32 change, a predeclared five-minute transfer-reuse comparison
+passes its workload with 151 resource samples: RSS 123.48 to 133.74 MiB, sampled
+peak 133.93 MiB. Both streams decode 9892 hardware frames, reusing transfer
+storage on 9891, with zero overflow/recovery and drained queues. This short
+result is diagnostic only; **hour-long resource acceptance is NOT_RUN** for
+that intermediate source. See `mac-transfer-reuse-short/diagnostic-summary.json`.
+The final pixel-format candidate passes Mac Viewer tests, including the actual
+native hardware reuse/color/resize/reset check, and the Viewer/mixed-load
+ASan/UBSan run (`mac-transfer-rgb-sanitizers.json`; leak detection disabled).
+`linux-transfer-rgb/result.json` passes the Ubuntu application build, eight
+Qt/Xvfb/load suites, nine sampler tests, 15 budget tests, 16-stream steady load
+and two HD streams. Its frozen archive SHA-256 is
+`06168a5444104f1e4e28e0340d55218f3c2c285d062f3efbab651bcc6b7ee001`;
+the offline fixture removes its temporary directory. No native GPU is exposed
+in that container, so its hardware-specific branch is explicitly unavailable.
+The final package, hosted matrix and long retest need separate results.
+
+H07–H12 attended acceptance and full native/OS queue certification remain open.
+
 ## P7 completed hour and diagnostic follow-up — 2026-10-14
 
 The first complete two-stream 1080p/30-fps synthetic hour **failed its steady

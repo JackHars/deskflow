@@ -133,6 +133,16 @@ preserved if a final workload invariant fails. `steady` still rejects any
 overflow or recovery request; diagnostics do not change admission limits,
 recovery deadlines or the workload verdict.
 
+Hardware decoding also retains one private CPU transfer buffer for the same
+hardware frames context and display dimensions. Its retained context reference
+prevents address reuse from matching a different context. Reset and context or
+dimension changes discard it. `hardwareDecoded` and `reusedHardwareTransfers`
+count successfully decoded results in the explicitly enabled diagnostics;
+software fallback is not counted as hardware. Decoded H.264 images are opaque,
+so FFmpeg's native-endian RGB32 maps directly to Qt's RGB32 paint format, avoiding
+the extra RGBA conversion observed in the Mac profile. See the
+[Qt image-format contract](https://doc.qt.io/qt-6/qimage.html#Format-enum).
+
 The production decoder reuses up to three conversion images only while no
 returned result or Viewer still shares them. Retained conversion storage is
 capped at 32 MiB per decoder; larger formats or an occupied cache use an

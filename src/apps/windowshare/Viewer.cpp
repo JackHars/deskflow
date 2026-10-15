@@ -975,6 +975,8 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
               self->m_decodeErrors = 0;
               if (self->m_mediaMetrics) {
                 ++self->m_mediaMetrics->decoded;
+                self->m_mediaMetrics->hardwareDecoded += result->hardwareFrame;
+                self->m_mediaMetrics->reusedHardwareTransfers += result->reusedTransferBuffer;
                 if (self->m_metricImage && self->m_metricImage != self->m_metricPaintedImage)
                   ++self->m_mediaMetrics->replacedBeforePaint;
                 self->m_metricImage = metricSequence;

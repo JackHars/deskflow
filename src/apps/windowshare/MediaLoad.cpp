@@ -80,6 +80,8 @@ QJsonObject metrics(const MediaMetrics &m)
       {"decodeErrors", qint64(m.decodeErrors)},
       {"discardedCompletions", qint64(m.discardedCompletions)},
       {"emptyDecodes", qint64(m.emptyDecodes)},
+      {"hardwareDecoded", qint64(m.hardwareDecoded)},
+      {"reusedHardwareTransfers", qint64(m.reusedHardwareTransfers)},
       {"replacedBeforePaint", qint64(m.replacedBeforePaint)},
       {"overflows", qint64(m.overflows)},
       {"recoveryRequests", qint64(m.recoveryRequests)},
@@ -448,7 +450,8 @@ int main(int argc, char **argv)
           m.received == received[i] + injected[i] && m.received == m.admitted + m.ignored && m.admitted == m.retired &&
               m.retired == m.decoded + m.decodeErrors + m.discardedCompletions + m.emptyDecodes && !m.pendingFrames &&
               !m.pendingBytes && m.peakFrames <= m.frameCapacity && m.peakBytes <= m.byteCapacity && !m.decodeErrors &&
-              m.painted > 1 && !m.invalidTimings && m.timedRetirements == m.retired,
+              m.painted > 1 && !m.invalidTimings && m.timedRetirements == m.retired &&
+              m.reusedHardwareTransfers <= m.hardwareDecoded && m.hardwareDecoded <= m.decoded,
           "Media accounting, capacity, decode or stream progress check failed"
       );
       if (scenario == "steady")

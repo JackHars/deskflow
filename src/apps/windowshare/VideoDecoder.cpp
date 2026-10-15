@@ -52,6 +52,7 @@ struct VideoDecoder::Impl
   AVCodecContext *context = nullptr;
   AVFrame *frame = nullptr;
   AVFrame *transferred = nullptr;
+  AVBufferRef *transferredFrom = nullptr;
   AVPacket *packet = nullptr;
   SwsContext *scaler = nullptr;
   AVPixelFormat hardwareFormat = AV_PIX_FMT_NONE;
@@ -77,6 +78,7 @@ struct VideoDecoder::Impl
     scaler = nullptr;
     av_packet_free(&packet);
     av_frame_free(&transferred);
+    av_buffer_unref(&transferredFrom);
     av_frame_free(&frame);
     avcodec_free_context(&context);
     hardwareFormat = AV_PIX_FMT_NONE;
@@ -174,7 +176,17 @@ struct VideoDecoder::Impl
       AVFrame *pixels = frame;
       const AVPixFmtDescriptor *descriptor = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(frame->format));
       if (descriptor && (descriptor->flags & AV_PIX_FMT_FLAG_HWACCEL)) {
-        av_frame_unref(transferred);
+        // The transfer API accepts an already allocated destination. Retain
+        // exactly one private CPU buffer for the same hardware frames context
+        // and display dimensions. Holding the context reference also prevents
+        // a freed context's address from falsely matching a later allocation.
+        const bool reuse = transferredFrom && frame->hw_frames_ctx &&
+                           transferredFrom->data == frame->hw_frames_ctx->data && transferred->width == frame->width &&
+                           transferred->height == frame->height && av_frame_is_writable(transferred);
+        if (!reuse) {
+          av_frame_unref(transferred);
+          av_buffer_unref(&transferredFrom);
+        }
         const int copied = av_hwframe_transfer_data(transferred, frame, 0);
         if (copied < 0) {
           output.error = QStringLiteral("Could not retrieve GPU video frame: ") + ffmpegError(copied);
@@ -184,10 +196,21 @@ struct VideoDecoder::Impl
           clear();
           return output;
         }
-        av_frame_copy_props(transferred, frame);
+        if (!reuse && frame->hw_frames_ctx) {
+          transferredFrom = av_buffer_ref(frame->hw_frames_ctx);
+          if (!transferredFrom) {
+            output.error = QStringLiteral("Could not retain the hardware transfer context");
+            av_frame_unref(frame);
+            return output;
+          }
+        }
+        output.hardwareFrame = true;
+        output.reusedTransferBuffer = reuse;
         pixels = transferred;
       } else {
         name = QStringLiteral("software");
+        output.hardwareFrame = false;
+        output.reusedTransferBuffer = false;
       }
       if (pixels->width < 1 || pixels->height < 1 || pixels->width > 16384 || pixels->height > 16384 ||
           static_cast<std::int64_t>(pixels->width) * pixels->height > maxDecodedPixels) {
@@ -197,7 +220,7 @@ struct VideoDecoder::Impl
       }
       scaler = sws_getCachedContext(
           scaler, pixels->width, pixels->height, static_cast<AVPixelFormat>(pixels->format), pixels->width,
-          pixels->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr
+          pixels->height, AV_PIX_FMT_RGB32, SWS_BILINEAR, nullptr, nullptr, nullptr
       );
       const QSize size(pixels->width, pixels->height);
       if (convertedSize != size) {
@@ -214,8 +237,10 @@ struct VideoDecoder::Impl
             break;
           }
       }
+      // H.264 is opaque. Both RGB32 formats use native-endian 0xffRRGGBB;
+      // Qt can paint it directly without another RGBA-to-premultiplied pass.
       if (image->isNull())
-        *image = QImage(size, QImage::Format_RGBA8888);
+        *image = QImage(size, QImage::Format_RGB32);
       if (!scaler || image->isNull()) {
         output.error = QStringLiteral("Could not allocate the decoded window image");
         av_frame_unref(frame);
@@ -223,10 +248,12 @@ struct VideoDecoder::Impl
       }
       // ScreenCaptureKit/VideoToolbox mark range and matrix; respect them rather
       // than treating every desktop frame as limited-range BT.601.
-      const int matrix = pixels->colorspace == AVCOL_SPC_BT709 ? SWS_CS_ITU709 : SWS_CS_DEFAULT;
+      // Read current source metadata directly. Copying all frame properties
+      // into the reused buffer would retain/duplicate irrelevant side data.
+      const int matrix = frame->colorspace == AVCOL_SPC_BT709 ? SWS_CS_ITU709 : SWS_CS_DEFAULT;
       const int *coefficients = sws_getCoefficients(matrix);
       sws_setColorspaceDetails(
-          scaler, coefficients, pixels->color_range == AVCOL_RANGE_JPEG, coefficients, 1, 0, 1 << 16, 1 << 16
+          scaler, coefficients, frame->color_range == AVCOL_RANGE_JPEG, coefficients, 1, 0, 1 << 16, 1 << 16
       );
       std::array<unsigned char *, 4> outputPlanes{image->bits(), nullptr, nullptr, nullptr};
       std::array<int, 4> outputStrides{static_cast<int>(image->bytesPerLine()), 0, 0, 0};

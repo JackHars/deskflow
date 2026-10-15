@@ -1,5 +1,32 @@
 # Seamless Windows work state
 
+## P7 reproducible quiet-hour failure; transfer/paint follow-up — 2026-10-14
+
+The quiet hour on `6108bd285` completes but fails: 70/68 decoder recoveries and
+498.05 MiB/h upper net RSS growth, with a 658.96 MiB sampled peak. All 1801 samples
+are retained; both queues drain without decode errors. Recovery begins at
+1892.38 seconds and decoder queue wait reaches about 0.59 seconds. No local
+build/test/signing/profiler work overlapped this run. The exact stall cause
+remains unknown; prior interference cannot explain away the reproduced failure.
+All six hosted jobs and source export pass on that commit, and downloaded Mac
+and Linux package provenance/checksums are verified. `TESTING.md` separates
+those automated passes from the failed sustained workload.
+
+An intentionally instrumented diagnostic confirms VideoToolbox transfers and
+allocator activity. The decoder follow-up reuses one CPU transfer buffer for
+the same retained hardware context/dimensions, and emits opaque native RGB32 to
+avoid a second Qt pixel conversion. Real hardware tests check alternating
+colors, retained images, resize and reset; unavailable hardware is reported
+explicitly. The transfer-only five-minute comparison passes with zero recovery,
+9891 reuses out of 9892 decoded frames per stream and RSS 123.48 to 133.74 MiB.
+It cannot establish hour acceptance. Final RGB32 Mac/native/ASan tests and the
+Ubuntu application/eight-suite/16-stream/two-HD checks also pass. Package, hosted
+matrix and long-run results must be recorded separately before acceptance.
+
+Attended tests remain deferred. Do not start physical routing, window relocation
+or sleep without the user's later readiness. Full native/OS queue certification
+and H07–H12 acceptance are still open.
+
 ## P7 retained steady-load failure and bounded diagnostics — 2026-10-14
 
 All six hosted jobs and source export pass on `affdad48b`; downloaded Linux

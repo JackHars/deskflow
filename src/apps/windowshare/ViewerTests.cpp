@@ -264,7 +264,10 @@ void testDecoder()
   check(decoded.error.isEmpty(), "Known H.264 fixture failed decoding");
   check(decoded.image.size() == QSize(64, 48), "Decoded fixture dimensions were wrong");
   const QColor pixel = decoded.image.pixelColor(32, 24);
-  check(pixel.red() > 230 && pixel.green() < 20 && pixel.blue() < 20, "Decoded RGB conversion was wrong");
+  check(
+      pixel.red() > 230 && pixel.green() < 20 && pixel.blue() < 20 && pixel.alpha() == 255,
+      "Decoded opaque RGB conversion was wrong"
+  );
   decoder.reset();
   decoded = decoder.decode(frame());
   check(decoded.error.isEmpty() && !decoded.image.isNull(), "Decoder failed after reset");
@@ -295,6 +298,88 @@ void testDecoder()
     const auto value = result.image.pixelColor(32, 24);
     check(i % 2 ? value.blue() > 230 : value.red() > 230, "Reused conversion image has stale pixels");
   }
+}
+
+void testHardwareTransferReuse()
+{
+  // Generated solid-color Annex B IDRs. Larger than the tiny software fixture
+  // so native decoders that reject its dimensions can exercise real transfers.
+  const auto red = QByteArray::fromBase64(
+      "AAAAAWdCwA3aBQfsBEAAAAMAQAAADyPFCqgAAAABaM4PyAAAAWWIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgAAABZQMoiEOhGKAAIY8c"
+      "AAQPY4AAh5ScnJycnJycnJycnJycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "dddddddddddddddeAAABZQGSIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgA=="
+  );
+  const auto blue = QByteArray::fromBase64(
+      "AAAAAWdCwA3aBQfsBEAAAAMAQAAADyPFCqgAAAABaM4PyAAAAWWIhDoRigACMXHAAEPKOAAIBcnJycnJycnJycnJycnJycnJycnX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgAAABZQMoiEOhGKAAIxcc"
+      "AAQ8o4AAgFycnJycnJycnJycnJycnJycnJyddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "dddddddddddddddeAAABZQGSIhDoRigACMXHAAEPKOAAIBcnJycnJycnJycnJycnJycnJycnXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgA=="
+  );
+  const auto wide = QByteArray::fromBase64(
+      "AAAAAWdCwB7aAoD2wEQAAAMABAAAAwDyPFi6gAAAAAFozg/IAAABZYiEOhGKAAIY8cAAQPY4AAh5ScnJycnJycnJycnJycnJycnJ"
+      "ycnJycnJycnJycnJycnJycnJycnJ111111111111111111111111111111111111111111111111111111111111111111111111"
+      "1111111111111111111111111111111111111111111111114AAAAWUBQiIQ6EYoAAhjxwABA9jgACHlJycnJycnJycnJycnJycn"
+      "JycnJycnJycnJycnJycnJycnJycnJycnXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXgAAAAWUA"
+      "tIiEOhGKAAIY8cAAQPY4AAh5ScnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJ111111111111111111111111"
+      "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111114AAA"
+      "AWUAQSIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJydddddddddddddddddddd"
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "eAAAAWUAVSIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJydddddddddddddddd"
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "ddddeAAAAWUAaSIhDoRigACGPHAAED2OAAIeUnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJydddddddddddd"
+      "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      "ddddddddddddddddddddddddddddddddddddddddddddddddeAAAAWUAIIiIQ6EYoAAhjxwABA9jgACHlJycnJycnJycnJycnJyc"
+      "nJycnJycnJycnJycnJycnJycnJycnJycnXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+      "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXg=="
+  );
+  VideoDecoder decoder;
+  auto first = decoder.decode(red);
+  check(first.error.isEmpty() && first.image.size() == QSize(320, 240), "Transfer fixture did not decode");
+  const bool hardware = first.hardwareFrame;
+  check(!first.reusedTransferBuffer, "First decode reused nonexistent transfer storage");
+  std::vector<QImage> retained;
+  retained.push_back(std::move(first.image));
+  for (unsigned i = 1; i != 12; ++i) {
+    auto result = decoder.decode(i % 2 ? blue : red);
+    check(result.error.isEmpty() && result.image.size() == QSize(320, 240), "Transfer reuse lost frame dimensions");
+    if (hardware)
+      check(
+          result.hardwareFrame && result.reusedTransferBuffer, "Stable hardware context did not reuse transfer storage"
+      );
+    else
+      check(!result.reusedTransferBuffer, "Software decode claimed a hardware buffer reuse");
+    retained.push_back(std::move(result.image));
+  }
+  auto resized = decoder.decode(wide);
+  check(
+      resized.error.isEmpty() && resized.image.size() == QSize(640, 480) && !resized.reusedTransferBuffer,
+      "Dimension change reused incompatible hardware transfer storage"
+  );
+  const auto next = decoder.decode(wide);
+  check(next.error.isEmpty() && next.image.size() == QSize(640, 480), "Resized transfer could not decode again");
+  if (resized.hardwareFrame)
+    check(next.hardwareFrame && next.reusedTransferBuffer, "Resized hardware transfer was not reusable");
+  decoder.reset();
+  const auto afterReset = decoder.decode(red);
+  check(
+      afterReset.error.isEmpty() && afterReset.image.size() == QSize(320, 240) && !afterReset.reusedTransferBuffer,
+      "Reset retained an old hardware transfer context"
+  );
+  for (unsigned i = 0; i != retained.size(); ++i) {
+    const auto pixel = retained[i].pixelColor(160, 120);
+    check(
+        pixel.alpha() == 255 && pixel.green() < 20 &&
+            (i % 2 ? pixel.blue() > 230 && pixel.red() < 20 : pixel.red() > 230 && pixel.blue() < 20),
+        "Reused hardware transfer changed a retained image or preserved stale pixels"
+    );
+  }
+  QTextStream(stdout)
+      << (hardware ? "PASS: native hardware transfer reuse, retained colors, resize and reset\n"
+                   : "SKIP: hardware transfer reuse unavailable; software colors/resize/reset passed\n");
 }
 
 void testMediaMetrics()
@@ -1602,6 +1687,7 @@ int main(int argc, char **argv)
   application.setQuitOnLastWindowClosed(false);
   try {
     testDecoder();
+    testHardwareTransferReuse();
     testMediaMetrics();
     testAttachedWindowLifecycle();
     testPopupDismissalFence();

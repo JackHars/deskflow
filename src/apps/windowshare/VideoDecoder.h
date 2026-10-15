@@ -20,6 +20,8 @@ public:
   {
     QImage image;
     QString error;
+    bool hardwareFrame = false;
+    bool reusedTransferBuffer = false;
   };
 
   explicit VideoDecoder(bool preferHardware = true);

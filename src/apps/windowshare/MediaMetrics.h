@@ -19,6 +19,7 @@ struct MediaMetrics
   std::uint64_t received = 0, admitted = 0, retired = 0, ignored = 0;
   std::uint64_t decoded = 0, decodeErrors = 0, painted = 0, replacedBeforePaint = 0;
   std::uint64_t discardedCompletions = 0, emptyDecodes = 0;
+  std::uint64_t hardwareDecoded = 0, reusedHardwareTransfers = 0;
   std::uint64_t overflows = 0, recoveryRequests = 0;
   std::uint64_t pendingFrames = 0, pendingBytes = 0, peakFrames = 0, peakBytes = 0;
   std::uint64_t frameCapacity = 0, byteCapacity = 0, maxReceiveToPaintNs = 0;
