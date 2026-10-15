@@ -132,7 +132,7 @@ ViewerViewportEndpoint::ViewerViewportEndpoint(int fd, QObject *parent) : QObjec
         QTimer::singleShot(250, this, [this, binding] {
           if (m_preparation && binding == m_preparation->binding && !m_preparation->promoted &&
               m_preparation->deadline.hasExpired())
-            close();
+            close(QStringLiteral("preparation-expired-without-cleanup"));
         });
     });
     m_queueExpiry.setSingleShot(true);
@@ -152,10 +152,11 @@ ViewerViewportEndpoint::~ViewerViewportEndpoint()
   onClosed = {};
   close();
 }
-void ViewerViewportEndpoint::close()
+void ViewerViewportEndpoint::close(QString reason)
 {
   if (m_descriptor < 0)
     return;
+  m_closeReason = reason.left(192).replace('\n', ' ').replace('\r', ' ');
   m_read->setEnabled(false);
   m_write->setEnabled(false);
   ::close(std::exchange(m_descriptor, -1));
@@ -197,15 +198,18 @@ bool ViewerViewportEndpoint::sendObject(const QJsonObject &object)
   try {
     const auto frame = gnomeViewportFrame(object);
     if (m_output.size() + frame.size() > 2 * (gnomeViewportMaximumPayload + 4)) {
-      close();
+      close(QStringLiteral("output-capacity-exceeded"));
       return false;
     }
     m_output += frame;
     const QPointer<ViewerViewportEndpoint> alive(this);
     write();
     return alive && live();
+  } catch (const std::exception &error) {
+    close(QStringLiteral("output-invalid: ") + QString::fromUtf8(error.what()).left(160));
+    return false;
   } catch (...) {
-    close();
+    close(QStringLiteral("output-invalid"));
     return false;
   }
 }
@@ -343,7 +347,7 @@ void ViewerViewportEndpoint::write()
     if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
       break;
     if (count <= 0) {
-      close();
+      close(QStringLiteral("socket-write-failed"));
       return;
     }
     m_output.remove(0, count);
@@ -364,7 +368,7 @@ void ViewerViewportEndpoint::invalidate(const QString &reason)
     if (actual != std::optional(expected)) {
       // An unfocused preparation cannot be silently rebound to another focus.
       // Closing requests owned Bridge teardown, never a successful release.
-      close();
+      close(QStringLiteral("prepared-focus-changed: ") + reason.left(128));
       return;
     }
   }
@@ -588,7 +592,7 @@ void ViewerViewportEndpoint::pollPreparationFocus()
     return;
   if (state->connection != m_preparation->inventory.connection ||
       state->peerFingerprint != m_preparation->inventory.peerFingerprint) {
-    close();
+    close(QStringLiteral("preparation-focus-peer-changed"));
     return;
   }
   m_preparation->focused = state;
@@ -623,7 +627,7 @@ void ViewerViewportEndpoint::handlePreparation(const GnomeViewportRequest &reque
     if (!alive || !live())
       return;
     if (!value) {
-      close();
+      close(QStringLiteral("preparation-inventory-gate-unavailable"));
       return;
     } // Partial or unsupported gate adoption is terminal.
     if (value->targets.empty()) {
@@ -632,7 +636,7 @@ void ViewerViewportEndpoint::handlePreparation(const GnomeViewportRequest &reque
       return;
     }
     if (!m_preparation || m_preparation->binding != request.preparation || m_preparation->deadline.hasExpired()) {
-      close();
+      close(QStringLiteral("preparation-inventory-expired-or-replaced"));
       return;
     }
     m_preparation->inventory = *value;
@@ -736,7 +740,7 @@ void ViewerViewportEndpoint::handlePreparation(const GnomeViewportRequest &reque
     replyPreparation(request, true);
     return;
   }
-  close();
+  close(QStringLiteral("unexpected-preparation-operation"));
 }
 
 void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
@@ -748,7 +752,7 @@ void ViewerViewportEndpoint::handle(const GnomeViewportRequest &request)
                                  m_preparation->binding == request.preparation;
   if ((m_pendingCheck && !cancelPreparation) || (m_preparationPending && !cancelPreparation) ||
       request.request <= m_lastRequest) {
-    close();
+    close(request.request <= m_lastRequest ? QStringLiteral("request-replayed") : QStringLiteral("request-overlapped"));
     return;
   }
   if (cancelPreparation) {
@@ -949,13 +953,13 @@ void ViewerViewportEndpoint::read()
       if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
         break;
       if (count <= 0) {
-        close();
+        close(count == 0 ? QStringLiteral("socket-peer-closed") : QStringLiteral("socket-read-failed"));
         return;
       }
       m_decoder.append(QByteArray(bytes, count));
       while (auto object = m_decoder.take()) {
         if (++messages > 16) {
-          close();
+          close(QStringLiteral("request-batch-exceeded"));
           return;
         }
         if (isGnomeWindowDrag(*object))
@@ -967,9 +971,12 @@ void ViewerViewportEndpoint::read()
       }
     }
     m_reading = false;
+  } catch (const std::exception &error) {
+    if (alive)
+      close(QStringLiteral("request-invalid: ") + QString::fromUtf8(error.what()).left(160));
   } catch (...) {
     if (alive)
-      close();
+      close(QStringLiteral("request-invalid"));
   }
 }
 } // namespace deskflow::windowshare

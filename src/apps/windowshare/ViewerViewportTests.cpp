@@ -1251,6 +1251,24 @@ void destruction()
   ::close(pair.peer);
   pair.peer = -1;
   check(waitUntil([&] { return closed; }), "Partial frame EOF did not close endpoint");
+  check(pair.endpoint->closeReason() == QStringLiteral("socket-peer-closed"), "EOF lost its initiating reason");
+  Pair diagnostic;
+  unsigned notifications = 0;
+  QString observed;
+  diagnostic.endpoint->onClosed = [&] {
+    ++notifications;
+    check(!diagnostic.endpoint->live(), "Close diagnostic preceded descriptor retirement");
+    observed = diagnostic.endpoint->closeReason();
+    diagnostic.endpoint->close(QStringLiteral("reentrant-cleanup"));
+  };
+  const auto reason = QStringLiteral("tls-channel:\n\r") + QString(512, 'x');
+  diagnostic.endpoint->close(reason);
+  diagnostic.endpoint->close(QStringLiteral("later-owner-cleanup"));
+  check(
+      notifications == 1 && observed == reason.left(192).replace('\n', ' ').replace('\r', ' ') &&
+          diagnostic.endpoint->closeReason() == observed,
+      "Reentrant cleanup replaced the first bounded single-line diagnostic"
+  );
   Pair throwing;
   throwing.endpoint->onClosed = [] { throw std::runtime_error("Fixture lifecycle observer failed"); };
   throwing.endpoint->close();

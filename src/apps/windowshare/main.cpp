@@ -1743,7 +1743,7 @@ private:
 #ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
       if (m_viewportEndpoint) {
         const QPointer<Bridge> alive(this);
-        m_viewportEndpoint->close();
+        m_viewportEndpoint->close(QStringLiteral("tls-channel: ") + reason.left(160));
         if (!alive || m_shuttingDown)
           return;
       }
@@ -2158,7 +2158,7 @@ private:
       }
       if (m_preparationRoute && !viewer->beginInputPreparation(m_preparationRoute->binding)) {
         if (m_viewportEndpoint)
-          m_viewportEndpoint->close();
+          m_viewportEndpoint->close(QStringLiteral("new-viewer-preparation-gate-unavailable"));
         return;
       }
       if (m_viewportEndpoint)
@@ -2937,7 +2937,12 @@ int main(int argc, char **argv)
     std::unique_ptr<ViewerViewportEndpoint> viewport;
     if (viewportBootstrap.inherited()) {
       viewport = std::make_unique<ViewerViewportEndpoint>(viewportBootstrap.takeDescriptor());
-      viewport->onClosed = [&shutdown] { shutdown.request(); };
+      viewport->onClosed = [&shutdown, endpoint = viewport.get()] {
+        // close() has already retired the descriptor and all retained gates.
+        // Report before shutdown can synchronously destroy the Bridge/endpoint.
+        QTextStream(stderr) << "Window sharing GNOME viewport closed: " << endpoint->closeReason() << '\n';
+        shutdown.request();
+      };
       bridge.attachViewportEndpoint(*viewport);
     }
 #endif

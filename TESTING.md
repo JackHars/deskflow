@@ -4,6 +4,38 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 visible input and Ubuntu disconnect diagnostics — 2026-10-15
+
+Attempt eight (`build/h04-r8-5bjw64xh/`) stayed visible beyond three minutes,
+accepted the user's Start and reached Active. The user confirmed that typed
+characters appeared after the routing hotkey. Ubuntu then lost its viewport
+channel during preparation inventory request 68, before Record/arm. All three
+recorders ended unarmed with loss 0; this is not original-input acceptance.
+The source retains a Right-arrow press/autorepeat without an observed release,
+so neutral-state restoration remains unverified. All exact owned processes
+stopped and ordinary apps/configurations were preserved; failed private IPC
+stop/relay EOF remain in the retained Ubuntu cleanup evidence.
+
+The Viewer now retains the first bounded, single-line endpoint close reason
+and logs it before synchronous Bridge shutdown can discard it. Regression
+coverage exercises EOF, descriptor retirement, exactly-once notification and
+reentrant/later cleanup preserving that reason. This diagnostic change does
+not establish the initiating cause or fix the physical disconnect.
+
+Mac viewport/Bridge suites pass (2.73 s / 9.50 s). Home Ubuntu Debug build and
+the same suites pass (1.19 s / 12.12 s); its isolated GNOME 50.1/QtWayland
+fixture passes in 12.40 s with a clean production-client stop. Synthetic fixture
+input has no original-delivery authority and never touches the user's desktop.
+The diagnostic container and temporary build tree were removed. Formatting,
+whitespace and full REUSE pass. Evidence: `build/h04-viewport-elrcr6hw/`.
+Retained earlier build attempts include a missing optional fixture flag and a
+Release-only GCC `maybe-uninitialized` error in unchanged fixture code; the
+passing Debug run does not verify the Release fixture build.
+
+The user is away. Ask for fresh permission immediately before the next physical
+test and wait for an affirmative reply before opening its window or starting
+its session. Previous Start/Ready replies do not authorize a new attempt.
+
 ## H04 Ready wait and source visibility — 2026-10-15
 
 Attempt seven failed before Start (`build/h04-r7-ptwmxdfb/session-1`): the

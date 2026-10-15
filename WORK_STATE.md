@@ -1,5 +1,51 @@
 # Seamless Windows work state
 
+## Attended-test permission — current user instruction, 2026-10-15
+
+The user is away from the computer. Ask for fresh permission immediately before
+executing the next physical test, and wait for an affirmative reply before
+opening its test window or starting its physical session. Earlier Start/Ready
+answers do not authorize another attempt. Unattended builds, unit tests and
+isolated headless GNOME fixtures can continue. Prepare the tested artifacts and
+plans before asking; do not ask while the user is known to be away.
+
+## Attempt eight: visible input, then Ubuntu viewport disconnect — 2026-10-15
+
+The user clicked Start and confirmed that typed characters appeared after
+the right-routing hotkey. The Ready fix survived more than three minutes of
+waiting and the session reached Active. It failed before Record/arm when the
+Ubuntu viewport channel closed during preparation inventory request 68.
+The upstream reason was discarded by the Viewer endpoint/Bridge shutdown path.
+This does not diagnose attempt four's separate Mac companion disconnect.
+
+Evidence is retained in `build/h04-r8-5bjw64xh/`, including copied Ubuntu logs
+and the direct human observation. Every recorder ended unarmed with loss 0;
+the exact Mac Core/Host/source and owned Linux processes stopped. Ordinary
+configurations and processes were preserved. Linux cleanup reports its failed
+private IPC stop and relay EOF; the source receipt retains the routing Right
+key without a matching observed release, so neutral-state restoration is not
+verified. No physical acceptance is claimed.
+
+The diagnostic change retains a bounded first close reason across
+reentrant endpoint cleanup and logs it before Bridge shutdown can discard it.
+Mac viewport/controller suites pass (2.73 s / 9.50 s). Home Ubuntu Debug build
+and both suites pass (1.19 s / 12.12 s); the isolated GNOME 50.1/QtWayland
+fixture passes (12.40 s), with clean production-client stop. It uses synthetic
+fixture input, reports no original-delivery authority and does not use the
+user's desktop. The diagnostic container and temporary build tree are gone.
+Formatting, whitespace and full REUSE pass. These checks do not identify or
+repair the initiating physical disconnect; no attended retry is authorized.
+
+Evidence: `build/h04-viewport-elrcr6hw/`, including copied Ubuntu logs/results.
+Source archive SHA-256:
+`a20d3668040e43a9b26c46d4c3af6bc4b2a4bc4669f6a33298cd0fc3e705968b`.
+Earlier build attempts are retained: the first omitted the optional fixture
+target, and the second Release build stopped on GCC `maybe-uninitialized` in
+unchanged `GnomeViewerFixture.cpp`. The passing Debug run matches CI's build
+configuration; it does not establish that the Release fixture builds.
+Hosted foundation/source-bundle runs on preceding commit `14cd5514f` also
+passed (`38772970872` / `38772971003`); they do not cover these new diagnostics.
+
 ## Ready-window lifetime and visibility repair — 2026-10-15
 
 Attempt seven (`build/h04-r7-ptwmxdfb/session-1`) ended before any Start click:

@@ -78,7 +78,11 @@ public:
       std::function<bool()> exactFence, std::function<void(bool)> finished
   );
   void invalidate(const QString &reason = QStringLiteral("viewport-changed"));
-  void close();
+  void close(QString reason = QStringLiteral("owner-closed"));
+  const QString &closeReason() const noexcept
+  {
+    return m_closeReason;
+  }
   bool live() const noexcept
   {
     return m_descriptor >= 0;
@@ -117,6 +121,7 @@ private:
     std::optional<bool> completion;
   };
   int m_descriptor = -1;
+  QString m_closeReason;
   std::unique_ptr<QSocketNotifier> m_read, m_write;
   GnomeViewportDecoder m_decoder;
   QByteArray m_output;
