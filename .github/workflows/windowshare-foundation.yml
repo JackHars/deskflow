@@ -181,6 +181,7 @@ jobs:
         run: |
           python3 deploy/windowshare/physical-linux-tests.py
           python3 deploy/windowshare/physical-macos-tests.py
+          python3 deploy/windowshare/physical-preview-tests.py
       - name: Compile the real opt-in Linux injection backend
         run: |
           cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON
@@ -267,7 +268,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check manual coordinator cancellation and receipt freshness without input
-        run: python3 deploy/windowshare/physical-macos-tests.py
+        run: |
+          python3 deploy/windowshare/physical-macos-tests.py
+          python3 deploy/windowshare/physical-preview-tests.py
       - name: Verify passive resource-soak evidence sampler
         run: |
           python3 deploy/windowshare/resource-soak-tests.py

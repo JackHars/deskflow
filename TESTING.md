@@ -4,6 +4,65 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 hidden desktop and Record readiness — 2026-10-15
+
+After fresh launch permission, the user reached priming and reported that typing
+worked but clicking did not. They returned left to the Mac to click Record;
+Record was requested, but Core/Host never published a ready owner and no
+recorder armed. The coordinator ended at its recording/safe-return cutoff.
+Its old "No visible Record request" message was inaccurate in this case.
+
+The user then clarified that no test window was visible on Ubuntu and they had
+not known one was expected. The harness runs a **headless, isolated GNOME
+session**, so its Viewer is absent from the ordinary Ubuntu monitor. The Mac
+source remains visible, but it is not the desktop receiving the routed pointer.
+Receipts show remote clicks reaching labels/widgets rather than Record. This
+explains why the instructions were unusable; it does not establish that the
+pointer transformation or original-input acquisition is correct.
+
+Evidence: `build/h04-r11-b4be7iux/`, including both observations and cleanup
+verification. Core/Host readiness counts were 0/940 and 0/850; native was
+1005/1005. All ended denied/unarmed with loss 0 and zero measured rows.
+The final receipt retains 2414 Qt events, the original frame, and an unmatched
+routing Right-key press. Neutral input remains unverified. Mac Core/source
+exited 0; exact Host, container and sockets are gone. Ordinary settings and
+processes were preserved. The coordinator retains Linux exit 255, while the
+copied remote result reports completed, container/Core exit 0, private IPC stop
+and fully drained relays. Preserve both; do not rewrite the failed run.
+Ubuntu archive SHA-256:
+`14a54e71c3c950ed7391d1c0ffc54a4d967d7d951bd2c2d79bd151ea403c6243`.
+
+The repair adds an explicitly planned, view-only preview of the real
+isolated Ubuntu desktop and cursor on the Mac. It has a separate bounded SSH
+image stream and observer process; it never injects input or grants authority.
+Start cannot become Active without live visible preview receipts. Frozen,
+closed or hidden previews abort; recording completion closes the preview so
+the source's local Stop is visible again. Both plans must opt in. The ordinary
+Ubuntu desktop is not used. Return in the existing source text box requests
+the same one-shot Record as its button without returning left. New readiness
+rows identify missing owners, active capture and blocked queues; arm conditions
+and session deadlines remain unchanged. Evidence: `build/h04-readiness-c_zn8we0/`.
+Validation passed: Mac recorder (0.76 s) and offscreen real-PNG renderer
+(4.24 s); home Ubuntu recorder/preview/private-channel suites (17.31 s) and
+ASan/UBSan recorder/preview (3.12 s); 66 Mac coordinator, 23 Linux coordinator
+and 7 preview protocol checks. The actual isolated GNOME cursor-pixel fixture
+passes in 3.72 s, uses only synthetic fixture input, and stops every owned
+process. A later receiver regression also passes directly on home Ubuntu and
+rejects a frozen renderer despite fresh network images. It is not a physical
+input or end-to-end original-delivery pass. Mac Core/Host/source build; the
+Apple-issued exact-library package and inert admission/bootstrap check pass.
+Formatting, whitespace and REUSE pass. Linux temporary builds/containers are
+gone. Earlier missing-target (before CMake reconfiguration) and C++ name-lookup
+compile failures remain in the build evidence; both were repaired.
+
+Ubuntu test archive SHA-256:
+`b3ec11b0016f15ca9045b09af1b36b81d0e15a56346d53732d933672c070c24b`.
+Mac package ZIP SHA-256:
+`bd0b549cce87c10eef7fee167e8f6d21b324d81927a96cf2edbeaaf17332b5ff`.
+Fresh attempt twelve preparation: `build/h04-r12-kh2mcwyo/`, with the
+new preview required in both plans. No physical launch is authorized; ask
+immediately before any launch. H04/P5 remains unaccepted.
+
 ## H04 native stage invalidation during priming — 2026-10-15
 
 Attempt ten (`build/h04-r10-f_dfkh1x/`) ran after fresh explicit launch permission.
@@ -41,8 +100,8 @@ Isolated GNOME 50.1/QtWayland: PASS, 12.14 s, clean production-client stop,
 no original-delivery authority and no user desktop. Temporary build/container
 cleanup, formatting, whitespace and full REUSE pass. Copied Ubuntu archive
 SHA-256: `3583d39ff93b0b2e20b470dd18276a8bb65136ecb419648170c13ab515d457db`.
-Attempt eleven (`build/h04-r11-b4be7iux/`) is prepared with the repaired Linux
-Core; it needs fresh launch permission. These regressions do not establish
+Attempt eleven (`build/h04-r11-b4be7iux/`) subsequently ran with the repaired
+Linux Core; its failed result is above. These regressions do not establish
 physical readiness or repair every possible native disconnect.
 
 ## H04 Host stall and TLS input-burst regression — 2026-10-15

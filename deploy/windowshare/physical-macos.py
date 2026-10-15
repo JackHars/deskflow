@@ -404,6 +404,13 @@ def original_support():
     return support
 
 
+def preview_support():
+    spec = importlib.util.spec_from_file_location("physical_preview", Path(__file__).with_name("physical-preview.py"))
+    support = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(support)
+    return support
+
+
 def validate_plans(mac, plan, base, production=False, source=None, holding=False):
     require(mac.get("version") == (2 if production else 1) and mac.get("preparedOnly") is True,
             "Wrong Mac preparation plan")
@@ -477,6 +484,7 @@ def run(arguments):
     holding = getattr(arguments, "holding_display", False)
     artifacts = validate_plans(mac, plan, base, production, arguments.source, holding)
     original = original_support() if production else None
+    desktop_preview = production and mac.get("desktopPreview") is True
     recording_seconds, session_seconds = original.recording_times(mac) if production else (0, 120)
     source_profile = ["--h11-input"] if production and mac.get("recordingProfile") == "h11" else []
     output = arguments.output.resolve()
@@ -493,6 +501,7 @@ def run(arguments):
                        "predeclaredRecordingSeconds": recording_seconds,
                        "maximumSessionSeconds": session_seconds,
                        "hostOwnership": "authenticated direct packaged Core companion"})
+        report["desktopPreviewConfigured"] = desktop_preview
     atomic_json(output / "linux-plan.json", plan)
     atomic_json(output / "mac-plan.json", mac)
     if getattr(arguments, "validate_only", False):
@@ -525,6 +534,8 @@ def run(arguments):
     title = "Deskflow original input physical test" if production else "Deskflow physical input test"
     streams, owned, socket_identities, cleanup_errors = [], {}, {}, []
     collector = publisher = driver = evidence = None
+    preview_receiver = None
+    preview_ready = preview_stopped = False
     linux_stopped = False
     started = False
     inspector = original.ProcessInspector() if production else None
@@ -555,7 +566,16 @@ def run(arguments):
         for name, process in owned.items():
             if name == "linux" and linux_stopped:
                 continue
+            if name.startswith("preview-") and preview_stopped:
+                continue
             require(process.poll() is None, name + " exited early: " + str(process.returncode))
+        if preview_receiver and not preview_stopped:
+            preview_receiver.poll()
+            if preview_ready:
+                require(preview_receiver.fresh(), "Ubuntu test desktop preview stopped updating")
+                display = read_json(output / "preview-visible.json")
+                require(preview_receiver.visible(display),
+                        "Ubuntu test desktop preview is not visible and live")
         if inspector and companion_identity:
             require(inspector.live(core_identity) and inspector.live(companion_identity),
                     "Exact Core or authenticated companion process changed")
@@ -573,6 +593,19 @@ def run(arguments):
                 raise Cancelled("Source requested Stop in the test window")
             return state["receipt"]
         return None
+
+    def stop_preview():
+        nonlocal preview_stopped
+        if preview_stopped:
+            return
+        preview_stopped = True
+        if preview_receiver:
+            preview_receiver.close()
+            report["desktopPreview"] = {"lastSequence": preview_receiver.sequence, "viewOnly": True,
+                                        "userDesktopUsed": False, "visibleBeforeActive": preview_ready}
+        for name in ("preview-display", "preview-stream"):
+            if owned.get(name):
+                report[name + "Exit"] = stop_owned(owned[name], name, output, report, grace=2)
 
     def wait(predicate, description, seconds=10, allow_stop=False):
         deadline = time.monotonic() + seconds
@@ -738,6 +771,19 @@ def run(arguments):
                     report["linuxReady"].get("productionPrerequisites", {}).get("inputPreparation") is True,
                     "Linux native production prerequisites were not observed")
         report["baseline"] = {"source": collector.snapshot(), "linux": driver.command("baseline")}
+        if desktop_preview:
+            frame_path, preview_receipt = output / "preview.frame", output / "preview-visible.json"
+            stream = launch("preview-stream", [*ssh, arguments.ssh_target, shlex.join(plan["previewArgv"])], pipe=True)
+            preview_receiver = preview_support().Receiver(stream.stdout, frame_path)
+            launch("preview-display", [str(source_executable), "--desktop-preview", str(frame_path),
+                                       str(preview_receipt)], env=environment)
+            def live_preview():
+                if not preview_receiver.fresh() or not preview_receipt.exists():
+                    return False
+                value = read_json(preview_receipt)
+                return preview_receiver.visible(value)
+            wait(live_preview, "visible live Ubuntu test desktop", 10)
+            preview_ready = True
         publisher.set("active", session_seconds)
         emit({"event": "active", "secondsRemaining": session_seconds, "title": title})
         deadline, next_status = time.monotonic() + session_seconds, time.monotonic() + 5
@@ -753,7 +799,7 @@ def run(arguments):
             if evidence and not evidence.stopped:
                 if not evidence.attempted:
                     require(time.monotonic() + recording_seconds + 5 < deadline,
-                            "No visible Record request with enough time for recording and safe return")
+                            evidence.arm_wait_failure())
                 if evidence.try_arm():
                     evidence_arm_deadline = time.monotonic() + 2
                     emit({"event": "evidence-arm-requested", "runId": evidence.run_id})
@@ -769,6 +815,7 @@ def run(arguments):
                     report["inputEvidence"] = evidence.finish()
                     emit({"event": "evidence-complete", "returnAndStop": True,
                           "physicalAcceptance": "not-assessed"})
+                    stop_preview()
             if time.monotonic() >= next_status:
                 report["lastLinuxStatus"] = driver.command("status")
                 next_status = time.monotonic() + 5
@@ -776,6 +823,7 @@ def run(arguments):
         else:
             report["autoStoppedAtDeadline"] = True
         publisher.set("stopped")
+        stop_preview()
         if evidence:
             evidence.stop()
             wait(lambda: all(reader.end for reader in evidence.readers.values()),
@@ -819,6 +867,10 @@ def run(arguments):
         signal.signal(signal.SIGINT, signal.SIG_IGN)
         if publisher:
             publisher.set("stopped")
+        try:
+            stop_preview()
+        except Exception as error:
+            cleanup_errors.append("Desktop preview cleanup: " + str(error))
         if evidence:
             try:
                 evidence.stop()

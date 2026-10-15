@@ -23,6 +23,7 @@ import signal
 import socket
 import ssl
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
@@ -207,6 +208,9 @@ def session(args):
     output.mkdir(exist_ok=True)
     require(not (output / 'container-result.json').exists(), 'Container session was already used')
     original = getattr(args, 'production_original_input', False)
+    preview_enabled = getattr(args, 'desktop_preview', False)
+    require(not preview_enabled or original, 'Desktop preview requires the explicit production test session')
+    preview = module('physical_preview', HERE / 'physical-preview.py') if preview_enabled else None
     protocol = 3 if original else 2
     report = {'schema': 1, 'status': 'failed',
               'scope': ('production original-input backend; Mac coordinator owns per-record authority' if original else
@@ -276,11 +280,17 @@ def session(args):
                     super().check()
             processes = PhaseProcesses(output, environment, lifetime_seconds=RESOURCE_SECONDS)
             cleanup.callback(safely_close, 'processes', processes.close)
+            preview_frame = preview.install(processes, root) if preview else None
+            preview_sequence = 0
+            preview_observed = time.monotonic()
             for endpoint in (args.core_socket, args.viewer_socket):
                 relay = cross.UnixRelay(endpoint, lifetime_seconds=RESOURCE_SECONDS)
                 relays.append(relay)
                 cleanup.callback(safely_close, 'relay', relay.close)
             shell = qt.start_shell(processes, root, report)
+            if preview:
+                preview.enable(processes, common)
+                common.wait_for(processes, preview_frame.exists, 'first private desktop preview', timeout=10)
             if original:
                 observer = common.Provider(processes.env['DBUS_SESSION_BUS_ADDRESS'])
                 try:
@@ -322,10 +332,21 @@ def session(args):
             cleanup.callback(safely_close, 'private core IPC stop', stop_core_if_running)
 
             def status():
+                nonlocal preview_sequence, preview_observed
                 processes.check()
                 for relay in relays:
                     relay.check()
                 require(shell.poll() is None and core.poll() is None, 'Owned compositor/core exited before stop')
+                if preview:
+                    frame = preview.read_frame(preview_frame)
+                    sequence = preview.frame_sequence(frame)
+                    require(sequence >= preview_sequence, 'Desktop preview sequence went backwards')
+                    if sequence > preview_sequence:
+                        preview.publish(frame, args.run / 'preview.frame')
+                        preview_sequence, preview_observed = sequence, time.monotonic()
+                    require(time.monotonic() - preview_observed < 2, 'Desktop preview stopped updating')
+                    report['desktopPreview'] = {'sequence': preview_sequence, 'viewOnly': True,
+                                                'userDesktopUsed': False, 'includesCursor': True}
                 core_text, shell_text = read_log(output / 'core.log'), read_log(output / 'gnome-shell.log')
                 actual_pins = [value.replace(':', '').lower() for value in re.findall(r'peer fingerprint: ([0-9a-fA-F:]+)', core_text)]
                 return {'coreProcessLive': core.poll() is None, 'compositorProcessLive': shell.poll() is None,
@@ -491,7 +512,8 @@ def ordinary_snapshot(pids, configs):
 
 def source_hashes():
     paths = [HERE / name for name in ('physical-linux.py', 'gnome-crossmachine-client.py',
-             'gnome-qt-viewer-tests.py', 'gnome-provider-tests.py', 'x11-core-smoke.py')]
+             'gnome-qt-viewer-tests.py', 'gnome-provider-tests.py', 'x11-core-smoke.py',
+             'physical-preview.py', 'physical-preview.js')]
     paths += [p for p in sorted((HERE / 'gnome-provider').rglob('*')) if p.is_file() and '__pycache__' not in p.parts]
     return {str(p.relative_to(HERE)): sha(p) for p in paths}
 
@@ -543,6 +565,8 @@ def prepare(args):
         directory.mkdir()
         (directory / 'owner.json').write_text(json.dumps({'schema': 1, 'container': container, 'token': token}) + '\n')
     original = getattr(args, 'production_original_input', False)
+    desktop_preview = getattr(args, 'desktop_preview', False)
+    require(not desktop_preview or original, 'Desktop preview requires the explicit production test plan')
     plan = {'version': 3 if original else 2, 'controlProtocol': 3 if original else 2,
             **original_metadata(original), 'container': container, 'token': token,
             'runDirectory': str(args.run), 'coreExecutable': str(args.core), 'viewerExecutable': str(args.viewer),
@@ -571,6 +595,9 @@ def prepare(args):
             'Ordinary configuration/process changed during preparation')
     plan['runArgv'] = ['python3', str(Path(__file__).resolve()), 'run', '--run', str(args.run), '--window-id', '{windowId}']
     plan['cleanupArgv'] = ['python3', str(Path(__file__).resolve()), 'cleanup', '--run', str(args.run)]
+    if desktop_preview:
+        plan['desktopPreview'] = True
+        plan['previewArgv'] = ['python3', str(Path(__file__).resolve()), 'preview', '--run', str(args.run)]
     target = args.run / 'linux-plan.json'
     with target.open('x') as output:
         json.dump(plan, output, indent=2, sort_keys=True)
@@ -638,6 +665,8 @@ def run(args):
                   '--window-id', str(args.window_id)]
     if original:
         arguments.append('--production-original-input')
+    if plan.get('desktopPreview') is True:
+        arguments.append('--desktop-preview')
     child = None
     terminal = None
     stop_id = None
@@ -766,6 +795,34 @@ def cleanup(args):
     return 0
 
 
+def preview_stream(args):
+    """One read-only SSH stream for this exact plan's private compositor images."""
+    host_only()
+    plan = load_plan(args.run)
+    require(plan.get('desktopPreview') is True and route_mode(plan), 'Desktop preview was not predeclared')
+    require(source_hashes() == plan['sourceHashes'], 'Preview helper changed after preparation')
+    info, = json.loads(subprocess.check_output(['docker', 'inspect', plan['container']], timeout=10))
+    require(info['State']['Running'] and
+            (info['Config']['Labels'] or {}).get('org.deskflow.crossmachine.run') == plan['token'],
+            'Desktop preview container does not match this run')
+    preview = module('physical_preview', HERE / 'physical-preview.py')
+    sequence, observed = 0, time.monotonic()
+    deadline = observed + RESOURCE_SECONDS
+    while time.monotonic() < deadline:
+        if (args.run / 'results/container-result.json').exists():
+            return 0
+        frame = preview.read_frame(args.run / 'preview.frame')
+        current = preview.frame_sequence(frame)
+        require(current >= sequence, 'Desktop preview sequence went backwards')
+        if current > sequence:
+            sys.stdout.buffer.write(struct.pack('>I', len(frame)) + frame)
+            sys.stdout.buffer.flush()
+            sequence, observed = current, time.monotonic()
+        require(time.monotonic() - observed < 2, 'Desktop preview stopped updating')
+        time.sleep(0.05)
+    raise RuntimeError('Desktop preview exceeded session lifetime')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest='mode', required=True)
@@ -782,11 +839,15 @@ def main():
     preparation.add_argument('--ordinary-config', type=Path, action='append', required=True)
     preparation.add_argument('--production-original-input', action='store_true',
                              help='Create a distinct v3 plan for the opt-in production Mac original-input harness')
+    preparation.add_argument('--desktop-preview', action='store_true',
+                             help='Publish a view-only live image of this disposable Ubuntu session')
     running = modes.add_parser('run', help='Linux host: supervise the private container and audit ordinary state')
     running.add_argument('--run', type=Path, required=True)
     running.add_argument('--window-id', type=int, required=True)
     cleaning = modes.add_parser('cleanup', help='Linux host: remove only this plan\'s owned resources after SSH closes')
     cleaning.add_argument('--run', type=Path, required=True)
+    previewing = modes.add_parser('preview', help='Stream only the predeclared disposable desktop over SSH')
+    previewing.add_argument('--run', type=Path, required=True)
     identity = modes.add_parser('init', help=argparse.SUPPRESS)
     identity.add_argument('--run', type=Path, required=True)
     identity.add_argument('--viewer', type=Path, required=True)
@@ -800,11 +861,13 @@ def main():
     native.add_argument('--mac-viewer-pin', required=True)
     native.add_argument('--window-id', type=int, required=True)
     native.add_argument('--production-original-input', action='store_true', help=argparse.SUPPRESS)
+    native.add_argument('--desktop-preview', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     def interrupted(signum, _frame):
         raise KeyboardInterrupt(f'Owned session interrupted by signal {signum}')
     signal.signal(signal.SIGTERM, interrupted)
-    return {'prepare': prepare, 'run': run, 'cleanup': cleanup, 'init': init, 'session': session}[args.mode](args)
+    return {'prepare': prepare, 'run': run, 'cleanup': cleanup, 'init': init,
+            'session': session, 'preview': preview_stream}[args.mode](args)
 
 
 if __name__ == '__main__':

@@ -52,6 +52,7 @@ python3 deploy/windowshare/original-input-physical.py freeze \
   --mac-plan /absolute/private/mac-preparation.json \
   --bundle '/absolute/frozen/Deskflow Seamless Experimental.app' \
   --source /absolute/frozen/windowshare-smoke-source \
+  --desktop-preview \
   --output /absolute/private/mac-original-plan.json
 ```
 
@@ -68,7 +69,7 @@ public `coreFingerprint` and `hostFingerprint`:
 
 ```sh
 python3 deploy/windowshare/physical-linux.py prepare \
-  --production-original-input \
+  --production-original-input --desktop-preview \
   --run /absolute/new/private-original-run \
   --core /absolute/frozen/linux/bin/deskflow-core \
   --viewer /absolute/frozen/linux/deskflow-windowshare \
@@ -86,6 +87,19 @@ actual preparation, mapped-drain, routed-point and supported ordering-contract
 capabilities. Unsupported prerequisites fail the run. Preserve the full
 private Linux results and source/binary/image hashes. Copy only
 `linux-plan.json` to the Mac; no private key leaves either machine.
+
+The Ubuntu test session is isolated and headless: **its window does not appear
+on the ordinary Ubuntu monitor**. Both `--desktop-preview` options above make
+the actual test desktop and pointer visible in a separate view-only Mac window.
+Use that view while input is routed right. The visible original Mac source is
+not the Ubuntu desktop and must not be used to aim the remote pointer.
+The preview reads only the private compositor through a separate bounded SSH
+image stream; it cannot inject input or establish original-delivery authority.
+The session cannot become Active without live, visible preview receipts, and
+stale/hidden/disconnected previews stop it. It closes after recording completes
+to reveal the local source's Stop button. Existing plans without this explicit
+option retain their historical headless behavior; do not use them for this
+attended pointer test. Preview overhead is not a latency acceptance measurement.
 
 Validate the complete plan pair without starting processes or SSH:
 
@@ -135,13 +149,14 @@ also available through `launch-smoke.py CORE_BUNDLE.app --code-admission` for
 separately signed exact-library packages; ordinary ad-hoc CI packages cannot
 pass exact-library admission.
 
-1. Wait for the source's **Ready**, then click **Start** within 90 seconds.
-   Leave the window in place and wait for **Active**. Start checks both routing-hotkey registrations and
+1. Wait for the source's **Ready**, then click **Start** within its countdown.
+   Leave the window in place and wait for **Active** and the **Ubuntu test desktop — live view**.
+   Start checks both routing-hotkey registrations and
    launches the actual Linux Core/provider/Viewer. The 120-second session
    deadline cannot be extended or restarted.
 2. Press **Control+Option+Shift+Right**, release all modifiers, and dismiss
-   overview with Escape if needed. Locate the exported disposable source in
-   the Viewer. Setup actions are retained as setup; they are not evidence of
+   overview with Escape if needed. In the live desktop view, locate the exported
+   source and use the Ubuntu pointer shown there. Setup actions are retained as setup; they are not evidence of
    successful original delivery.
 3. Prime the intended physical controls: click/release inside the exported
    source, press/release a, b, c, x and Shift, and finish a short scroll gesture.
@@ -149,11 +164,13 @@ pass exact-library admission.
    acquisition cycle. Do not invent a neutral physical snapshot to bypass it.
    Release everything and wait for the route to settle. If the source/Viewer
    cannot be reached or focus is wrong, Stop; do not claim the run succeeded.
-4. Click the source's distinct **Record** button in the Viewer. It remains in
-   the exported source even when H06 uses separate local controls. The button
-   creates a single exact run request; it does not grant input permission.
+4. Press **Return** in the source's text box, or click its distinct **Record**
+   button in the Viewer. Both request the same one-shot recording. Stay on the
+   Ubuntu route; returning left replaces the route being measured. Both controls
+   remain in the exported source even when H06 uses separate local controls.
+   They create a single exact run request; they do not grant input permission.
    The harness waits for **new**, matching Core/Host owner/identity readiness
-   rows after that click and the exact source PID/window in the native
+   rows after that request and the exact source PID/window in the native
    recorder. It attempts arm once and requires accepted receipts from all
    three recorders. A denied, partial or changed-owner arm is terminal.
 5. Wait for the coordinator's `evidence-recording` event before the measured
@@ -274,4 +291,5 @@ Pure tests require no native windows, input, SSH, or containers:
 ```sh
 python3 deploy/windowshare/physical-macos-tests.py
 python3 deploy/windowshare/physical-linux-tests.py
+python3 deploy/windowshare/physical-preview-tests.py
 ```

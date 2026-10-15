@@ -4,6 +4,7 @@
  */
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
+#include "PhysicalDesktopPreview.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEvent.h>
 #include <CoreGraphics/CGGeometry.h>
@@ -643,7 +644,7 @@ private:
             "1. Ctrl+Option+Shift+Right, release all modifiers, then press Escape once.\n"
             "2. Type a, Shift+b, c; hold x for 1 second. Click/drag inside this window and scroll both ways; release "
             "everything.\n"
-            "3. Click Record in the Viewer and wait for Recording.\n"
+            "3. Press Return in the text box to request recording; wait for Recording. Stay on this route.\n"
             "4. Repeat those inputs for 30 seconds; stay here until Recording complete.\n"
             "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
         );
@@ -651,7 +652,7 @@ private:
         m_instructions->setText(
             m_sessionSeconds == 150
                 ? "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
-                  "2. Prime the planned controls, release them, then click Record in the Viewer.\n"
+                  "2. Prime the planned controls, release them, then press Return in the text box.\n"
                   "3. Wait for Recording, then perform the planned two-minute mixed-input sequence.\n"
                   "4. Stay in this session until Recording complete.\n"
                   "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
@@ -715,7 +716,9 @@ private:
 class EvidenceControls final : public QObject
 {
 public:
-  EvidenceControls(InputEvidenceRuntime &runtime, ManualAcceptance &manual, QString request, QVBoxLayout &layout)
+  EvidenceControls(
+      InputEvidenceRuntime &runtime, ManualAcceptance &manual, QString request, QVBoxLayout &layout, QLineEdit &field
+  )
       : m_runtime(runtime),
         m_manual(manual),
         m_request(std::move(request))
@@ -727,19 +730,25 @@ public:
     m_record->setFocusPolicy(Qt::NoFocus);
     layout.addWidget(m_label);
     layout.addWidget(m_record);
-    connect(m_record, &QPushButton::clicked, this, [this] {
-      if (!m_requested && m_manual.activeForEvidence() && m_runtime.recorder().state() == InputEvidenceState::Waiting) {
-        m_requested = true;
-        m_requestOkay = m_runtime.requestRecord(m_request);
-        update();
-      }
-    });
+    connect(m_record, &QPushButton::clicked, this, [this] { requestRecord(); });
+    // The keyboard path remains usable when this test is diagnosing pointer
+    // delivery. It requests the same one-shot record without changing focus
+    // or returning to the Mac; it never arms or establishes input authority.
+    connect(&field, &QLineEdit::returnPressed, this, [this] { requestRecord(); });
     connect(&m_timer, &QTimer::timeout, this, [this] { update(); });
     m_timer.start(100);
     update();
   }
 
 private:
+  void requestRecord()
+  {
+    if (!m_requested && m_manual.activeForEvidence() && m_runtime.recorder().state() == InputEvidenceState::Waiting) {
+      m_requested = true;
+      m_requestOkay = m_runtime.requestRecord(m_request);
+      update();
+    }
+  }
   void update()
   {
     const auto state = m_runtime.recorder().state();
@@ -754,10 +763,10 @@ private:
     else if (state == InputEvidenceState::Recording)
       m_label->setText("Recording. Perform the planned input sequence here; stay in this session.");
     else if (m_requested)
-      m_label->setText("Record requested. Waiting for the exact live route and empty queues.");
+      m_label->setText("Record requested. Release controls and stay on the Ubuntu route. Wait for Recording.");
     else
       m_label->setText(
-          "Prime the planned key/button/scroll controls, release them, then click Record here in the Viewer."
+          "Prime the controls, then press Return in the text box (or click Record). Stay on the Ubuntu route."
       );
   }
   InputEvidenceRuntime &m_runtime;
@@ -773,6 +782,12 @@ int main(int argc, char **argv)
 {
   QApplication app(argc, argv);
   const auto arguments = app.arguments();
+  if (arguments.size() == 4 && arguments.at(1) == "--desktop-preview") {
+    PhysicalDesktopPreview preview(arguments.at(2), arguments.at(3));
+    // Independent observer process: no recorder or native event hooks.
+    QTimer::singleShot(270000, &app, &QCoreApplication::quit);
+    return app.exec();
+  }
   QString manualPath, evidencePath, recordRequestPath;
   bool separateControls = false, h11Input = false;
   if (arguments.size() < 3)
@@ -847,7 +862,7 @@ int main(int argc, char **argv)
   // returning to the Mac to arm would replace the route being measured.
   std::unique_ptr<EvidenceControls> evidenceControls;
   if (!recordRequestPath.isEmpty())
-    evidenceControls = std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout);
+    evidenceControls = std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout, *field);
   if (controls)
     controls->onManualClose = window.onManualClose;
   app.installEventFilter(&recorder);

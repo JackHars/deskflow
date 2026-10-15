@@ -435,6 +435,19 @@ class ProductionPlans(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 module.validate_plans(mac, linux, self.base, production=True)
 
+    def test_preview_requires_matching_plans_and_the_same_remote_run(self):
+        mac = {**self.mac, 'desktopPreview': True}
+        with self.assertRaisesRegex(RuntimeError, 'same desktop preview'):
+            module.validate_plans(mac, self.linux, self.base, production=True)
+        linux = {**self.linux, 'desktopPreview': True, 'runDirectory': '/private/run',
+                 'previewArgv': ['python3', '/private/controller', 'preview', '--run', '/private/run']}
+        self.assertTrue(module.validate_plans(mac, linux, self.base, production=True))
+        with self.assertRaisesRegex(RuntimeError, 'same desktop preview'):
+            module.validate_plans(mac, {**linux, 'desktopPreview': 1}, self.base, production=True)
+        linux['previewArgv'][-1] = '/other/run'
+        with self.assertRaisesRegex(RuntimeError, 'exact prepared run'):
+            module.validate_plans(mac, linux, self.base, production=True)
+
     def test_hash_peer_package_and_holding_substitutions_refuse(self):
         for name in self.paths:
             altered = {**self.mac, 'frozenArtifacts': {**self.mac['frozenArtifacts'], name: '0' * 64}}
@@ -827,6 +840,17 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(self.session.try_arm())
         self.ready()
         self.assertTrue(self.session.try_arm())
+
+    def test_record_request_timeout_distinguishes_missing_from_unready(self):
+        self.session.start_boundary()
+        self.assertIn('No visible Record request', self.session.arm_wait_failure())
+        self.request()
+        self.ready(candidate=False)
+        self.assertFalse(self.session.try_arm())
+        self.assertIn('Record was requested', self.session.arm_wait_failure())
+        self.assertFalse(self.session.attempted)
+        self.assertFalse(self.session.armed)
+        self.assertFalse(any(path.exists() for path in self.session.controls.values()))
 
     def test_replaced_or_wrong_record_request_cannot_arm(self):
         self.session.start_boundary()

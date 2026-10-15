@@ -78,6 +78,13 @@ def validate(mac, linux, base, private_path, source=None, holding=False):
     require(linux.get('version') == linux.get('controlProtocol') == 3 and
             linux.get('routeMode') == 'production-original-input' and linux.get('macOriginalInputConfigured') is True,
             'Production input requires a freshly prepared v3 Linux plan')
+    require(type(mac.get('desktopPreview', False)) is bool and
+            type(linux.get('desktopPreview', False)) is bool and
+            mac.get('desktopPreview', False) == linux.get('desktopPreview', False),
+            'Both physical plans must declare the same desktop preview')
+    if mac.get('desktopPreview'):
+        require(linux.get('previewArgv') == [*linux['runArgv'][:2], 'preview', '--run', linux['runDirectory']],
+                'Desktop preview must read only this exact prepared run')
     require(isinstance(mac.get('hostArgv'), list) and len(mac['hostArgv']) == 3 and
             mac['hostArgv'][1] == '--identity', 'Production Host is launched only by packaged Core')
     require(all(Path(value).is_absolute() for value in
@@ -345,6 +352,11 @@ class EvidenceSession:
             self.atomic_json(self.controls[role], {'version': 1, 'runId': self.run_id, 'command': 'arm'})
         return True
 
+    def arm_wait_failure(self):
+        if self.record_identity is None:
+            return 'No visible Record request before the recording and safe-return cutoff'
+        return 'Record was requested, but matching input readiness was unavailable before the recording cutoff'
+
     def stop(self):
         if self.stopped:
             return
@@ -444,6 +456,8 @@ def freeze_plan(arguments, coordinator):
                recordingProfile=profile,
                separateControls=arguments.holding_display, sourceExecutable=str(paths['source']),
                frozenArtifacts={name: sha(role) for name, role in paths.items()})
+    if getattr(arguments, 'desktop_preview', False):
+        mac['desktopPreview'] = True
     mac['coreArgv'][0], mac['hostArgv'][0] = str(paths['core']), str(paths['host'])
     # A future Linux plan repeats these public pins. Full configuration and
     # counterpart checks run again in --validate-only and after visible Start.
@@ -532,6 +546,8 @@ if __name__ == '__main__':
         parser.add_argument('--bundle', type=Path, required=True)
         parser.add_argument('--source', type=Path, required=True)
         parser.add_argument('--holding-display', action='store_true')
+        parser.add_argument('--desktop-preview', action='store_true',
+                            help='Require a live view of the isolated Ubuntu test desktop on the Mac')
         parser.add_argument('--recording-profile', choices=('h04', 'h11'), default='h04',
                             help='h04: 30-second recording; h11: 120-second recording in a 150-second session')
         parser.add_argument('--output', type=Path, required=True)

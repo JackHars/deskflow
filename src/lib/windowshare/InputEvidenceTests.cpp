@@ -143,6 +143,51 @@ void baselinesAndLifecycle()
       "incomplete source/queue boundaries"
   );
 }
+void readinessDiagnostics()
+{
+  const auto allQueues = [](const InputEvidenceReadiness &detail, std::uint8_t blocked) {
+    return std::all_of(detail.queues.begin(), detail.queues.end(), [blocked](std::uint8_t value) {
+      return value == blocked;
+    });
+  };
+  InputEvidenceReadiness detail;
+  auto missing = core(false);
+  check(
+      !missing->readyOwner(&detail) && detail.inspected && detail.ownerLive && detail.captureIdle &&
+          allQueues(detail, 1),
+      "missing queue readiness was not diagnosed"
+  );
+  auto recorder = core();
+  recorder->revokeOwner();
+  check(
+      !recorder->readyOwner(&detail) && detail.inspected && !detail.ownerLive && detail.captureIdle &&
+          allQueues(detail, 0),
+      "missing live owner was not diagnosed"
+  );
+  recorder->bindOwner(owner());
+  recorder->beginCaptureActivity();
+  check(!recorder->readyOwner(&detail) && !detail.captureIdle, "capture activity was not diagnosed");
+  recorder->endCaptureActivity();
+  constexpr auto queue = InputEvidenceQueue::Capture;
+  constexpr auto index = static_cast<std::size_t>(queue);
+  check(recorder->beginQueueActivity(queue, recorder.get()), "queue activity failed");
+  check(recorder->beginMutation(queue, recorder.get()), "queue lock failed");
+  check(!recorder->readyOwner(&detail) && detail.queues[index] == 6, "queue activity and mutation were not diagnosed");
+  recorder->endMutation(queue, 1, 0);
+  recorder->endQueueActivity(queue);
+  check(!recorder->readyOwner(&detail) && detail.queues[index] == 8, "nonempty queue was not diagnosed");
+  check(recorder->beginMutation(queue, recorder.get()), "queue lock failed");
+  recorder->endMutation(queue, 0, 1);
+  check(
+      recorder->readyOwner(&detail) && detail.inspected && detail.ownerLive && detail.captureIdle &&
+          allQueues(detail, 0) && recorder->written() == 0 && recorder->loss() == InputEvidenceLoss::None,
+      "diagnostics changed readiness or invented measured rows"
+  );
+  check(recorder->arm(1000000000), "diagnostic sampling prevented arm");
+  check(!recorder->readyOwner(&detail) && !detail.inspected, "recording reused stale readiness diagnostics");
+  recorder->stop();
+  recorder->finish();
+}
 void concurrentEventPreparation()
 {
   auto recorder = core();
@@ -794,6 +839,7 @@ int main(int argc, char **argv)
   QuitGuardApplication app(argc, argv);
   try {
     baselinesAndLifecycle();
+    readinessDiagnostics();
     concurrentEventPreparation();
     stickyFailures();
     publicationBoundaries();

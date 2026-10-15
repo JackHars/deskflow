@@ -112,6 +112,12 @@ fi
 # correctly refuse its already-existing output directory.
 if [[ $result == 0 ]]; then
   runuser -u "$fixture_user" -- /usr/bin/python3 \
+    "$source_root/deploy/windowshare/physical-preview-native-tests.py" \
+    --output "$scratch/report/physical-preview"
+  result=$?
+fi
+if [[ $result == 0 ]]; then
+  runuser -u "$fixture_user" -- /usr/bin/python3 \
     "$source_root/deploy/windowshare/gnome-window-family-tests.py" \
     --fixture "$scratch/build/windowshare-gnome-family-fixture" \
     --output "$scratch/report/window-family"

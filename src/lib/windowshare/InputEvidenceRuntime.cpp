@@ -288,7 +288,8 @@ void InputEvidenceRuntime::tick()
   const auto now = inputEvidenceNow();
   if (!m_armSeen && now >= m_nextReadiness && m_recorder->state() == InputEvidenceState::Waiting) {
     m_nextReadiness = now + 100000000;
-    const auto ready = m_recorder->readyOwner();
+    InputEvidenceReadiness readiness;
+    const auto ready = m_recorder->readyOwner(&readiness);
     QJsonObject status{
         {"type", "readiness"},
         {"timeNs", QString::number(now)},
@@ -299,6 +300,25 @@ void InputEvidenceRuntime::tick()
       status["owner"] = numbers(ready->values);
       status["identity"] =
           QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(ready->identity.data()), 96).toHex());
+    } else {
+      QJsonArray queues;
+      for (std::size_t i = 0; i != readiness.queues.size(); ++i)
+        if (const auto blocked = readiness.queues[i])
+          queues.append(
+              QJsonObject{
+                  {"queue", queueNames[i]},
+                  {"uninitialized", bool(blocked & 1)},
+                  {"mutationBusy", bool(blocked & 2)},
+                  {"activityInFlight", bool(blocked & 4)},
+                  {"nonempty", bool(blocked & 8)}
+              }
+          );
+      status["preparation"] = QJsonObject{
+          {"snapshotAvailable", readiness.inspected},
+          {"ownerLive", readiness.ownerLive},
+          {"captureIdle", readiness.captureIdle},
+          {"blockedQueues", queues}
+      };
     }
     if (m_recorder->loss() != InputEvidenceLoss::None)
       status["failure"] = failureDetails(*m_recorder);

@@ -101,6 +101,13 @@ struct InputEvidenceOwner
   std::array<std::uint8_t, 96> identity{};
   bool operator==(const InputEvidenceOwner &) const = default;
 };
+// Diagnostic samples from the existing readiness check, never arm authority.
+struct InputEvidenceReadiness
+{
+  bool inspected = false, ownerLive = false, captureIdle = false;
+  // Per queue: uninitialized, mutation busy, activity in flight, nonempty.
+  std::array<std::uint8_t, static_cast<std::size_t>(InputEvidenceQueue::Count)> queues{};
+};
 struct InputEvidenceRaw
 {
   std::uint64_t timestamp = 0, flags = 0;
@@ -399,17 +406,30 @@ public:
     m_ownerBusy.clear(std::memory_order_release);
     return result;
   }
-  std::optional<InputEvidenceOwner> readyOwner() noexcept
+  std::optional<InputEvidenceOwner> readyOwner(InputEvidenceReadiness *diagnostic = nullptr) noexcept
   {
+    if (diagnostic)
+      *diagnostic = {};
     if (state() != InputEvidenceState::Waiting || loss() != InputEvidenceLoss::None ||
         m_ownerBusy.test_and_set(std::memory_order_acquire))
       return {};
-    bool ready = m_ownerLive && m_captureGate.load(std::memory_order_acquire) == 0;
+    const bool captureIdle = m_captureGate.load(std::memory_order_acquire) == 0;
+    bool ready = m_ownerLive && captureIdle;
+    if (diagnostic) {
+      diagnostic->inspected = true;
+      diagnostic->ownerLive = m_ownerLive;
+      diagnostic->captureIdle = captureIdle;
+    }
     for (std::size_t i = 0; i != queueCount; ++i)
       if (expectedQueue(static_cast<InputEvidenceQueue>(i))) {
         const auto &q = m_queues[i];
-        ready = ready && q.initialized.load(std::memory_order_acquire) && !q.busy.test(std::memory_order_acquire) &&
-                q.activity.load(std::memory_order_acquire) == 0 && q.depth.load(std::memory_order_acquire) == 0;
+        const std::uint8_t blocked = (!q.initialized.load(std::memory_order_acquire) ? 1 : 0) |
+                                     (q.busy.test(std::memory_order_acquire) ? 2 : 0) |
+                                     (q.activity.load(std::memory_order_acquire) ? 4 : 0) |
+                                     (q.depth.load(std::memory_order_acquire) ? 8 : 0);
+        ready = ready && !blocked;
+        if (diagnostic)
+          diagnostic->queues[i] = blocked;
       }
     auto result = ready ? std::optional(m_owner) : std::nullopt;
     m_ownerBusy.clear(std::memory_order_release);
