@@ -449,6 +449,8 @@ struct Service
   bool advertiseRoutedPoint = true, advertiseStage = false;
   bool wrongStagePoint = false, shortStageReply = false, unavailableStage = false, unknownStageMethod = false;
   bool duplicateStageField = false, substituteStageField = false, wrongStageFieldType = false;
+  bool changeNativeRevisionDuringStage = false, signalStageInvalidation = false;
+  bool wrongStageRevision = false, wrongStageRequest = false, emptyStageReason = false;
   unsigned stageRequests = 0;
   bool advertiseDrain = false, wrongDrainBinding = false, duplicateDrainField = false, unknownDrainMethod = false;
   bool advertisePreparation = false, wrongPreparationBinding = false, noPreparationTarget = false;
@@ -1164,6 +1166,13 @@ struct Service
       GVariantBuilder values;
       g_variant_builder_init(&values, G_VARIANT_TYPE("a{sv}"));
       const auto add = [&](const char *key, GVariant *value) { g_variant_builder_add(&values, "{sv}", key, value); };
+      const bool invalidated = std::exchange(changeNativeRevisionDuringStage, false);
+      if (invalidated) {
+        if (signalStageInvalidation)
+          invalidateNative("native-state-invalidated");
+        else
+          ++revision;
+      }
       const bool permitted = !unavailableStage && requestedRevision == revision;
       add("available", g_variant_new_boolean(permitted));
       if (duplicateStageField)
@@ -1171,17 +1180,21 @@ struct Service
       else if (substituteStageField)
         add("unexpected-field", g_variant_new_string(""));
       else
-        add("reason", g_variant_new_string(permitted ? "" : "fixture-stage-unavailable"));
+        add("reason", g_variant_new_string(
+                          permitted || emptyStageReason ? ""
+                          : invalidated                 ? "native-state-invalidated"
+                                                        : "fixture-stage-unavailable"
+                      ));
       add("observationOnly", g_variant_new_boolean(true));
       add("deliveryReady", g_variant_new_boolean(false));
       add("session", g_variant_new_string(sessionId));
       add("viewer", g_variant_new_string(viewerId));
-      add("request", g_variant_new_string(request));
+      add("request", g_variant_new_string(wrongStageRequest ? "other-request" : request));
       add("generation", g_variant_new_uint32(generation));
-      add("revision", g_variant_new_uint32(revision));
+      add("revision", g_variant_new_uint32(wrongStageRevision ? revision + 1 : revision));
       add("stageUpdates",
           wrongStageFieldType ? g_variant_new_string("two") : g_variant_new_uint32(shortStageReply ? 1 : 2));
-      add("sameStageView", g_variant_new_boolean(true));
+      add("sameStageView", g_variant_new_boolean(permitted));
       add("stageX", g_variant_new_double(wrongStagePoint ? stageX + 1 : stageX));
       add("stageY", g_variant_new_double(stageY));
       g_dbus_method_invocation_return_value(invocation, g_variant_new("(a{sv})", &values));
@@ -2582,6 +2595,67 @@ void stageUpdateObservationCapabilities(const PrivateBus &bus)
     client.stop();
     waitUntil([&] { return service.callerGone; }, "Unknown stage method fixture did not close");
     check(service.failure.empty(), "Unknown stage method fixture failed");
+  }
+  for (const bool signal : {false, true}) {
+    // The real provider returns its current revision when native state
+    // invalidates an in-flight stage check. The negative reply must retire
+    // that observation, even if its Invalidated signal has not arrived yet.
+    Service service(bus);
+    service.advertiseStage = true;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Stage invalidation fixture not Ready");
+    const auto previous = observed(client);
+    const auto previousRevision = previous.snapshot().nativeRevision;
+    service.afterQtCheck = false;
+    service.changeNativeRevisionDuringStage = true;
+    service.signalStageInvalidation = signal;
+    const auto request = client.requestRoutedPointObservation({9, 40, 425, 325});
+    check(request != 0, "Stage invalidation request did not start");
+    const auto denied = viewportResult(client, request);
+    check(
+        !denied.observation && denied.error == "native-state-invalidated" && !service.afterQtCheck && client.live(),
+        "A changed native stage denial killed the session or published an observation"
+    );
+    if (signal)
+      waitUntil([&] { return !previous.live(); }, "Native stage invalidation retained an earlier observation");
+    const auto fresh = observed(client);
+    check(
+        fresh.live() && fresh.snapshot().request != request && fresh.snapshot().nativeRevision > previousRevision &&
+            fresh.snapshot().nativeRevision == service.revision && fresh.snapshot().stageFramesObserved,
+        "Fresh stage observation could not recover from a native state change"
+    );
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Stage invalidation fixture did not close");
+    check(service.failure.empty(), "Stage invalidation fixture failed");
+  }
+  // A denial still authenticates the exact request and point. It cannot
+  // disguise substitution, and a successful reply cannot change revision.
+  for (int corruption = 0; corruption < 4; ++corruption) {
+    Service service(bus);
+    service.advertiseStage = true;
+    service.unavailableStage = corruption != 0;
+    service.wrongStageRevision = corruption == 0;
+    service.wrongStagePoint = corruption == 1;
+    service.wrongStageRequest = corruption == 2;
+    service.emptyStageReason = corruption == 3;
+    Configuration configuration;
+    Wake wake;
+    GnomeProviderClient client(configuration.load(), [&] { wake.changed(); });
+    const auto ready = wake.next(client);
+    Descriptor descriptor(ready.descriptor);
+    check(ready.ready, "Stage binding fixture not Ready");
+    const auto request = client.requestViewportObservation();
+    check(request != 0, "Stage binding request did not start");
+    const auto denied = viewportResult(client, request);
+    check(!denied.observation && !denied.error.empty(), "Malformed stage binding published an observation");
+    waitUntil([&] { return !client.live(); }, "Malformed stage binding did not retire private provider");
+    client.stop();
+    waitUntil([&] { return service.callerGone; }, "Stage binding fixture did not close");
+    check(service.failure.empty(), "Stage binding fixture failed");
   }
   // A dictionary with thirteen entries can still substitute an unknown
   // field or repeat a known one; GVariant lookup alone does not reject either.

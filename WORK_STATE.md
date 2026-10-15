@@ -2,12 +2,58 @@
 
 ## Attended-test permission — current user instruction, 2026-10-15
 
-The user returned and explicitly authorized attempt nine below. Ask for fresh permission immediately before
+The user returned and explicitly authorized attempt ten below. Ask for fresh permission immediately before
 executing the next physical test, and wait for an affirmative reply before
 opening its test window or starting its physical session. Earlier Start/Ready
 answers do not authorize another attempt. Unattended builds, unit tests and
 isolated headless GNOME fixtures can continue. Prepare the tested artifacts and
 plans before asking. Do not ask while the user is known to be away.
+
+## Attempt ten: native stage invalidation retired the Linux session — 2026-10-15
+
+The user explicitly approved this launch immediately beforehand. The run reached
+Active and priming but no Record request or arm. They reported "scrolling i think"
+just before closure. Ubuntu Core rejected request 29 with `GNOME stage observation
+substituted its exact native binding`, then closed the viewport. The relay EOF
+and coordinator `linux exited early: 1` followed. The prior Mac heartbeat stall
+did not recur in this short run: maximum readiness gaps were 290 ms Host,
+111 ms Core and 147 ms source. This is not a complete physical-input pass.
+
+Evidence: `build/h04-r10-f_dfkh1x/`, including fresh permission, human observation,
+copied Ubuntu results and separate cleanup verification. All three recorders
+ended denied/unarmed, loss 0, zero measured rows. The final collected receipt
+contains 889 Qt and 363 native events without gaps; the routing Right key still
+lacks an observed release. Source geometry returned to its original frame;
+neutral input remains unverified. Mac Core/source exited 0 and the exact Host,
+owned Ubuntu container and forwarding sockets are absent. Ordinary processes
+and settings were preserved. Ubuntu's failed IPC stop and terminated Core remain
+recorded. H04/P5 remains unaccepted.
+
+The real GNOME provider returns its newer native revision in a negative stage
+reply when state changes during an observation. The client previously required
+the old revision before checking whether the reply was a denial, turning that
+normal invalidation into a terminal channel error. It now rejects the observation
+while allowing a fresh request on the authenticated channel. Successful replies
+still require the exact old revision; request, peer, point, schema and deadline
+checks remain mandatory for every reply. Empty or contradictory reasons and
+substituted bindings remain terminal.
+
+Evidence: `build/h04-stage-f1bz5dzq/`. The new private D-Bus regression reproduces
+the old shutdown on Mac and home Ubuntu. It covers invalidation with and without
+the accompanying signal, rejects the old observation and requires a new revision
+for recovery. Malformed denial and successful-substitution cases remain terminal.
+Mac's full provider-client suite passes in 6.39 s; Ubuntu's normal and ASan/UBSan
+provider-client suites pass in 4.28 s / 6.13 s. The production Linux Core builds;
+isolated GNOME 50.1/QtWayland passes in 12.14 s with a clean production-client
+stop, no original-delivery authority and no use of the user's desktop. The
+temporary build/container are gone. Formatting, whitespace and full REUSE pass.
+The source archive SHA-256 is
+`2392590054d64fa3643bece3c0ead18d4444ed21b8b36087d5319fd810e65114`;
+the rebuilt Linux Core SHA-256 is
+`6e276b212d45ed2adf34b132165f3327535fc81d3fea52c111eff966f7ea9249`.
+Fresh attempt eleven preparation is under `build/h04-r11-b4be7iux/`, using that
+Core with the unchanged tested `3e4690e99` Mac package/Ubuntu Viewer and
+`14cd5514f` source fixture. It has no physical launch permission.
 
 ## Attempt nine: Host event-loop stall during physical input — 2026-10-15
 
@@ -47,9 +93,8 @@ The updated Mac Core/Host builds and Apple-issued exact-library package verify;
 the packaged admission/bootstrap smoke passes with native input disabled.
 Package ZIP SHA-256:
 `78959dd0b6a95ac9ca75c109d72b00096937c0bd2fc05feda0c58aa31d1e9ada`.
-Fresh attempt ten is prepared/validated under `build/h04-r10-f_dfkh1x/`, using
-the repaired Mac package and repaired Ubuntu Viewer. No physical process has
-started for that attempt; it needs fresh permission immediately before launch.
+Attempt ten used the repaired Mac package and repaired Ubuntu Viewer under
+`build/h04-r10-f_dfkh1x/`; its failed physical result is recorded above.
 
 ## Attempt eight: visible input, then Ubuntu viewport disconnect — 2026-10-15
 

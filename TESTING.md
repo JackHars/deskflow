@@ -4,6 +4,47 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 native stage invalidation during priming — 2026-10-15
+
+Attempt ten (`build/h04-r10-f_dfkh1x/`) ran after fresh explicit launch permission.
+It reached Active and priming, with no Record request or armed recorder. The user
+reported "scrolling i think" before closure. Ubuntu Core's first failure was
+`GNOME stage observation substituted its exact native binding`, request 29,
+followed by viewport closure, TLS relay EOF and `linux exited early: 1`.
+No Mac heartbeat expiry occurred; maximum Host/Core/source readiness gaps were
+290/111/147 ms. The short failed run cannot establish sustained responsiveness.
+
+All recorders ended denied/unarmed, loss 0 and zero measured rows. The collected
+final source receipt contains 889 Qt and 363 native events without gaps and the
+original frame, but retains the routing Right key without an observed release.
+Neutral input is unverified. Exact owned processes, container and sockets are
+gone; ordinary settings/processes were preserved. Ubuntu's failed private IPC
+stop and terminated Core remain recorded. **Physical acceptance is unassessed.**
+Copied Ubuntu archive SHA-256:
+`af310cb019c3ce76235c6537adf72db416857b1b6db6171ce7937b0d13a4ddc2`.
+
+The provider's negative stage reply legitimately carries a newer native revision
+after invalidation. The client now denies that observation without terminating
+the authenticated session. A fresh request must establish a new observation;
+success still requires the exact requested revision and two same-view updates.
+Malformed schema, substituted identities/points, backward revisions and empty
+or contradictory reasons remain terminal. No old observation is renewed and
+no input-delivery authority comes from a denial.
+
+Evidence: `build/h04-stage-f1bz5dzq/`. Real private D-Bus regressions reproduce
+the previous shutdown on Mac and Ubuntu. With the repair, both signal-delivered
+and signal-not-yet-delivered invalidations reject that request and allow a fresh
+revision; malformed denials and substituted successful replies still close the
+channel. Mac provider-client suite: PASS, 6.39 s. Ubuntu normal and ASan/UBSan
+provider-client suites: PASS, 4.28 s / 6.13 s. Production Linux Core build: PASS.
+Isolated GNOME 50.1/QtWayland: PASS, 12.14 s, clean production-client stop,
+no original-delivery authority and no user desktop. Temporary build/container
+cleanup, formatting, whitespace and full REUSE pass. Copied Ubuntu archive
+SHA-256: `3583d39ff93b0b2e20b470dd18276a8bb65136ecb419648170c13ab515d457db`.
+Attempt eleven (`build/h04-r11-b4be7iux/`) is prepared with the repaired Linux
+Core; it needs fresh launch permission. These regressions do not establish
+physical readiness or repair every possible native disconnect.
+
 ## H04 Host stall and TLS input-burst regression — 2026-10-15
 
 Attempt nine (`build/h04-r9-0q_whncg/`) ran only after fresh explicit launch
@@ -37,9 +78,8 @@ core ASan/UBSan (0.17 s), and isolated GNOME/QtWayland (12.70 s). The isolated
 fixture reports a clean client stop and no original-delivery authority; it
 uses no user desktop or physical input. Formatting and full REUSE pass.
 The Apple-issued exact-library Mac package verifies, and packaged admission/
-bootstrap smoke passes with native input disabled. Fresh attempt ten is
-prepared/validated under `build/h04-r10-f_dfkh1x/`; it requires fresh launch
-permission and has not run.
+bootstrap smoke passes with native input disabled. Attempt ten subsequently ran
+under `build/h04-r10-f_dfkh1x/`; its failed physical result is recorded above.
 
 ## H04 visible input and Ubuntu disconnect diagnostics — 2026-10-15
 

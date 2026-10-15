@@ -1474,7 +1474,7 @@ struct GnomeProviderClient::Impl
       throw ChannelError("Malformed GNOME stage observation field schema");
     const auto text = [&](const char *key) -> std::string {
       const char *value = nullptr;
-      if (!g_variant_lookup(values.value, key, "&s", &value) || !bounded(value))
+      if (!g_variant_lookup(values.value, key, "&s", &value) || !value || std::strlen(value) > 128)
         throw ChannelError("Malformed GNOME stage observation binding");
       return value;
     };
@@ -1483,7 +1483,7 @@ struct GnomeProviderClient::Impl
     double stageX = 0, stageY = 0;
     if (text("session") != session || text("viewer") != viewer || text("request") != requestText ||
         !g_variant_lookup(values.value, "generation", "u", &returnedGeneration) || returnedGeneration != generation ||
-        !g_variant_lookup(values.value, "revision", "u", &revision) || revision != native.revision ||
+        !g_variant_lookup(values.value, "revision", "u", &revision) || revision < native.revision ||
         !g_variant_lookup(values.value, "available", "b", &available) ||
         !g_variant_lookup(values.value, "observationOnly", "b", &observationOnly) || !observationOnly ||
         !g_variant_lookup(values.value, "deliveryReady", "b", &deliveryReady) || deliveryReady ||
@@ -1493,9 +1493,19 @@ struct GnomeProviderClient::Impl
         !g_variant_lookup(values.value, "stageY", "d", &stageY) || !std::isfinite(stageX) || !std::isfinite(stageY) ||
         stageX != native.x || stageY != native.y)
       throw ChannelError("GNOME stage observation substituted its exact native binding");
-    if (!available)
-      throw std::runtime_error(text("reason"));
-    if (!sameView || cycles != 2)
+    const auto reason = text("reason");
+    if (!available) {
+      // A native change ends the provider's pending stage check with a
+      // negative reply carrying its newer revision. Reject this observation,
+      // but keep the authenticated channel for a fresh request. Identity and
+      // point echoes above remain mandatory even for a denial.
+      if (reason.empty())
+        throw ChannelError("GNOME stage observation denied without a reason");
+      throw std::runtime_error(reason);
+    }
+    if (revision != native.revision)
+      throw ChannelError("GNOME stage observation substituted its exact native binding");
+    if (!reason.empty() || !sameView || cycles != 2)
       throw ChannelError("GNOME stage observation lacked two same-view update pairs");
   }
 
