@@ -2,6 +2,14 @@
 
 ## Current implementation — 2026-10-15
 
+Runtime `e154f94e0` adds a Host progress monitor: stalled startup or event-loop
+work expires inside the Host, enabling its independent child to run existing
+journal recovery. Local deadline/crash/teardown fixtures, scoped sanitizers,
+Bridge/journal regressions and the fresh signed package checks pass, as do all
+six jobs in [CI run 38712601209](https://github.com/JackHars/deskflow/actions/runs/38712601209). See
+[Host recovery](../deploy/windowshare/host-recovery.md). Physical restoration
+and sleep/wake remain untested on this candidate.
+
 P7 now includes bounded experimental Core admission (4096 Events, 64 dispatch
 scopes and two-second age checks), a separate 4096-event libei processing limit,
 and opt-in Viewer queue/unique-paint diagnostics. The reproducible loopback

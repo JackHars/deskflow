@@ -23,9 +23,11 @@ first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
 P7 media/resource tooling and whole-Core queue admission/evidence are implemented.
 The newest local verification results are recorded in `TESTING.md`. Runtime
-`d57e78a0d` passes all six hosted jobs, verified source/packages and a complete
-one-hour two-HD-stream synthetic workload/resource comparison. This does not
-close native or attended acceptance.
+`e154f94e0` adds independent Host progress expiration and passes all six hosted
+jobs, local recovery/sanitizer/package checks and exact source verification.
+The verified one-hour two-HD-stream synthetic workload/resource result remains attached to
+`d57e78a0d`, with unchanged media sources. These do not close native or attended
+acceptance.
 Full platform/kernel queue certification and physical H07–H11
 acceptance remain open. Historical
 results below do not cover later source changes.
@@ -542,8 +544,8 @@ owned-process cases, sleep/wake and actual performance/soak in H10/H11.
   credentials are available. Otherwise provide the commit/patch and explain how
   to transfer it. Leave no essential code only in ignored build directories.
 
-Runtime candidate `d57e78a0d` passes all six hosted jobs in run `38675705240`
-and the independently verified 1157-entry source archive. Its local Apple-issued
+Runtime candidate `e154f94e0` passes all six hosted jobs in run `38712601209`
+and the independently verified 1158-entry source archive. Its local Apple-issued
 exact-library bundle passes staging/handshake checks. CI retains verified
 Linux and ad-hoc Mac archives for seven days. See `TESTING.md` for exact hashes,
 commands and remaining hardware tests; these checks do not complete H12.

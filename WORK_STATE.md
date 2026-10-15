@@ -1,5 +1,29 @@
 # Seamless Windows work state
 
+## Host progress recovery implemented — 2026-10-15
+
+Runtime `e154f94e0676b299b225080658c3d5c3dfbf9f50` closes an unattended recovery
+gap: the existing child observes Host death, but cannot detect an event loop
+that never returns. An independent Host thread now expires a 15-second startup
+or five-second active progress deadline, exits only itself, and lets the child
+reopen the exact journal. Heartbeats must come from the creating thread and
+stop when shutdown starts. Successful teardown cancels and joins the monitor.
+
+Mac build, actual deadline/crash/healthy/teardown fixtures, ASan/UBSan, both TLS
+Bridge suites and native journal regressions pass. The new Apple-issued exact
+library package and private handshake pass. Source export matches all 1158
+tracked Git entries. All six jobs in hosted run `38712601209` pass, including
+the expanded Mac watchdog suite. Downloaded Mac/Linux package provenance,
+checksums and architectures pass; the Linux internal manifest also verifies.
+Evidence is in `build/p7-host-progress-20261015/` and
+`TESTING.md`; the new staged bundle is under that evidence root's `mac-package`.
+
+The earlier one-hour media result remains attached to `d57e78a0d`; those media
+sources are unchanged, but it does not test this new Host monitor. Full native
+queue certification and attended H02–H12 remain open. In particular, real
+window restoration and sleep/wake have not been accepted. Keep physical tests
+deferred until the user says they are ready.
+
 ## P7 unattended candidate verified; attended gates remain — 2026-10-15
 
 Runtime `d57e78a0da972d29b9e71201c3efdae8c00fac18` passes all six hosted jobs
