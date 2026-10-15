@@ -4,6 +4,62 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 whole-Core backlog verification — 2026-10-14
+
+The candidate adds production admission limits to explicitly configured
+experimental Core sessions and evidence v2 for every Core Event lifetime.
+Limits are 4096 outstanding Events, 64 dispatch scopes and two-second age
+checks. An overload stops the session instead of continuing after dropping a
+release. Ordinary launches remain unguarded. See
+[`input-queue-budget.md`](deploy/windowshare/input-queue-budget.md) for the
+native boundary and exact failure behavior.
+
+Evidence directory: `build/p7-queue-20261014` (local, ignored).
+
+| Check | Result and evidence |
+| --- | --- |
+| Mac enabled Core build and six regression suites | PASS, `mac-build-final-2.log`, `mac-tests-final.json`: EventQueue, Server, both protocol proxies, input evidence and private capture lifecycle |
+| Mac companion/source rebuild and two regressions | PASS, `mac-companion-build.log`, `mac-companion-tests-final.json`: Bridge and native-input checks offscreen |
+| Mac disabled Core build and four compatibility suites | PASS, `mac-ordinary-build.log`, `mac-ordinary-tests-final.json` |
+| Mac ASan/UBSan | PASS, `mac-sanitizer-build-final.log`, `mac-sanitizer-tests-final.json`: EventQueue, Server, evidence and private capture; project dependencies instrumented, leak detection disabled |
+| Ubuntu enabled Core build and nine suites | PASS, `linux-final-2/result.json`: EventQueue, EI, Server/proxies, original-input coordinator, sequence checks and evidence |
+| Ubuntu private native startup checks | PASS, same report: terminal GNOME provider absence on a private bus and actual Core observation on private Xvfb |
+| Ubuntu disabled Core and five ASan/UBSan suites | PASS, same report: EventQueue, actual EI buffer, Server and both proxies; leak detection disabled |
+| Strict evidence and coordinator parsers | PASS on Mac and Ubuntu: 40 normalization, 35 H11 analysis, 35 physical-coordinator tests, including legacy v1 and bounded v2 |
+| GitHub hosted checks | NOT_RUN: enable API calls accepted, but GitHub separately blocks workflows on this fork |
+| Full upstream queue certification, physical H10/H11 | NOT_RUN; automated counts and parser fixtures cannot certify these |
+
+New cases cover overflow before/after queue readiness; concurrent producers;
+retrieved/moved Event lifetime; callback/Event/queue destruction; nested dispatch
+limits; expired retrieval and payload disposal; foreign-budget reuse; platform
+buffer refusal; cleanup timers under continuous load; 10,000 spurious wakeups;
+actual Mac posted IDs; actual EI buffer shutdown; and immediate capture/inbox/
+held-motion revocation. Mac capture checks construct private CGEvents only.
+No input tap, post, desktop capture or visible native fixture is started.
+
+The Ubuntu source archive SHA-256 is
+`8df3799c5eaee5ff0e916c6279a3485841b98d70fb494f7d982f154bbdab245c`;
+`linux-final-2/source-sha256.json` records files and symlink targets. It runs in
+the existing offline Ubuntu 26.04 / GCC 15.2 / Qt 6.10.2 dependency image on the
+home machine, without host display/device/bus mounts, and removes its temporary
+directory. Mac binaries are tested as separately ad-hoc-signed copies beside
+their build outputs, retaining hashes in each JSON report.
+
+Retained initial failures exposed an evidence check accepting an invented
+capacity and a Linux-only collision with X11's `None` macro. Both are fixed;
+the final builds/tests above use the correction. `actions-enablement.json`
+records accepted repository/workflow enable calls and the rejected dispatch.
+The Actions UI identifies a fork usage restriction requiring maintainer
+re-enablement, and the available browser is signed out. A source change or a
+successful settings call is not a successful hosted run.
+
+The next physical step remains fresh readiness followed by the recorded H10
+owned-process recovery procedure and the H11 predeclared measurement workload.
+The 2-second age check cannot preempt a hung callback or certify events retained
+inside an OS/library before Core sees them. Keep those native queues in the
+remaining audit and retain unknown bounds explicitly. Do not mark P7 accepted
+from these short deterministic checks.
+
 ## P7 media/resource tooling verification — 2026-10-14
 
 This checkpoint adds executable measurement tools; it does **not** complete

@@ -19,6 +19,7 @@ add_library(base STATIC ${PLATFORM_CODE}
   EventInputObserver.h
   EventQueue.cpp
   EventQueue.h
+  EventQueueBudget.h
   EventQueueTimer.h
   EventTypes.h
   FinalAction.h

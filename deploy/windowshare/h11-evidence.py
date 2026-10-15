@@ -32,6 +32,7 @@ KINDS = frozenset(('key_down', 'key_up', 'key_repeat', 'button_down', 'button_up
                    'drag', 'scroll', 'hover'))
 REQUIRED_KINDS = KINDS - {'key_repeat'}
 UNBOUNDED_METRICS = frozenset(('core-event-outstanding', 'core-event-dispatch'))
+EVENT_METRICS = UNBOUNDED_METRICS | frozenset(('core-event-all-outstanding', 'core-event-all-dispatch'))
 IDENTIFIER = re.compile(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,95}\Z')
 SHA256 = re.compile(r'[0-9a-f]{64}\Z')
 
@@ -319,12 +320,14 @@ def analyze_input(bundle: Bundle, config: dict, run: str) -> dict:
         keys(q, {'name', 'capacity', 'clock', 'trace'}, 'queue configuration')
         name = identifier(q['name'], 'queue name')
         require(name not in queues, 'duplicate queue name')
-        if name in UNBOUNDED_METRICS:
-            require(q['capacity'] is None, 'unbounded event metric must declare capacity:null')
+        if name in UNBOUNDED_METRICS and q['capacity'] is None:
             capacity = None
             unbounded.append(name)
         else:
             capacity = integer(q['capacity'], 'queue capacity', 1, 65536)
+            if name in EVENT_METRICS:
+                require(capacity == (64 if name.endswith('dispatch') else 4096),
+                        'event capacity differs from the production admission limit')
         clock = identifier(q['clock'], 'queue clock')
         first, values, last = trace(bundle, q['trace'], 'deskflow-h11-queue-v1', {**identity, 'clock': clock})
         metrics, errors = queue_metrics(values, first, last, capacity)

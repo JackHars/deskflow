@@ -192,7 +192,7 @@ class EvidenceReader:
             self.rows += 1
             kind = value.get('type')
             if self.header is None:
-                require(kind == 'header' and value.get('schema') == 'deskflow-input-evidence-v1' and
+                require(kind == 'header' and value.get('schema') in ('deskflow-input-evidence-v1', 'deskflow-input-evidence-v2') and
                         value.get('role') == self.role and value.get('runId') == self.run_id and
                         unsigned(value.get('pid')) > 0 and isinstance(value.get('clockId'), str) and
                         isinstance(value.get('queues'), list), 'Wrong evidence header or process')

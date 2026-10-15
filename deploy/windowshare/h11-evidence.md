@@ -60,9 +60,9 @@ are distinct from bounded synthetic timestamps used to re-encode a static image.
   predeclared growth tests may require investigating noise; do not loosen them
   after seeing a run. A missing queue in the collection inventory is a review
   failure that a parser cannot discover by itself.
-  The actual Core EventQueue lifetime/dispatch metrics have no configured
-  production capacity. Their exact names require `capacity:null`; accounting,
-  observed growth and final-drain checks still run, but capacity certification
+  Legacy v1 Core EventQueue lifetime/dispatch metrics have no configured
+  production capacity and retain `capacity:null`; accounting,
+  observed growth and final-drain checks still run, but their capacity certification
   remains **INCOMPLETE**. A successful finite trace cannot prove a production
   bound. Platform/kernel buffers remain outside the collector's inventory.
 * Latency uses one wired 1920×1080, 60 fps stream, at least 600 predeclared
@@ -224,17 +224,22 @@ source, receipts, compressions: artifacts, even when no hover was compressed
 queues: [{name, capacity, clock, trace: artifact}, ...]
 ```
 
-`capacity` is a positive integer from 1 to 65536 for bounded metrics. Exactly
-`core-event-outstanding` and `core-event-dispatch` instead require JSON `null`,
-because their production EventQueue storage/callback lifetimes are unbounded.
-Finite substituted capacities for those names, null on another name, missing
-metadata, booleans or string `"null"` are rejected. These metrics are counted
-Event views/callbacks, not new captured physical events. The normalizer emits
-all 19 declared Core/Host descriptors, with exact role-scoped names and these
-two explicit nulls. The 32-descriptor parser bound is not a queue-depth limit.
-An otherwise valid input component containing either metric returns INCOMPLETE
-with the measured counts and `capacity_certification:"INCOMPLETE"`; actual
-loss, growth, insufficient workload or drain failures still return FAIL.
+`capacity` is a positive integer from 1 to 65536 for bounded metrics. The
+production v2 Core EventQueue metrics require exactly 4096 for
+`core-event-outstanding`/`core-event-all-outstanding` and 64 for
+`core-event-dispatch`/`core-event-all-dispatch`. The normalizer requires all
+21 v2 Core/Host descriptors and reports the still-unmeasured native/OS boundary.
+See [input-queue-budget.md](input-queue-budget.md) for the enforced lifetimes.
+
+Legacy v1 normalization emits 19 descriptors and retains JSON `null` for
+`core-event-outstanding` and `core-event-dispatch`. The analyzer accepts those
+two legacy nulls but reports capacity certification INCOMPLETE. It rejects
+substituted positive EventQueue limits, null on another name, missing metadata,
+booleans and string `"null"`. Event metrics count views/callbacks, not additional
+physical source records; the subset and whole-Core counts are not summed.
+The 32-descriptor parser bound is not a queue-depth limit. Actual loss, growth,
+insufficient workload and drain failures still return FAIL. Finite application
+limits alone cannot certify opaque OS, compositor or device queues.
 
 Each trace begins with exactly
 `{event:"start", format, run_id, clock, t_ns, owner, epoch}`. Latency traces omit

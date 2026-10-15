@@ -19,13 +19,16 @@ import re
 import stat
 import sys
 
-QUEUES = ('capture', 'translation', 'completed', 'server-pending', 'server-completed',
+LEGACY_QUEUES = ('capture', 'translation', 'completed', 'server-pending', 'server-completed',
           'server-executing', 'coordinator-operations', 'coordinator-batch',
           'coordinator-preview', 'event-outstanding', 'event-dispatch',
           'private-output', 'private-buffered-input', 'private-incoming', 'private-dispatch')
 # None is an explicit absence of a production bound, not missing metadata or
 # the bounded recorder's capacity. Only these two EventQueue metrics use it.
-CAPACITIES = dict(zip(QUEUES, (256, 256, 256, 256, 256, 256, 17, 16, 16, None, None, 16384, 1488, 372, 256)))
+LEGACY_CAPACITIES = dict(zip(LEGACY_QUEUES, (256, 256, 256, 256, 256, 256, 17, 16, 16, None, None, 16384, 1488, 372, 256)))
+QUEUES = LEGACY_QUEUES[:-4] + ('event-all-outstanding', 'event-all-dispatch') + LEGACY_QUEUES[-4:]
+CAPACITIES = {**LEGACY_CAPACITIES, **{name: 64 if name.endswith('dispatch') else 4096
+                                    for name in QUEUES if name.startswith('event-')}}
 KINDS = {'key_down', 'key_up', 'key_repeat', 'button_down', 'button_up', 'drag', 'scroll', 'hover'}
 TAG = 0x445357494E503031
 MAX_BYTES = 256 * 1024 * 1024
@@ -158,10 +161,11 @@ class Journal:
         kind = row['type']
         if index == 1:
             keys(row, ('type', 'schema', 'runId', 'role', 'pid', 'clockId', 'queues', 'nativeFieldPreservation', 'observerProvenance'), 'header')
-            require(kind == 'header' and row['schema'] == 'deskflow-input-evidence-v1' and row['role'] == role, 'wrong journal schema/role')
+            require(kind == 'header' and row['schema'] in ('deskflow-input-evidence-v1', 'deskflow-input-evidence-v2') and row['role'] == role, 'wrong journal schema/role')
             require(type(row['runId']) is str and re.fullmatch('[A-Za-z0-9_-]{1,64}', row['runId']), 'bad run identity')
             require(type(row['clockId']) is str and re.fullmatch('[A-Za-z0-9_-]{1,96}', row['clockId']), 'bad observer clock')
-            require(row['queues'] == (list(QUEUES) if role == 'core' else list(QUEUES[-4:]) if role == 'host' else []), 'undeclared or incomplete queue inventory')
+            inventory = LEGACY_QUEUES if row['schema'].endswith('-v1') else QUEUES
+            require(row['queues'] == (list(inventory) if role == 'core' else list(inventory[-4:]) if role == 'host' else []), 'undeclared or incomplete queue inventory')
             require(row['nativeFieldPreservation'] == row['observerProvenance'] == 'NOT_RUN', 'collector cannot certify its own physical provenance')
             integer(row['pid'], 'observer pid', nonzero=True)
             self.header = row
@@ -205,7 +209,7 @@ class Journal:
 def checked_queues(journal):
     for name, rows in journal.queues.items():
         previous = (0, 0, 0)
-        capacity = CAPACITIES[name]
+        capacity = (LEGACY_CAPACITIES if journal.header['schema'].endswith('-v1') else CAPACITIES)[name]
         for index, row in enumerate(rows):
             added, retired, depth = (integer(row[key], 'queue ' + key) for key in ('enqueued', 'retired', 'depth'))
             if capacity is None:
@@ -229,6 +233,7 @@ def checked_queues(journal):
 def normalize(core: Journal, host: Journal, native: Journal):
     run = core.header['runId']
     require(host.header['runId'] == native.header['runId'] == run, 'run substitution')
+    require(len({journal.header['schema'] for journal in (core, host, native)}) == 1, 'mixed evidence schema versions')
     require(core.binding == host.binding and all(core.binding[0]) and core.binding[1] != '0'*192, 'Core/Host exact lease mismatch')
     require(len({v.header['clockId'] for v in (core, host, native)}) == 3, 'observer clocks must remain independent')
     require(len({integer(v.header['pid'], 'observer pid', nonzero=True) for v in (core, host, native)}) == 3,
@@ -324,6 +329,8 @@ def write_normalized(output: Path, journals, data):
         input_config['queues'].append({'name': scoped_name, 'capacity': capacity, 'clock': journal.header['clockId'],
              'trace': trace(scoped_name + '.jsonl', 'deskflow-h11-queue-v1', journal, converted)})
     mapping = artifact('capture-identities.json', encoded(data['identities']) + b'\n')
+    unbounded = [q['name'] for q in input_config['queues'] if q['capacity'] is None]
+    all_events = not core.header['schema'].endswith('-v1')
     report = {'format': 'deskflow-normalized-input-v1', 'status': 'NORMALIZED_UNVERIFIED', 'run_id': data['run'],
               'h11_complete': False, 'observer_provenance': 'NOT_RUN', 'native_field_preservation': 'NOT_RUN',
               'clock_policy': 'independent observer clocks retained; no endpoint clock subtraction',
@@ -331,12 +338,12 @@ def write_normalized(output: Path, journals, data):
               'raw_journals': {journal.header['role']: {'path': str(journal.path), 'sha256': journal.sha256} for journal in journals},
               'capture_identities': mapping, 'input': input_config, 'latency': None,
               'pending_queue_coverage': {'status': 'INCOMPLETE', 'full_component_eligible': False,
-                  'observed_event_scope': 'original-stamped input views from admission through pending/saved/retrieved storage and dispatch completion',
-                  'unbounded_metrics': ['core-event-outstanding', 'core-event-dispatch'],
-                  'capacity_certification': 'INCOMPLETE',
-                  'unmeasured': ['unstamped/configured Core events', 'platform event queues and OS/kernel buffers']},
+                  'observed_event_scope': ('all Core Event lifetimes, with a separate original-stamped subset' if all_events else 'original-stamped input views') + ' from admission through pending/saved/retrieved storage and dispatch completion',
+                  'unbounded_metrics': unbounded,
+                  'capacity_certification': 'INCOMPLETE' if unbounded else 'DECLARED',
+                  'unmeasured': ([] if all_events else ['unstamped/configured Core events']) + ['OS/library input buffers before Core admission; compositor and device queues']},
               'limits': ['queue inventory covers only the declared Deskflow structures; complete pending-input coverage remains unverified',
-                         'EventQueue lifetime and callback counts have no configured production capacity; their null bounds cannot certify bounded backlog',
+                         'Declared application limits do not certify OS/library/kernel buffers outside admission',
                          'AppKit receipt is an owned app observation, not physical hardware consumption',
                          'raw capture before first queue is stream observation, not a physical-neutral assertion']}
     artifact('normalized-input.json', encoded(report) + b'\n')

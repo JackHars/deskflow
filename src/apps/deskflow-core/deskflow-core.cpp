@@ -262,7 +262,24 @@ int main(int argc, char **argv)
   }
 #endif
 
-  EventQueue events;
+  // Apply one process-lifetime budget to explicitly configured experimental
+  // sessions only. The ordinary Core keeps its existing admission policy.
+  bool boundedEvents = false;
+  std::function<void()> revokeBacklog;
+#ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputSession) {
+    boundedEvents = true;
+    revokeBacklog = [source = inputSession->captureSource()] { source->stop(); };
+  }
+#endif
+#ifdef WINDOWSHARE_GNOME_PROVIDER
+  boundedEvents = boundedEvents || parser.windowShareGnomeEnabled();
+#endif
+#ifdef WINDOWSHARE_X11_OBSERVER
+  boundedEvents = boundedEvents || parser.windowShareObserveX11();
+#endif
+  auto eventBudget = boundedEvents ? std::make_shared<deskflow::EventQueueBudget>(std::move(revokeBacklog)) : nullptr;
+  EventQueue events(eventBudget);
   const auto processName = QFileInfo(argv[0]).fileName();
 
   App *coreApp = createApp(parser, events, processName);

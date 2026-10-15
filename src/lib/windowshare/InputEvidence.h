@@ -6,6 +6,7 @@
 
 #include "OriginalInput.h"
 #include "base/EventInputObserver.h"
+#include "base/EventQueueBudget.h"
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -34,15 +35,18 @@ enum class InputEvidenceQueue : std::uint8_t
   CoordinatorPreview,
   EventOutstanding,
   EventDispatch,
+  EventAllOutstanding,
+  EventAllDispatch,
   PrivateOutput,
   PrivateBufferedInput,
   PrivateIncoming,
   PrivateDispatch,
   Count
 };
-inline constexpr bool unboundedInputEvidenceQueue(InputEvidenceQueue queue) noexcept
+inline constexpr bool eventInputEvidenceQueue(InputEvidenceQueue queue) noexcept
 {
-  return queue == InputEvidenceQueue::EventOutstanding || queue == InputEvidenceQueue::EventDispatch;
+  return queue == InputEvidenceQueue::EventOutstanding || queue == InputEvidenceQueue::EventDispatch ||
+         queue == InputEvidenceQueue::EventAllOutstanding || queue == InputEvidenceQueue::EventAllDispatch;
 }
 enum class InputEvidenceLoss : std::uint8_t
 {
@@ -397,7 +401,12 @@ public:
       fail(InputEvidenceLoss::Contention);
       return;
     }
-    if (q.initialized || !identity || (unboundedInputEvidenceQueue(queue) ? limit != 0 : limit == 0))
+    const auto actualEventLimit =
+        queue == InputEvidenceQueue::EventDispatch || queue == InputEvidenceQueue::EventAllDispatch
+            ? deskflow::EventQueueBudget::dispatchCapacity
+            : deskflow::EventQueueBudget::capacity;
+    if (q.initialized || !identity ||
+        (eventInputEvidenceQueue(queue) ? limit != 0 && limit != actualEventLimit : limit == 0))
       fail(InputEvidenceLoss::QueueIdentity);
     else {
       q.identity = identity;
@@ -433,7 +442,7 @@ public:
     auto &q = m_queues[static_cast<std::size_t>(queue)];
     const auto depth = q.depth.load(std::memory_order_relaxed);
     if ((added && removed) || removed > depth || added > UINT64_MAX - depth ||
-        (!unboundedInputEvidenceQueue(queue) && added > q.capacity - depth) || added > UINT64_MAX - q.enqueued ||
+        (q.capacity && added > q.capacity - depth) || added > UINT64_MAX - q.enqueued ||
         removed > UINT64_MAX - q.retired)
       fail(InputEvidenceLoss::QueueAccounting);
     else {
@@ -549,13 +558,16 @@ public:
 
 private:
   friend struct InputEvidenceTestAccess;
-  static void initializeEventQueue(void *context, const void *queue) noexcept
+  static void
+  initializeEventQueue(void *context, const void *queue, std::uint64_t capacity, std::uint64_t dispatch) noexcept
   {
     auto &recorder = *static_cast<InputEvidenceRecorder *>(context);
-    // These are observed outstanding lifetimes/callbacks, with no configured
-    // production capacity. Zero is internal metadata; JSON emits null.
-    recorder.initialize(InputEvidenceQueue::EventOutstanding, queue, 0);
-    recorder.initialize(InputEvidenceQueue::EventDispatch, queue, 0);
+    // The queue supplies its actual production admission bound. Ordinary
+    // unguarded queues still use zero internally and serialize explicit null.
+    recorder.initialize(InputEvidenceQueue::EventOutstanding, queue, capacity);
+    recorder.initialize(InputEvidenceQueue::EventDispatch, queue, dispatch);
+    recorder.initialize(InputEvidenceQueue::EventAllOutstanding, queue, capacity);
+    recorder.initialize(InputEvidenceQueue::EventAllDispatch, queue, dispatch);
   }
   static void observeEvent(
       void *context, const void *queue, OriginalInputStamp stamp, deskflow::EventInputObservation action
@@ -563,20 +575,26 @@ private:
   {
     auto &recorder = *static_cast<InputEvidenceRecorder *>(context);
     using Action = deskflow::EventInputObservation;
+    const auto all = action >= Action::AllAdmit;
+    if (all)
+      action = static_cast<Action>(static_cast<unsigned>(action) - static_cast<unsigned>(Action::AllAdmit));
     if (action == Action::Lost) {
-      recorder.fail(stamp ? InputEvidenceLoss::PipelineRevoked : InputEvidenceLoss::QueueIdentity);
+      recorder.fail(stamp || all ? InputEvidenceLoss::PipelineRevoked : InputEvidenceLoss::QueueIdentity);
       return;
     }
-    if (!stamp || !stamp.part || stamp.part > maximumOriginalInputParts) {
+    if (!all && (!stamp || !stamp.part || stamp.part > maximumOriginalInputParts)) {
       recorder.fail(InputEvidenceLoss::Malformed);
       return;
     }
-    if ((recorder.state() == InputEvidenceState::Recording || recorder.state() == InputEvidenceState::Draining) &&
+    if (!all &&
+        (recorder.state() == InputEvidenceState::Recording || recorder.state() == InputEvidenceState::Draining) &&
         stamp.epoch != recorder.m_captureEpoch.load(std::memory_order_acquire))
       recorder.fail(InputEvidenceLoss::CaptureChanged);
     const bool dispatch = action == Action::Dispatch || action == Action::Return;
     const bool added = action == Action::Admit || action == Action::Dispatch;
-    const auto counter = dispatch ? InputEvidenceQueue::EventDispatch : InputEvidenceQueue::EventOutstanding;
+    const auto counter =
+        all ? (dispatch ? InputEvidenceQueue::EventAllDispatch : InputEvidenceQueue::EventAllOutstanding)
+            : (dispatch ? InputEvidenceQueue::EventDispatch : InputEvidenceQueue::EventOutstanding);
     if (recorder.beginMutation(counter, queue))
       recorder.endMutation(counter, added ? 1 : 0, added ? 0 : 1);
   }

@@ -28,7 +28,7 @@ delegates the platform dependent parts to a subclass.
 class EventQueue : public IEventQueue
 {
 public:
-  EventQueue();
+  explicit EventQueue(std::shared_ptr<deskflow::EventQueueBudget> budget = {});
   EventQueue(EventQueue const &) = delete;
   EventQueue(EventQueue &&) = delete;
   ~EventQueue() override;
@@ -49,10 +49,16 @@ public:
   void removeHandlers(void *target) override;
   void *getSystemTarget() override;
   void waitForReady() const override;
+  std::shared_ptr<deskflow::EventQueueBudget> queueBudget() const override
+  {
+    return m_budget;
+  }
 
 private:
   friend struct EventQueueTestAccess;
   void checkInputObserver() const noexcept;
+  bool admitEvent(const Event &event);
+  bool budgetFailureEvent(Event &event) const;
   std::optional<EventHandler> getHandler(EventTypes type, void *target) const;
   uint32_t saveEvent(Event &&event);
   Event removeEvent(uint32_t eventID);
@@ -125,4 +131,5 @@ private:
   CondVar<bool> *m_readyCondVar = nullptr;
   std::queue<Event> m_pending;
   const deskflow::EventInputObserver *m_inputObserver = nullptr;
+  const std::shared_ptr<deskflow::EventQueueBudget> m_budget;
 };

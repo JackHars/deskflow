@@ -31,6 +31,10 @@ public:
   using EventHandler = std::function<void(const Event &)>;
 
   virtual ~IEventQueue() = default;
+  virtual std::shared_ptr<deskflow::EventQueueBudget> queueBudget() const
+  {
+    return {};
+  }
   class TimerEvent
   {
   public:

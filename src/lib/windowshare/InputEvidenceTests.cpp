@@ -58,7 +58,7 @@ std::unique_ptr<InputEvidenceRecorder> core(bool initialize = true)
     for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i)
       result->initialize(
           static_cast<InputEvidenceQueue>(i), result.get(),
-          unboundedInputEvidenceQueue(static_cast<InputEvidenceQueue>(i)) ? 0 : 256
+          eventInputEvidenceQueue(static_cast<InputEvidenceQueue>(i)) ? 0 : 256
       );
   result->bindOwner(owner());
   return result;
@@ -267,7 +267,7 @@ void actualPortableQueues()
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
     if (queue != InputEvidenceQueue::Capture && queue != InputEvidenceQueue::Completed)
-      recorder->initialize(queue, recorder.get(), unboundedInputEvidenceQueue(queue) ? 0 : 256);
+      recorder->initialize(queue, recorder.get(), eventInputEvidenceQueue(queue) ? 0 : 256);
   }
   auto binding = owner();
   binding.values[4] = stream.epoch().id();
@@ -312,7 +312,7 @@ void revokeDuringDrain()
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
     if (queue != InputEvidenceQueue::Capture && queue != InputEvidenceQueue::Completed)
-      recorder->initialize(queue, recorder.get(), unboundedInputEvidenceQueue(queue) ? 0 : 256);
+      recorder->initialize(queue, recorder.get(), eventInputEvidenceQueue(queue) ? 0 : 256);
   }
   auto binding = owner();
   binding.values[4] = stream.epoch().id();
@@ -447,10 +447,10 @@ void privateConfiguration()
   check(!storage->readyOwner(), "runtime invented an EventQueue baseline before construction");
   // Serialization fixture only. Actual queue initialization/lifetimes are
   // exercised by EventQueueTests and ServerTests with the real InputFilter.
-  observer->initialize(observer->context, storage);
+  observer->initialize(observer->context, storage, 0, 0);
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
-    if (!unboundedInputEvidenceQueue(queue))
+    if (!eventInputEvidenceQueue(queue))
       storage->initialize(queue, storage, 256);
   }
   storage->bindOwner(owner());
@@ -466,10 +466,10 @@ void privateConfiguration()
   while (!output.atEnd()) {
     const auto row = QJsonDocument::fromJson(output.readLine()).object();
     if (row["type"] == "header")
-      check(row["queues"].toArray().size() == 15, "Core header lost its declared queue inventory");
+      check(row["queues"].toArray().size() == 17, "Core header lost its declared queue inventory");
     if (row["type"] != "queue")
       continue;
-    if (row["queue"] == "event-outstanding" || row["queue"] == "event-dispatch") {
+    if (row["queue"].toString().startsWith("event-")) {
       check(row.contains("capacity") && row["capacity"].isNull(), "unbounded capacity was not serialized as null");
       ++nullRows;
     } else {
@@ -477,7 +477,7 @@ void privateConfiguration()
       ++boundedRows;
     }
   }
-  check(nullRows == 4 && boundedRows == 26, "runtime omitted initial/final queue boundaries");
+  check(nullRows == 8 && boundedRows == 26, "runtime omitted initial/final queue boundaries");
   // No producers survive this unit fixture; production deliberately retains
   // both targets until process exit instead of attempting live reassignment.
   deskflow::eventInputObserverInstalled.store(nullptr);

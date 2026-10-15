@@ -490,6 +490,21 @@ class EvidenceTests(unittest.TestCase):
         self.assertFalse(self.session.try_arm())
         self.assertFalse(any(path.exists() for path in self.session.controls.values()))
 
+    def test_v2_whole_core_inventory_can_complete_the_manual_coordinator(self):
+        # The coordinator verifies owned process/lifetime, not queue accounting;
+        # the strict offline normalizer validates the complete v2 inventory.
+        for role in self.session.roles:
+            path = self.session.readers[role].path
+            value = json.loads(path.read_text())
+            value['schema'] = 'deskflow-input-evidence-v2'
+            path.write_text(json.dumps(value) + '\n')
+        self.arm()
+        self.session.stop()
+        self.ends()
+        result = self.session.finish()
+        self.assertTrue(result['recordersArmed'])
+        self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+
     def test_denied_or_changed_arm_cannot_be_retried(self):
         self.session.start_boundary()
         self.request()

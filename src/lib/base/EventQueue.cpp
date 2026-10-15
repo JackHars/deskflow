@@ -33,7 +33,10 @@ static void interrupt(Arch::ThreadSignal, void *data)
 // EventQueue
 //
 
-EventQueue::EventQueue() : m_readyMutex(new Mutex), m_readyCondVar(new CondVar<bool>(m_readyMutex, false))
+EventQueue::EventQueue(std::shared_ptr<deskflow::EventQueueBudget> budget)
+    : m_readyMutex(new Mutex),
+      m_readyCondVar(new CondVar<bool>(m_readyMutex, false)),
+      m_budget(std::move(budget))
 {
   deskflow::eventInputQueueConstructed.store(true);
   ARCH->setSignalHandler(Arch::ThreadSignal::Interrupt, &interrupt, this);
@@ -41,11 +44,22 @@ EventQueue::EventQueue() : m_readyMutex(new Mutex), m_readyCondVar(new CondVar<b
   m_buffer = std::make_unique<SimpleEventQueueBuffer>();
   m_inputObserver = deskflow::eventInputObserverInstalled.load();
   if (m_inputObserver)
-    m_inputObserver->initialize(m_inputObserver->context, this);
+    m_inputObserver->initialize(
+        m_inputObserver->context, this, m_budget ? deskflow::EventQueueBudget::capacity : 0,
+        m_budget ? deskflow::EventQueueBudget::dispatchCapacity : 0
+    );
 }
 
 EventQueue::~EventQueue()
 {
+  // Event owns its admission tokens, while payload ownership is explicit.
+  // Terminal overload may leave data in either startup or platform storage.
+  for (auto &[id, event] : m_events)
+    Event::deleteData(event);
+  while (!m_pending.empty()) {
+    Event::deleteData(m_pending.front());
+    m_pending.pop();
+  }
   delete m_readyCondVar;
   delete m_readyMutex;
 
@@ -57,17 +71,18 @@ int EventQueue::loop()
 {
   m_buffer->init();
   {
+    std::scoped_lock queueLock{m_mutex};
     Lock lock(m_readyMutex);
     *m_readyCondVar = true;
     m_readyCondVar->signal();
+    // Publish ready and transfer startup storage atomically with admission.
+    // New producer events must not overtake the older pending prefix.
+    while (!m_pending.empty()) {
+      addEventToBuffer(std::move(m_pending.front()));
+      m_pending.pop();
+    }
   }
   LOG_DEBUG("event queue is ready");
-  while (!m_pending.empty()) {
-    LOG_DEBUG("add pending events to buffer");
-    Event &event = m_pending.front();
-    addEventToBuffer(std::move(event));
-    m_pending.pop();
-  }
 
   Event event;
   getEvent(event);
@@ -76,9 +91,21 @@ int EventQueue::loop()
     Event::deleteData(event);
     getEvent(event);
   }
+  event.m_allObservation.complete();
   int exitCode = s_exitSuccess;
   if (auto *exitEvent = dynamic_cast<ExitEventData *>(event.getDataObject()); exitEvent != nullptr) {
     exitCode = exitEvent->exitCode();
+  }
+  Event::deleteData(event);
+  if (m_budget && !m_budget->live()) {
+    const auto state = m_budget->snapshot();
+    LOG_ERR(
+        "experimental event backlog stopped: reason=%u admitted=%llu retired=%llu outstanding=%llu peak=%llu",
+        static_cast<unsigned>(state.failure), static_cast<unsigned long long>(state.admitted),
+        static_cast<unsigned long long>(state.retired), static_cast<unsigned long long>(state.outstanding),
+        static_cast<unsigned long long>(state.peak)
+    );
+    return s_exitFailed;
   }
   return exitCode;
 }
@@ -112,70 +139,93 @@ void EventQueue::adoptBuffer(IEventQueueBuffer *buffer)
 
 bool EventQueue::processEvent(Event &event, double timeout, Stopwatch &timer)
 {
-  // if no events are waiting then handle timers and then wait
-  while (m_buffer->isEmpty()) {
-    // handle timers first
-    if (hasTimerExpired(event)) {
+  for (;;) {
+    if (budgetFailureEvent(event))
+      return true;
+    // A continuously populated input queue must not starve cleanup timers.
+    if (m_budget && hasTimerExpired(event))
+      return true;
+    // if no events are waiting then handle timers and then wait
+    while (m_buffer->isEmpty()) {
+      if (budgetFailureEvent(event))
+        return true;
+      // handle timers first
+      if (hasTimerExpired(event)) {
+        return true;
+      }
+
+      // get time remaining in timeout
+      double timeLeft = timeout - timer.getTime();
+      if (timeout >= 0.0 && timeLeft <= 0.0) {
+        return false;
+      }
+
+      // get time until next timer expires.  if there is a timer
+      // and it'll expire before the client's timeout then use
+      // that duration for our timeout instead.
+      if (double timerTimeout = getNextTimerTimeout();
+          timeout < 0.0 || (timerTimeout >= 0.0 && timerTimeout < timeLeft)) {
+        timeLeft = timerTimeout;
+      }
+
+      // wait for an event
+      // A fault can occur while every admitted Event is caller-retrieved and
+      // the platform buffer is empty. Bound that wait without allocating a
+      // synthetic wakeup behind the very backlog that failed.
+      if (m_budget && (timeLeft < 0 || timeLeft > 0.05))
+        timeLeft = 0.05;
+      m_buffer->waitForEvent(timeLeft);
+    }
+    if (budgetFailureEvent(event))
+      return true;
+
+    // get the event
+    uint32_t dataID;
+    IEventQueueBuffer::Type type = m_buffer->getEvent(event, dataID);
+    switch (type) {
+      using enum IEventQueueBuffer::Type;
+    case Unknown:
+      if (timeout >= 0.0 && timer.getTime() >= timeout)
+        return false;
+      // Spurious platform readiness must not grow the C++ call stack.
+      continue;
+
+    case System:
+      return true;
+
+    case User: {
+      std::scoped_lock lock{m_mutex};
+      event = removeEvent(dataID);
       return true;
     }
 
-    // get time remaining in timeout
-    double timeLeft = timeout - timer.getTime();
-    if (timeout >= 0.0 && timeLeft <= 0.0) {
+    default:
+      assert(0 && "invalid event type");
       return false;
     }
-
-    // get time until next timer expires.  if there is a timer
-    // and it'll expire before the client's timeout then use
-    // that duration for our timeout instead.
-    if (double timerTimeout = getNextTimerTimeout();
-        timeout < 0.0 || (timerTimeout >= 0.0 && timerTimeout < timeLeft)) {
-      timeLeft = timerTimeout;
-    }
-
-    // wait for an event
-    m_buffer->waitForEvent(timeLeft);
-  }
-
-  // get the event
-  uint32_t dataID;
-  IEventQueueBuffer::Type type = m_buffer->getEvent(event, dataID);
-  switch (type) {
-    using enum IEventQueueBuffer::Type;
-  case Unknown:
-    if (timeout < 0.0 || timeout <= timer.getTime()) {
-      // don't want to fail if client isn't expecting that
-      // so if getEvent() fails with an infinite timeout
-      // then just try getting another event.
-      processEvent(event, timeout, timer);
-    }
-    return false;
-
-  case System:
-    return true;
-
-  case User: {
-    std::scoped_lock lock{m_mutex};
-    event = removeEvent(dataID);
-    return true;
-  }
-
-  default:
-    assert(0 && "invalid event type");
-    return false;
   }
 }
 
 bool EventQueue::getEvent(Event &event, double timeout)
 {
   Stopwatch timer(true);
-  return processEvent(event, timeout, timer);
+  const auto received = processEvent(event, timeout, timer);
+  if (received && event.getType() != EventTypes::Quit && !admitEvent(event)) {
+    Event::deleteData(event);
+    return budgetFailureEvent(event);
+  }
+  return received;
 }
 
 bool EventQueue::dispatchEvent(const Event &event)
 {
-  checkInputObserver();
-  event.observeInput(m_inputObserver, this);
+  if (!admitEvent(event))
+    return false;
+  auto admission = event.m_queueAdmission.takeForDispatch();
+  if (!admission.beginDispatch())
+    return false;
+  auto allObservation = event.m_allObservation.takeForDispatch();
+  allObservation.dispatch();
   auto observation = event.m_inputObservation.takeForDispatch();
   observation.dispatch();
   auto dispatch = [&] {
@@ -197,7 +247,34 @@ bool EventQueue::dispatchEvent(const Event &event)
 #endif
   if (handled)
     observation.complete();
+  // An unhandled control/System event is retired normally. Only genuine
+  // stamped input requires a handler to establish successful delivery.
+  allObservation.complete();
   return handled;
+}
+
+bool EventQueue::budgetFailureEvent(Event &event) const
+{
+  if (!m_budget || m_budget->live())
+    return false;
+  event = Event(EventTypes::Quit);
+  return true;
+}
+
+bool EventQueue::admitEvent(const Event &event)
+{
+  checkInputObserver();
+  if (!event.m_queueAdmission.admit(m_budget)) {
+    deskflow::windowshare::OriginalInputStampScope::uncertain();
+    if (m_inputObserver)
+      m_inputObserver->observe(
+          m_inputObserver->context, this, event.originalInputStamp(), deskflow::EventInputObservation::Lost
+      );
+    return false;
+  }
+  event.m_allObservation.admit(m_inputObserver, this, {}, true);
+  event.observeInput(m_inputObserver, this);
+  return true;
 }
 
 void EventQueue::checkInputObserver() const noexcept
@@ -225,28 +302,34 @@ void EventQueue::addEvent(Event &&event)
     break;
   }
 
-  checkInputObserver();
-  event.observeInput(m_inputObserver, this);
+  if (!admitEvent(event)) {
+    Event::deleteData(event);
+    return;
+  }
 
   if ((event.getFlags() & Event::EventFlags::DeliverImmediately) != 0) {
     dispatchEvent(event);
     Event::deleteData(event);
-  } else if (!(*m_readyCondVar)) {
-    m_pending.push(std::move(event));
   } else {
-    addEventToBuffer(std::move(event));
+    std::scoped_lock lock{m_mutex};
+    if (!(*m_readyCondVar))
+      m_pending.push(std::move(event));
+    else
+      addEventToBuffer(std::move(event));
   }
 }
 
 void EventQueue::addEventToBuffer(Event &&event)
 {
-  std::scoped_lock lock{m_mutex};
+  // The caller serializes startup transfer and all producers with m_mutex.
 
   // store the event's data locally
   auto eventID = saveEvent(std::move(event));
 
   // add it
   if (!m_buffer->addEvent(eventID)) {
+    if (m_budget)
+      m_budget->fail(deskflow::EventQueueBudget::Failure::PlatformBuffer);
     // failed to send event
     auto removedEvent = removeEvent(eventID);
     Event::deleteData(removedEvent);

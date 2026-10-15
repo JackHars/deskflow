@@ -9,6 +9,9 @@
 #include "base/EventQueue.h"
 #include "base/SimpleEventQueueBuffer.h"
 #include "windowshare/InputEvidence.h"
+#ifdef __APPLE__
+#include "platform/OSXEventQueueBuffer.h"
+#endif
 
 #include <QTest>
 
@@ -16,6 +19,7 @@
 #include <memory>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 
 using namespace deskflow::windowshare;
 
@@ -35,6 +39,15 @@ struct EventQueueTestAccess
   {
     return events.m_events.size();
   }
+  static void expire(Event &event)
+  {
+    event.m_queueAdmission.m_entered -= deskflow::EventQueueBudget::maximumAge + std::chrono::seconds(1);
+  }
+  static void expireSaved(EventQueue &events)
+  {
+    for (auto &[id, event] : events.m_events)
+      expire(event);
+  }
 };
 
 namespace {
@@ -45,7 +58,7 @@ struct Evidence
   {
     for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
       const auto queue = static_cast<InputEvidenceQueue>(i);
-      if (!unboundedInputEvidenceQueue(queue))
+      if (!eventInputEvidenceQueue(queue))
         recorder->initialize(queue, this, 256);
     }
     InputEvidenceOwner owner;
@@ -75,7 +88,8 @@ struct Evidence
   {
     std::array<Counts, 2> result{};
     while (const auto row = recorder->pop()) {
-      if (row->kind != InputEvidenceKind::Queue || !unboundedInputEvidenceQueue(row->queue))
+      if (row->kind != InputEvidenceKind::Queue ||
+          (row->queue != InputEvidenceQueue::EventOutstanding && row->queue != InputEvidenceQueue::EventDispatch))
         continue;
       auto &count = result[row->queue == InputEvidenceQueue::EventDispatch];
       count.peak = std::max(count.peak, row->depth);
@@ -94,6 +108,29 @@ struct RefusingBuffer : SimpleEventQueueBuffer
   {
     return false;
   }
+};
+struct CountedData : EventData
+{
+  explicit CountedData(unsigned &count) : destroyed(count)
+  {
+  }
+  ~CountedData() override
+  {
+    ++destroyed;
+  }
+  unsigned &destroyed;
+};
+struct SpuriousBuffer : SimpleEventQueueBuffer
+{
+  Type getEvent(Event &event, std::uint32_t &id) override
+  {
+    if (remaining) {
+      --remaining;
+      return Type::Unknown;
+    }
+    return SimpleEventQueueBuffer::getEvent(event, id);
+  }
+  unsigned remaining = 10000;
 };
 } // namespace
 
@@ -424,5 +461,276 @@ void EventQueueTests::inputObservation_disabledAndUnstamped()
     QCOMPARE(count.retired, std::uint64_t{0});
   }
 }
+
+void EventQueueTests::backlog_pendingCapacityRevokesAndDisposes()
+{
+  unsigned revoked = 0, destroyed = 0;
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>([&] { ++revoked; });
+  {
+    EventQueue events(budget);
+    for (std::uint64_t i = 0; i != deskflow::EventQueueBudget::capacity; ++i)
+      events.addEvent(Event(EventTypes::ClientDisconnected, this, new CountedData(destroyed)));
+    QCOMPARE(EventQueueTestAccess::pending(events), std::size_t(deskflow::EventQueueBudget::capacity));
+    QVERIFY(budget->live());
+    // Even a release cannot be silently dropped while continuing the session.
+    events.addEvent(Event(EventTypes::KeyStateKeyUp, this, new CountedData(destroyed)));
+    QCOMPARE(revoked, 1U);
+    QCOMPARE(destroyed, 1U);
+    QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::Capacity);
+    bool routed = false;
+    events.addHandler(EventTypes::ClientDisconnected, this, [&](const Event &) { routed = true; });
+    QCOMPARE(events.loop(), 1);
+    QVERIFY(!routed);
+    // Teardown's nested loop cannot clear the fault and resume old input.
+    QCOMPARE(events.loop(), 1);
+  }
+  const auto state = budget->snapshot();
+  QCOMPARE(revoked, 1U);
+  QCOMPARE(destroyed, unsigned(deskflow::EventQueueBudget::capacity + 1));
+  QCOMPARE(state.peak, deskflow::EventQueueBudget::capacity);
+  QCOMPARE(state.outstanding, std::uint64_t{0});
+  QCOMPARE(state.admitted, state.retired);
+}
+
+void EventQueueTests::backlog_retrievedLifetimeStillConsumesCapacity()
+{
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  Event retrieved;
+  {
+    EventQueue events(budget);
+    EventQueueTestAccess::ready(events);
+    events.addEvent(Event(EventTypes::PrimaryComputerButtonDown, this));
+    QVERIFY(events.getEvent(retrieved, 0));
+    QCOMPARE(EventQueueTestAccess::saved(events), std::size_t{0});
+    QCOMPARE(budget->snapshot().outstanding, std::uint64_t{1});
+    Event moved(std::move(retrieved));
+    retrieved = std::move(moved);
+    for (std::uint64_t i = 1; i != deskflow::EventQueueBudget::capacity; ++i)
+      events.addEvent(Event(EventTypes::ClientDisconnected, this));
+    events.addEvent(Event(EventTypes::PrimaryComputerButtonUp, this));
+    QVERIFY(!budget->live());
+    QVERIFY(!events.dispatchEvent(retrieved));
+  }
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{1});
+  retrieved = Event();
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().admitted, budget->snapshot().retired);
+}
+
+void EventQueueTests::backlog_nestedAndDestructiveDispatch()
+{
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  auto events = std::make_unique<EventQueue>(budget);
+  auto event = std::make_unique<Event>(EventTypes::KeyStateKeyDown, this);
+  unsigned calls = 0;
+  events->addHandler(EventTypes::KeyStateKeyDown, this, [&](const Event &borrowed) {
+    if (++calls == 1) {
+      QVERIFY(events->dispatchEvent(borrowed));
+      QCOMPARE(budget->snapshot().outstanding, std::uint64_t{1});
+    } else {
+      QCOMPARE(budget->snapshot().outstanding, std::uint64_t{2});
+      event.reset();
+      events.reset();
+    }
+  });
+  QVERIFY(events->dispatchEvent(*event));
+  QCOMPARE(calls, 2U);
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().peak, std::uint64_t{2});
+  QVERIFY(budget->live());
+}
+
+void EventQueueTests::backlog_expiredAndForeignEventsAreTerminal()
+{
+  for (bool foreign : {false, true}) {
+    const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+    const auto other = std::make_shared<deskflow::EventQueueBudget>();
+    EventQueue events(budget), destination(other);
+    EventQueueTestAccess::ready(events);
+    events.addEvent(Event(EventTypes::KeyStateKeyDown, this));
+    Event retrieved;
+    QVERIFY(events.getEvent(retrieved, 0));
+    bool called = false;
+    events.addHandler(EventTypes::KeyStateKeyDown, this, [&](const Event &) { called = true; });
+    destination.addHandler(EventTypes::KeyStateKeyDown, this, [&](const Event &) { called = true; });
+    if (foreign) {
+      QVERIFY(!destination.dispatchEvent(retrieved));
+      QCOMPARE(other->snapshot().failure, deskflow::EventQueueBudget::Failure::ForeignQueue);
+    } else {
+      EventQueueTestAccess::expire(retrieved);
+      QVERIFY(!events.dispatchEvent(retrieved));
+    }
+    QVERIFY(!called);
+    QCOMPARE(
+        budget->snapshot().failure,
+        foreign ? deskflow::EventQueueBudget::Failure::ForeignQueue : deskflow::EventQueueBudget::Failure::Deadline
+    );
+    retrieved = Event();
+    QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+    QCOMPARE(events.loop(), 1);
+  }
+}
+
+void EventQueueTests::backlog_platformRefusalAndConcurrentProducers()
+{
+  {
+    const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+    EventQueue events(budget);
+    EventQueueTestAccess::ready(events);
+    events.adoptBuffer(new RefusingBuffer);
+    events.addEvent(Event(EventTypes::KeyStateKeyUp, this));
+    QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::PlatformBuffer);
+    QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+    QCOMPARE(events.loop(), 1);
+  }
+  std::atomic<unsigned> revoked{0};
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>([&] { ++revoked; });
+  {
+    EventQueue events(budget);
+    std::vector<std::thread> producers;
+    for (int i = 0; i != 4; ++i)
+      producers.emplace_back([&] {
+        for (std::uint64_t n = 0; n != deskflow::EventQueueBudget::capacity; ++n)
+          events.addEvent(Event(EventTypes::ClientDisconnected, this));
+      });
+    for (auto &producer : producers)
+      producer.join();
+    QVERIFY(!budget->live());
+    QVERIFY(budget->snapshot().peak <= deskflow::EventQueueBudget::capacity);
+    QCOMPARE(revoked.load(), 1U);
+    QCOMPARE(events.loop(), 1);
+  }
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().admitted, budget->snapshot().retired);
+}
+
+void EventQueueTests::backlog_controlAndConfiguredEventsAreMeasured()
+{
+  Evidence evidence;
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  EventQueue events(budget);
+  QVERIFY(evidence.recorder->arm(180000000000ULL));
+  events.addHandler(EventTypes::KeyStateKeyDown, this, [](const Event &) {});
+  events.addHandler(EventTypes::ClientDisconnected, this, [](const Event &) {});
+  QVERIFY(events.dispatchEvent(Event(EventTypes::KeyStateKeyDown, this)));
+  QVERIFY(events.dispatchEvent(evidence.key(this)));
+  QVERIFY(events.dispatchEvent(Event(EventTypes::ClientDisconnected, this)));
+  evidence.recorder->stop();
+  evidence.recorder->finish();
+  QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::None);
+  std::array<std::uint64_t, 4> added{};
+  while (const auto row = evidence.recorder->pop()) {
+    if (row->kind == InputEvidenceKind::Queue && eventInputEvidenceQueue(row->queue)) {
+      const auto dispatch =
+          row->queue == InputEvidenceQueue::EventDispatch || row->queue == InputEvidenceQueue::EventAllDispatch;
+      QCOMPARE(
+          row->capacity, dispatch ? deskflow::EventQueueBudget::dispatchCapacity : deskflow::EventQueueBudget::capacity
+      );
+      const auto index = std::size_t(row->queue) - std::size_t(InputEvidenceQueue::EventOutstanding);
+      added[index] = row->enqueued;
+    }
+  }
+  QCOMPARE(added, (std::array<std::uint64_t, 4>{1, 1, 3, 3}));
+}
+
+void EventQueueTests::backlog_timersAndSpuriousWakeupsMakeProgress()
+{
+  {
+    EventQueue events(std::make_shared<deskflow::EventQueueBudget>());
+    const auto timer = events.newOneShotTimer(0.01, this);
+    events.addHandler(EventTypes::Timer, this, [&](const Event &) { events.addEvent(Event(EventTypes::Quit)); });
+    events.addHandler(EventTypes::ClientDisconnected, this, [&](const Event &) {
+      events.addEvent(Event(EventTypes::ClientDisconnected, this));
+    });
+    events.addEvent(Event(EventTypes::ClientDisconnected, this));
+    QCOMPARE(events.loop(), 0);
+    events.deleteTimer(timer);
+    QVERIFY(events.queueBudget()->live());
+  }
+  {
+    EventQueue events(std::make_shared<deskflow::EventQueueBudget>());
+    events.adoptBuffer(new SpuriousBuffer);
+    events.addEvent(Event(EventTypes::Quit));
+    QCOMPARE(events.loop(), 0);
+    QVERIFY(events.queueBudget()->live());
+  }
+}
+
+void EventQueueTests::backlog_ordinaryQueueKeepsAdmissionPolicy()
+{
+  EventQueue events;
+  QVERIFY(!events.queueBudget());
+  for (std::uint64_t i = 0; i != deskflow::EventQueueBudget::capacity + 1; ++i)
+    events.addEvent(Event(EventTypes::ClientDisconnected, this));
+  QCOMPARE(EventQueueTestAccess::pending(events), std::size_t(deskflow::EventQueueBudget::capacity + 1));
+}
+
+void EventQueueTests::backlog_recursiveDispatchHasItsOwnLimit()
+{
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  EventQueue events(budget);
+  unsigned called = 0;
+  events.addHandler(EventTypes::KeyStateKeyDown, this, [&](const Event &event) {
+    ++called;
+    (void)events.dispatchEvent(event);
+  });
+  QVERIFY(events.dispatchEvent(Event(EventTypes::KeyStateKeyDown, this)));
+  QCOMPARE(called, unsigned(deskflow::EventQueueBudget::dispatchCapacity));
+  QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::DispatchCapacity);
+  QCOMPARE(budget->snapshot().dispatchPeak, deskflow::EventQueueBudget::dispatchCapacity);
+  QCOMPARE(budget->snapshot().dispatching, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().admitted, budget->snapshot().retired);
+}
+
+void EventQueueTests::backlog_expiredRetrievalDisposesPayload()
+{
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  unsigned destroyed = 0;
+  EventQueue events(budget);
+  EventQueueTestAccess::ready(events);
+  events.addEvent(Event(EventTypes::KeyStateKeyUp, this, new CountedData(destroyed)));
+  EventQueueTestAccess::expireSaved(events);
+  Event received;
+  QVERIFY(events.getEvent(received, 0));
+  QCOMPARE(received.getType(), EventTypes::Quit);
+  QCOMPARE(destroyed, 1U);
+  QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::Deadline);
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+}
+
+#ifdef __APPLE__
+void EventQueueTests::backlog_nativeMacBufferRetainsTheBound()
+{
+  const auto budget = std::make_shared<deskflow::EventQueueBudget>();
+  EventQueue events(budget);
+  auto *buffer = new OSXEventQueueBuffer(&events);
+  events.adoptBuffer(buffer);
+  EventQueueTestAccess::ready(events);
+  events.addHandler(EventTypes::ClientDisconnected, this, [](const Event &) {});
+  for (unsigned i = 0; i != 16; ++i) {
+    events.addEvent(Event(EventTypes::ClientDisconnected, this));
+    Event received;
+    QVERIFY(events.getEvent(received, 0));
+    QVERIFY(events.dispatchEvent(received));
+  }
+  QVERIFY(buffer->isEmpty());
+  for (std::uint64_t i = 0; i != deskflow::EventQueueBudget::capacity; ++i)
+    events.addEvent(Event(EventTypes::ClientDisconnected, this));
+  events.addEvent(Event(EventTypes::KeyStateKeyUp, this));
+  QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::Capacity);
+  // Inspect the actual posted-ID queue after terminal failure. Destruction
+  // still owns the corresponding saved Events and retires their permits.
+  unsigned posted = 0;
+  while (!buffer->isEmpty()) {
+    Event unused;
+    std::uint32_t id = 0;
+    QCOMPARE(buffer->getEvent(unused, id), IEventQueueBuffer::Type::User);
+    ++posted;
+  }
+  QCOMPARE(posted, unsigned(deskflow::EventQueueBudget::capacity));
+  QCOMPARE(events.loop(), 1);
+}
+#endif
 
 QTEST_MAIN(EventQueueTests)

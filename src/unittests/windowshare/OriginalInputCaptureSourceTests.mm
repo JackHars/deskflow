@@ -704,6 +704,28 @@ void heldWindowMotion()
   );
   source.stop();
 }
+void coreBacklogRevokesCapture()
+{
+  auto source = std::make_shared<OriginalInputCaptureSource>();
+  EventFixture event;
+  check(source->start(), "backlog fixture capture starts");
+  event.button(0, true);
+  const auto press = captureCompleted(*source, event);
+  check(source->windowDragMotionGate().arm(press.translation.stamp), "backlog fixture holds original motion");
+  const auto epoch = source->epoch();
+  auto inbox = source->completedInput();
+  deskflow::EventQueueBudget budget([source] { source->stop(); });
+  for (std::uint64_t i = 0; i != deskflow::EventQueueBudget::capacity; ++i)
+    check(budget.acquire(), "backlog fixture admits up to the production capacity");
+  check(!budget.acquire(), "backlog capacity must revoke, never continue dropping releases");
+  check(
+      !epoch.live() && !inbox->live() && !source->windowDragMotionGate().active(press.translation.stamp),
+      "backlog fault failed to revoke capture, completed copies and native motion holding"
+  );
+  check(!source->start(), "terminal backlog fault cannot restart the same capture epoch");
+  for (std::uint64_t i = 0; i != deskflow::EventQueueBudget::capacity; ++i)
+    budget.release();
+}
 } // namespace
 
 int main()
@@ -723,6 +745,7 @@ int main()
     stopBeforeRunStarts();
     pointerObservationLifetime();
     heldWindowMotion();
+    coreBacklogRevokesCapture();
     std::cout << "Original input capture lifecycle tests passed\n";
     return 0;
   } catch (const std::exception &error) {

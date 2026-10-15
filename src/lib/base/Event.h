@@ -8,6 +8,7 @@
 #pragma once
 
 #include "EventInputObserver.h"
+#include "EventQueueBudget.h"
 #include "EventTypes.h"
 #include "windowshare/OriginalInputStamp.h"
 
@@ -192,6 +193,7 @@ public:
 
 private:
   friend class EventQueue;
+  friend struct EventQueueTestAccess;
   void observeInput(const deskflow::EventInputObserver *observer, const void *queue) const noexcept
   {
     m_inputObservation.verify(m_originalInputStamp);
@@ -230,4 +232,6 @@ private:
   EventData *m_dataObject = nullptr;
   deskflow::windowshare::OriginalInputStamp m_originalInputStamp;
   mutable deskflow::EventInputToken m_inputObservation;
+  mutable deskflow::EventInputToken m_allObservation;
+  mutable deskflow::EventQueueAdmission m_queueAdmission;
 };

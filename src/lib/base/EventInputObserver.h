@@ -19,12 +19,17 @@ enum class EventInputObservation
   Retire,
   Dispatch,
   Return,
-  Lost
+  Lost,
+  AllAdmit,
+  AllRetire,
+  AllDispatch,
+  AllReturn,
+  AllLost
 };
 struct EventInputObserver
 {
   void *context;
-  void (*initialize)(void *, const void *) noexcept;
+  void (*initialize)(void *, const void *, std::uint64_t, std::uint64_t) noexcept;
   void (*observe)(void *, const void *, windowshare::OriginalInputStamp, EventInputObservation) noexcept;
 };
 inline std::atomic<const EventInputObserver *> eventInputObserverInstalled{nullptr};
@@ -74,10 +79,12 @@ public:
   {
     release();
   }
-  void admit(const EventInputObserver *observer, const void *queue, windowshare::OriginalInputStamp stamp) noexcept
+  void admit(
+      const EventInputObserver *observer, const void *queue, windowshare::OriginalInputStamp stamp, bool all = false
+  ) noexcept
   {
     if (m_observer) {
-      if (m_observer != observer || m_queue != queue || m_stamp != stamp)
+      if (m_observer != observer || m_queue != queue || m_stamp != stamp || m_all != all)
         notify(EventInputObservation::Lost);
       if (m_owned)
         return;
@@ -87,6 +94,7 @@ public:
     m_observer = observer;
     m_queue = queue;
     m_stamp = stamp;
+    m_all = all;
     m_owned = true;
     m_dispatching = m_complete = false;
     notify(EventInputObservation::Admit);
@@ -97,6 +105,7 @@ public:
     result.m_observer = m_observer;
     result.m_queue = m_queue;
     result.m_stamp = m_stamp;
+    result.m_all = m_all;
     result.m_owned = std::exchange(m_owned, false);
     // Keep only a non-owning provenance check in the Event. Its public stamp
     // setter must diagnose mutation even while a callback owns the lifetime.
@@ -122,6 +131,10 @@ public:
 private:
   void notify(EventInputObservation action) const noexcept
   {
+    if (m_all)
+      action = static_cast<EventInputObservation>(
+          static_cast<unsigned>(action) + static_cast<unsigned>(EventInputObservation::AllAdmit)
+      );
     m_observer->observe(m_observer->context, m_queue, m_stamp, action);
   }
   void release() noexcept
@@ -144,11 +157,12 @@ private:
     m_owned = std::exchange(other.m_owned, false);
     m_dispatching = other.m_dispatching;
     m_complete = other.m_complete;
+    m_all = other.m_all;
   }
   const EventInputObserver *m_observer = nullptr;
   const void *m_queue = nullptr;
   windowshare::OriginalInputStamp m_stamp;
-  bool m_owned = false, m_dispatching = false, m_complete = false;
+  bool m_owned = false, m_dispatching = false, m_complete = false, m_all = false;
 };
 
 } // namespace deskflow

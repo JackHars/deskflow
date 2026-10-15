@@ -2997,7 +2997,7 @@ void ServerTests::inputFilter_actualQueueObservedBorrowedDispatch()
   auto recorder = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Core);
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i) {
     const auto queue = static_cast<InputEvidenceQueue>(i);
-    if (!unboundedInputEvidenceQueue(queue))
+    if (!eventInputEvidenceQueue(queue))
       recorder->initialize(queue, recorder.get(), 256);
   }
   InputEvidenceOwner owner;
@@ -3047,7 +3047,7 @@ void ServerTests::inputFilter_actualQueueObservedBorrowedDispatch()
   std::array<std::uint64_t, 2> peaks{}, added{}, retired{};
   while (const auto row = recorder->pop()) {
     QVERIFY(row->kind == InputEvidenceKind::Queue); // no duplicate physical-source records
-    if (unboundedInputEvidenceQueue(row->queue)) {
+    if (row->queue == InputEvidenceQueue::EventOutstanding || row->queue == InputEvidenceQueue::EventDispatch) {
       const auto index = row->queue == InputEvidenceQueue::EventDispatch;
       peaks[index] = std::max(peaks[index], row->depth);
       added[index] = row->enqueued;

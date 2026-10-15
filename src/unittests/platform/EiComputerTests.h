@@ -17,6 +17,7 @@ class EiComputerTests : public QObject
 private Q_SLOTS:
   void initTestCase();
   void producerAndConsumerAgreeOnLayout();
+  void freshSenderProcessesFirstBatchWithoutCutoff_data();
   void freshSenderProcessesFirstBatchWithoutCutoff();
 
 private:

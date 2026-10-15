@@ -26,6 +26,19 @@ private Q_SLOTS:
   void inputObservation_dropThrowAndAdoptBuffer();
   void inputObservation_stampMutationAndInstallation();
   void inputObservation_disabledAndUnstamped();
+  void backlog_pendingCapacityRevokesAndDisposes();
+  void backlog_retrievedLifetimeStillConsumesCapacity();
+  void backlog_nestedAndDestructiveDispatch();
+  void backlog_expiredAndForeignEventsAreTerminal();
+  void backlog_platformRefusalAndConcurrentProducers();
+  void backlog_controlAndConfiguredEventsAreMeasured();
+  void backlog_timersAndSpuriousWakeupsMakeProgress();
+  void backlog_ordinaryQueueKeepsAdmissionPolicy();
+  void backlog_recursiveDispatchHasItsOwnLimit();
+  void backlog_expiredRetrievalDisposesPayload();
+#ifdef __APPLE__
+  void backlog_nativeMacBufferRetainsTheBound();
+#endif
 
 private:
   Arch m_arch;

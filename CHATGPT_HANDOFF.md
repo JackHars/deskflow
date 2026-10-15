@@ -21,8 +21,9 @@ limits. Multiple-window association, focused text clipboard and negotiated
 attached-window capture/lifecycle changes are part of the current working candidate;
 first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
-P7 media/resource tooling is implemented and locally verified on Mac and
-isolated Ubuntu. Full platform/kernel queue bounds and physical H07–H11
+P7 media/resource tooling and whole-Core queue admission/evidence are implemented.
+The newest local verification results are recorded in `TESTING.md`.
+Full platform/kernel queue certification and physical H07–H11
 acceptance remain open. Historical
 results below do not cover later source changes.
 
@@ -486,14 +487,19 @@ or production original-input authority.
   paint, bounded overload recovery and hidden/resumed streams. Resource v2
   records per-probe timing and counter resolution; its offline budget report
   applies the fixed pilot limits without accepting short runs as an hour soak.
-- [ ] Complete full platform/kernel queue coverage and bounded-backlog
-  certification, and collect the actual stimulus/display measurements.
-  Original-stamped Core EventQueue views now retain observation through queued,
-  retrieved and dispatched lifetimes, including borrowed InputFilter callbacks.
-  Their outstanding/dispatch metrics explicitly have no configured capacity.
-  These diagnostics do not introduce production capacity limits or establish
-  native input/display latency. See `deploy/windowshare/media-load.md` and
-  `deploy/windowshare/resource-soak.md` for scope and reproducible commands.
+- [x] Bound the complete experimental Core EventQueue, including configured
+  actions/control events, pending/saved/retrieved lifetimes and nested callbacks.
+  Admission enforces 4096 outstanding Events, 64 dispatch scopes and a two-second
+  residence deadline. Failure revokes Mac capture synchronously and terminates
+  Core through existing recovery. Evidence v2 records both the original-stamped
+  subset and all-event counts with their actual shared limits. Ordinary launches
+  retain their admission policy; legacy evidence retains its original null bounds.
+- [ ] Complete full native/library/OS/kernel queue certification on the frozen
+  runtime and collect the actual stimulus/display measurements. Core admission
+  cannot certify input buffered before it, compositor/device queues or a blocked
+  native call. H10 crash/sleep and H11 physical latency/hour-soak acceptance remain
+  NOT_RUN. See `deploy/windowshare/input-queue-budget.md`,
+  `deploy/windowshare/media-load.md` and `deploy/windowshare/resource-soak.md`.
 
 Acceptance: fault injection and bounded-resource tests in cloud; destructive
 owned-process cases, sleep/wake and actual performance/soak in H10/H11.

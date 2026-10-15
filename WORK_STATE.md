@@ -1,5 +1,65 @@
 # Seamless Windows work state
 
+## P7 Core backlog implementation and Actions enablement — 2026-10-14
+
+Explicit experimental Core launches now enforce 4096 outstanding Event
+lifetimes, 64 active dispatch scopes and a two-second age check before dispatch
+and after callback completion. The shared budget covers pending, saved,
+caller-retrieved, immediate and nested borrowed events. Failure is terminal;
+the Mac callback synchronously revokes capture, completed input and held-motion
+state, then the event loop exits through the existing cleanup path. Ordinary
+Core launches keep their previous admission policy. Startup publication is
+serialized, busy queues service cleanup timers, and spurious wakeups no longer
+recurse. Rejected/expired/abandoned payloads are disposed.
+
+Evidence v2 adds whole-Core counters, including configured actions and control
+events, beside the original-stamped subset. It declares the actual 4096/64
+limits. The normalizer rejects missing inventory, substituted limits and mixed
+versions; legacy v1 null capacities remain explicitly unbounded. Application
+limits do not establish upstream OS/libei/compositor/device bounds or physical
+latency. See `deploy/windowshare/input-queue-budget.md`.
+
+Final local results are retained in `build/p7-queue-20261014`:
+
+- `mac-build-final-2.log` and `mac-tests-final.json`: production Core plus six
+  signed suites pass, including the actual Mac buffer and capture-revocation
+  fixture. No tap or OS input posting is used by those fixtures.
+- `mac-companion-build.log` / `mac-companion-tests-final.json`: production
+  companion and disposable source rebuilt for evidence v2; Bridge and native
+  input regression suites pass offscreen. No desktop fixture was launched.
+- `mac-ordinary-build.log` / `mac-ordinary-tests-final.json`: OFF Core build
+  and four compatibility suites pass.
+- `mac-sanitizer-build-final.log` / `mac-sanitizer-tests-final.json`: fully
+  instrumented project Core dependencies, EventQueue, Server, evidence and
+  private capture checks pass ASan/UBSan; external system/Qt libraries are not
+  instrumented and leak detection is disabled.
+- `linux-final-2/result.json`: full ON Core build, nine suites, private GNOME
+  absence/Xvfb smoke, full OFF Core build and five ASan/UBSan suites pass.
+  The actual EI buffer is tested through an owned Unix listener. All 40
+  normalization, 35 H11 analyzer and 35 physical-coordinator parser tests pass.
+  The offline Ubuntu 26.04 image has no host display/device/bus mounts and
+  removes its temporary directory. Source archive SHA-256:
+  `8df3799c5eaee5ff0e916c6279a3485841b98d70fb494f7d982f154bbdab245c`.
+- The same Python checks pass on Mac. Earlier failing reports are retained:
+  a capacity-validation regression and the Linux X11 `None` macro collision
+  are corrected in the final candidate.
+
+GitHub accepted repository Actions enablement and workflow activation, but
+dispatch still returns HTTP 422, “Actions has been disabled for this repository.”
+The Actions page separately says this fork was stopped due to the scale of
+Actions usage and requires a maintainer to re-enable it. The available browser
+is signed out. The user has been asked to clear that restriction; see
+`actions-enablement.json`. Hosted verification is **NOT_RUN**, not passed.
+Workflow path filters now include the complete EventQueue interfaces, platform
+buffers and test/build files; the existing six-job matrix runs the regressions.
+
+**P7 acceptance remains open:** full native/OS queue certification, H10 owned
+crash/sleep recovery, H11 real input/display latency and the planned hour-long
+resource workload. Fresh physical readiness was requested; do not treat an
+unanswered request or the automated passes as readiness. H07/H08/H09 also remain
+deferred. This entry supersedes older statements that Core backlog itself has
+no production bound; it does not upgrade any historical physical result.
+
 ## P7 reproducible media/resource tooling — 2026-10-14
 
 The next P7 implementation slice is complete. The production Viewer now has

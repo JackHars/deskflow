@@ -32,6 +32,8 @@ constexpr const char *queueNames[]{
     "coordinator-preview",
     "event-outstanding",
     "event-dispatch",
+    "event-all-outstanding",
+    "event-all-dispatch",
     "private-output",
     "private-buffered-input",
     "private-incoming",
@@ -170,7 +172,7 @@ std::unique_ptr<InputEvidenceRuntime> InputEvidenceRuntime::open(const QString &
       queues.append(queueNames[i]);
   result->write(
       {{"type", "header"},
-       {"schema", "deskflow-input-evidence-v1"},
+       {"schema", "deskflow-input-evidence-v2"},
        {"runId", run},
        {"role", roleName(role)},
        {"pid", QString::number(getpid())},
@@ -233,8 +235,7 @@ void InputEvidenceRuntime::drain()
       object["enqueued"] = QString::number(row->enqueued);
       object["retired"] = QString::number(row->retired);
       object["depth"] = QString::number(row->depth);
-      object["capacity"] = unboundedInputEvidenceQueue(row->queue) ? QJsonValue(QJsonValue::Null)
-                                                                   : QJsonValue(QString::number(row->capacity));
+      object["capacity"] = !row->capacity ? QJsonValue(QJsonValue::Null) : QJsonValue(QString::number(row->capacity));
     } else {
       object["type"] = row->kind == InputEvidenceKind::Source   ? "source"
                        : row->kind == InputEvidenceKind::Native ? "native"

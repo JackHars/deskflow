@@ -53,8 +53,16 @@ void EiComputerTests::producerAndConsumerAgreeOnLayout()
   QCOMPARE(alignof(deskflow::EiComputer), producer[1]);
 }
 
+void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff_data()
+{
+  QTest::addColumn<bool>("bounded");
+  QTest::newRow("ordinary") << false;
+  QTest::newRow("experimental-backlog") << true;
+}
+
 void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff()
 {
+  QFETCH(bool, bounded);
   // Check before allocation so a missing transitive compile definition fails
   // deterministically, rather than corrupting the test process's heap.
   QCOMPARE(sizeof(deskflow::EiComputer), eiComputerPlatformLayout()[0]);
@@ -84,7 +92,8 @@ void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff()
   QVERIFY(qputenv("LIBEI_SOCKET", path.toLocal8Bit()));
 
   TestAppUtil appUtil;
-  EventQueue events;
+  const auto budget = bounded ? std::make_shared<deskflow::EventQueueBudget>() : nullptr;
+  EventQueue events(budget);
   auto computer = std::make_unique<deskflow::EiComputer>(false, &events, false);
   QTRY_VERIFY_WITH_TIMEOUT(listener.hasPendingConnections(), 1000);
   std::unique_ptr<QLocalSocket> connection(listener.nextPendingConnection());
@@ -97,8 +106,28 @@ void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff()
   QCOMPARE(y, 0);
   QCOMPARE(width, 1);
   QCOMPARE(height, 1);
+  if (bounded) {
+    unsigned calls = 0;
+    events.addHandler(EventTypes::ClientDisconnected, this, [&](const Event &) {
+      ++calls;
+      // This callback owns one slot; the actual EI posted-ID queue can
+      // receive only the remaining slots before admission becomes terminal.
+      for (std::uint64_t i = 1; i != deskflow::EventQueueBudget::capacity; ++i)
+        events.addEvent(Event(EventTypes::ClientDisconnected, this));
+      events.addEvent(Event(EventTypes::KeyStateKeyUp, this));
+    });
+    events.addEvent(Event(EventTypes::ClientDisconnected, this));
+    QCOMPARE(events.loop(), 1);
+    QCOMPARE(calls, 1U);
+    QCOMPARE(budget->snapshot().peak, deskflow::EventQueueBudget::capacity);
+    QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::Capacity);
+  }
   computer.reset();
   QVERIFY(!events.dispatchEvent(Event(EventTypes::System, events.getSystemTarget())));
+  if (bounded) {
+    QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+    QCOMPARE(budget->snapshot().admitted, budget->snapshot().retired);
+  }
 }
 
 QTEST_MAIN(EiComputerTests)

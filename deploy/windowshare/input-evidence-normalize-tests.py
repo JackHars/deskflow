@@ -21,15 +21,17 @@ spec.loader.exec_module(h11)
 
 
 class Fixture:
-    def __init__(self, directory):
+    def __init__(self, directory, version=1):
         self.directory = Path(directory)
         self.values = {}
         binding = ['1'] * 11
         binding[4] = '9'
+        inventory = normalizer.LEGACY_QUEUES if version == 1 else normalizer.QUEUES
+        capacities = normalizer.LEGACY_CAPACITIES if version == 1 else normalizer.CAPACITIES
         for role, pid, start in [('core', 101, 1_000_000_000), ('host', 202, 3_000_000_000), ('native', 303, 7_000_000_000)]:
-            names = list(normalizer.QUEUES) if role == 'core' else list(normalizer.QUEUES[-4:]) if role == 'host' else []
+            names = list(inventory) if role == 'core' else list(inventory[-4:]) if role == 'host' else []
             native_owner = ['303', '44'] + ['0']*9
-            rows = [{'type': 'header', 'schema': 'deskflow-input-evidence-v1', 'runId': 'synthetic-parser-fixture',
+            rows = [{'type': 'header', 'schema': f'deskflow-input-evidence-v{version}', 'runId': 'synthetic-parser-fixture',
                      'role': role, 'pid': str(pid), 'clockId': 'fixture-' + role, 'queues': names,
                      'nativeFieldPreservation': 'NOT_RUN', 'observerProvenance': 'NOT_RUN'},
                     {'type': 'arm', 'accepted': True, 'timeNs': str(start),
@@ -39,8 +41,8 @@ class Fixture:
                 for at, enqueued, retired in [(start, 0, 0), (start+1, 1, 0), (start+2, 1, 1), (start+100_000_000, 1, 1)]:
                     rows.append({'type': 'queue', 'timeNs': str(at), 'queue': name,
                                  'enqueued': str(enqueued), 'retired': str(retired),
-                                 'depth': str(enqueued-retired), 'capacity': None if normalizer.CAPACITIES[name] is None
-                                 else str(normalizer.CAPACITIES[name])})
+                                 'depth': str(enqueued-retired), 'capacity': None if capacities[name] is None
+                                 else str(capacities[name])})
             for index, event_type in enumerate((10, 11)):
                 if role == 'host':
                     continue
@@ -91,7 +93,7 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual([row['id'] for row in result['receipts']], [1, 2])
         self.assertEqual(result['identities'][0]['capture_sequence'], '500')
         self.assertEqual(result['identities'][0]['cg_timestamp_ns'], str(2**53+11))
-        self.assertEqual(len(result['queues']), len(normalizer.QUEUES)+4)
+        self.assertEqual(len(result['queues']), len(normalizer.LEGACY_QUEUES)+4)
 
     def test_output_is_unverified_and_never_claims_h11_or_latency(self):
         journals = self.fixture.journals()
@@ -137,6 +139,38 @@ class NormalizeTests(unittest.TestCase):
         queue = next(item for item in result['queues'] if item[1] == 'event-outstanding')
         self.assertIsNone(queue[2])
         self.assertEqual(max(int(row['depth']) for row in queue[3]), 65537)
+
+    def test_v2_actual_bound_and_all_event_inventory_round_trip(self):
+        self.fixture = Fixture(self.temporary.name, version=2)
+        journals = self.fixture.journals()
+        output = Path(self.temporary.name) / 'bounded'
+        result = normalizer.write_normalized(output, journals, normalizer.normalize(*journals))
+        report = h11.analyze_input(h11.Bundle(output / 'normalized-input.json'), result['input'], result['run_id'])
+        self.assertEqual(len(report['queues']), 21)
+        self.assertEqual(report['capacity_certification'], 'DECLARED')
+        self.assertEqual(report['unbounded_metrics'], [])
+        for name in h11.EVENT_METRICS:
+            self.assertEqual(report['queues'][name]['capacity'], 64 if name.endswith('dispatch') else 4096)
+        self.assertFalse(result['h11_complete'])
+        self.assertEqual(result['pending_queue_coverage']['status'], 'INCOMPLETE')
+        self.assertFalse(result['pending_queue_coverage']['full_component_eligible'])
+        self.assertEqual(report['status'], 'FAIL')  # deliberately short synthetic input
+
+    def test_v2_rejects_missing_all_events_null_and_overflow(self):
+        for change in ('missing', 'null', 'overflow', 'mixed-version'):
+            self.fixture = Fixture(self.temporary.name, version=2)
+            rows = [r for r in self.fixture.values['core'] if r['type'] == 'queue' and r['queue'] == 'event-all-outstanding']
+            if change == 'missing':
+                self.fixture.row('core', 'header')['queues'].remove('event-all-outstanding')
+            elif change == 'null':
+                for row in rows:
+                    row['capacity'] = None
+            elif change == 'overflow':
+                rows[1].update(enqueued='4097', depth='4097')
+            else:
+                self.fixture.row('host', 'header')['schema'] = 'deskflow-input-evidence-v1'
+            with self.subTest(change=change):
+                self.rejected()
 
     def test_null_is_only_valid_for_declared_unbounded_event_metrics(self):
         original = copy.deepcopy(self.fixture.values)
