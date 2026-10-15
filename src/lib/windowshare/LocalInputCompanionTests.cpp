@@ -243,6 +243,11 @@ void diagnosticForwarding()
 {
   for (const bool forward : {false, true}) {
     QProcess fixture;
+    auto environment = QProcessEnvironment::systemEnvironment();
+    // The wrapper may emit its own Qt locale warning before launching Host.
+    // Test the child's unique marker, not unrelated wrapper diagnostics.
+    environment.insert(QStringLiteral("LC_ALL"), QStringLiteral("C"));
+    fixture.setProcessEnvironment(environment);
     fixture.start(
         QCoreApplication::applicationFilePath(), {QStringLiteral("--diagnostic-forwarding=%1").arg(int(forward))}
     );
@@ -252,7 +257,7 @@ void diagnosticForwarding()
     );
     const auto error = fixture.readAllStandardError();
     check(
-        forward ? error == "companion fixture stderr\n" : error.isEmpty(),
+        error.count("companion fixture stderr\n") == (forward ? 1 : 0),
         "Companion stderr forwarding did not respect explicit opt-in"
     );
     check(fixture.readAllStandardOutput().isEmpty(), "Diagnostic forwarding leaked companion stdout");

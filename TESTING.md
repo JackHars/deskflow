@@ -34,8 +34,20 @@ The fixed recorder and private-channel suites pass together in 23.68 s; the
 offline container and temporary build directory were removed. Mac recorder
 tests pass in 0.66 s and all 30 integrated EventQueue checks pass in 17.91 s,
 including a separate eight-worker real-dispatch regression. Core, Host and
-the source build; formatting, whitespace and full REUSE pass. The next signed
-package and fresh attended attempt are pending in this entry.
+the source build; formatting, whitespace and full REUSE pass. Runtime
+`fbd1212b95e8f30e21e19b437fe748bba2299e6e` is pushed. The Apple-issued
+exact-library package verifies; ZIP SHA-256 is
+`8ab3bc026e2836fa993de5be94e6b36bbba606edc9fcc21d627e9d2a7cf02dfb`.
+Attempt seven is staged under `build/h04-r7-ptwmxdfb/`.
+
+Hosted run `38767970888` on the previous countdown commit passed five jobs
+but failed Linux companion diagnostics: Qt's non-UTF-8 locale warning came
+from the wrapper itself. The test had incorrectly required its entire stderr
+to equal the Host marker. It now requires the unique child marker exactly
+once when forwarding is enabled and absent otherwise, with stdout still
+discarded, while forcing `LC_ALL=C`. This changes the test, not forwarding.
+The Mac suite passes in 11.93 s and home Ubuntu GCC ASan/UBSan in 6.57 s with
+that locale; logs/source snapshot are retained with `locale-` prefixes.
 
 ## H04 reached Active, then lost its private channel — 2026-10-15
 

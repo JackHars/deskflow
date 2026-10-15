@@ -23,8 +23,15 @@ The old failing run is retained, with exact source archive and patch, under
 `build/h04-event-preparation-aawd8i2l/`. Mac recorder tests pass (0.66 s), and
 all 30 integrated EventQueue checks pass (17.91 s), including eight concurrent
 dispatch workers. Core, Host and source build; formatting and full REUSE pass.
-The signed candidate is being prepared for another attended attempt.
-H04/P5 remains unaccepted.
+Runtime `fbd1212b9` is pushed and its Apple-issued exact-library package verifies.
+A fresh attempt-seven plan is staged; H04/P5 remains unaccepted.
+
+The prior hosted Linux run on `4874c6084` found an overly broad test assertion:
+the wrapper's Qt locale warning was counted as Host output. The subprocess
+regression now checks the unique child stderr marker and forces `LC_ALL=C`.
+The Mac suite passes in 11.93 s and home Ubuntu ASan/UBSan in 6.57 s with that
+locale. Production forwarding behavior is unchanged; the CI failure remains
+retained in `prior-ci-failure.log` under the same evidence directory.
 
 ## Active H04 session lost its private channel — 2026-10-15
 
