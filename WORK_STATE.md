@@ -2,7 +2,7 @@
 
 ## Independent Core dispatch expiration implemented — 2026-10-15
 
-Experimental Core now arms an independent monitor before EventQueue producers
+Runtime `8132c85540b6c3f7f07acaeae0f61c98854df09d` arms an independent monitor before EventQueue producers
 start. Its 64 fixed slots retain each active dispatch's original two-second
 admission deadline; nested or concurrent work cannot renew an older scope.
 Expiry exits only Core with code 71, closing peer/Host channels for existing
@@ -16,8 +16,13 @@ All six disposable-process scenarios pass, including actual blocked, nested
 and concurrent dispatch expiration and healthy/cancelled/ordinary survival.
 The first normal test run consumed its own diagnostic output prematurely;
 that harness bug is fixed and its failed log retained. Evidence is under
-`build/p7-core-dispatch-20261015/`. Hosted matrix and fresh package results will
-be recorded separately; previous candidate results do not cover this code.
+`build/p7-core-dispatch-20261015/`. All six hosted jobs in run `38744933197`
+pass on this exact commit, including the new Mac/Linux subprocess tests,
+disabled builds, sanitizers and native GNOME/Qt matrix. Source verification
+matches all 1160 Git entries. The fresh local Apple-issued exact-library bundle
+and private handshake pass; downloaded Mac/Linux package provenance, checksums,
+architectures and Linux manifest verify. The staged package is under that
+evidence root's `mac-package` directory. See `TESTING.md` for hashes and timings.
 
 No physical input, window relocation or sleep was started. H10 real restoration
 and H11 input/display acceptance, full native queue certification and the other

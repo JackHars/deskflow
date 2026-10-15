@@ -22,10 +22,11 @@ attached-window capture/lifecycle changes are part of the current working candid
 first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
 P7 media/resource tooling and whole-Core queue admission/evidence are implemented.
-The newest local verification results are recorded in `TESTING.md`. The working
-candidate additionally expires blocked Core callbacks through an independent
-dispatch monitor; Mac enabled/disabled and sanitizer checks pass. See the
-current candidate entry for its hosted/package status. Earlier runtime
+The newest verification results are recorded in `TESTING.md`. Runtime
+`8132c8554` additionally expires blocked Core callbacks through an independent
+dispatch monitor. All six hosted jobs, local Mac enabled/disabled/sanitizer
+checks, the signed package/private handshake and exact source/artifact
+verification pass. These do not establish physical restoration. Earlier runtime
 `e154f94e0` adds independent Host progress expiration and passes all six hosted
 jobs, local recovery/sanitizer/package checks and exact source verification.
 The verified one-hour two-HD-stream synthetic workload/resource result remains attached to

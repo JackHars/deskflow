@@ -2,12 +2,14 @@
 
 ## Current implementation — 2026-10-15
 
-Experimental Core additionally monitors every active dispatch independently of
+Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed
 by nested/concurrent work; expiry exits only Core with code 71 and closes its
 peer/Host channels for existing recovery. Ordinary launches create no monitor.
-Local ON/OFF and sanitizer checks pass; exact hosted/package results are in
-`TESTING.md`. Calls outside active dispatch and native queue capacities remain
+Local ON/OFF and sanitizer checks, the signed package/private handshake and all
+six jobs in [CI run 38744933197](https://github.com/JackHars/deskflow/actions/runs/38744933197)
+pass; source and downloaded artifacts are verified. See `TESTING.md` for exact
+results. Calls outside active dispatch and native queue capacities remain
 outside this guard. See [Core event limits](../deploy/windowshare/input-queue-budget.md).
 
 Runtime `e154f94e0` adds a Host progress monitor: stalled startup or event-loop

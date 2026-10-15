@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 ## Current candidate: independent Core dispatch expiration — 2026-10-15
 
-The experimental Core now enforces its existing two-second event residence
+Runtime **`8132c85540b6c3f7f07acaeae0f61c98854df09d`** enforces the existing two-second event residence
 deadline even when a handler never returns. An independent thread scans 64
 fixed dispatch slots every 25 ms, subject to scheduling. Each slot retains the
 original admission deadline; nested and concurrent callbacks cannot refresh
@@ -28,14 +28,54 @@ Local results in `build/p7-core-dispatch-20261015/`:
 - PASS: EventQueue ASan/UBSan, 29 entries, 18.10 seconds inside the runner;
   leak detection disabled. All temporary ad-hoc-signed copies were removed.
 - PASS: changed-file REUSE, formatting and whitespace checks.
+- PASS: full Mac build and a fresh Intel Apple-issued exact-library bundle
+  audit plus private Core/Host handshake with original input disabled. Staged:
+  `build/p7-core-dispatch-20261015/mac-package/DeskflowSeamless-Core-Experimental.app`.
+  ZIP SHA-256: `9f8b62634e4a8d2b2db08a5f9638812d230a97dddd6677c17f8b860a99802bbf`.
+- PASS: [source export](https://github.com/JackHars/deskflow/actions/runs/38744933891),
+  with independent verification of the raw commit and all **1160** tracked
+  entries, modes/symlinks and Git blob identities. Source tar SHA-256:
+  `4e8cc7751f7b47b648eb687612d63cb213e2accfcda8bf66305333b0f16b6968`.
 - Retained initial harness failure: timeout children exited correctly, but a
   diagnostic `readAll()` consumed their output before the marker assertion.
   Fixed the harness and reran the full suite; `event-queue-on.log` retains the
   original three assertion failures, `event-queue-on-fixed.log` the passing run.
 
-The existing CI matrix already selects `EventQueueTests` in Mac/Linux enabled
-and disabled builds and in the Linux sanitizer job. Exact hosted/source/package
-results for this candidate are pending and must be recorded separately.
+Hosted [run 38744933197](https://github.com/JackHars/deskflow/actions/runs/38744933197):
+**PASS — all six jobs** on this exact commit. Mac passes 27 standalone, nine
+integrated, four disabled-feature and 19 portable/native-private sanitizer
+suites plus packaging checks. EventQueue takes 17.64/17.84 seconds in the enabled/
+disabled Mac builds. Linux passes 22 standalone, 11 enabled, five disabled and
+one EventQueue sanitizer suite; EventQueue takes 17.07/17.07/17.26 seconds.
+Both compiler foundations, transport and native GNOME/Qt integration also pass.
+
+Downloaded packages have independently verified source/checksums, inventories
+and executable architecture; the Linux internal manifest verifies. No
+downloaded executable was launched locally. The CI Mac archives are ARM64,
+ad-hoc signed and declare macOS 15.0. The separate local bundle above uses the
+Intel Mac's Apple-issued identity and exact-library policy, with minimum macOS
+26.0 inherited from its bundled dependencies.
+
+| CI artifact | SHA-256 |
+| --- | --- |
+| Linux x86_64 tar | `276acc8d0089501089356cd501fb16949c3288cfaf820c69ea014c1627ec4a93` |
+| Mac ARM64 Core ZIP | `d616ea16db0e0736707ad5401525960350b68cd38803640d47331c3ca307668a` |
+| Mac ARM64 Viewer ZIP | `e344b35e6a6b80931b2d9baa83cd318498c37b09d42759269c75e22454a7683a` |
+
+CI artifact retention is seven days. For example:
+
+```sh
+gh run download 38744933197 \
+  -n windowshare-linux-8132c85540b6c3f7f07acaeae0f61c98854df09d \
+  -D /absolute/new/private/download
+python3 deploy/windowshare/package-linux.py \
+  --verify /absolute/new/private/download/DeskflowSeamless-Linux-Experimental.tar.gz
+```
+
+`candidate.json`, individual test logs/JSON, `ci-final.json`, `ci.log`,
+`package-verification.json`, `source-verification.json`,
+`github-linux-verification.json`, `github-mac-verification.json` and the Linux
+manifest log retain the evidence under the local evidence root above.
 
 These fixtures never start Core, a Host, an input source, a native window or a
 desktop connection. Expiration closes private channels for existing disconnect
