@@ -82,6 +82,15 @@ def validate(mac, linux, base, private_path, source=None, holding=False):
             type(linux.get('desktopPreview', False)) is bool and
             mac.get('desktopPreview', False) == linux.get('desktopPreview', False),
             'Both physical plans must declare the same desktop preview')
+    environment = linux.get('linuxEnvironment', 'isolated-container')
+    require(environment in ('isolated-container', 'user-desktop') and
+            mac.get('linuxEnvironment', 'isolated-container') == environment,
+            'Both physical plans must select the same Linux desktop environment')
+    if environment == 'user-desktop':
+        require(not mac.get('desktopPreview') and 'container' not in linux and 'imageId' not in linux and
+                isinstance(linux.get('desktopAtPrepare'), dict) and
+                isinstance(linux['desktopAtPrepare'].get('sessionId'), str),
+                'Actual desktop plan cannot substitute a container or preview')
     if mac.get('desktopPreview'):
         require(linux.get('previewArgv') == [*linux['runArgv'][:2], 'preview', '--run', linux['runDirectory']],
                 'Desktop preview must read only this exact prepared run')
@@ -458,6 +467,9 @@ def freeze_plan(arguments, coordinator):
                frozenArtifacts={name: sha(role) for name, role in paths.items()})
     if getattr(arguments, 'desktop_preview', False):
         mac['desktopPreview'] = True
+    if getattr(arguments, 'linux_desktop', False):
+        require(not mac.get('desktopPreview'), 'Actual Ubuntu desktop excludes the isolated desktop preview')
+        mac['linuxEnvironment'] = 'user-desktop'
     mac['coreArgv'][0], mac['hostArgv'][0] = str(paths['core']), str(paths['host'])
     # A future Linux plan repeats these public pins. Full configuration and
     # counterpart checks run again in --validate-only and after visible Start.
@@ -548,6 +560,8 @@ if __name__ == '__main__':
         parser.add_argument('--holding-display', action='store_true')
         parser.add_argument('--desktop-preview', action='store_true',
                             help='Require a live view of the isolated Ubuntu test desktop on the Mac')
+        parser.add_argument('--linux-desktop', action='store_true',
+                            help='Require the physical Ubuntu desktop, without a container or Mac preview')
         parser.add_argument('--recording-profile', choices=('h04', 'h11'), default='h04',
                             help='h04: 30-second recording; h11: 120-second recording in a 150-second session')
         parser.add_argument('--output', type=Path, required=True)

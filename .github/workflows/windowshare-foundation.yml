@@ -180,6 +180,7 @@ jobs:
       - name: Check user-started physical acceptance controls without input
         run: |
           python3 deploy/windowshare/physical-linux-tests.py
+          python3 deploy/windowshare/physical-desktop-tests.py
           python3 deploy/windowshare/physical-macos-tests.py
           python3 deploy/windowshare/physical-preview-tests.py
       - name: Compile the real opt-in Linux injection backend
@@ -270,6 +271,7 @@ jobs:
       - name: Check manual coordinator cancellation and receipt freshness without input
         run: |
           python3 deploy/windowshare/physical-macos-tests.py
+          python3 deploy/windowshare/physical-desktop-tests.py
           python3 deploy/windowshare/physical-preview-tests.py
       - name: Verify passive resource-soak evidence sampler
         run: |

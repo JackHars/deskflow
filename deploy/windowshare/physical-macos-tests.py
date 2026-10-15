@@ -74,6 +74,22 @@ class CoreReadinessTests(unittest.TestCase):
     authenticated = "trusted window host connected;"
     admitted = "window sharing exact library admission verified;"
 
+    def test_cleanup_requires_the_selected_environment_and_every_restoration_receipt(self):
+        plan = {'linuxEnvironment': 'user-desktop'}
+        result = {'lifecycleCompleted': True, 'linuxEnvironment': 'user-desktop',
+                  'cleanup': {'ordinaryPreserved': True, 'ownedProcessesStopped': True,
+                              'desktopRestored': True, 'controllerExit': 0}}
+        self.assertTrue(module.linux_cleanup_complete(plan, result))
+        self.assertFalse(module.linux_cleanup_complete({}, result))
+        for key, value in (('ordinaryPreserved', False), ('ownedProcessesStopped', False),
+                           ('desktopRestored', False), ('controllerExit', 7), ('controllerExit', False)):
+            with self.subTest(field=key):
+                self.assertFalse(module.linux_cleanup_complete(plan, {**result, 'cleanup': {**result['cleanup'], key: value}}))
+        container = {'lifecycleCompleted': True, 'cleanup': {'ordinaryPreserved': True,
+                     'ownedContainerStopped': True, 'containerExit': 0}}
+        self.assertFalse(module.linux_cleanup_complete(plan, container))
+        self.assertTrue(module.linux_cleanup_complete({}, container))
+
     def test_production_waits_for_every_admission_and_hotkey(self):
         complete = self.hotkeys + self.authenticated + self.admitted
         self.assertTrue(module.core_ready(complete, True, True))
@@ -447,6 +463,20 @@ class ProductionPlans(unittest.TestCase):
         linux['previewArgv'][-1] = '/other/run'
         with self.assertRaisesRegex(RuntimeError, 'exact prepared run'):
             module.validate_plans(mac, linux, self.base, production=True)
+
+    def test_user_desktop_requires_both_plans_and_forbids_preview_or_container(self):
+        mac = {**self.mac, 'linuxEnvironment': 'user-desktop'}
+        linux = {**self.linux, 'linuxEnvironment': 'user-desktop', 'desktopAtPrepare': {'sessionId': '2'}}
+        self.assertTrue(module.validate_plans(mac, linux, self.base, production=True))
+        with self.assertRaisesRegex(RuntimeError, 'same Linux desktop'):
+            module.validate_plans(mac, self.linux, self.base, production=True)
+        for change in ({'container': 'wrong'}, {'imageId': 'wrong'}, {'desktopAtPrepare': {}},
+                       {'linuxEnvironment': 'unknown'}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                module.validate_plans(mac, {**linux, **change}, self.base, production=True)
+        with self.assertRaisesRegex(RuntimeError, 'cannot substitute'):
+            module.validate_plans({**mac, 'desktopPreview': True}, {**linux, 'desktopPreview': True},
+                                  self.base, production=True)
 
     def test_hash_peer_package_and_holding_substitutions_refuse(self):
         for name in self.paths:

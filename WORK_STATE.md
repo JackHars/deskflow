@@ -1,8 +1,50 @@
 # Seamless Windows work state
 
+## Actual Ubuntu monitor test preparation — 2026-10-15
+
+The user explicitly requires physical testing on the active desktop of host
+`jack`, visible on the monitor behind the MacBook. Do not substitute another
+headless desktop or the Mac preview. Ask for fresh permission immediately
+before every physical launch, even after the user signs back in or answers Ready.
+
+Attempt twelve (`build/h04-r12-kh2mcwyo/`) reached Active with its preview visible,
+then ended when the preview process exited 0. No recording armed: Core/Host/native
+ended denied, loss 0, zero measured rows, drained true. The final source receipt
+has no held keys/buttons and restored geometry; this is not original-delivery
+acceptance. Mac Core/source exited 0 and the Host stopped. The copied Ubuntu
+result records Core/container exit 0, private IPC stop, drained relays and
+ordinary state preserved; the Mac coordinator still records Linux exit 255 and
+its unarmed-evidence cleanup failure. Preserve that failed result. The user
+then signed back in (the observed Ubuntu boot ID also changed); older ordinary
+PID audits cannot be repeated across that reboot. Ubuntu archive SHA-256:
+`5f7eb794bde48f5f4d7a79b55b2ca9444366aeb6f0f3b6c7688bbfb5f4f31d4d`.
+
+New explicit Mac `--linux-desktop` / Linux `--desktop-session` plans use the
+existing physical Wayland session. The installed GNOME provider is unchanged,
+recognized after sign-in, and disabled. Start enables it temporarily; Core and
+Viewer use private settings, identities and IPC. No new compositor or Mac preview
+starts. Desktop identity changes refuse startup. Durable rollback restores the
+test extension's prior membership without discarding unrelated user edits, and
+exact PID/birth/executable checks plus pidfds bound fallback process cleanup.
+The Viewer exec wrapper preserves Mutter's native process and inherited FDs.
+
+Evidence: `build/h04-desktop-f9vl8zk0/`. Read-only preflight identifies the actual
+unlocked local GNOME desktop and unchanged installed provider. Home Ubuntu's
+9 desktop, 28 Linux coordinator and 68 Mac coordinator regressions pass, including
+real exec/PID/FD preservation with a plain Python child. The Mac checks also
+pass; its Linux-only exec check is skipped. These tests do not open a physical
+window, enable the actual provider or deliver physical input. The production
+Mac and Linux binaries are reused from their previously verified frozen builds.
+
+Fresh actual-desktop attempt: `build/h04-r13-3qf8w10p/`, with fresh private
+identities and matching physical-desktop plans. Its configuration-only review
+is retained separately from the unlaunched session. No launch is authorized by
+the user's sign-in reply. H04/P5 and physical roadmap acceptance remain open.
+See [the actual-desktop procedure](deploy/windowshare/physical-desktop.md).
+
 ## Attended-test permission — current user instruction, 2026-10-15
 
-The user explicitly authorized attempt eleven below. Ask for fresh permission immediately before
+The user explicitly authorized attempt twelve below. Ask for fresh permission immediately before
 executing the next physical test, and wait for an affirmative reply before
 opening its test window or starting its physical session. Earlier Start/Ready
 answers do not authorize another attempt. Unattended builds, unit tests and
@@ -64,9 +106,9 @@ Ubuntu test archive SHA-256:
 `b3ec11b0016f15ca9045b09af1b36b81d0e15a56346d53732d933672c070c24b`.
 Mac package ZIP SHA-256:
 `bd0b549cce87c10eef7fee167e8f6d21b324d81927a96cf2edbeaaf17332b5ff`.
-Fresh attempt twelve preparation: `build/h04-r12-kh2mcwyo/`, with the
-new preview required in both plans. No physical launch is authorized; ask
-immediately before any launch. H04/P5 remains unaccepted.
+Historical attempt twelve preparation: `build/h04-r12-kh2mcwyo/`, with the
+preview required in both plans. Its subsequent approved run is recorded above.
+It does not satisfy the user's actual-monitor requirement. H04/P5 remains unaccepted.
 
 ## Attempt ten: native stage invalidation retired the Linux session — 2026-10-15
 

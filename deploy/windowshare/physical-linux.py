@@ -29,12 +29,35 @@ import sys
 import tempfile
 import time
 import traceback
+from types import SimpleNamespace
 
 sys.dont_write_bytecode = True
 SCREEN = 'gnome-physical-test'
 HERE = Path(__file__).resolve().parent
 PREPARED_SECONDS, STARTUP_SECONDS, RUNNING_SECONDS, RESOURCE_SECONDS = 600, 80, 180, 270
 ORIGINAL_MODE = 'production-original-input'
+
+
+def desktop_mode(plan):
+    value = plan.get('linuxEnvironment', 'isolated-container')
+    require(value in ('isolated-container', 'user-desktop'), 'Unknown Linux test environment')
+    if value == 'user-desktop':
+        require(route_mode(plan) and not plan.get('desktopPreview') and 'container' not in plan and
+                'imageId' not in plan, 'User desktop requires a separate production plan without a preview/container')
+        return True
+    return False
+
+
+def desktop_support():
+    return module('physical_desktop', HERE / 'physical-desktop.py')
+
+
+def api():
+    return SimpleNamespace(**globals())
+
+
+def owner_name(plan):
+    return plan['desktopRunName'] if desktop_mode(plan) else plan['container']
 
 
 def route_mode(plan):
@@ -90,7 +113,9 @@ def read_log(path):
 
 
 def init(args):
-    require(sys.platform == 'linux' and os.getuid() != 0 and Path('/.dockerenv').is_file(), 'Disposable Linux container required')
+    require(sys.platform == 'linux' and os.getuid() != 0 and
+            (Path('/.dockerenv').is_file() or getattr(args, 'desktop_session', None)),
+            'Disposable container or explicitly selected user desktop required')
     os.umask(0o077)
     core = args.run / 'core'
     core.mkdir(exist_ok=False)
@@ -196,7 +221,24 @@ class StartupStopped(Exception):
 
 
 def session(args):
-    require(sys.platform == 'linux' and os.getuid() != 0 and Path('/.dockerenv').is_file(), 'Disposable Linux container required')
+    desktop = desktop_support() if getattr(args, 'desktop_session', None) else None
+    if desktop:
+        host_only()
+        desktop_plan = load_plan(args.run)
+        require(desktop_mode(desktop_plan) and
+                desktop_plan['desktopAtPrepare']['sessionId'] == args.desktop_session,
+                'Physical desktop must match its explicit plan')
+        require(args.production_original_input and not args.desktop_preview and
+                str(args.core) == desktop_plan['coreExecutable'] and str(args.viewer) == desktop_plan['viewerExecutable'] and
+                str(args.core_socket) == desktop_plan['remoteSockets']['core'] and
+                str(args.viewer_socket) == desktop_plan['remoteSockets']['viewer'] and
+                args.mac_core_pin == desktop_plan['macCorePin'] and args.mac_viewer_pin == desktop_plan['macViewerPin'] and
+                source_hashes() == desktop_plan['sourceHashes'] and
+                {role: sha(Path(desktop_plan[role + 'Executable'])) for role in ('core', 'viewer')} == desktop_plan['binaryHashes'],
+                'Physical desktop invocation differs from its frozen plan')
+    else:
+        require(sys.platform == 'linux' and os.getuid() != 0 and Path('/.dockerenv').is_file(),
+                'Disposable Linux container required')
     os.umask(0o077)
     canonical_pin(args.mac_core_pin)
     canonical_pin(args.mac_viewer_pin)
@@ -218,6 +260,8 @@ def session(args):
               'originalInputAuthorityGranted': False, 'syntheticMeasuredInput': False, 'syntheticStartupInput': False,
               'linuxScreen': SCREEN, 'windowId': args.window_id, 'commands': [],
               'physicalReceipts': 'external-Mac-required', **original_metadata(original)}
+    if desktop:
+        report.update(linuxEnvironment='user-desktop', userDesktopUsed=True, compositorOwned=False)
     public = json.loads((args.run / 'public.json').read_text())
     require(cross.fingerprint(args.run / 'viewer-identity') == canonical_pin(public['viewerPin'])
             and pin(args.run / 'core/tls/cert.pem') == canonical_pin(public['corePin']),
@@ -287,7 +331,12 @@ def session(args):
                 relay = cross.UnixRelay(endpoint, lifetime_seconds=RESOURCE_SECONDS)
                 relays.append(relay)
                 cleanup.callback(safely_close, 'relay', relay.close)
-            shell = qt.start_shell(processes, root, report)
+            if desktop:
+                shell = desktop.DesktopLease(api(), common, desktop_plan, processes, root)
+                cleanup.callback(safely_close, 'desktop restoration', shell.close)
+                environment = processes.env
+            else:
+                shell = qt.start_shell(processes, root, report)
             if preview:
                 preview.enable(processes, common)
                 common.wait_for(processes, preview_frame.exists, 'first private desktop preview', timeout=10)
@@ -304,7 +353,7 @@ def session(args):
                         'Production input requires an audited native GNOME preparation/drain build')
                 report['productionPrerequisites'] = capabilities
             configuration = args.run / 'provider.json'
-            configuration.write_text(json.dumps({'version': 1, 'viewerExecutable': str(args.viewer),
+            configuration.write_text(json.dumps({'version': 1, 'viewerExecutable': str(shell.viewer if desktop else args.viewer),
                                                  'connect': '127.0.0.1', 'port': relays[1].port,
                                                  'identity': str(args.run / 'viewer-identity'), 'peerPin': args.mac_viewer_pin,
                                                  'exportWindow': str(args.window_id)}))
@@ -321,6 +370,8 @@ def session(args):
             report['coreArgv'] = argv
             core = processes.start('core', argv)
             report['corePid'] = core.pid
+            if desktop:
+                desktop.atomic(args.run / 'core-process.json', desktop.identity(core.pid))
 
             def stop_core_if_running():
                 nonlocal stopped
@@ -347,7 +398,9 @@ def session(args):
                     require(time.monotonic() - preview_observed < 2, 'Desktop preview stopped updating')
                     report['desktopPreview'] = {'sequence': preview_sequence, 'viewOnly': True,
                                                 'userDesktopUsed': False, 'includesCursor': True}
-                core_text, shell_text = read_log(output / 'core.log'), read_log(output / 'gnome-shell.log')
+                core_text = read_log(output / 'core.log')
+                shell_log = output / ('viewer.log' if desktop else 'gnome-shell.log')
+                shell_text = read_log(shell_log)
                 actual_pins = [value.replace(':', '').lower() for value in re.findall(r'peer fingerprint: ([0-9a-fA-F:]+)', core_text)]
                 return {'coreProcessLive': core.poll() is None, 'compositorProcessLive': shell.poll() is None,
                         'relayThreadsLive': all(relay.thread.is_alive() for relay in relays),
@@ -370,7 +423,7 @@ def session(args):
                             'motion': 'recv mouse move ', 'relativeMotion': 'recv mouse relative move ',
                             'wheel': 'recv mouse wheel ', 'eiKey': 'fake key: '}.items()},
                         'coreLogBytes': (output / 'core.log').stat().st_size,
-                        'shellLogBytes': (output / 'gnome-shell.log').stat().st_size,
+                        'shellLogBytes': shell_log.stat().st_size if shell_log.exists() else 0,
                         'coreRelay': dict(relays[0].stats), 'viewerRelay': dict(relays[1].stats)}
 
             def ready():
@@ -388,6 +441,7 @@ def session(args):
                   'linuxScreen': SCREEN, 'windowId': args.window_id, 'publicPins': report['publicPins'],
                   'corePid': core.pid, 'compositorPid': shell.pid, 'originalInputAuthorityGranted': False,
                   'syntheticStartupInput': False, **clock.state(), 'state': value, **original_metadata(original),
+                  **({'linuxEnvironment': 'user-desktop', 'compositorOwned': False} if desktop else {}),
                   **({'productionPrerequisites': report['productionPrerequisites']} if original else {})})
             while True:
                 clock.check()
@@ -433,7 +487,8 @@ def finish_session(output, report, stop_id, core, processes, relays, stopped, cl
     report['ownedProcessesStopped'] = all(value['exitCode'] is not None for value in report['processExits'])
     report['coreStoppedByPrivateIpc'] = stopped
     report['relays'] = [dict(relay.stats) for relay in relays]
-    (output / 'container-result.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
+    result_name = 'desktop-result.json' if report.get('linuxEnvironment') == 'user-desktop' else 'container-result.json'
+    (output / result_name).write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     completed = report['status'] in ('completed', 'completed-without-start', 'completed-startup-cancelled') \
         and report['ownedProcessesStopped'] and (core is None or (core.returncode == 0 and stopped))
     emit({'event': 'stopped' if completed else 'failed', 'id': stop_id, 'status': report['status'],
@@ -513,7 +568,7 @@ def ordinary_snapshot(pids, configs):
 def source_hashes():
     paths = [HERE / name for name in ('physical-linux.py', 'gnome-crossmachine-client.py',
              'gnome-qt-viewer-tests.py', 'gnome-provider-tests.py', 'x11-core-smoke.py',
-             'physical-preview.py', 'physical-preview.js')]
+             'physical-preview.py', 'physical-preview.js', 'physical-desktop.py')]
     paths += [p for p in sorted((HERE / 'gnome-provider').rglob('*')) if p.is_file() and '__pycache__' not in p.parts]
     return {str(p.relative_to(HERE)): sha(p) for p in paths}
 
@@ -544,7 +599,12 @@ def prepare(args):
     host_only()
     canonical_pin(args.mac_core_pin)
     canonical_pin(args.mac_viewer_pin)
-    require(re.fullmatch(r'sha256:[0-9a-f]{64}', args.image), 'Use an exact installed Docker image digest')
+    desktop = desktop_support() if getattr(args, 'desktop_session', None) else None
+    require(not desktop or (args.production_original_input and not args.desktop_preview and not args.image),
+            'Actual desktop preparation requires original input and excludes a container/preview')
+    if not desktop:
+        require(isinstance(args.image, str) and re.fullmatch(r'sha256:[0-9a-f]{64}', args.image),
+                'Use an exact installed Docker image digest')
     require(args.run.is_absolute() and not args.run.exists(), 'Run directory must be new and absolute')
     safe_mount(args.run)
     for path in (args.core, args.viewer):
@@ -553,13 +613,17 @@ def prepare(args):
             require(stream.read(4) == b'\x7fELF', 'Expected a Linux ELF executable')
     require(1 <= args.mac_core_port <= 65535 and 1 <= args.mac_viewer_port <= 65535
             and args.mac_core_port != args.mac_viewer_port, 'Distinct valid Mac ports required')
-    actual_image = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', args.image],
-                                           text=True, timeout=10).strip()
-    require(actual_image == args.image, 'Installed Docker image differs')
+    if not desktop:
+        actual_image = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', args.image],
+                                               text=True, timeout=10).strip()
+        require(actual_image == args.image, 'Installed Docker image differs')
+    else:
+        common = module('desktop_common', HERE / 'gnome-provider-tests.py')
+        desktop_before = desktop.inspect(api(), common, args.desktop_session)
     before = ordinary_snapshot(args.ordinary_pid, args.ordinary_config)
     os.umask(0o077)
     args.run.mkdir(mode=0o700)
-    container, token = 'deskflow-cross-' + secrets.token_hex(8), secrets.token_hex(16)
+    container, token = ('deskflow-desktop-' if desktop else 'deskflow-cross-') + secrets.token_hex(8), secrets.token_hex(16)
     for name in ('forward-core', 'forward-viewer'):
         directory = args.run / name
         directory.mkdir()
@@ -568,7 +632,7 @@ def prepare(args):
     desktop_preview = getattr(args, 'desktop_preview', False)
     require(not desktop_preview or original, 'Desktop preview requires the explicit production test plan')
     plan = {'version': 3 if original else 2, 'controlProtocol': 3 if original else 2,
-            **original_metadata(original), 'container': container, 'token': token,
+            **original_metadata(original), 'token': token,
             'runDirectory': str(args.run), 'coreExecutable': str(args.core), 'viewerExecutable': str(args.viewer),
             'linuxScreen': SCREEN, 'macCorePin': args.mac_core_pin, 'macViewerPin': args.mac_viewer_pin,
             'remoteSockets': {role: str(args.run / ('forward-' + role) / 'mac.sock') for role in ('core', 'viewer')},
@@ -576,18 +640,25 @@ def prepare(args):
             'remoteResults': str(args.run / 'results'), 'preparedWaitSeconds': PREPARED_SECONDS,
             'startupTimeoutSeconds': STARTUP_SECONDS, 'runningSeconds': RUNNING_SECONDS,
             'maximumRuntimeSeconds': RESOURCE_SECONDS, 'syntheticStartupInput': False,
-            'imageId': args.image, 'sourceHashes': source_hashes(),
+            'sourceHashes': source_hashes(),
             'binaryHashes': {'core': sha(args.core), 'viewer': sha(args.viewer)}, 'helperSha256': sha(Path(__file__)),
             'ordinaryPids': args.ordinary_pid, 'ordinaryConfigs': [str(p) for p in args.ordinary_config],
             'ordinaryAtPrepare': before}
-    arguments = container_command(plan) + ['--name', container + '-init', '--label', 'org.deskflow.crossmachine.run=' + token,
-                 args.image, 'python3', '/source/deploy/windowshare/physical-linux.py', 'init',
-                 '--run', '/run', '--viewer', '/viewer/' + args.viewer.name]
+    if desktop:
+        plan.update(linuxEnvironment='user-desktop', desktopRunName=container, desktopAtPrepare=desktop_before)
+        arguments = [sys.executable, str(Path(__file__).resolve()), 'init', '--run', str(args.run),
+                     '--viewer', str(args.viewer), '--desktop-session', args.desktop_session]
+    else:
+        plan.update(container=container, imageId=args.image)
+        arguments = container_command(plan) + ['--name', container + '-init', '--label', 'org.deskflow.crossmachine.run=' + token,
+                     args.image, 'python3', '/source/deploy/windowshare/physical-linux.py', 'init',
+                     '--run', '/run', '--viewer', '/viewer/' + args.viewer.name]
     try:
         with (args.run / 'identity-init.log').open('xb') as log:
             result = subprocess.run(arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, timeout=60)
     finally:
-        stop_owned_container({**plan, 'container': container + '-init'})
+        if not desktop:
+            stop_owned_container({**plan, 'container': container + '-init'})
     require(result.returncode == 0, f'Isolated identity generation failed with exit {result.returncode}')
     public = read_owned_json(args.run / 'public.json')
     plan.update({key: canonical_pin(public[key]) for key in ('corePin', 'viewerPin')})
@@ -616,12 +687,13 @@ def load_plan(run):
     require('version' in plan and 'controlProtocol' in plan, 'Physical plan lacks its route version')
     route_mode(plan)
     require(plan['runDirectory'] == str(run), 'Wrong physical plan directory')
-    require(re.fullmatch(r'deskflow-cross-[0-9a-f]{16}', plan['container'])
+    desktop = desktop_mode(plan)
+    require(re.fullmatch(r'deskflow-' + ('desktop' if desktop else 'cross') + '-[0-9a-f]{16}', owner_name(plan))
             and re.fullmatch(r'[0-9a-f]{32}', plan['token']), 'Invalid exact-owned container identity')
     for role in ('core', 'viewer'):
         require(plan['remoteSockets'][role] == str(run / ('forward-' + role) / 'mac.sock'), 'Wrong owned socket path')
         owner = read_owned_json(run / ('forward-' + role) / 'owner.json', 512)
-        require(owner == {'schema': 1, 'container': plan['container'], 'token': plan['token']}, 'Wrong forward owner')
+        require(owner == {'schema': 1, 'container': owner_name(plan), 'token': plan['token']}, 'Wrong forward owner')
     return plan
 
 
@@ -640,6 +712,8 @@ def run(args):
     host_only()
     plan = load_plan(args.run)
     original = route_mode(plan)
+    desktop = desktop_support() if desktop_mode(plan) else None
+    common = module('desktop_run_common', HERE / 'gnome-provider-tests.py') if desktop else None
     protocol = 3 if original else 2
     require(type(args.window_id) is int and 1 <= args.window_id <= 2**32 - 1, 'Explicit owned Mac window ID required')
     require(source_hashes() == plan['sourceHashes'], 'Fixture source changed after preparation')
@@ -647,6 +721,9 @@ def run(args):
             'Production binary changed after preparation')
     before = ordinary_snapshot(plan['ordinaryPids'], plan['ordinaryConfigs'])
     require(before == plan['ordinaryAtPrepare'], 'Ordinary state changed since preparation; prepare a fresh plan')
+    if desktop:
+        require(desktop.inspect(api(), common, plan['desktopAtPrepare']['sessionId']) == plan['desktopAtPrepare'],
+                'Actual desktop changed since preparation; prepare a fresh plan')
     with (args.run / 'supervisor-started.json').open('x') as marker:
         json.dump({'pid': os.getpid(), 'monotonic': time.monotonic()}, marker)
     output = args.run / 'results'
@@ -654,14 +731,21 @@ def run(args):
     report = {'version': protocol, **original_metadata(original),
               'status': 'failed', 'physicalAcceptance': 'not-assessed', 'syntheticInputSent': False,
               'ordinaryBefore': before, 'planSha256': sha(args.run / 'linux-plan.json'), 'commands': []}
-    arguments = container_command(plan)
-    arguments.insert(2, '-i')
-    arguments += ['--name', plan['container'], '--label', 'org.deskflow.crossmachine.run=' + plan['token'],
-                  plan['imageId'], 'python3', '/source/deploy/windowshare/physical-linux.py', 'session', '--run', '/run',
-                  '--core', '/core/' + Path(plan['coreExecutable']).name,
-                  '--viewer', '/viewer/' + Path(plan['viewerExecutable']).name,
-                  '--core-socket', '/forward-core/mac.sock', '--viewer-socket', '/forward-viewer/mac.sock',
-                  '--mac-core-pin', plan['macCorePin'], '--mac-viewer-pin', plan['macViewerPin'],
+    if desktop:
+        report.update(linuxEnvironment='user-desktop', userDesktopUsed=True, compositorOwned=False)
+        arguments = [sys.executable, str(Path(__file__).resolve()), 'session', '--run', str(args.run),
+                     '--core', plan['coreExecutable'], '--viewer', plan['viewerExecutable'],
+                     '--core-socket', plan['remoteSockets']['core'], '--viewer-socket', plan['remoteSockets']['viewer'],
+                     '--desktop-session', plan['desktopAtPrepare']['sessionId']]
+    else:
+        arguments = container_command(plan)
+        arguments.insert(2, '-i')
+        arguments += ['--name', plan['container'], '--label', 'org.deskflow.crossmachine.run=' + plan['token'],
+                      plan['imageId'], 'python3', '/source/deploy/windowshare/physical-linux.py', 'session', '--run', '/run',
+                      '--core', '/core/' + Path(plan['coreExecutable']).name,
+                      '--viewer', '/viewer/' + Path(plan['viewerExecutable']).name,
+                      '--core-socket', '/forward-core/mac.sock', '--viewer-socket', '/forward-viewer/mac.sock']
+    arguments += ['--mac-core-pin', plan['macCorePin'], '--mac-viewer-pin', plan['macViewerPin'],
                   '--window-id', str(args.window_id)]
     if original:
         arguments.append('--production-original-input')
@@ -672,11 +756,12 @@ def run(args):
     stop_id = None
     cleanup_errors = []
     try:
-        with (output / 'container-stderr.log').open('xb') as errors, \
+        with (output / ('desktop-stderr.log' if desktop else 'container-stderr.log')).open('xb') as errors, \
                 (output / 'control.jsonl').open('x', buffering=1) as transcript, contextlib.ExitStack() as resources:
             controls = Controls()
             resources.callback(controls.close)
-            child = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors)
+            child = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
+                                     start_new_session=True)
             selector = selectors.DefaultSelector()
             resources.callback(selector.close)
             selector.register(child.stdout, selectors.EVENT_READ)
@@ -693,6 +778,9 @@ def run(args):
                     if command['op'] == 'start':
                         require(ordinary_snapshot(plan['ordinaryPids'], plan['ordinaryConfigs']) == before,
                                 'Ordinary state changed before Start')
+                        if desktop:
+                            require(desktop.inspect(api(), common, plan['desktopAtPrepare']['sessionId']) ==
+                                    plan['desktopAtPrepare'], 'Actual desktop changed before Start')
                     if command['op'] == 'stop':
                         stop_id = command['id']
                     report['commands'].append(command)
@@ -723,7 +811,7 @@ def run(args):
                     terminal = value
                 else:
                     emit(value)
-            report['containerFinal'] = terminal
+            report['desktopFinal' if desktop else 'containerFinal'] = terminal
             require(child.wait(timeout=10) == 0, f'Container exit was nonzero: {child.returncode}')
             require(terminal.get('event') == 'stopped' and terminal.get('id') == stop_id
                     and terminal.get('lifecycleCompleted') is True, 'Container did not complete the requested stop')
@@ -744,11 +832,14 @@ def run(args):
                 safely_error = 'Container failed to exit after control closure'
                 cleanup_errors.append(safely_error)
         try:
-            stop_owned_container(plan)
-            report['ownedContainerStopped'] = True
+            if desktop:
+                report.update(desktop.cleanup(api(), common, plan))
+            else:
+                stop_owned_container(plan)
+                report['ownedContainerStopped'] = True
         except BaseException as error:
             cleanup_errors.append(str(error))
-            report['ownedContainerStopped'] = False
+            report['ownedProcessesStopped' if desktop else 'ownedContainerStopped'] = False
         if child is not None:
             try:
                 child.wait(timeout=5)
@@ -759,7 +850,7 @@ def run(args):
                 except subprocess.TimeoutExpired:
                     child.kill()
                     child.wait(timeout=3)
-            report['containerExit'] = child.returncode
+            report['controllerExit' if desktop else 'containerExit'] = child.returncode
             if child.stdout:
                 child.stdout.close()
         try:
@@ -768,29 +859,39 @@ def run(args):
         except BaseException as error:
             cleanup_errors.append(str(error))
             report['ordinaryPreserved'] = False
-    completed = report['status'] == 'completed' and not cleanup_errors and report['ordinaryPreserved'] \
-        and report['ownedContainerStopped'] and report.get('containerExit') == 0
+    cleanup_keys = ('ordinaryPreserved', 'ownedProcessesStopped', 'desktopRestored', 'controllerExit') if desktop else \
+        ('ordinaryPreserved', 'ownedContainerStopped', 'containerExit')
+    clean = (report.get('ownedProcessesStopped') is True and report.get('desktopRestored') is True and
+             report.get('controllerExit') == 0) if desktop else \
+        (report['ownedContainerStopped'] and report.get('containerExit') == 0)
+    completed = report['status'] == 'completed' and not cleanup_errors and report['ordinaryPreserved'] and clean
     report['lifecycleCompleted'] = completed
     report['status'] = 'completed' if completed else 'failed'
-    report['cleanup'] = {key: report.get(key) for key in ('ordinaryPreserved', 'ownedContainerStopped', 'containerExit')}
+    report['cleanup'] = {key: report.get(key) for key in cleanup_keys}
     report['cleanupErrors'] = cleanup_errors
     (output / 'result.json').write_text(json.dumps(report, indent=2, sort_keys=True) + '\n')
     emit({**(terminal or {}), 'event': 'stopped' if completed else 'failed', 'id': stop_id,
           'lifecycleCompleted': completed, 'physicalAcceptance': 'not-assessed', 'cleanup': report['cleanup'],
-          'failure': report.get('failure'), 'cleanupErrors': cleanup_errors, **original_metadata(original)})
+          'failure': report.get('failure'), 'cleanupErrors': cleanup_errors, **original_metadata(original),
+          **({'linuxEnvironment': 'user-desktop'} if desktop else {})})
     return 0 if completed else 1
 
 
 def cleanup(args):
     host_only()
     plan = load_plan(args.run)
-    stop_owned_container(plan)
+    desktop = desktop_support() if desktop_mode(plan) else None
+    if desktop:
+        common = module('desktop_cleanup_common', HERE / 'gnome-provider-tests.py')
+        restored = desktop.cleanup(api(), common, plan)
+    else:
+        stop_owned_container(plan)
     cross = module('physical_cleanup', HERE / 'gnome-crossmachine-client.py')
-    removed = {role: cross.cleanup_socket(args.run / ('forward-' + role), plan['container'], plan['token'])
+    removed = {role: cross.cleanup_socket(args.run / ('forward-' + role), owner_name(plan), plan['token'])
                for role in ('core', 'viewer')}
     preserved = ordinary_snapshot(plan['ordinaryPids'], plan['ordinaryConfigs']) == plan['ordinaryAtPrepare']
-    emit({'event': 'cleaned', 'container': plan['container'], 'forwardSocketsRemoved': removed,
-          'ordinaryPreserved': preserved})
+    emit({'event': 'cleaned', 'runName': owner_name(plan), 'forwardSocketsRemoved': removed,
+          'ordinaryPreserved': preserved, **(restored if desktop else {'container': plan['container']})})
     require(preserved, 'Ordinary state changed since preparation')
     return 0
 
@@ -830,7 +931,8 @@ def main():
     preparation.add_argument('--run', type=Path, required=True)
     preparation.add_argument('--core', type=lambda p: Path(p).resolve(strict=True), required=True)
     preparation.add_argument('--viewer', type=lambda p: Path(p).resolve(strict=True), required=True)
-    preparation.add_argument('--image', required=True)
+    preparation.add_argument('--image')
+    preparation.add_argument('--desktop-session', help='Use this active physical Wayland session, without a container')
     preparation.add_argument('--mac-core-pin', required=True)
     preparation.add_argument('--mac-viewer-pin', required=True)
     preparation.add_argument('--mac-core-port', type=int, default=24860)
@@ -851,6 +953,7 @@ def main():
     identity = modes.add_parser('init', help=argparse.SUPPRESS)
     identity.add_argument('--run', type=Path, required=True)
     identity.add_argument('--viewer', type=Path, required=True)
+    identity.add_argument('--desktop-session', help=argparse.SUPPRESS)
     native = modes.add_parser('session', help=argparse.SUPPRESS)
     native.add_argument('--run', type=Path, required=True)
     native.add_argument('--core', type=Path, required=True)
@@ -862,6 +965,7 @@ def main():
     native.add_argument('--window-id', type=int, required=True)
     native.add_argument('--production-original-input', action='store_true', help=argparse.SUPPRESS)
     native.add_argument('--desktop-preview', action='store_true', help=argparse.SUPPRESS)
+    native.add_argument('--desktop-session', help=argparse.SUPPRESS)
     args = parser.parse_args()
     def interrupted(signum, _frame):
         raise KeyboardInterrupt(f'Owned session interrupted by signal {signum}')

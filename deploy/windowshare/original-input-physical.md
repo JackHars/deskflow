@@ -52,7 +52,7 @@ python3 deploy/windowshare/original-input-physical.py freeze \
   --mac-plan /absolute/private/mac-preparation.json \
   --bundle '/absolute/frozen/Deskflow Seamless Experimental.app' \
   --source /absolute/frozen/windowshare-smoke-source \
-  --desktop-preview \
+  --linux-desktop \
   --output /absolute/private/mac-original-plan.json
 ```
 
@@ -64,32 +64,39 @@ requires the real Core's exact-library admission and authenticated companion
 bootstrap. Core launches Host through its genuine inherited private channel;
 the harness never launches a standalone original-input Host.
 
-On the Ubuntu Docker host, prepare a new v3 Linux run using the Mac plan's
-public `coreFingerprint` and `hostFingerprint`:
+On the actual Ubuntu computer, prepare a new v3 Linux run using the Mac plan's
+public `coreFingerprint` and `hostFingerprint`. Install the default-off provider
+and identify the active graphical session as described in
+[physical-desktop.md](physical-desktop.md). This is the required environment
+for the user's physical monitor acceptance:
 
 ```sh
 python3 deploy/windowshare/physical-linux.py prepare \
-  --production-original-input --desktop-preview \
+  --production-original-input --desktop-session LOCAL_GRAPHICAL_SESSION_ID \
   --run /absolute/new/private-original-run \
   --core /absolute/frozen/linux/bin/deskflow-core \
   --viewer /absolute/frozen/linux/deskflow-windowshare \
-  --image sha256:EXACT_INSTALLED_IMAGE_ID \
   --mac-core-pin MAC_CORE_SHA256 --mac-viewer-pin MAC_HOST_SHA256 \
   --ordinary-pid ORDINARY_DESKFLOW_PID \
   --ordinary-config /absolute/ordinary/Deskflow.conf
 ```
 
 Repeat the ordinary PID/config options for all relevant existing processes
-and settings. Use the audited GNOME 50/libei/Qt image described in
-[physical-linux.md](physical-linux.md); no packages or native sessions are
-installed on the ordinary desktop. Production startup requires the provider's
+and settings. This mode uses the existing physical GNOME Wayland desktop;
+the exported source appears on its actual monitor. Both plans must explicitly
+select `user-desktop`, and no container/image/preview may be substituted.
+Preparation is inert. The temporary provider session and experimental Linux
+Core/Viewer start only after the visible Start click. Production startup requires the provider's
 actual preparation, mapped-drain, routed-point and supported ordering-contract
 capabilities. Unsupported prerequisites fail the run. Preserve the full
-private Linux results and source/binary/image hashes. Copy only
+private Linux results and source/binary/desktop identity hashes. Copy only
 `linux-plan.json` to the Mac; no private key leaves either machine.
 
-The Ubuntu test session is isolated and headless: **its window does not appear
-on the ordinary Ubuntu monitor**. Both `--desktop-preview` options above make
+The older isolated diagnostic remains available with Mac `--desktop-preview`
+and Linux `--desktop-preview --image sha256:EXACT_INSTALLED_IMAGE_ID`, omitting
+both actual-desktop selectors. That session is headless: **its window does not
+appear on the ordinary Ubuntu monitor**, and it cannot satisfy actual-monitor
+acceptance. The two preview options make
 the actual test desktop and pointer visible in a separate view-only Mac window.
 Use that view while input is routed right. The visible original Mac source is
 not the Ubuntu desktop and must not be used to aim the remote pointer.
@@ -150,13 +157,15 @@ separately signed exact-library packages; ordinary ad-hoc CI packages cannot
 pass exact-library admission.
 
 1. Wait for the source's **Ready**, then click **Start** within its countdown.
-   Leave the window in place and wait for **Active** and the **Ubuntu test desktop — live view**.
+   Leave the Mac source in place and wait for **Active** and its shared window
+   on the actual Ubuntu monitor.
    Start checks both routing-hotkey registrations and
    launches the actual Linux Core/provider/Viewer. The 120-second session
    deadline cannot be extended or restarted.
 2. Press **Control+Option+Shift+Right**, release all modifiers, and dismiss
-   overview with Escape if needed. In the live desktop view, locate the exported
-   source and use the Ubuntu pointer shown there. Setup actions are retained as setup; they are not evidence of
+   overview with Escape if needed. Look at the physical Ubuntu monitor, locate
+   the shared test window, and click its text box using the Ubuntu pointer.
+   Setup actions are retained as setup; they are not evidence of
    successful original delivery.
 3. Prime the intended physical controls: click/release inside the exported
    source, press/release a, b, c, x and Shift, and finish a short scroll gesture.

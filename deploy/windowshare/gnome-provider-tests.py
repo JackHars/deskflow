@@ -132,6 +132,10 @@ class Processes:
         self.closed = True
         # Every signal is to a process group that this invocation created.
         for child in reversed(self.children):
+            # A child already reaped by its private IPC stop can no longer
+            # reserve its PID/group number. Never signal that old number.
+            if child.poll() is not None:
+                continue
             try:
                 os.killpg(child.pid, signal.SIGTERM)
             except ProcessLookupError:

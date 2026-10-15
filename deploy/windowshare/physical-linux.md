@@ -3,6 +3,13 @@
 
 # Disposable physical-input acceptance: Linux half
 
+For an attended test on the computer's **actual monitor**, use the explicit
+`prepare --production-original-input --desktop-session SESSION_ID` mode in
+[physical-desktop.md](physical-desktop.md). It uses the existing logged-in
+desktop, without starting a container, compositor, or Mac preview. The older
+isolated diagnostic described below remains the default; it does not establish
+physical-monitor acceptance.
+
 `physical-linux.py` runs the actual experimental Deskflow client and its
 provider-owned Qt viewer in a private, native headless GNOME 50 container. It
 never sends test EIS input. Original-input authorization remains off. An EIS

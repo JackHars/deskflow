@@ -69,6 +69,16 @@ class Gates(unittest.TestCase):
 
 
 class PlanModes(unittest.TestCase):
+    def test_user_desktop_cannot_silently_fall_back_to_a_container_or_preview(self):
+        plan = {'version': 3, 'controlProtocol': 3, **module.original_metadata(True),
+                'linuxEnvironment': 'user-desktop'}
+        self.assertTrue(module.desktop_mode(plan))
+        self.assertFalse(module.desktop_mode({'version': 2, 'controlProtocol': 2}))
+        for change in ({'version': 2}, {'desktopPreview': True}, {'container': 'wrong'},
+                       {'imageId': 'wrong'}, {'linuxEnvironment': 'unknown'}):
+            with self.subTest(change=change), self.assertRaises(RuntimeError):
+                module.desktop_mode({**plan, **change})
+
     def test_legacy_and_production_scopes_are_explicit_and_separate(self):
         self.assertFalse(module.route_mode({'version': 2, 'controlProtocol': 2}))
         original = {'version': 3, 'controlProtocol': 3, **module.original_metadata(True)}
@@ -149,6 +159,15 @@ class Lifetimes(unittest.TestCase):
                 now[0] = 280
                 with self.assertRaisesRegex(RuntimeError, '270 seconds'):
                     extended.check()
+
+    def test_reaped_child_never_receives_a_process_group_signal(self):
+        processes = self.cross.common.Processes(Path('/unused'), {})
+        child = Mock(pid=42)
+        child.poll.return_value = 0
+        processes.children.append(child)
+        with patch.object(self.cross.common.os, 'killpg') as signal_group:
+            processes.close()
+        signal_group.assert_not_called()
 
     def test_invalid_process_and_relay_bounds_fail_before_resources(self):
         for value in (0, 29, 601, True, 270.0, '270', float('inf')):
@@ -271,7 +290,7 @@ raise SystemExit(9)
 
 class Supervisor(unittest.TestCase):
     def drive(self, *, exit_code=0, changed_at_start=False, changed_at_exit=False, start=True, early_stop=False,
-              original=False, prepared_protocol=None):
+              original=False, prepared_protocol=None, user_desktop=False, desktop_changed=False):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run = Path(temporary.name)
@@ -290,6 +309,15 @@ class Supervisor(unittest.TestCase):
                 'ordinaryPids': [42], 'ordinaryConfigs': ['/tmp/config'], 'ordinaryAtPrepare': before,
                 'container': 'deskflow-cross-' + '1' * 16, 'token': '2' * 32,
                 'macCorePin': '3' * 64, 'macViewerPin': '4' * 64, 'imageId': 'sha256:' + '5' * 64}
+        desktop_before = {'sessionId': '2', 'shell': {'pid': 543}}
+        desktop = SimpleNamespace(inspect=Mock(side_effect=[desktop_before,
+                                  {} if desktop_changed else desktop_before] if start else [desktop_before]),
+                                  cleanup=Mock(return_value={'ownedProcessesStopped': True, 'desktopRestored': True}))
+        if user_desktop:
+            plan.pop('container')
+            plan.pop('imageId')
+            plan.update(linuxEnvironment='user-desktop', desktopAtPrepare=desktop_before,
+                        remoteSockets={'core': '/private/core.sock', 'viewer': '/private/viewer.sock'})
         controls = module.Controls(read)
         if early_stop:
             self.assertFalse(start)
@@ -300,6 +328,9 @@ class Supervisor(unittest.TestCase):
 
         def launch(_arguments, **kwargs):
             self.assertEqual('--production-original-input' in _arguments, original)
+            self.assertEqual('--desktop-session' in _arguments, user_desktop)
+            if user_desktop:
+                self.assertNotIn('docker', _arguments)
             child = real_popen([sys.executable, '-c', FAKE_CHILD, str(exit_code),
                                str(prepared_protocol or protocol)], **kwargs)
             children.append(child)
@@ -317,12 +348,17 @@ class Supervisor(unittest.TestCase):
                 patch.object(module, 'ordinary_snapshot', side_effect=snapshots) as audit, \
                 patch.object(module, 'container_command', return_value=[]), \
                 patch.object(module, 'stop_owned_container') as stop, \
+                patch.object(module, 'desktop_support', return_value=desktop), \
                 patch.object(module, 'Controls', return_value=controls), patch.object(module, 'emit', side_effect=reply), \
                 patch.object(module.subprocess, 'Popen', side_effect=launch):
             result = module.run(SimpleNamespace(run=run, window_id=42))
         self.assertTrue(all(p.poll() is not None for p in children))
         self.assertEqual(audit.call_count, 3 if start else 2)
-        stop.assert_called_once_with(plan)
+        if user_desktop:
+            stop.assert_not_called()
+            desktop.cleanup.assert_called_once()
+        else:
+            stop.assert_called_once_with(plan)
         return result, replies, json.loads((run / 'results/result.json').read_text())
 
     def test_stopped_success_requires_before_start_after_audits(self):
@@ -331,6 +367,29 @@ class Supervisor(unittest.TestCase):
         self.assertEqual([v['event'] for v in replies], ['prepared', 'ready', 'stopped'])
         self.assertEqual(replies[-1]['cleanup'], {'ordinaryPreserved': True, 'ownedContainerStopped': True, 'containerExit': 0})
         self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+
+    def test_physical_desktop_uses_no_container_and_reports_its_own_cleanup(self):
+        result, replies, report = self.drive(original=True, user_desktop=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(replies[-1]['cleanup'], {'ordinaryPreserved': True, 'ownedProcessesStopped': True,
+                                                'desktopRestored': True, 'controllerExit': 0})
+        self.assertEqual(report['linuxEnvironment'], 'user-desktop')
+        self.assertFalse(report['compositorOwned'])
+        self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+
+    def test_replaced_desktop_before_start_is_not_launched(self):
+        result, replies, report = self.drive(original=True, user_desktop=True, desktop_changed=True)
+        self.assertEqual(result, 1)
+        self.assertNotIn('ready', [r['event'] for r in replies])
+        self.assertIn('Actual desktop changed before Start', report['failure'])
+
+    def test_desktop_stop_before_start_and_nonzero_controller_exit(self):
+        result, replies, _ = self.drive(original=True, user_desktop=True, start=False, early_stop=True)
+        self.assertEqual(result, 0)
+        self.assertNotIn('ready', [r['event'] for r in replies])
+        result, replies, _ = self.drive(original=True, user_desktop=True, exit_code=7)
+        self.assertEqual(result, 1)
+        self.assertEqual(replies[-1]['cleanup']['controllerExit'], 7)
 
     def test_stop_without_start_is_clean_and_never_running(self):
         result, replies, _ = self.drive(start=False)

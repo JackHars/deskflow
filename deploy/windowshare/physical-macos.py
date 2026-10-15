@@ -472,8 +472,23 @@ def validate_plans(mac, plan, base, production=False, source=None, holding=False
         return support.validate(mac, plan, base, private_path, source, holding)
     require("routeMode" not in plan and "macOriginalInputConfigured" not in plan,
             "Legacy physical mode cannot consume a production plan")
+    require("linuxEnvironment" not in plan and "linuxEnvironment" not in mac,
+            "Actual desktop selection requires the production physical coordinator")
     require("recordingProfile" not in mac, "Legacy physical mode cannot select a production recording profile")
     return None
+
+
+def linux_cleanup_complete(plan, result):
+    cleanup = result.get('cleanup', {})
+    if result.get('lifecycleCompleted') is not True or cleanup.get('ordinaryPreserved') is not True:
+        return False
+    environment = plan.get('linuxEnvironment', 'isolated-container')
+    if environment == 'user-desktop':
+        return result.get('linuxEnvironment') == environment and \
+            cleanup.get('ownedProcessesStopped') is True and cleanup.get('desktopRestored') is True and \
+            type(cleanup.get('controllerExit')) is int and cleanup['controllerExit'] == 0
+    return environment == 'isolated-container' and cleanup.get('ownedContainerStopped') is True and \
+        type(cleanup.get('containerExit')) is int and cleanup['containerExit'] == 0
 
 
 def run(arguments):
@@ -502,6 +517,7 @@ def run(arguments):
                        "maximumSessionSeconds": session_seconds,
                        "hostOwnership": "authenticated direct packaged Core companion"})
         report["desktopPreviewConfigured"] = desktop_preview
+        report["linuxEnvironment"] = plan.get("linuxEnvironment", "isolated-container")
     atomic_json(output / "linux-plan.json", plan)
     atomic_json(output / "mac-plan.json", mac)
     if getattr(arguments, "validate_only", False):
@@ -770,6 +786,11 @@ def run(arguments):
                     report["linuxReady"].get("macOriginalInputConfigured") is True and
                     report["linuxReady"].get("productionPrerequisites", {}).get("inputPreparation") is True,
                     "Linux native production prerequisites were not observed")
+            if plan.get("linuxEnvironment") == "user-desktop":
+                require(report["linuxReady"].get("linuxEnvironment") == "user-desktop" and
+                        report["linuxReady"].get("compositorOwned") is False and
+                        report["linuxReady"].get("compositorPid") == plan["desktopAtPrepare"]["shell"]["pid"],
+                        "Test did not attach to the selected physical Ubuntu compositor")
         report["baseline"] = {"source": collector.snapshot(), "linux": driver.command("baseline")}
         if desktop_preview:
             frame_path, preview_receipt = output / "preview.frame", output / "preview-visible.json"
@@ -833,10 +854,7 @@ def run(arguments):
         report["linuxStop"] = driver.command("stop", check=False)
         linux_stopped = True
         require(linux.wait(timeout=15) == 0, "Linux controller did not exit successfully")
-        require(report["linuxStop"].get("lifecycleCompleted") is True and
-                report["linuxStop"].get("cleanup", {}).get("ordinaryPreserved") is True and
-                report["linuxStop"]["cleanup"].get("ownedContainerStopped") is True and
-                report["linuxStop"]["cleanup"].get("containerExit") == 0,
+        require(linux_cleanup_complete(plan, report["linuxStop"]),
                 "Linux lifecycle or ordinary installation audit failed")
         disconnected_at = time.monotonic()
 
