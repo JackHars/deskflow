@@ -54,8 +54,13 @@ points to the same backup. Actual free-space gain was 6,008,745,984 bytes
 (5.60 GiB), increasing available space from 8.20 to 13.80 GiB. This reduces
 storage pressure but does not establish capture recovery or physical acceptance.
 
-No physical test was launched by cleanup, and no new launch is authorized.
-Obtain fresh permission immediately before another physical launch.
+No physical test was launched by cleanup. Fresh attempt seventeen is prepared
+at `build/h04-r17-0zwgwnaz/`, using the unchanged current binaries, fresh private
+identities and jack's actual unlocked desktop session 2. Both plans validate;
+Mac permissions and ordinary-session conflict checks pass, and the packaged
+Core/Host admission probe passes in 20.16 seconds with native input hooks off.
+The shared-window test has not started and no new launch is authorized.
+Obtain fresh permission immediately before this physical launch.
 
 ## Actual-desktop attempt fifteen — 2026-10-15
 
