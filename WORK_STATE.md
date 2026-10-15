@@ -28,13 +28,30 @@ Ubuntu reports owned processes stopped, desktop restored and ordinary state
 preserved, with Core/controller exit 1. The archived Ubuntu evidence SHA-256 is
 `edac8375b48d5192e48012087fd401c7d26346adbaf91298722c7f2d654262bf`.
 
-No new attempt is prepared or authorized. A concrete storage-cleanup proposal
-is saved in `build/h04-r16-awg5w2ql/storage-cleanup-proposal.json`: archive and
-verify the 41 historical `build/packages/` entries on Ubuntu before removing
-their Mac copies (up to 5.61 GiB estimated). Current builds and all failed-run
-logs/receipts remain. The user has been asked to approve this removal; no
-package has moved or been deleted. Storage cleanup does not authorize a
-physical test. Obtain fresh permission immediately before another launch.
+The user clarified that they tried to press Record but the window shut down
+before they could reach it. This agrees with the absent recording request;
+it does not establish that input stopped first.
+
+With explicit cleanup permission, all 41 historical `build/packages/` entries
+were archived to jack and independently verified before removing the Mac copies.
+The 3,346 regular files, 717 symlinks, 1,740 directories and 5,840 extended
+attributes match contents, permissions, ownership and timestamps; the archive
+also preserves AppleDouble metadata. A second source inventory matched before
+removal. Current builds, failed-run records and ordinary settings remain;
+the current package/source and retained result-file hashes match.
+
+The archive is on `jack@192.168.1.12` at
+`/home/jack/src/deskflow-h04-20261015-zgta6i4f/historical-mac-packages-20261015-7dcdf12a/packages.tar.gz`.
+SHA-256: `3b60b8a3cae9a93d6160f4866a39d59efc63d5ecf3c86682b0232831311ef735`.
+It is 2,975,406,080 bytes, with its manifest, verifier, verification receipt,
+cleanup receipt and restore instructions beside it. Local receipts and restore
+instructions are in `build/h04-r16-awg5w2ql/`; `build/packages/ARCHIVE_RESTORE.md`
+points to the same backup. Actual free-space gain was 6,008,745,984 bytes
+(5.60 GiB), increasing available space from 8.20 to 13.80 GiB. This reduces
+storage pressure but does not establish capture recovery or physical acceptance.
+
+No physical test was launched by cleanup, and no new launch is authorized.
+Obtain fresh permission immediately before another physical launch.
 
 ## Actual-desktop attempt fifteen — 2026-10-15
 
@@ -2931,7 +2948,14 @@ The widget/application build uses the installed macOS 15.5 SDK for Qt's AGL link
   That includes preflight v2, selected-peer snapshots and the packaged trusted
   core/host handshake. The subsequent foundation work is recorded separately.
 
-## Local package
+## Historical local packages (archived)
+
+The `build/packages/` paths in this section are historical and now reside in
+the verified Ubuntu archive recorded above. Installed applications were not
+changed. The current physical-test package remains locally at
+`build/h04-late-target-94wwqjc4/mac-package/DeskflowSeamless-Core-Experimental.app`,
+with ZIP SHA-256
+`3a20163da3bc42706ee4f620d631229d886205079226b3bc3dfb7b658fb85c86`.
 
 The signed core-main bundle is
 `build/packages/x11-active-handoff-v2-20261012/DeskflowSeamless-Core-Experimental.app`,
