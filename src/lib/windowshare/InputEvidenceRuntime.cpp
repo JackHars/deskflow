@@ -320,7 +320,13 @@ void InputEvidenceRuntime::tick()
         m_recorder->stop();
       } else if (action == "close" && !m_closeSeen) {
         m_closeSeen = true;
-        QCoreApplication::quit();
+        // Only the native fixture accepts this command, after its terminal
+        // evidence is written and the coordinator has finished restoration.
+        // quit() asks the fixture's manual-close guard, which deliberately
+        // vetoes ordinary window closure while that coordinator is alive.
+        // This timer runs on the application thread; exit() ends its event
+        // loop directly, then main still flushes receipts and destroys Qt.
+        QCoreApplication::exit(0);
       }
     }
   } catch (...) {

@@ -2,6 +2,13 @@
 
 ## Current implementation — 2026-10-15
 
+Attended H04 setup exposed a short readiness wait and a fixture-close veto.
+The current follow-up adds an inert packaged code-admission diagnostic before
+the user sees Start, a fixed 30-second exact-library startup allowance, and
+explicit terminal fixture closure after cleanup. Every live input authority
+check remains required. Both attended attempts stopped before Active; see the
+latest `TESTING.md` entry for failures, regressions and the next physical run.
+
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed
 by nested/concurrent work; expiry exits only Core with code 71 and closes its

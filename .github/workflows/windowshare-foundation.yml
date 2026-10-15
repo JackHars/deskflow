@@ -315,7 +315,7 @@ jobs:
       - name: Verify the packaged private core and host handshake without input hooks
         run: |
           deploy/windowshare/package-macos.sh build/app build/core-package - build/integrated/bin/deskflow-core
-          python3 deploy/windowshare/launch-smoke.py build/core-package/DeskflowSeamless-Core-Experimental.app
+          python3 deploy/windowshare/launch-smoke.py build/core-package/DeskflowSeamless-Core-Experimental.app --reject-code-admission
       - name: Record verified Mac package provenance
         run: |
           mkdir -p build/ci-artifacts

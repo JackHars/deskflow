@@ -6,6 +6,7 @@
 #include "LocalInputPeerTrust.h"
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -513,7 +514,7 @@ bool admissionUntil(const std::function<bool()> &condition, int timeoutMs = 2000
   loop.exec();
   return condition();
 }
-int admissionHostFixture(QCoreApplication &application, int descriptor, bool expectedAdmission)
+int admissionHostFixture(QCoreApplication &application, int descriptor, bool expectedAdmission, int budgetMs)
 {
   QString error;
   const auto parent = localInputProcess(getppid());
@@ -523,7 +524,7 @@ int admissionHostFixture(QCoreApplication &application, int descriptor, bool exp
   std::unique_ptr<LocalInputCodeAdmission> guard;
   std::optional<LocalInputCodeAdmissionProof> retained;
   bool announced = false, closed = false, revokedAtClose = false;
-  channel->onAuthenticated = [&] { guard = LocalInputCodeAdmission::request(*channel, &error); };
+  channel->onAuthenticated = [&] { guard = LocalInputCodeAdmission::request(*channel, &error, budgetMs); };
   channel->onClosed = [&](QString) {
     closed = true;
     revokedAtClose = !retained || !retained->live();
@@ -546,12 +547,12 @@ int admissionHostFixture(QCoreApplication &application, int descriptor, bool exp
     output.flush();
   });
   poll.start();
-  QTimer::singleShot(25000, &application, [&] { application.exit(1); });
+  QTimer::singleShot(budgetMs + 10000, &application, [&] { application.exit(1); });
   const auto result = application.exec();
   check(result == 0 && announced && closed && revokedAtClose, "Real host admission/close lifecycle failed");
   return 0;
 }
-int admissionCoreFixture(bool expectedAdmission)
+int admissionCoreFixture(bool expectedAdmission, int budgetMs)
 {
   QString error;
   const auto trust = LocalInputPeerTrust::forPackagedPeer(LocalInputRole::Host, &error);
@@ -560,26 +561,33 @@ int admissionCoreFixture(bool expectedAdmission)
   Child child;
   pair.configureChild(child.process);
   child.process.start(
-      trust->executable(),
-      {"--admission-host", QString::number(pair.childDescriptor()), expectedAdmission ? "allow" : "deny"}
+      trust->executable(), {"--admission-host", QString::number(pair.childDescriptor()),
+                            expectedAdmission ? "allow" : "deny", QString::number(budgetMs)}
   );
   check(child.process.waitForStarted(5000), "Cannot launch real admission fixture host");
   const auto peer = localInputProcess(child.process.processId());
   check(peer && trust->verify(*peer), "Real admission fixture peer identity failed");
   auto channel = pair.adoptCore(*peer);
   check(admissionUntil([&] { return channel->authenticated(); }), "Real admission private handshake failed");
-  auto guard = LocalInputCodeAdmission::request(*channel, &error);
+  QElapsedTimer elapsed;
+  elapsed.start();
+  auto guard = LocalInputCodeAdmission::request(*channel, &error, budgetMs);
   check(bool(guard), qPrintable(error));
   QByteArray hostResult;
   check(
-      admissionUntil([&] {
-        hostResult += child.process.readAllStandardOutput();
-        return (guard->state() != LocalInputCodeAdmission::State::Pending && hostResult.contains('\n')) ||
-               child.process.state() == QProcess::NotRunning;
-      }),
+      admissionUntil(
+          [&] {
+            hostResult += child.process.readAllStandardOutput();
+            return (guard->state() != LocalInputCodeAdmission::State::Pending && hostResult.contains('\n')) ||
+                   child.process.state() == QProcess::NotRunning;
+          },
+          budgetMs + 5000
+      ),
       "Real asynchronous code admission timed out"
   );
   auto proof = guard->proof();
+  if (budgetMs != LocalInputCodeAdmission::defaultTimeoutMs)
+    QTextStream(stderr) << "Admission fixture: elapsed=" << elapsed.elapsed() << "ms budget=" << budgetMs << "ms\n";
   if (bool(proof) != expectedAdmission || child.process.state() == QProcess::NotRunning)
     QTextStream(stderr) << "Core admission: " << guard->error() << '\n' << child.process.readAllStandardError();
   check(bool(proof) == expectedAdmission, "Real core code-admission result differs from policy");
@@ -668,16 +676,24 @@ int main(int argc, char **argv)
   QCoreApplication application(argc, argv);
   try {
     const auto arguments = application.arguments();
-    if (arguments.size() == 3 && arguments[1] == "--admission-core") {
+    const auto admissionBudget = [&](qsizetype index) {
+      if (index == arguments.size())
+        return LocalInputCodeAdmission::defaultTimeoutMs;
+      bool ok = false;
+      const auto budget = arguments[index].toInt(&ok);
+      check(ok && budget >= 100 && budget <= 30000, "Invalid fixture admission budget");
+      return budget;
+    };
+    if ((arguments.size() == 3 || arguments.size() == 4) && arguments[1] == "--admission-core") {
       check(arguments[2] == "allow" || arguments[2] == "deny", "Invalid code-admission expectation");
-      return admissionCoreFixture(arguments[2] == "allow");
+      return admissionCoreFixture(arguments[2] == "allow", admissionBudget(3));
     }
-    if (arguments.size() == 4 && arguments[1] == "--admission-host") {
+    if ((arguments.size() == 4 || arguments.size() == 5) && arguments[1] == "--admission-host") {
       bool ok = false;
       const auto descriptor = arguments[2].toInt(&ok);
       check(ok && descriptor >= 3 && protectLocalInputDescriptor(descriptor), "Invalid fixture private descriptor");
       check(arguments[3] == "allow" || arguments[3] == "deny", "Invalid host code-admission expectation");
-      return admissionHostFixture(application, descriptor, arguments[3] == "allow");
+      return admissionHostFixture(application, descriptor, arguments[3] == "allow", admissionBudget(4));
     }
 #if defined(DESKFLOW_LOCAL_INPUT_PEER_TRUST_TESTING)
     if (arguments.size() == 2 && arguments[1] == "--reader-only") {

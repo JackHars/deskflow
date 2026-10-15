@@ -118,6 +118,21 @@ def core_arguments(mac, configuration):
     return [*mac['coreArgv'], '--windowshare-host-config=' + str(configuration)]
 
 
+def validate_admission_probe(value):
+    """Diagnostic readiness only; real startup independently rechecks admission."""
+    require(isinstance(value, dict) and
+            value.get('privateInputHandshake') is True and value.get('exactLibraryAdmission') is True and
+            value.get('companionStopped') is True and value.get('originalInputEnabled') is False and
+            value.get('nativeInputHooks') is False and 'error' not in value,
+            'Packaged code-admission diagnostic did not complete with input disabled')
+    for field in ('admissionElapsedMs', 'totalElapsedMs'):
+        require(type(value.get(field)) is int and 0 <= value[field] < 60000,
+                'Packaged code-admission diagnostic has invalid timing')
+    require(value['totalElapsedMs'] >= value['admissionElapsedMs'],
+            'Packaged code-admission diagnostic has reversed timing')
+    return value
+
+
 def source_identity(receipt, initial=None, holding=False):
     """Observe owned window identities; this never grants native input authority."""
     source = receipt.get('sourceWindowId')

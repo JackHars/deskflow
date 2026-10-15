@@ -58,11 +58,22 @@ void coreArguments()
   check(!ordinary.pair && !ordinary.probe && ordinary.hostConfig.isEmpty(), "Ordinary core created private IPC");
   const auto probe = Arguments{"core", "--windowshare-ipc-probe"}.core();
   check(probe.probe && probe.pair && probe.hostConfig.isEmpty(), "Core probe was not recognized");
+  check(!probe.codeAdmissionProbe && !ordinary.codeAdmissionProbe, "Ordinary launch requested code admission probe");
+  const auto admission = Arguments{"core", "--windowshare-code-admission-probe"}.core();
+  check(
+      admission.probe && admission.codeAdmissionProbe && admission.pair && admission.hostConfig.isEmpty(),
+      "Inert code-admission probe was not recognized"
+  );
   for (const auto &arguments :
        {QStringList{"core", "server", "--windowshare-ipc-probe"},
         {"core", "--windowshare-ipc-probe", "--help"},
         {"core", "-windowshare-ipc-probe"},
         {"core", "--windowshare-ipc-probe=1"},
+        {"core", "--windowshare-code-admission-probe", "server"},
+        {"core", "--windowshare-code-admission-probe", "--windowshare-ipc-probe"},
+        {"core", "--windowshare-code-admission-probe", "--windowshare-host-config=/tmp/a"},
+        {"core", "-windowshare-code-admission-probe"},
+        {"core", "--windowshare-code-admission-probe=1"},
         {"core", "--windowshare-host-config"},
         {"core", "--windowshare-host-config="},
         {"core", "--windowshare-host-config", "--help"},

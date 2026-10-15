@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputSession.h"
+#include "LocalInputCodeAdmission.h"
 #ifdef __APPLE__
 #include "platform/OriginalInputCaptureSource_mac.h"
 #endif
@@ -397,10 +398,12 @@ int localInputHostProbe(std::unique_ptr<LocalInputChannel> channel)
   bool authenticated = false, closed = false;
   channel->onAuthenticated = [&] { authenticated = true; };
   channel->onClosed = [&](QString) { closed = true; };
-  // A cold signed bundle can spend several seconds validating nested code
-  // before the other endpoint adopts its channel. Cover that bounded startup
-  // budget and orderly probe shutdown without changing authenticated liveness.
-  const bool finished = waitFor([&] { return closed; }, LocalInputCompanionLimits{}.startupMs + 5000);
+  // Also cover the optional Core code-admission probe before orderly shutdown.
+  // No input hooks or authority exist here; authenticated channel liveness
+  // retains its independent short deadline throughout this diagnostic wait.
+  const bool finished = waitFor(
+      [&] { return closed; }, LocalInputCompanionLimits{}.startupMs + LocalInputCodeAdmission::defaultTimeoutMs + 5000
+  );
   channel->onAuthenticated = {};
   channel->onClosed = {};
   channel->close();

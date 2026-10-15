@@ -116,9 +116,19 @@ The source is the only exported window. The loopback listeners use temporary
 private SSH sockets, and only the explicitly paired fresh TLS identities are
 approved. A second running Mac Core is refused to avoid overlapping capture.
 No input hooks or Linux native session start before the visible Start click.
+Before opening the test window, the coordinator runs the packaged Core's
+`--windowshare-code-admission-probe`. It authenticates the real companion,
+performs the production exact-library inspection under its existing deadline,
+and stops the companion with no input hooks, ordinary Core state or network
+listeners. Admission failure now stops unattended setup before asking for Start.
+This diagnostic does not supply authority to the later physical session, which
+authenticates and inspects its own newly started endpoints again. The probe is
+also available through `launch-smoke.py CORE_BUNDLE.app --code-admission` for
+separately signed exact-library packages; ordinary ad-hoc CI packages cannot
+pass exact-library admission.
 
 1. Wait for the source's **Ready**, then click **Start** within 90 seconds.
-   Wait for **Active**. Start checks both routing-hotkey registrations and
+   Leave the window in place and wait for **Active**. Start checks both routing-hotkey registrations and
    launches the actual Linux Core/provider/Viewer. The 120-second session
    deadline cannot be extended or restarted.
 2. Press **Control+Option+Shift+Right**, release all modifiers, and dismiss
@@ -156,6 +166,16 @@ The 30-second recording must begin with at least 35 seconds left in the
 visible session. There is no retry within a run. Start a new run with fresh
 plans/results after a failure. The source recorder has a bounded preparation
 lifetime too; an unusually slow setup can fail rather than silently reset it.
+After identifying the packaged Host child, the coordinator allows 50 seconds
+for 15-second child authentication and subsequent 30-second exact-library
+inspection plus scheduling grace. It still requires both
+success markers, the private IPC socket and both hotkeys; runtime admission
+uses a single absolute startup deadline with no retry or renewal. The original
+15-second inspection allowance expired during full-package concurrent startup
+on the Intel Mac; pending, expired or failed checks still provide no authority.
+Final fixture closure uses a
+separate explicit command after terminal evidence and restoration checks, so
+the manual-close safeguard cannot veto the coordinator's final cleanup.
 
 ## Optional H06 holding lifecycle
 

@@ -98,6 +98,8 @@ int main(int argc, char **argv)
   QApplication app(argc, argv);
 
 #ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputBootstrap->codeAdmissionProbe)
+    return localInputCodeAdmissionProbe(std::move(*inputBootstrap->pair));
   if (inputBootstrap->probe)
     return localInputCoreProbe(std::move(*inputBootstrap->pair));
 #endif

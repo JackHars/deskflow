@@ -5,6 +5,7 @@
 #include "InputEvidenceRuntime.h"
 #include "OriginalInputCapturedInbox.h"
 #include <QCoreApplication>
+#include <QEvent>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -28,6 +29,23 @@ struct InputEvidenceTestAccess
 };
 } // namespace deskflow::windowshare
 namespace {
+class QuitGuardApplication final : public QCoreApplication
+{
+public:
+  using QCoreApplication::QCoreApplication;
+  unsigned quitRequests = 0;
+
+protected:
+  bool event(QEvent *event) override
+  {
+    if (event->type() == QEvent::Quit) {
+      ++quitRequests;
+      return true; // Model the native fixture's deliberate manual-close veto.
+    }
+    return QCoreApplication::event(event);
+  }
+};
+
 void check(bool value, const char *message)
 {
   if (!value)
@@ -484,10 +502,74 @@ void privateConfiguration()
   inputEvidenceInstalled.store(nullptr);
   delete storage;
 }
+
+void explicitNativeClose(QuitGuardApplication &app)
+{
+  QTemporaryDir directory;
+  check(directory.isValid(), "close fixture directory failed");
+  const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+  const auto write = [&](const QString &path, const QJsonObject &value) {
+    QFile file(path);
+    check(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "close fixture write failed");
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    const auto bytes = QJsonDocument(value).toJson();
+    check(file.write(bytes) == bytes.size(), "close fixture short write");
+  };
+  const auto output = parent + "/evidence.jsonl", control = parent + "/control.json";
+  const auto config = parent + "/config.json";
+  write(
+      config, {{"version", 1},
+               {"role", "native"},
+               {"runId", "close-fixture"},
+               {"durationMs", 1000},
+               {"output", output},
+               {"control", control}}
+  );
+  auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+  auto *storage = &runtime->recorder();
+  const auto command = [&](const char *action) {
+    write(control, {{"version", 1}, {"runId", "close-fixture"}, {"command", action}});
+  };
+  bool endObserved = false;
+  QTimer observe;
+  QObject::connect(&observe, &QTimer::timeout, &app, [&] {
+    QFile file(output);
+    if (!file.open(QIODevice::ReadOnly))
+      return;
+    const auto rows = file.readAll();
+    if (!rows.contains("\"type\":\"end\""))
+      return;
+    endObserved = true;
+    observe.stop();
+    command("close");
+  });
+  observe.start(25);
+  QTimer::singleShot(0, &app, [&] {
+    // An ordinary quit must still be vetoed; the explicit close below is only
+    // legal after the unarmed recorder has emitted its terminal evidence.
+    QCoreApplication::quit();
+    command("stop");
+  });
+  QTimer deadline;
+  deadline.setSingleShot(true);
+  QObject::connect(&deadline, &QTimer::timeout, &app, [] { QCoreApplication::exit(91); });
+  deadline.start(2000);
+  const auto result = app.exec();
+  check(result == 0 && endObserved, "explicit terminal native close was blocked by a manual quit veto");
+  check(app.quitRequests == 1, "explicit close reused the ordinary vetoable quit request");
+  check(
+      storage->state() == InputEvidenceState::Denied && storage->loss() == InputEvidenceLoss::None &&
+          storage->written() == 0 && storage->drained(),
+      "unarmed native cleanup invented recording or lost terminal evidence"
+  );
+  runtime.reset();
+  inputEvidenceInstalled.store(nullptr);
+  delete storage;
+}
 } // namespace
 int main(int argc, char **argv)
 {
-  QCoreApplication app(argc, argv);
+  QuitGuardApplication app(argc, argv);
   try {
     baselinesAndLifecycle();
     stickyFailures();
@@ -496,6 +578,7 @@ int main(int argc, char **argv)
     revokeDuringDrain();
     nativeFields();
     privateConfiguration();
+    explicitNativeClose(app);
     std::puts("Bounded input evidence, actual portable queue mutations, native fields and strict opt-in config passed");
     return 0;
   } catch (const std::exception &error) {

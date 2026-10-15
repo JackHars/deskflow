@@ -34,6 +34,23 @@ CROSS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CROSS)
 require = CROSS.require
 MAX_SEQUENCE = 2**53 - 1
+# Child authentication has a 15-second deadline and subsequent exact-library
+# inspection has 30 seconds. Observe both plus scheduling grace; do not
+# shorten them to the generic ten-second polling timeout or renew either one.
+PRODUCTION_CORE_READY_SECONDS = 50
+
+
+def core_ready(text, ipc_ready, production):
+    if production:
+        require("window sharing code admission unavailable:" not in text and
+                "experimental window host stopped:" not in text,
+                "Production companion or exact library admission was refused")
+        if "trusted window host connected;" not in text or \
+                "window sharing exact library admission verified;" not in text:
+            return False
+    return ipc_ready and all(
+        re.search(r"registered hotkey .*macKey=" + str(key) + r" macMask=1a00\)", text)
+        for key in (123, 124))
 
 
 def digest(path):
@@ -569,6 +586,12 @@ def run(arguments):
         report["ordinaryMacConfigBefore"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
         report["remoteHostname"] = remote(["hostname"]).strip()
         host_executable = mac["hostArgv"][0]
+        if production:
+            # Fail unattended before showing Start when this exact production
+            # package cannot complete admission. This does not replace the
+            # independent live admission checks after the user's Start click.
+            report["codeAdmissionDiagnostic"] = original.validate_admission_probe(json.loads(command(
+                [mac["coreArgv"][0], "--windowshare-code-admission-probe"], timeout=60, env=environment)))
         report["permissions"] = json.loads(command([host_executable, "--probe"], env=environment))
         require(all(report["permissions"].get(key) is True
                     for key in ("accessibility", "screenCapture", "targetedPointer")),
@@ -667,20 +690,11 @@ def run(arguments):
                  (output / "host.log").read_text(), "Mac host listener")
             launch("core", mac["coreArgv"], env=environment)
 
-        def core_ready():
-            text = (output / "core.log").read_text()
-            if production:
-                require("window sharing code admission unavailable:" not in text and
-                        "experimental window host stopped:" not in text,
-                        "Production companion or exact library admission was refused")
-                if "trusted window host connected;" not in text or \
-                        "window sharing exact library admission verified;" not in text:
-                    return False
-            return Path(mac["coreIpcExpectedPath"]).is_socket() and all(
-                re.search(r"registered hotkey .*macKey=" + str(key) + r" macMask=1a00\)", text)
-                for key in (123, 124))
-
-        wait(core_ready, "fixed Option hotkeys and private Mac core IPC")
+        wait(lambda: core_ready((output / "core.log").read_text(),
+                                Path(mac["coreIpcExpectedPath"]).is_socket(), production),
+             "authenticated companion, exact library admission, fixed Option hotkeys and private Mac core IPC"
+             if production else "fixed Option hotkeys and private Mac core IPC",
+             PRODUCTION_CORE_READY_SECONDS if production else 10)
         if production:
             report["productionBootstrap"] = {"privateCompanionAuthenticated": True,
                                              "exactLibraryAdmissionObserved": True,
@@ -889,15 +903,18 @@ def run(arguments):
             report["sourceExit"] = stop_owned(owned.get("source"), "source", output, report)
             if report.get("sourceTerminationTimedOut"):
                 cleanup_errors.append("Source exceeded the termination deadline")
-            report["ordinaryMacConfigAfter"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
-            require(report["ordinaryMacConfigAfter"] == report.get("ordinaryMacConfigBefore"),
-                    "Ordinary Mac configuration changed")
         except Exception as error:
             cleanup_errors.append("Mac cleanup: " + str(error))
             try:
                 report["sourceFallbackExit"] = stop_owned(owned.get("source"), "source", output, report)
             except Exception as fallback:
                 cleanup_errors.append("Source fallback: " + str(fallback))
+        try:
+            report["ordinaryMacConfigAfter"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
+            require(report["ordinaryMacConfigAfter"] == report.get("ordinaryMacConfigBefore"),
+                    "Ordinary Mac configuration changed")
+        except Exception as error:
+            cleanup_errors.append("Ordinary Mac audit: " + str(error))
         if publisher:
             try:
                 publisher.close()

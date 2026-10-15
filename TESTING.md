@@ -4,6 +4,67 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Attended setup failures and startup/cleanup repairs — 2026-10-15
+
+The user confirmed they were at the Mac and clicked Start in two fresh H04
+sessions. Neither reached Active or armed evidence. These are **failed setup
+attempts, not H04 or P5 acceptance**. The first generic ten-second readiness
+wait ended before production exact-library admission completed. Its SSH
+connection also dropped during the move from WiFiman to the home LAN. Ubuntu
+`jack` was subsequently reached directly at its existing address; owned remote
+cleanup and ordinary configuration preservation were verified. The second run
+observed an explicit 15-second code-admission timeout with both runtime
+components present. Both attempts retain the source's changed frame rather
+than claiming restoration of a window the user moved during setup.
+
+Evidence: `build/h04-20261015-h9zilmyj/session-1/` and
+`build/h04-retry-20261015-91731y1_/session-1/`. The second run confirms Core exit
+0 through private IPC, its exact companion stopped, Linux container exit 0,
+ordinary Mac/Ubuntu configuration preserved, and source exit 0. The first
+source required termination because its manual-close veto rejected the
+coordinator's final `quit()`; that failure remains recorded.
+
+Repairs and verification:
+
+- Explicit native `close` after terminal evidence now ends the main event loop
+  directly. Manual window close still requests restoration. The regression
+  rejects ordinary Quit, stops an unarmed recorder, requires its terminal row,
+  then verifies explicit close exits successfully without inventing recording.
+- The one-shot exact-library inspection budget is now 30 seconds, within its
+  existing maximum. Both endpoints retain independent channel liveness and
+  all code/identity checks; pending, expired or failed inspection supplies no
+  authority. No worker retry, budget renewal or queue was added. The physical
+  coordinator observes the 15-second child startup plus 30-second admission
+  and five seconds of scheduling grace.
+- `--windowshare-code-admission-probe` exercises the actual packaged Core and
+  Host without input hooks, ordinary Core startup, exported windows or network
+  listeners. It reports elapsed times and clean companion shutdown. Physical
+  setup requires this unattended diagnostic before showing Start, then checks
+  the new physical endpoints independently. CI's ad-hoc package must reject
+  exact admission while still completing diagnostic cleanup.
+- PASS: local Mac evidence, bootstrap, code-admission, companion and peer-trust
+  suites; 56 coordinator regressions; formatting, whitespace and full REUSE
+  (1133/1133 files). Core, Host and the source fixture build locally.
+- PASS: home Ubuntu GCC ASan/UBSan evidence, bootstrap, code-admission and
+  companion suites plus all 56 coordinator regressions. `linux-final-init-results.json`
+  retains the exact source archive hash and four successful steps. The offline
+  container and temporary directory were removed. Use Docker `--init`: without
+  it, the nested parent-exit fixture left a zombie under Python PID 1 and failed
+  its disappearance check. Earlier attempts also retain a GCC `-O1` custom
+  allocator warning and missing Clang sanitizer runtime; the final GCC `-O0`
+  sanitizer run needs neither a warning suppression nor package installation.
+- PASS: the new Apple-issued exact-library package's inert admission probe,
+  private handshake and invalid-option rejection smoke. A separate ad-hoc copy
+  passes the inverse check: admission is rejected, input stays disabled and the
+  companion exits cleanly. Final signed ZIP SHA-256:
+  `c7d8aaae04afbd54c3edbecfa0a8c79d21ee528be1a0f2199372c8740b74cfa5`.
+
+The signed candidate package, logs, source snapshots and diagnostics live under
+`build/h04-retry-20261015-91731y1_/`. Earlier successful seven/eight-second
+diagnostics and a later 15-second expiration show why one fast probe did not
+establish reliable startup. Physical input, dragging, recovery and installation
+acceptance remain open; full upstream native/OS queue capacity is still uncertified.
+
 ## H11 physical recording profile — 2026-10-15
 
 Collection/source-fixture commit **`286328d055478692ea877c5d5d61d5c619e5093f`**

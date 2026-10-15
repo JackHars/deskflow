@@ -139,12 +139,16 @@ ParsedPeerPairs peerPairs(const QByteArray &json)
 LocalInputCoreBootstrap LocalInputCoreBootstrap::inspect(int argc, char *const argv[])
 {
   LocalInputCoreBootstrap result;
-  constexpr std::string_view probe = "--windowshare-ipc-probe", config = "--windowshare-host-config";
+  constexpr std::string_view probe = "--windowshare-ipc-probe", admission = "--windowshare-code-admission-probe",
+                             config = "--windowshare-host-config";
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
     if (related(argument, probe)) {
       require(argument == probe && argc == 2, "Use --windowshare-ipc-probe alone");
       result.probe = true;
+    } else if (related(argument, admission)) {
+      require(argument == admission && argc == 2, "Use --windowshare-code-admission-probe alone");
+      result.probe = result.codeAdmissionProbe = true;
     } else if (related(argument, config)) {
       require(result.hostConfig.isEmpty(), "Duplicate WindowShare host configuration");
       if (argument == config) {

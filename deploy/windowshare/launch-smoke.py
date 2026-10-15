@@ -23,7 +23,7 @@ def run(executable, arguments, *, success, descriptors=(), rejection=None):
             del environment[key]
     environment["QT_QPA_PLATFORM"] = "offscreen"
     result = subprocess.run([str(executable), *arguments], env=environment,
-                            pass_fds=descriptors, capture_output=True, text=True, timeout=45)
+                            pass_fds=descriptors, capture_output=True, text=True, timeout=60)
     if result.returncode < 0 or (result.returncode == 0) != success:
         raise RuntimeError(f"Unexpected exit {result.returncode}: {result.stdout[-1000:]} {result.stderr[-1000:]}")
     if rejection is not None and rejection not in result.stderr:
@@ -32,8 +32,10 @@ def run(executable, arguments, *, success, descriptors=(), rejection=None):
 
 
 def main():
-    if len(sys.argv) != 2:
-        raise RuntimeError("Usage: launch-smoke.py CORE_BUNDLE.app")
+    exact = len(sys.argv) == 3 and sys.argv[2] == "--code-admission"
+    denied = len(sys.argv) == 3 and sys.argv[2] == "--reject-code-admission"
+    if len(sys.argv) != 2 and not (exact or denied):
+        raise RuntimeError("Usage: launch-smoke.py CORE_BUNDLE.app [--code-admission | --reject-code-admission]")
     bundle = Path(sys.argv[1]).resolve()
     core = bundle / "Contents/MacOS/deskflow-core"
     host = bundle / "Contents/MacOS/deskflow-windowshare"
@@ -41,11 +43,24 @@ def main():
     report = json.loads(result.stdout)
     if report != {"privateInputHandshake": True, "companionStopped": True, "originalInputEnabled": False}:
         raise RuntimeError("Probe did not confirm a handshake and clean stop with input disabled")
+    if exact or denied:
+        result = run(core, ["--windowshare-code-admission-probe"], success=exact)
+        report = json.loads(result.stdout)
+        if (report.get("privateInputHandshake") is not True or report.get("exactLibraryAdmission") is not exact or
+                report.get("companionStopped") is not True or report.get("originalInputEnabled") is not False or
+                report.get("nativeInputHooks") is not False or
+                ("error" in report if exact else not report.get("error"))):
+            raise RuntimeError("Exact code-admission probe did not finish cleanly with input disabled")
 
     for arguments in (["--windowshare-ipc-probe", "server"],
                       ["--windowshare-ipc-probe", "--new-instance"],
                       ["-windowshare-ipc-probe"],
                       ["--windowshare-ipc-probe=true"],
+                      ["--windowshare-code-admission-probe", "server"],
+                      ["--windowshare-code-admission-probe", "--windowshare-ipc-probe"],
+                      ["--windowshare-code-admission-probe", "--windowshare-host-config=/nonexistent"],
+                      ["-windowshare-code-admission-probe"],
+                      ["--windowshare-code-admission-probe=true"],
                       ["client", "--windowshare-host-config=/nonexistent"],
                       ["--help", "--windowshare-host-config=/nonexistent"],
                       ["--windowshare-host-config=/a", "--windowshare-host-config=/b"]):

@@ -68,6 +68,46 @@ class HistoryTests(unittest.TestCase):
         module.ReceiptHistory().merge(receipt(request="stop", request_sequence=2))
 
 
+class CoreReadinessTests(unittest.TestCase):
+    hotkeys = "\n".join("registered hotkey test (macKey=" + str(key) + " macMask=1a00)"
+                        for key in (123, 124))
+    authenticated = "trusted window host connected;"
+    admitted = "window sharing exact library admission verified;"
+
+    def test_production_waits_for_every_admission_and_hotkey(self):
+        complete = self.hotkeys + self.authenticated + self.admitted
+        self.assertTrue(module.core_ready(complete, True, True))
+        self.assertFalse(module.core_ready(complete, False, True))
+        for marker in (self.authenticated, self.admitted, "macKey=123", "macKey=124", "macMask=1a00"):
+            with self.subTest(marker=marker):
+                self.assertFalse(module.core_ready(complete.replace(marker, ""), True, True))
+        self.assertTrue(module.core_ready(self.hotkeys, True, False))
+
+    def test_refusal_is_terminal_even_after_success_markers(self):
+        complete = self.hotkeys + self.authenticated + self.admitted
+        for failure in ("window sharing code admission unavailable:", "experimental window host stopped:"):
+            with self.subTest(failure=failure), self.assertRaisesRegex(RuntimeError, "refused"):
+                module.core_ready(complete + failure, True, True)
+
+    def test_unattended_probe_requires_inert_success_and_clean_stop(self):
+        validate = module.original_support().validate_admission_probe
+        report = dict(privateInputHandshake=True, exactLibraryAdmission=True, companionStopped=True,
+                      originalInputEnabled=False, nativeInputHooks=False, admissionElapsedMs=7000,
+                      totalElapsedMs=13000)
+        self.assertEqual(validate(report), report)
+        for field, value in list(report.items()):
+            bad = {**report, field: not value if type(value) is bool else True}
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                validate(bad)
+            missing = {key: item for key, item in report.items() if key != field}
+            with self.subTest(missing=field), self.assertRaises(RuntimeError):
+                validate(missing)
+        for bad in ({**report, 'error': ''}, {**report, 'admissionElapsedMs': 14000},
+                    {**report, 'totalElapsedMs': 60000}, None):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                validate(bad)
+
+
 class StatusTests(unittest.TestCase):
     def test_countdown_cannot_extend_or_restart(self):
         for session_seconds in (120, 150):

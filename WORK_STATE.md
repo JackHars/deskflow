@@ -1,5 +1,31 @@
 # Seamless Windows work state
 
+## Attended startup and cleanup follow-up — 2026-10-15
+
+The user returned to the Mac and clicked Start twice. Both fresh H04 attempts
+stopped before Active/evidence arm: first the coordinator's short startup wait,
+then the runtime's 15-second exact-library deadline. Ubuntu is now on the same
+home LAN; WiFiman is unnecessary. Remote cleanup, exact owned-process exits
+and ordinary configurations were checked after connectivity returned.
+
+The coordinator now checks actual packaged code admission unattended before
+opening the source, and independently checks the later physical endpoints.
+The runtime inspection has a single 30-second startup allowance with unchanged
+verification, liveness, worker and refusal rules. Explicit terminal fixture
+closure bypasses its manual-close veto only after restoration/evidence cleanup;
+ordinary window close still requests Stop. Configuration auditing runs even
+when fixture closure fails. New probe option combinations fail before startup.
+
+Five focused Mac suites and 56 coordinator tests pass. The home Ubuntu offline
+GCC ASan/UBSan evidence/bootstrap/admission/companion suites and 56 coordinator
+tests pass with Docker `--init`; full REUSE reports 1133/1133. Failed environment
+attempts and both attended failures remain in `TESTING.md` and
+`build/h04-retry-20261015-91731y1_/`. These checks do not close H04, P5, physical
+recovery or the native/OS queue certification gap. The new Apple-issued package
+passes exact admission, private handshake and invalid-option smoke; a separate
+ad-hoc copy rejects admission and shuts down cleanly. A fresh physical plan is
+ready for the newly signed package.
+
 ## H11 physical recording interval implemented — 2026-10-15
 
 Collection/source-fixture commit `286328d055478692ea877c5d5d61d5c619e5093f`

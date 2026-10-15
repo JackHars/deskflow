@@ -66,6 +66,10 @@ private:
 class LocalInputCodeAdmission final
 {
 public:
+  // Cold full bundles can exceed 15 seconds when both endpoints inspect their
+  // sealed dependencies concurrently. This is a one-shot startup allowance;
+  // it never renews liveness, authorizes input while pending or retries work.
+  static constexpr int defaultTimeoutMs = 30000;
   enum class State
   {
     Pending,
@@ -74,7 +78,7 @@ public:
     Revoked
   };
   static std::unique_ptr<LocalInputCodeAdmission>
-  request(LocalInputChannel &channel, QString *error = nullptr, int timeoutMs = 15000);
+  request(LocalInputChannel &channel, QString *error = nullptr, int timeoutMs = defaultTimeoutMs);
   ~LocalInputCodeAdmission();
   LocalInputCodeAdmission(const LocalInputCodeAdmission &) = delete;
   LocalInputCodeAdmission &operator=(const LocalInputCodeAdmission &) = delete;

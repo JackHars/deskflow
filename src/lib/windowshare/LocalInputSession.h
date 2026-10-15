@@ -75,6 +75,9 @@ private:
 // Diagnostic only: perform the real private handshake and shut down the owned
 // child. No Deskflow shared state, input hooks, network listeners or NativeHost.
 int localInputCoreProbe(LocalInputSocketPair pair);
+// Adds the production asynchronous exact-library check to the same inert
+// handshake. Its result is diagnostic only and never grants input authority.
+int localInputCodeAdmissionProbe(LocalInputSocketPair pair);
 int localInputHostProbe(std::unique_ptr<LocalInputChannel> channel);
 
 } // namespace deskflow::windowshare
