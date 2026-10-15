@@ -40,6 +40,16 @@ Collected Linux validation archive SHA-256:
 H04 input readiness and H06 hiding/restoration remain unaccepted. No new physical
 test has been launched by this work.
 
+Fresh preparation is `build/h06-r18-i25moopp/` (pointer
+`build/h06-r18-current.txt`), source commit `22d7695c0`. It freezes the rebuilt
+signed bundle and revised source, fresh private identities, explicit holding
+display/separate controls, no preview, and jack's existing unlocked session 2.
+Plan validation, permissions and conflict checks pass. The packaged admission
+probe passes in 10.81s with native input hooks disabled and its companion stopped.
+`prepared-launch-argv.json` is reviewable; `physicalLaunchAuthorized:false` remains
+in the preparation record. A fresh launch-permission question is pending. Do not
+reuse any earlier approval or describe this prepared run as launched/passed.
+
 ## Actual-desktop attempt seventeen and display clarification — 2026-10-15
 
 Fresh explicit permission launched `build/h04-r17-0zwgwnaz/` after the verified
