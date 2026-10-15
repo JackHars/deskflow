@@ -20,6 +20,12 @@ using namespace deskflow::windowshare;
 namespace deskflow::windowshare {
 struct InputEvidenceTestAccess
 {
+  static void preparationElapsed(InputEvidenceRuntime &runtime, std::uint64_t elapsedMs)
+  {
+    runtime.m_created = inputEvidenceNow() - elapsedMs * 1000000;
+    runtime.m_nextReadiness = 0;
+    runtime.tick();
+  }
   static std::uint64_t depth(const InputEvidenceRecorder &recorder, InputEvidenceQueue queue)
   {
     return recorder.m_queues[static_cast<std::size_t>(queue)].depth.load();
@@ -718,6 +724,70 @@ void explicitNativeClose(QuitGuardApplication &app)
   inputEvidenceInstalled.store(nullptr);
   delete storage;
 }
+
+void nativePreparationDeadline()
+{
+  QTemporaryDir directory;
+  check(directory.isValid(), "preparation fixture directory failed");
+  const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+  const auto config = parent + "/config.json";
+  for (const std::uint64_t budget : {180000, 600000}) {
+    const auto output = parent + "/output-" + QString::number(budget) + ".jsonl";
+    {
+      QFile file(config);
+      check(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "preparation config write failed");
+      file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      file.write(QJsonDocument(
+                     QJsonObject{
+                         {"version", 1},
+                         {"role", "native"},
+                         {"runId", "waiting-fixture"},
+                         {"durationMs", 1000},
+                         {"output", output},
+                         {"control", parent + "/control.json"}
+                     }
+      )
+                     .toJson());
+    }
+    for (const auto invalid : std::array<std::uint64_t, 3>{0, 600001, UINT64_MAX})
+      denied([&] { InputEvidenceRuntime::open(config, InputEvidenceRole::Native, invalid); });
+    for (const auto role : {InputEvidenceRole::Core, InputEvidenceRole::Host})
+      denied([&] { InputEvidenceRuntime::open(config, role, 600000); });
+    auto runtime = budget == 180000 ? InputEvidenceRuntime::open(config, InputEvidenceRole::Native)
+                                    : InputEvidenceRuntime::open(config, InputEvidenceRole::Native, budget);
+    auto *storage = &runtime->recorder();
+    InputEvidenceOwner binding;
+    binding.values[0] = 44;
+    binding.values[1] = 55;
+    storage->bindOwner(binding);
+    if (budget == 600000) {
+      for (const std::uint64_t elapsed : {180001, 300001, 599000}) {
+        InputEvidenceTestAccess::preparationElapsed(*runtime, elapsed);
+        check(
+            storage->state() == InputEvidenceState::Waiting && storage->loss() == InputEvidenceLoss::None &&
+                storage->written() == 0 && storage->readyOwner(),
+            "visible Start wait expired early or implicitly armed recording"
+        );
+      }
+    }
+    InputEvidenceTestAccess::preparationElapsed(*runtime, budget);
+    check(
+        storage->state() == InputEvidenceState::Denied && storage->loss() == InputEvidenceLoss::Deadline &&
+            storage->written() == 0,
+        "native preparation exceeded its one-shot bound"
+    );
+    runtime.reset();
+    inputEvidenceInstalled.store(nullptr);
+    delete storage;
+    QFile file(output);
+    check(file.open(QIODevice::ReadOnly), "preparation evidence absent");
+    const auto rows = file.readAll();
+    check(
+        rows.contains("\"type\":\"end\"") && !rows.contains("\"type\":\"arm\""),
+        "preparation expiry omitted terminal evidence or invented an arm"
+    );
+  }
+}
 } // namespace
 int main(int argc, char **argv)
 {
@@ -732,6 +802,7 @@ int main(int argc, char **argv)
     revokeDuringDrain();
     nativeFields();
     privateConfiguration();
+    nativePreparationDeadline();
     explicitNativeClose(app);
     std::puts("Bounded input evidence, actual portable queue mutations, native fields and strict opt-in config passed");
     return 0;

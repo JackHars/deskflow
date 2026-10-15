@@ -546,6 +546,56 @@ class ProductionPlans(unittest.TestCase):
         self.assertEqual(self.support.recording_times(frozen), (120, 150))
 
 
+class UnstartedEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.session = module.original_support().EvidenceSession(Path(self.temporary.name) / 'evidence',
+                                                                 module.atomic_json)
+        self.session.bind('native', 102, 7)
+        self.write({'type': 'header', 'schema': 'deskflow-input-evidence-v2', 'role': 'native',
+                    'runId': self.session.run_id, 'pid': '102', 'clockId': 'native-clock', 'queues': []})
+
+    def write(self, value):
+        path = self.session.readers['native'].path
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), 'ab') as stream:
+            stream.write(json.dumps(value).encode() + b'\n')
+
+    def end(self, **changes):
+        self.write({'type': 'end', 'timeNs': '0', 'sourceEndNs': '0', 'rows': '0',
+                    'state': 4, 'loss': 0, 'drained': True, **changes})
+
+    def test_cancelled_start_wait_needs_only_native_end_and_never_counts_as_measurement(self):
+        self.session.stop()
+        with self.assertRaisesRegex(RuntimeError, 'did not stop cleanly'):
+            self.session.finish_unstarted()
+        self.end()
+        result = self.session.finish_unstarted()
+        self.assertFalse(result['recordersArmed'])
+        self.assertEqual(result['recordersEnded'], ['native'])
+        self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+        self.assertEqual(result['recordingSeconds'], 0)
+        with self.assertRaisesRegex(RuntimeError, 'not fully armed'):
+            self.session.finish()
+        # A second runtime appearing is not a harmless pre-Start cancellation.
+        self.session.readers['core'].path.touch(mode=0o600)
+        with self.assertRaisesRegex(RuntimeError, 'another role started'):
+            self.session.finish_unstarted()
+
+    def test_deadline_loss_is_retained_in_pre_start_cleanup(self):
+        self.session.stop()
+        self.end(loss=9)
+        with self.assertRaisesRegex(RuntimeError, 'did not stop cleanly'):
+            self.session.finish_unstarted()
+
+    def test_visible_start_prevents_unstarted_cleanup(self):
+        self.session.start_boundary()
+        self.session.stop()
+        self.end()
+        with self.assertRaisesRegex(RuntimeError, 'cannot cover a started session'):
+            self.session.finish_unstarted()
+
+
 class EvidenceTests(unittest.TestCase):
     recording_seconds = 30
 

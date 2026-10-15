@@ -17,6 +17,14 @@ The explicit `h11` profile records 120 seconds inside a 150-second session.
 Duration alone does **not** establish H11's input workload, native delivery,
 queue certification or capture-to-display latency.
 
+Ready offers a separate five-minute countdown. The disposable native source
+uses an absolute ten-minute preparation watchdog to cover that wait, startup
+and priming; Core and Host retain their three-minute preparation watchdogs.
+Neither countdown extends a recording. The source requests foreground once,
+and initial readiness requires its own WindowServer on-screen visibility and
+settled frame. A pre-Start cancellation verifies only the native recorder's
+clean unarmed end and the absence of Core/Host evidence; it is not a measurement.
+
 ## Prepare the exact artifacts
 
 Use a frozen, separately packaged experimental Mac app with

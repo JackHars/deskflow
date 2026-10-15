@@ -1,5 +1,28 @@
 # Seamless Windows work state
 
+## Ready-window lifetime and visibility repair — 2026-10-15
+
+Attempt seven (`build/h04-r7-ptwmxdfb/session-1`) ended before any Start click:
+the native evidence recorder's 180-second preparation watchdog expired while
+the window offered a 300-second Ready wait. The user could not see the window
+after it closed. Native evidence retains Deadline loss 9 and no recorded rows.
+All owned processes stopped; exact remote cleanup preserved the ordinary apps.
+The old all-role evidence-cleanup timeout is retained in that failed result.
+
+The disposable native fixture now explicitly uses a one-shot 600-second
+preparation bound, matching the outer coordinator limit and covering Ready,
+startup and priming. Core/Host still use 180 seconds. Recording duration,
+explicit Start/Record requirements and authority checks are unchanged. The
+source requests foreground once and publishes its own WindowServer visibility;
+production readiness now requires that visibility as well as settled geometry.
+Pre-Start cancellation waits only for the launched native recorder, verifies
+its clean unarmed end and absence of other roles, and never claims a recording.
+
+The actual runtime deadline regression passes on Mac (0.78 s) and home Ubuntu
+ASan/UBSan; all 63 Python coordinator checks pass. Source builds and is signed.
+Evidence is under `build/h04-ready-u_nmzsoi/`; fresh attempt eight is prepared
+under `build/h04-r8-5bjw64xh/`. H04 and physical roadmap acceptance remain open.
+
 ## Concurrent preparation Event accounting — 2026-10-15
 
 Attempt six (`build/h04-r6-e1zqbfc2/session-1`) received the user's Start and

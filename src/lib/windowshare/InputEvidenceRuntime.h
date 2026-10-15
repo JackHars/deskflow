@@ -15,7 +15,10 @@ namespace deskflow::windowshare {
 class InputEvidenceRuntime final : public QObject
 {
 public:
-  static std::unique_ptr<InputEvidenceRuntime> open(const QString &path, InputEvidenceRole role);
+  // Only the disposable native fixture may allow extra time for its visible
+  // Start button. This one-shot preparation budget never extends recording.
+  static std::unique_ptr<InputEvidenceRuntime>
+  open(const QString &path, InputEvidenceRole role, std::uint64_t preparationTimeoutMs = 180000);
   ~InputEvidenceRuntime() override;
   InputEvidenceRecorder &recorder() const
   {
@@ -25,6 +28,7 @@ public:
   bool requestRecord(const QString &privateNewPath);
 
 private:
+  friend struct InputEvidenceTestAccess;
   InputEvidenceRuntime() = default;
   void tick();
   void drain();
@@ -35,6 +39,7 @@ private:
   QTimer m_timer;
   QString m_run, m_control;
   std::uint64_t m_duration = 0, m_rows = 0, m_bytes = 0, m_nextReadiness = 0, m_created = 0;
+  std::uint64_t m_preparationTimeout = 0;
   bool m_armSeen = false, m_stopSeen = false, m_endWritten = false, m_closeSeen = false, m_recordRequested = false;
 };
 } // namespace deskflow::windowshare

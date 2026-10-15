@@ -130,8 +130,14 @@ QJsonArray numbers(const auto &values)
   return array;
 }
 } // namespace
-std::unique_ptr<InputEvidenceRuntime> InputEvidenceRuntime::open(const QString &path, InputEvidenceRole role)
+std::unique_ptr<InputEvidenceRuntime>
+InputEvidenceRuntime::open(const QString &path, InputEvidenceRole role, std::uint64_t preparationTimeoutMs)
 {
+  require(
+      preparationTimeoutMs > 0 && preparationTimeoutMs <= 600000 &&
+          (role == InputEvidenceRole::Native || preparationTimeoutMs == 180000),
+      "Only the native fixture may change its bounded preparation wait"
+  );
   const auto config = readPrivate(path, 8192);
   require(
       config.size() == 6 && config["version"].isDouble() && config["version"].toDouble() == 1 &&
@@ -176,6 +182,7 @@ std::unique_ptr<InputEvidenceRuntime> InputEvidenceRuntime::open(const QString &
   result->m_control = control;
   result->m_duration = static_cast<std::uint64_t>(duration) * 1000000;
   result->m_created = inputEvidenceNow();
+  result->m_preparationTimeout = preparationTimeoutMs * 1000000;
   QJsonArray queues;
   for (std::size_t i = 0; i != InputEvidenceRecorder::queueCount; ++i)
     if (recorder->expectedQueue(static_cast<InputEvidenceQueue>(i)))
@@ -296,7 +303,7 @@ void InputEvidenceRuntime::tick()
     if (m_recorder->loss() != InputEvidenceLoss::None)
       status["failure"] = failureDetails(*m_recorder);
     write(status);
-    if (now - m_created > 180000000000ULL) {
+    if (now - m_created >= m_preparationTimeout) {
       m_recorder->fail(InputEvidenceLoss::Deadline);
       m_recorder->stop();
     }

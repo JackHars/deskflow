@@ -370,35 +370,15 @@ private:
     const bool controlVisible = controlSettled && control.onScreen && m_controlWindow->isVisible() &&
                                 nativeMessage<BOOL>(controlWindow, "isVisible") &&
                                 !nativeMessage<BOOL>(controlWindow, "isMiniaturized");
-    QJsonObject frame;
-    if (ownId > 0) {
-      const auto windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, CGWindowID(ownId));
-      if (windows) {
-        for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
-          const auto info = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(windows, i));
-          const auto ownerValue = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowOwnerPID));
-          const auto numberValue = static_cast<CFNumberRef>(CFDictionaryGetValue(info, kCGWindowNumber));
-          int owner = 0, number = 0;
-          CGRect bounds{};
-          if (ownerValue && numberValue && CFNumberGetValue(ownerValue, kCFNumberIntType, &owner) &&
-              owner == getpid() && CFNumberGetValue(numberValue, kCFNumberIntType, &number) && number == ownId &&
-              CGRectMakeWithDictionaryRepresentation(
-                  static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds)), &bounds
-              ))
-            frame = {
-                {"x", bounds.origin.x},
-                {"y", bounds.origin.y},
-                {"width", bounds.size.width},
-                {"height", bounds.size.height}
-            };
-        }
-        CFRelease(windows);
-      }
-    }
+    const auto source = observeOwnedWindow(ownId);
+    const auto &frame = source.frame;
     const auto expected = m_window ? m_window->frameGeometry() : QRect();
     const bool settled = !frame.isEmpty() && frame["x"].toDouble() == expected.x() &&
                          frame["y"].toDouble() == expected.y() && frame["width"].toDouble() == expected.width() &&
                          frame["height"].toDouble() == expected.height();
+    const bool sourceVisible = settled && source.onScreen && m_window->isVisible() &&
+                               nativeMessage<BOOL>(ownWindow, "isVisible") &&
+                               !nativeMessage<BOOL>(ownWindow, "isMiniaturized");
     // WindowServer can briefly report a transformed frame during the initial
     // show animation. Latch only the requested Qt frame, not that transient.
     if (m_originalFrame.isEmpty() && settled)
@@ -418,6 +398,7 @@ private:
         {"controlFrame", control.frame},
         {"controlOriginalFrame", m_originalControlFrame},
         {"controlVisible", controlVisible},
+        {"sourceVisible", sourceVisible},
         {"nativePendingDropped", QString::number(m_nativePendingDropped)},
         {"ready", !m_originalFrame.isEmpty() && settled},
         {"title", m_window ? m_window->windowTitle() : QString()},
@@ -827,7 +808,10 @@ int main(int argc, char **argv)
   std::unique_ptr<InputEvidenceRuntime> evidence;
   try {
     if (!evidencePath.isEmpty())
-      evidence = InputEvidenceRuntime::open(evidencePath, InputEvidenceRole::Native);
+      // The fixture exists during Ready (up to five minutes), preparation and
+      // the active session. Core/Host retain their ordinary three-minute wait;
+      // this absolute fixture-only limit matches the coordinator's outer bound.
+      evidence = InputEvidenceRuntime::open(evidencePath, InputEvidenceRole::Native, 600000);
   } catch (...) {
     return 2;
   }
@@ -875,6 +859,17 @@ int main(int argc, char **argv)
     recorder.watchControlWindow(controls.get());
   }
   field->setFocus();
+  if (manualMode) {
+    QTimer::singleShot(0, &app, [&] {
+      // Present only this disposable application's own windows, once. Never
+      // steal focus again during physical input or synthesize a Start click.
+      nativeMessage<void>(nativeApplication(), "activateIgnoringOtherApps:", YES);
+      window.raise();
+      auto *target = controls ? controls.get() : &window;
+      target->raise();
+      target->activateWindow();
+    });
+  }
   const int result = app.exec();
   app.removeNativeEventFilter(&recorder);
   app.removeEventFilter(&recorder);

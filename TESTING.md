@@ -4,6 +4,26 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 Ready wait and source visibility — 2026-10-15
+
+Attempt seven failed before Start (`build/h04-r7-ptwmxdfb/session-1`): the
+native recorder's three-minute preparation limit was shorter than the new
+five-minute Ready countdown. Its terminal evidence has Deadline loss 9 and
+zero rows. All owned processes stopped; exact remote cleanup preserved the
+ordinary apps. The user reported that the already-closed window was not visible.
+
+The native fixture now has an explicit absolute ten-minute preparation budget;
+Core/Host retain three minutes and measured duration remains unchanged. Tests
+exercise the actual timer at 180001, 300001, 599000 and 600000 ms, verify default
+180000 ms expiry, reject invalid/non-native overrides and require an unarmed
+terminal record. Mac recorder tests pass (0.78 s), and the home Ubuntu
+ASan/UBSan recorder suite passes. All 63 Python coordinator checks pass,
+including clean native-only pre-Start cancellation and retention of deadline
+failure. The window requests foreground once; initial production readiness
+also checks its own on-screen and non-minimized state. Human visibility still
+requires observation. Evidence: `build/h04-ready-u_nmzsoi/`; next fresh run:
+`build/h04-r8-5bjw64xh/`. This is a harness repair, not physical acceptance.
+
 ## H04 concurrent Event preparation repair — 2026-10-15
 
 Attempt six: **failed preparation; no physical acceptance**. The user clicked

@@ -378,6 +378,23 @@ class EvidenceSession:
                 'observerProvenance': 'not-assessed',
                 'logs': {role: str(reader.path) for role, reader in self.readers.items()}}
 
+    def finish_unstarted(self):
+        """Describe a cleanly cancelled Start wait without asserting a measurement."""
+        require(self.stopped and self.baseline is None and not self.attempted and not self.armed and
+                set(self.pids) == {'native'}, 'Unstarted cleanup cannot cover a started session')
+        self.poll()
+        native = self.readers['native']
+        require(native.header and native.end and not native.arm and not native.buffer and
+                native.end.get('state') == 4 and type(native.end.get('loss')) is int and native.end['loss'] == 0 and
+                native.end.get('drained') is True and unsigned(native.end.get('rows')) == 0 and
+                unsigned(native.end.get('sourceEndNs')) == 0 and
+                all(not reader.path.exists() and reader.header is None
+                    for role, reader in self.readers.items() if role != 'native'),
+                'Unstarted recorder did not stop cleanly or another role started')
+        return {'runId': self.run_id, 'recordersArmed': False, 'recordersEnded': ['native'],
+                'physicalAcceptance': 'not-assessed', 'recordingSeconds': 0,
+                'logs': {'native': str(native.path)}}
+
 
 def stop_core(process, endpoint, inspector, expected, timeout=12):
     """Stop only the retained Mac child through its kernel-identified Qt IPC peer."""

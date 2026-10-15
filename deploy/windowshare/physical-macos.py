@@ -627,6 +627,8 @@ def run(arguments):
             if not data or data.get("ready") is not True or data.get("windowId", 0) <= 0 or \
                     not data.get("frame") or data["frame"] != data.get("originalFrame"):
                 return None
+            if production and data.get("sourceVisible") is not True:
+                return None
             if holding and (data.get("controlVisible") is not True or not data.get("controlFrame") or
                             data["controlFrame"] != data.get("controlOriginalFrame")):
                 return None
@@ -820,9 +822,11 @@ def run(arguments):
         if evidence:
             try:
                 evidence.stop()
-                CROSS.wait_for(lambda: (evidence.poll(), all(reader.end for reader in evidence.readers.values()))[1],
+                CROSS.wait_for(lambda: (evidence.poll(),
+                                        all(reader.end for reader in evidence.readers.values()) if started else
+                                        evidence.readers["native"].end)[1],
                                "evidence recorder stop", timeout=2)
-                report["inputEvidence"] = evidence.finish()
+                report["inputEvidence"] = evidence.finish() if started else evidence.finish_unstarted()
             except Exception as error:
                 cleanup_errors.append("Input evidence: " + str(error))
         if driver and not linux_stopped and owned["linux"].poll() is None:
