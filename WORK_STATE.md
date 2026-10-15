@@ -1,5 +1,45 @@
 # Seamless Windows work state
 
+## Seamless test placement and handoff diagnosis — 2026-10-15
+
+The user requests the original Mac window hidden while it is used on jack's
+Ubuntu monitor. Prepare the next attended run in explicit H06 holding-display
+mode, with separate persistent Mac controls, actual-desktop mode and no Mac
+desktop preview. This is a change to the test setup; the existing holding-display
+implementation still needs physical hiding/restoration acceptance. Ask for fresh
+permission immediately before launch.
+
+The source instructions now require moving the Ubuntu pointer into the shared
+text box and clicking/releasing twice before typing. The former instructions
+typed first and did not establish the mapped pointer position or a fresh button
+boundary. This correction does not prove the cause of attempt seventeen's
+missing readiness. Both of its sealed cutoff attempts were canceled; the many
+busy viewport messages were background observations, not proof of failed input
+drain. Preserve that uncertainty.
+
+Added real production GNOME coverage for focused `DICS` acquisition after the
+existing first-click `DIPM` promotion and exact cleanup. It passes with the
+previous executables and the container's supported Mutter build. Rebuilt Linux
+Core/Viewer then pass with read-only mounts of the exact Mutter/clutter libraries
+used by jack's desktop, at Qt scales 1 and 1.25. All native runs use isolated
+container compositors, private buses and synthetic protocol correlation; none
+uses the user's desktop or establishes physical Mac input acceptance. Both new
+direct cutoffs obtain exact mapped seals and acknowledge cleanup; Core exits 0.
+
+Core now logs the first terminal capture/preparation failure, and the Linux
+backend retains the provider's bounded drain/map refusal reason in its log.
+These diagnostics do not change admission checks or extend deadlines. Evidence:
+`build/h04-handoff-zzbhm4sr/`. Mac Server/coordinator/preflight CTests pass (23.31s);
+the same Linux suites pass (15.91s); the Python wire self-tests pass (9 cases).
+Rebuilt Core/Host and the new signed Mac package pass packaging checks. The
+first packaging invocation lacked `MACDEPLOYQT` and exited before creating an
+output; the retry explicitly selected the build's Qt 6.8.3 deployment tool.
+Collected Linux validation archive SHA-256:
+`71b0e27cb66a7b6be8420b21f3435327822d35f5940cab7a07d3d809defa5eab`.
+
+H04 input readiness and H06 hiding/restoration remain unaccepted. No new physical
+test has been launched by this work.
+
 ## Actual-desktop attempt seventeen and display clarification — 2026-10-15
 
 Fresh explicit permission launched `build/h04-r17-0zwgwnaz/` after the verified

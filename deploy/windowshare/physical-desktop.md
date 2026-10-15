@@ -24,6 +24,13 @@ control window. Its hiding and restoration need their own physical verification;
 a visible-source H04 result cannot establish either. Explain the selected mode
 before launch so duplicate content is not mistaken for another remote desktop.
 
+For the requested seamless acceptance run, use `freeze --linux-desktop
+--holding-display`, and pass `--holding-display` to `physical-macos.py` as well.
+After Start and the first painted Ubuntu frame, the original moves to the
+private holding display. Only the separate Mac controls stay visible. If hiding
+cannot be verified, stop and retain the failure; do not describe a visible
+source fallback as seamless acceptance. Stop must restore the original window.
+
 ## One-time preparation
 
 The logged-in user must have an active, unlocked local GNOME 50 Wayland session,
@@ -74,8 +81,13 @@ The wrapper does not synthesize input, replace the native protocol, or grant
 delivery authority. Only the disposable Mac source is exported.
 
 After Active, look at the Ubuntu monitor. Switch with
-Control+Option+Shift+Right, release the modifiers, and click the test window's
-text box there. Follow its priming/Record sequence, staying on the Ubuntu route.
+Control+Option+Shift+Right and release every key. Move the Ubuntu pointer into
+the shared text box, then click and release twice. The first release establishes
+the observed button boundary; the next press can acquire the original-input
+route at that exact point. Follow its priming/Record sequence with the pointer
+inside the text box, staying on the Ubuntu route. Typing before positioning
+the pointer can use the older forwarding route and does not establish mapped
+original-input readiness.
 Control+Option+Shift+Left returns to the Mac. Never treat missing focus, absent
 windows or a failed Record request as successful delivery.
 

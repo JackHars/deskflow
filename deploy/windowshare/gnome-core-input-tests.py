@@ -620,6 +620,28 @@ def run(arguments):
                 report["freshAfterCleanup"], report["positiveIntervalClosed"] = fresh, closed
                 report["finalHostResume"] = exact_forwarding(peer, core, host, route_request(prepared, 2, "viewer"))
                 report["coreResponses"] = exact_transcript(peer.events(), origin, binding)
+                # Keyboard and scroll acquisition use DICS directly when the
+                # Viewer already has focus. Promotion alone cannot exercise
+                # this distinct production EiComputer/provider entry point.
+                direct_route = route_request(prepared, 3, "original")
+                report["directAllAcknowledged"] = exact_forwarding(peer, core, host, direct_route)
+                direct = (3, GENERATION, origin[2], origin[3] + 1, 1,
+                          prepared["session"], prepared["epoch"], 3, prepared["focusRequest"],
+                          prepared["focusRevision"], prepared["geometry"], 1, prepared["connection"])
+                start = len(peer.events())
+                sent = peer.send(b"DICS" + CUTOFF.pack(*direct) + struct.pack(">Hii", 250, *point))
+                payload, receipt = next_packet(peer, core, ("CIMS", "CICR"), start,
+                                               "direct focused mapped seal")
+                direct_mapped = sealed_result(payload)
+                mapped_matches(direct_mapped, prepared, direct, contract)
+                require(receipt["time"] < sent["time"] + .25,
+                        "Direct mapped cutoff renewed its inherited deadline")
+                report["directMapped"] = direct_mapped
+                report["directHostResume"] = exact_forwarding(peer, core, host,
+                                                              route_request(prepared, 3, "viewer"))
+                peer.send(b"DICX" + CUTOFF.pack(*direct))
+                report["directCleanup"] = cutoff_receipt(bytes.fromhex(
+                    resumed_packet(peer, core, direct, start)["hex"]))
             logs = log_text(core_log)
             require(peer.connections == 1 and logs.count("connected experimental GNOME input session and owned Wayland viewer") == 1
                     and logs.count("connected to server") == 1 and "experimental GNOME session stopped:" not in logs

@@ -2205,8 +2205,10 @@ void Server::flushOriginalBeforeSelection()
   m_originalDraining = draining;
 }
 
-void Server::cancelOriginalDispatch() noexcept
+void Server::cancelOriginalDispatch(const char *reason) noexcept
 {
+  if (!m_originalDispatchTerminal)
+    LOG_WARN("original input dispatch stopped: %s", reason);
   deskflow::windowshare::inputEvidenceInvalidate(deskflow::windowshare::InputEvidenceLoss::PipelineRevoked);
   m_originalDispatchTerminal = true;
   const auto owners = m_originalOwners;
@@ -2292,7 +2294,7 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
   if (!*lifetime)
     return;
   if (!m_originalInputCaptured->live() || (m_originalInputRoutes && !m_originalInputRoutes->live()))
-    cancelOriginalDispatch();
+    cancelOriginalDispatch("capture or route inbox revoked");
   while (auto captured = m_originalInputCaptured->pop()) {
     if (!dispatcher)
       continue;
@@ -2439,10 +2441,11 @@ void Server::drainOriginalInput(OriginalClock::time_point now)
       if (!m_originalDispatchTerminal && front.route.stamp && found == m_originalCompleted.end() &&
           now < front.deadline)
         break;
-      if (!m_originalDispatchTerminal &&
-          ((found == m_originalCompleted.end() && now >= front.deadline) ||
-           (found != m_originalCompleted.end() && found->second.receivedAt > front.deadline)))
-        cancelOriginalDispatch();
+      if (!m_originalDispatchTerminal && found == m_originalCompleted.end() && now >= front.deadline)
+        cancelOriginalDispatch("translated input has no completed capture before its deadline");
+      if (!m_originalDispatchTerminal && found != m_originalCompleted.end() &&
+          found->second.receivedAt > front.deadline)
+        cancelOriginalDispatch("completed capture arrived after its translated input deadline");
       front.captureResolved = true;
       if (!m_originalDispatchTerminal && found != m_originalCompleted.end()) {
         const auto part = front.route.stamp.part;
@@ -2645,7 +2648,7 @@ bool Server::executeOriginalInput(
   if (ticket && (!eligible || now >= deadline)) {
     pending.preparation = 0;
     if (now >= deadline)
-      cancelOriginalDispatch();
+      cancelOriginalDispatch("input handoff preparation expired");
     suppress();
     dispatcher->cancelPreparation(ticket);
     observation.decision.outcome = OriginalInputRouteOutcome::Failed;
@@ -2699,7 +2702,11 @@ bool Server::executeOriginalInput(
                                                            : result.ticket == 0;
     if (!result.wellFormed() || !identity || std::max(now, OriginalClock::now()) >= deadline) {
       pending.preparation = 0;
-      cancelOriginalDispatch();
+      cancelOriginalDispatch(
+          !result.wellFormed() ? "input dispatcher returned an invalid result"
+          : !identity          ? "input dispatcher changed its preparation identity"
+                               : "input dispatcher returned after its preparation deadline"
+      );
       suppress();
       discard();
       observation.decision.outcome = OriginalInputRouteOutcome::Failed;

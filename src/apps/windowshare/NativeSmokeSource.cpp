@@ -641,12 +641,13 @@ private:
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
       if (m_recordInput && m_sessionSeconds == 120)
         m_instructions->setText(
-            "1. Ctrl+Option+Shift+Right, release all modifiers, then press Escape once.\n"
-            "2. Type a, Shift+b, c; hold x for 1 second. Click/drag inside this window and scroll both ways; release "
-            "everything.\n"
-            "3. Press Return in the text box to request recording; wait for Recording. Stay on this route.\n"
-            "4. Repeat those inputs for 30 seconds; stay here until Recording complete.\n"
-            "5. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+            "1. Ctrl+Option+Shift+Right, then release all keys. Look at the Ubuntu monitor.\n"
+            "2. Move its pointer into the Ubuntu text box. Click and release twice, then press Escape.\n"
+            "3. Type a, Shift+b, c; hold x for 1 second. Drag inside the text box and scroll both ways. Release "
+            "everything. Keep the pointer inside the text box.\n"
+            "4. Press Return to request recording; wait for Recording. Stay on the Ubuntu route.\n"
+            "5. Repeat those inputs for 30 seconds; stay here until Recording complete.\n"
+            "6. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
         );
       else
         m_instructions->setText(

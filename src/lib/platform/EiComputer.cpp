@@ -1738,6 +1738,10 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
                     segment.seal()->binding() == *m_gnomePrefixBinding && segment.seal()->live();
           }
           if (!valid) {
+            LOG_WARN(
+                "GNOME original input batch refused: %.160s",
+                update->error.empty() ? "mapped receipts are missing, changed or no longer live" : update->error.c_str()
+            );
             cancelGnomeEiPrefixObservation();
             return windowshare::InputCutoffState::Denied;
           }
@@ -1771,6 +1775,10 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
         if (update->request != mapped.providerRequest || !update->segment || update->segment->binding() != binding ||
             !update->segment->live() || !update->segment->seal() ||
             update->segment->seal()->binding() != *m_gnomePrefixBinding || !update->segment->seal()->live()) {
+          LOG_WARN(
+              "GNOME original input map refused: %.160s",
+              update->error.empty() ? "mapped receipt is missing, changed or no longer live" : update->error.c_str()
+          );
           cancelGnomeEiPrefixObservation();
           return windowshare::InputCutoffState::Denied;
         }
@@ -1819,6 +1827,11 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
       if (update->request != mapped.providerRequest || !update->segment || update->segment->binding() != binding ||
           !update->segment->live() || !update->segment->senderOrdering() ||
           !update->segment->senderOrdering()->live()) {
+        LOG_WARN(
+            "GNOME original input drain refused: %.160s",
+            update->error.empty() ? "drain receipt or sender ordering is missing, changed or no longer live"
+                                  : update->error.c_str()
+        );
         cancelGnomeEiPrefixObservation();
         return windowshare::InputCutoffState::Denied;
       }

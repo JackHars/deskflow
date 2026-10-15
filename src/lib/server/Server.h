@@ -518,7 +518,7 @@ private:
   );
   void suppressOriginalInput(const PendingInput &pending, const deskflow::windowshare::OriginalInputCaptured *captured);
   void executeLegacyInput(const PendingInput &pending);
-  void cancelOriginalDispatch() noexcept;
+  void cancelOriginalDispatch(const char *reason = "capture or routing authority ended") noexcept;
   void cancelInFlightOriginal();
   void flushOriginalBeforeSelection();
   void retireOriginalCapture(const deskflow::windowshare::OriginalInputCaptured &captured);
