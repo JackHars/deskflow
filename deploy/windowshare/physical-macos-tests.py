@@ -620,6 +620,14 @@ class EvidenceTests(unittest.TestCase):
             self.session.poll()
         self.assertTrue(self.session.attempted)
 
+    def test_preparation_failure_names_the_process_and_queue_without_arming(self):
+        self.write('core', {'type': 'readiness', 'timeNs': '100', 'readyCandidate': False, 'loss': 1,
+                            'failure': {'site': 'queue-mutation', 'queue': 'capture'}})
+        with self.assertRaisesRegex(RuntimeError, 'core evidence failed during preparation: loss=1.*capture'):
+            self.session.poll()
+        self.assertFalse(self.session.attempted)
+        self.assertFalse(any(path.exists() for path in self.session.controls.values()))
+
     def test_candidate_change_during_the_three_independent_arm_checks_fails(self):
         self.session.start_boundary()
         self.request()

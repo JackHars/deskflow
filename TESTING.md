@@ -4,6 +4,42 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Recorder publication overlap repair — 2026-10-15
+
+Third attended H04 attempt: **failed setup, physical acceptance not assessed**.
+`build/h04-r3-spns1sz_/session-1/` records a successful inert admission probe
+(6.931 s inspection, 12.247 s total), followed by Core recorder `Contention`
+during real preparation. No recorders armed and Linux native input did not start.
+Core/source exited 0; the exact companion and owned container stopped; ordinary
+Mac/Ubuntu configuration hashes were preserved. Source movement during setup
+remains recorded as a restoration failure. No failure is trimmed into a pass.
+
+The recorder's scope-long counter lock could collide with a legitimate SPSC
+consumer after publication. The three native rings now commit counters before
+publishing availability/free space, while a separate atomic activity guard
+covers the whole native operation. Start and terminal checks require both
+empty counters and no in-flight activity. Genuine contention, ordering loss
+or a racing measurement boundary still denies diagnostics. The first failure's
+site and queue are published atomically; the coordinator now names the role
+and details instead of only reporting generic readiness failure.
+
+Evidence under `build/h04-recorder-20261015-ayzo9bsd/`:
+
+- PASS: Mac recorder regression reproducing producer/consumer publication
+  overlap, exact intermediate depths, incomplete start and delayed drain.
+- PASS: Mac private-channel suite and four ASan/UBSan input, routing, native
+  field and capture suites. Core, Host and source fixture build successfully.
+- PASS: home Ubuntu GCC ASan/UBSan recorder and private-channel suites
+  (23.81 s combined), 58 coordinator and 40 normalizer tests. The container used
+  `--init`, no network or desktop/device mounts; its temporary tree was removed.
+- PASS: separately signed Apple-issued exact-library package verification.
+  The initial package invocation lacked its Qt tool path and stopped before
+  creating output; the corrected invocation used the build's Qt 6.8.3 tool.
+- Prior runtime `58ab63674`: all six hosted jobs in run `38760298734` passed.
+  This hosted result does not cover the subsequent recorder repair.
+
+The new physical session is pending. H04/P5 and later attended gates remain open.
+
 ## Attended setup failures and startup/cleanup repairs — 2026-10-15
 
 The user confirmed they were at the Mac and clicked Start in two fresh H04

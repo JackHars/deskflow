@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## Recorder publication overlap follow-up — 2026-10-15
+
+The third attended H04 attempt (`build/h04-r3-spns1sz_/session-1`) stopped
+during Preparing with Core recorder loss `Contention`, before Active or arm.
+Its inert packaged admission probe had passed. Core and source exited 0,
+the authenticated companion stopped, remote cleanup was rechecked, and ordinary
+Mac/Ubuntu settings were preserved. The moved source frame remains a failed
+restoration check. H04 acceptance is still open.
+
+The recorder held its counter lock across SPSC publication, allowing a legitimate
+consumer to collide with a producer finishing its operation. The capture,
+translation and completed-copy rings now commit diagnostic counters before
+publishing availability/free space. A separate atomic activity guard remains
+through the full mutation so arm/drain cannot mistake in-flight work for an
+empty queue. Genuine counter/journal contention still denies the one-shot run.
+First-failure site and queue are atomically retained and surfaced by the harness.
+
+The deterministic two-thread publication/baseline/drain regression and Mac
+channel tests pass; four Mac input/capture suites pass under ASan/UBSan.
+Home Ubuntu's recorder/channel ASan/UBSan suites and 98 Python coordinator/
+normalizer tests pass in an offline disposable container. The exact source
+snapshot and logs are under `build/h04-recorder-20261015-ayzo9bsd/`.
+A fresh signed candidate and new physical preparation are staged. A rerun is
+required; these checks do not establish physical input or roadmap acceptance.
+
 ## Attended startup and cleanup follow-up — 2026-10-15
 
 The user returned to the Mac and clicked Start twice. Both fresh H04 attempts

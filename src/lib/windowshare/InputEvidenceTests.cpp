@@ -12,6 +12,7 @@
 #include <QTemporaryDir>
 #include <cstdio>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 using namespace deskflow::windowshare;
@@ -159,6 +160,11 @@ void stickyFailures()
   );
   concurrent->endMutation(InputEvidenceQueue::Capture, 0, 0);
   check(concurrent->loss() == InputEvidenceLoss::Contention && !concurrent->arm(100), "contention silently recovered");
+  check(
+      concurrent->failureSite() == InputEvidenceFailureSite::QueueMutation &&
+          concurrent->failureQueue() == InputEvidenceQueue::Capture,
+      "first contention lost its exact failure context"
+  );
   auto active = core();
   active->beginCaptureActivity();
   check(!active->arm(1000000000), "capture before first queue escaped arm baseline");
@@ -231,6 +237,75 @@ void stickyFailures()
       full->loss() == InputEvidenceLoss::BufferFull && full->written() == InputEvidenceRecorder::capacity,
       "bounded recorder overwrote or hid loss"
   );
+}
+void publicationBoundaries()
+{
+  auto recorder = core();
+  inputEvidenceInstalled.store(recorder.get());
+  struct Reset
+  {
+    ~Reset()
+    {
+      inputEvidenceInstalled.store(nullptr);
+    }
+  } reset;
+  // Reproduce the legitimate SPSC overlap: after publishing one record, its
+  // consumer can finish before the producer returns from its native scope.
+  // The old scope-long counter lock denied the run at that exact boundary.
+  for (const auto queue :
+       {InputEvidenceQueue::Capture, InputEvidenceQueue::Translation, InputEvidenceQueue::Completed}) {
+    {
+      InputEvidenceMutation producer(queue, recorder.get(), 1, 0);
+      producer.commit();
+      bool consumerSawReady = true;
+      std::thread consumer([&] {
+        {
+          InputEvidenceMutation retirement(queue, recorder.get(), 0, 1);
+          retirement.commit();
+        }
+        consumerSawReady = recorder->readyOwner().has_value();
+      });
+      consumer.join();
+      check(!consumerSawReady, "published-but-active producer escaped the empty start boundary");
+      check(recorder->loss() == InputEvidenceLoss::None, "legal publication overlap poisoned preparation");
+    }
+    check(recorder->readyOwner().has_value(), "completed publication did not become ready");
+  }
+  check(recorder->arm(1000000000), "publication preparation did not arm");
+  {
+    InputEvidenceMutation producer(InputEvidenceQueue::Capture, recorder.get(), 1, 0);
+    producer.commit();
+    std::thread consumer([&] {
+      InputEvidenceMutation retirement(InputEvidenceQueue::Capture, recorder.get(), 0, 1);
+      retirement.commit();
+    });
+    consumer.join();
+    recorder->stop();
+    recorder->finish();
+    check(recorder->state() == InputEvidenceState::Draining, "active publication escaped terminal drain");
+  }
+  recorder->finish();
+  check(
+      recorder->state() == InputEvidenceState::Stopped && recorder->loss() == InputEvidenceLoss::None,
+      "completed concurrent publication did not drain cleanly"
+  );
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> counts;
+  while (const auto row = recorder->pop())
+    if (row->queue == InputEvidenceQueue::Capture)
+      counts.emplace_back(row->enqueued, row->retired);
+  check(
+      counts == std::vector<std::pair<std::uint64_t, std::uint64_t>>{{0, 0}, {1, 0}, {1, 1}, {1, 1}},
+      "publication accounting omitted, reordered or aggregated an intermediate depth"
+  );
+
+  auto active = core();
+  inputEvidenceInstalled.store(active.get());
+  {
+    InputEvidenceMutation unfinished(InputEvidenceQueue::Capture, active.get(), 0, 0);
+    unfinished.commit();
+    check(!active->arm(1000000000), "empty counters hid an unfinished native mutation at arm");
+  }
+  check(active->loss() == InputEvidenceLoss::Baseline, "unfinished mutation arm was not terminal");
 }
 void unboundedEventMetrics()
 {
@@ -573,6 +648,7 @@ int main(int argc, char **argv)
   try {
     baselinesAndLifecycle();
     stickyFailures();
+    publicationBoundaries();
     unboundedEventMetrics();
     actualPortableQueues();
     revokeDuringDrain();

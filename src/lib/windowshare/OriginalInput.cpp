@@ -342,6 +342,7 @@ bool OriginalInputStream::push(const OriginalInputRecord &record) noexcept
   m_lastSequence = record.sequence;
   m_lastTimestamp = record.sourceTimestampNs;
   m_epoch.m_state->published.store(record.sequence, std::memory_order_release);
+  evidence.commit();
   m_written.store(written + 1, std::memory_order_release);
   return m_epoch.live();
 }
@@ -355,6 +356,7 @@ std::optional<OriginalInputDelivery> OriginalInputStream::pop() noexcept
     return std::nullopt;
   InputEvidenceMutation evidence(InputEvidenceQueue::Capture, this, 0, 1);
   OriginalInputDelivery result{m_records[read % capacity], m_epoch};
+  evidence.commit();
   m_read.store(read + 1, std::memory_order_release);
   return result.live() ? std::optional<OriginalInputDelivery>(std::move(result)) : std::nullopt;
 }

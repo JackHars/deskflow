@@ -71,6 +71,15 @@ enum class InputEvidenceState : std::uint8_t
   Stopped,
   Denied
 };
+enum class InputEvidenceFailureSite : std::uint8_t
+{
+  Unspecified,
+  OwnerBind,
+  OwnerRevoke,
+  QueueInitialize,
+  QueueMutation,
+  JournalReserve
+};
 enum class InputEvidenceKind : std::uint8_t
 {
   Source,
@@ -153,6 +162,7 @@ public:
         m_eventObserver{this, initializeEventQueue, observeEvent}
   {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
     static_assert(std::atomic<InputEvidenceRecorder *>::is_always_lock_free);
   }
   InputEvidenceRecorder(const InputEvidenceRecorder &) = delete;
@@ -166,19 +176,37 @@ public:
   }
   InputEvidenceLoss loss() const noexcept
   {
-    return m_loss.load(std::memory_order_acquire);
+    return static_cast<InputEvidenceLoss>(m_failure.load(std::memory_order_acquire) & 0xff);
+  }
+  InputEvidenceFailureSite failureSite() const noexcept
+  {
+    return static_cast<InputEvidenceFailureSite>((m_failure.load(std::memory_order_acquire) >> 8) & 0xff);
+  }
+  InputEvidenceQueue failureQueue() const noexcept
+  {
+    return static_cast<InputEvidenceQueue>((m_failure.load(std::memory_order_acquire) >> 16) & 0xff);
   }
   InputEvidenceRole role() const noexcept
   {
     return m_role;
   }
-  void fail(InputEvidenceLoss reason) noexcept
+  void fail(
+      InputEvidenceLoss reason, InputEvidenceFailureSite site = InputEvidenceFailureSite::Unspecified,
+      InputEvidenceQueue queue = InputEvidenceQueue::Count
+  ) noexcept
   {
     if ((state() == InputEvidenceState::Stopped || state() == InputEvidenceState::Denied) &&
         reason != InputEvidenceLoss::Output)
       return;
-    auto expected = InputEvidenceLoss::None;
-    m_loss.compare_exchange_strong(expected, reason, std::memory_order_acq_rel);
+    if (reason == InputEvidenceLoss::None)
+      return;
+    // Publish the first reason and its scalar context together. Producers do
+    // no formatting, allocation or logging, and a later failure cannot replace
+    // the event that actually invalidated this diagnostic run.
+    std::uint32_t expected = 0;
+    const auto failure = static_cast<std::uint32_t>(reason) | (static_cast<std::uint32_t>(site) << 8) |
+                         (static_cast<std::uint32_t>(queue) << 16);
+    m_failure.compare_exchange_strong(expected, failure, std::memory_order_acq_rel);
   }
   bool recording() noexcept
   {
@@ -193,7 +221,7 @@ public:
   void bindOwner(const InputEvidenceOwner &owner) noexcept
   {
     if (m_ownerBusy.test_and_set(std::memory_order_acquire)) {
-      fail(InputEvidenceLoss::Contention);
+      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::OwnerBind);
       return;
     }
     if ((state() == InputEvidenceState::Recording || state() == InputEvidenceState::Draining) &&
@@ -213,7 +241,7 @@ public:
     if (state() == InputEvidenceState::Recording || state() == InputEvidenceState::Draining)
       fail(InputEvidenceLoss::OwnerChanged);
     if (m_ownerBusy.test_and_set(std::memory_order_acquire)) {
-      fail(InputEvidenceLoss::Contention);
+      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::OwnerRevoke);
       return;
     }
     m_ownerLive = false;
@@ -232,13 +260,15 @@ public:
     }
     const bool captureHeld = lockCaptureBoundary();
     bool okay = captureHeld && m_ownerLive && loss() == InputEvidenceLoss::None;
-    std::array<bool, queueCount> held{};
+    std::array<bool, queueCount> held{}, activityHeld{};
     for (std::size_t i = 0; i != queueCount; ++i) {
       if (!expectedQueue(static_cast<InputEvidenceQueue>(i)))
         continue;
       auto &q = m_queues[i];
+      std::uint64_t idle = 0;
+      activityHeld[i] = q.activity.compare_exchange_strong(idle, captureBoundary, std::memory_order_acq_rel);
       held[i] = !q.busy.test_and_set(std::memory_order_acquire);
-      okay = okay && held[i] && q.initialized && q.depth == 0;
+      okay = okay && activityHeld[i] && held[i] && q.initialized && q.depth == 0;
     }
     if (okay) {
       m_start = inputEvidenceNow();
@@ -261,8 +291,12 @@ public:
       m_state.store(InputEvidenceState::Denied);
     }
     for (std::size_t i = 0; i != queueCount; ++i)
-      if (held[i])
+      if (held[i]) {
         m_queues[i].busy.clear(std::memory_order_release);
+      }
+    for (std::size_t i = 0; i != queueCount; ++i)
+      if (activityHeld[i])
+        m_queues[i].activity.fetch_and(~captureBoundary, std::memory_order_acq_rel);
     m_ownerBusy.clear(std::memory_order_release);
     return okay && loss() == InputEvidenceLoss::None;
   }
@@ -291,14 +325,16 @@ public:
     const bool expired = now >= m_sourceEnd.load(std::memory_order_acquire) + 250000000;
     if (m_role == InputEvidenceRole::Native && !expired && !force)
       return;
-    std::array<bool, queueCount> held{};
+    std::array<bool, queueCount> held{}, activityHeld{};
     bool captureHeld = lockCaptureBoundary();
     bool empty = captureHeld;
     for (std::size_t i = 0; i != queueCount; ++i)
       if (expectedQueue(static_cast<InputEvidenceQueue>(i))) {
         auto &q = m_queues[i];
+        std::uint64_t idle = 0;
+        activityHeld[i] = q.activity.compare_exchange_strong(idle, captureBoundary, std::memory_order_acq_rel);
         held[i] = !q.busy.test_and_set(std::memory_order_acquire);
-        empty = empty && held[i] && q.initialized && q.depth == 0;
+        empty = empty && activityHeld[i] && held[i] && q.initialized && q.depth == 0;
       }
     if (empty || expired || force) {
       if (captureHeld) {
@@ -332,6 +368,9 @@ public:
     for (std::size_t i = 0; i != queueCount; ++i)
       if (held[i])
         m_queues[i].busy.clear(std::memory_order_release);
+    for (std::size_t i = 0; i != queueCount; ++i)
+      if (activityHeld[i])
+        m_queues[i].activity.fetch_and(~captureBoundary, std::memory_order_acq_rel);
   }
   std::uint64_t sourceEnd() const noexcept
   {
@@ -370,7 +409,7 @@ public:
       if (expectedQueue(static_cast<InputEvidenceQueue>(i))) {
         const auto &q = m_queues[i];
         ready = ready && q.initialized.load(std::memory_order_acquire) && !q.busy.test(std::memory_order_acquire) &&
-                q.depth.load(std::memory_order_acquire) == 0;
+                q.activity.load(std::memory_order_acquire) == 0 && q.depth.load(std::memory_order_acquire) == 0;
       }
     auto result = ready ? std::optional(m_owner) : std::nullopt;
     m_ownerBusy.clear(std::memory_order_release);
@@ -398,7 +437,7 @@ public:
     }
     auto &q = m_queues[static_cast<std::size_t>(queue)];
     if (q.busy.test_and_set(std::memory_order_acquire)) {
-      fail(InputEvidenceLoss::Contention);
+      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueInitialize, queue);
       return;
     }
     const auto actualEventLimit =
@@ -423,7 +462,7 @@ public:
     }
     auto &q = m_queues[static_cast<std::size_t>(queue)];
     if (q.busy.test_and_set(std::memory_order_acquire)) {
-      fail(InputEvidenceLoss::Contention);
+      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueMutation, queue);
       return false;
     }
     if (!q.initialized || q.identity != identity) {
@@ -432,6 +471,29 @@ public:
       return false;
     }
     return true;
+  }
+  bool beginQueueActivity(InputEvidenceQueue queue, const void *identity) noexcept
+  {
+    if (!expectedQueue(queue)) {
+      fail(InputEvidenceLoss::QueueIdentity);
+      return false;
+    }
+    auto &q = m_queues[static_cast<std::size_t>(queue)];
+    if (q.activity.fetch_add(1, std::memory_order_acq_rel) & captureBoundary) {
+      fail(InputEvidenceLoss::Baseline, InputEvidenceFailureSite::QueueMutation, queue);
+      q.activity.fetch_sub(1, std::memory_order_acq_rel);
+      return false;
+    }
+    if (!q.initialized.load(std::memory_order_acquire) || q.identity != identity) {
+      fail(InputEvidenceLoss::QueueIdentity, InputEvidenceFailureSite::QueueMutation, queue);
+      q.activity.fetch_sub(1, std::memory_order_acq_rel);
+      return false;
+    }
+    return true;
+  }
+  void endQueueActivity(InputEvidenceQueue queue) noexcept
+  {
+    m_queues[static_cast<std::size_t>(queue)].activity.fetch_sub(1, std::memory_order_acq_rel);
   }
   void endMutation(InputEvidenceQueue queue, std::uint64_t added, std::uint64_t removed) noexcept
   {
@@ -621,7 +683,7 @@ private:
       return;
     }
     if (!m_written.compare_exchange_strong(next, next + 1, std::memory_order_acq_rel)) {
-      fail(InputEvidenceLoss::Contention);
+      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::JournalReserve);
       return;
     }
     auto &slot = m_rows[next % capacity];
@@ -634,6 +696,7 @@ private:
     const void *identity = nullptr;
     std::uint64_t capacity = 0, enqueued = 0, retired = 0;
     std::atomic<std::uint64_t> depth{0};
+    std::atomic<std::uint64_t> activity{0};
     std::atomic<bool> initialized{false};
   };
   struct Slot
@@ -648,7 +711,7 @@ private:
   std::atomic<std::uint64_t> m_written{0}, m_read{0}, m_deadline{0}, m_captureEpoch{0}, m_captureGate{0}, m_stop{0},
       m_sourceEnd{0};
   std::atomic<InputEvidenceState> m_state{InputEvidenceState::Waiting};
-  std::atomic<InputEvidenceLoss> m_loss{InputEvidenceLoss::None};
+  std::atomic<std::uint32_t> m_failure{0};
   std::atomic_flag m_ownerBusy = ATOMIC_FLAG_INIT;
   std::atomic_flag m_stopBusy = ATOMIC_FLAG_INIT;
   InputEvidenceOwner m_owner;
@@ -670,8 +733,12 @@ inline void inputEvidenceInitialize(InputEvidenceQueue q, const void *identity, 
   if (auto *r = inputEvidence())
     r->initialize(q, identity, capacity);
 }
-// A try-lock only: ordinary queue work always proceeds, even if diagnostics
-// lose their ordering witness. Scope this object around the actual mutation.
+// Keep the native operation visible to arm/drain boundaries without holding
+// the diagnostic counter lock across a queue's publication. SPSC consumers
+// may legally enter while the producer is finishing its published operation.
+// commit() records the counters before publishing availability or free space;
+// the activity guard stays live until the complete native mutation returns.
+// Counter/journal contention still denies diagnostics and never blocks input.
 class InputEvidenceMutation final
 {
 public:
@@ -680,27 +747,42 @@ public:
   ) noexcept
       : m_recorder(inputEvidence()),
         m_queue(queue),
+        m_identity(identity),
         m_added(added),
         m_removed(removed)
   {
-    if (m_recorder && !m_recorder->beginMutation(queue, identity))
+    if (m_recorder && !m_recorder->beginQueueActivity(queue, identity))
       m_recorder = nullptr;
   }
   ~InputEvidenceMutation()
   {
-    if (m_recorder)
-      m_recorder->endMutation(m_queue, m_added, m_removed);
+    if (m_recorder) {
+      commit();
+      m_recorder->endQueueActivity(m_queue);
+    }
   }
   InputEvidenceMutation(const InputEvidenceMutation &) = delete;
+  void commit() noexcept
+  {
+    if (m_recorder && !m_committed) {
+      m_committed = true;
+      if (m_recorder->beginMutation(m_queue, m_identity))
+        m_recorder->endMutation(m_queue, m_added, m_removed);
+    }
+  }
   void removed(std::uint64_t count) noexcept
   {
+    if (m_committed && m_recorder)
+      m_recorder->fail(InputEvidenceLoss::QueueAccounting);
     m_removed = count;
   }
 
 private:
   InputEvidenceRecorder *m_recorder;
   InputEvidenceQueue m_queue;
+  const void *m_identity;
   std::uint64_t m_added, m_removed;
+  bool m_committed = false;
 };
 template <class Function>
 decltype(auto) inputEvidenceApply(

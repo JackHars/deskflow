@@ -44,6 +44,16 @@ const char *roleName(InputEvidenceRole role)
 {
   return role == InputEvidenceRole::Core ? "core" : role == InputEvidenceRole::Host ? "host" : "native";
 }
+QJsonObject failureDetails(const InputEvidenceRecorder &recorder)
+{
+  constexpr const char *sites[]{"unspecified",      "owner-bind",     "owner-revoke",
+                                "queue-initialize", "queue-mutation", "journal-reserve"};
+  const auto queue = static_cast<std::size_t>(recorder.failureQueue());
+  return {
+      {"site", sites[static_cast<std::size_t>(recorder.failureSite())]},
+      {"queue", queue < InputEvidenceRecorder::queueCount ? QJsonValue(queueNames[queue]) : QJsonValue()}
+  };
+}
 void require(bool condition, const char *reason)
 {
   if (!condition)
@@ -283,6 +293,8 @@ void InputEvidenceRuntime::tick()
       status["identity"] =
           QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(ready->identity.data()), 96).toHex());
     }
+    if (m_recorder->loss() != InputEvidenceLoss::None)
+      status["failure"] = failureDetails(*m_recorder);
     write(status);
     if (now - m_created > 180000000000ULL) {
       m_recorder->fail(InputEvidenceLoss::Deadline);
@@ -348,15 +360,18 @@ void InputEvidenceRuntime::endJournal()
   // finish() froze payload collection only after its actual queue/active-copy
   // boundary. A failed or forced boundary carries sticky loss. Storage remains
   // installed for process lifetime, so late producer calls cannot use freed RAM.
-  write(
-      {{"type", "end"},
-       {"timeNs", QString::number(m_recorder->stoppedAt())},
-       {"sourceEndNs", QString::number(m_recorder->sourceEnd())},
-       {"state", int(m_recorder->state())},
-       {"loss", int(m_recorder->loss())},
-       {"rows", QString::number(m_recorder->written())},
-       {"drained", m_recorder->drained()}}
-  );
+  QJsonObject terminal{
+      {"type", "end"},
+      {"timeNs", QString::number(m_recorder->stoppedAt())},
+      {"sourceEndNs", QString::number(m_recorder->sourceEnd())},
+      {"state", int(m_recorder->state())},
+      {"loss", int(m_recorder->loss())},
+      {"rows", QString::number(m_recorder->written())},
+      {"drained", m_recorder->drained()}
+  };
+  if (m_recorder->loss() != InputEvidenceLoss::None)
+    terminal["failure"] = failureDetails(*m_recorder);
+  write(terminal);
   m_output.flush();
   m_timer.setInterval(100); // Native fixture may receive its explicit clean-close command.
 }

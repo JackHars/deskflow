@@ -162,6 +162,7 @@ void OriginalInputCaptureSource::completeCapture(OriginalInputTranslation transl
   m_openStamp = {};
   m_openTransition = {};
   m_openPointer.reset();
+  evidence.commit();
   m_completedWritten.store(written + 1, std::memory_order_release);
 }
 void OriginalInputCaptureSource::capture(CGEventType type, CGEventRef event) noexcept
@@ -258,6 +259,7 @@ std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() n
   const auto input = m_stream.pop();
   {
     InputEvidenceMutation evidence(InputEvidenceQueue::Translation, this, 0, 1);
+    evidence.commit();
     m_completedRead.store(read + 1, std::memory_order_release);
   }
   if (!input)

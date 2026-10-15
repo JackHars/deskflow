@@ -226,8 +226,11 @@ class EvidenceReader:
             unsigned(value.get('timeNs'))
             if kind == 'readiness':
                 require(self.arm is None and type(value.get('readyCandidate')) is bool and
-                        type(value.get('loss')) is int and value['loss'] == 0,
-                        'Evidence readiness was denied or arrived after arm')
+                        type(value.get('loss')) is int,
+                        'Evidence readiness was invalid or arrived after arm')
+                require(value['loss'] == 0,
+                        f"{self.role} evidence failed during preparation: loss={value['loss']}, "
+                        f"details={value.get('failure', 'unavailable')}")
                 owner = evidence_owner(value, self.role) if value['readyCandidate'] else None
                 self.readiness_count += 1
                 self.readiness = (self.readiness_count, self.now(), owner)

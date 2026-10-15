@@ -136,6 +136,14 @@ a bounded per-turn drain. Loss is sticky; full buffers never overwrite history.
 Process-lifetime storage avoids freeing diagnostic memory beneath a late
 producer, but it does not keep a run armed after shutdown.
 
+Native SPSC publication commits its counter update before exposing a record
+or free slot to the opposite thread. A separate atomic activity guard spans
+the complete mutation, including publication; it blocks a false empty arm or
+drain boundary without holding the diagnostic counter lock across that handoff.
+Counter/journal contention is still terminal and never delays native input.
+Failed readiness/terminal rows also retain the first failure's scalar site and
+queue, with no producer-side logging. Loss-free journals keep the v2 format.
+
 ## Declared queue inventory
 
 Each mutation has separate cumulative enqueue/retirement counters. A row never

@@ -77,6 +77,7 @@ public:
     m_records[written % capacity] = captured;
     m_lastSequence = record.sequence;
     m_lastTimestamp = record.sourceTimestampNs;
+    evidence.commit();
     m_written.store(written + 1, std::memory_order_release);
     return live();
   }
@@ -89,6 +90,7 @@ public:
       return {};
     InputEvidenceMutation evidence(InputEvidenceQueue::Completed, this, 0, 1);
     auto result = m_records[read % capacity];
+    evidence.commit();
     m_read.store(read + 1, std::memory_order_release);
     // A successful copy is still only evidence. The consumer must recheck
     // this conduit and the retained original epoch at every subsequent use.
