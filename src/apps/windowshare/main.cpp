@@ -2636,7 +2636,11 @@ int main(int argc, char **argv)
       });
       if (inputBootstrap.probe())
         return localInputHostProbe(std::move(coreInput));
-      coreInput->onClosed = [&shutdown](const QString &) { shutdown.request(); };
+      coreInput->onClosed = [&shutdown, diagnostics = bool(inputEvidenceRuntime)](const QString &reason) {
+        shutdown.request();
+        if (diagnostics)
+          QTextStream(stderr) << "Window sharing private input channel closed in Host: " << reason.left(512) << '\n';
+      };
       if (!inputBootstrap.peerPolicy().empty()) {
         // Run the optional inspection only after the ordinary private handshake.
         // Expensive Security work never blocks this event loop or input hooks.

@@ -66,6 +66,11 @@ contain:
 
 This requires the existing explicit nonempty `inputPeerPairs` policy. Core
 forwards the Host configuration through its inherited companion bootstrap.
+For these explicit evidence sessions, Host stderr is inherited directly into
+the coordinator's Core log; both processes report bounded private-channel
+close reasons after revocation begins. Ordinary launches still discard Host
+stderr, and stdout is always discarded. No parent-side output buffer or input
+authority is introduced by this diagnostic option.
 Standalone, probe, identity-init and help/action combinations cannot use the
 private Host evidence option. Evidence paths and role labels never supply code
 admission, peer trust, a native owner or input authority.

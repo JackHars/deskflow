@@ -209,9 +209,54 @@ int hostFixture(QCoreApplication &application, int descriptor, const QString &mo
       QTimer::singleShot(100, &application, [&] { application.exit(12); });
     if (mode == "auth-crash")
       QTimer::singleShot(100, &application, [] { std::raise(SIGKILL); });
+    if (mode == "diagnostic-output") {
+      QTextStream(stderr) << "companion fixture stderr\n" << Qt::flush;
+      QTextStream(stdout) << "companion fixture stdout\n" << Qt::flush;
+      QTimer::singleShot(100, &application, &QCoreApplication::quit);
+    }
   };
   const int result = application.exec();
   return result ? result : authenticated ? 0 : 13;
+}
+
+int diagnosticForwardingFixture(bool forward)
+{
+  resetTrust();
+  auto diagnosticLimits = limits;
+  diagnosticLimits.forwardStandardError = forward;
+  auto launcher = companion(diagnosticLimits);
+  std::unique_ptr<LocalInputChannel> channel;
+  launcher->onChannel = [&](std::unique_ptr<LocalInputChannel> value) {
+    check(!value->authorize, "Diagnostic forwarding granted input authority");
+    channel = std::move(value);
+  };
+  check(launcher->start({"--fixture=diagnostic-output"}), "Diagnostic companion launch failed");
+  stopped(*launcher);
+  check(
+      launcher->exitResult() && launcher->exitResult()->normalExit && launcher->exitResult()->exitCode == 0,
+      "Diagnostic companion failed its authenticated normal exit"
+  );
+  return 0;
+}
+
+void diagnosticForwarding()
+{
+  for (const bool forward : {false, true}) {
+    QProcess fixture;
+    fixture.start(
+        QCoreApplication::applicationFilePath(), {QStringLiteral("--diagnostic-forwarding=%1").arg(int(forward))}
+    );
+    check(until([&] { return fixture.state() == QProcess::NotRunning; }), "Diagnostic forwarding fixture hung");
+    check(
+        fixture.exitStatus() == QProcess::NormalExit && fixture.exitCode() == 0, "Diagnostic forwarding fixture failed"
+    );
+    const auto error = fixture.readAllStandardError();
+    check(
+        forward ? error == "companion fixture stderr\n" : error.isEmpty(),
+        "Companion stderr forwarding did not respect explicit opt-in"
+    );
+    check(fixture.readAllStandardOutput().isEmpty(), "Diagnostic forwarding leaked companion stdout");
+  }
 }
 
 void normalLaunchAndStop()
@@ -1219,10 +1264,14 @@ int main(int argc, char **argv)
           mode = argument.mid(10);
       return hostFixture(application, descriptor, mode);
     }
-    for (const auto &argument : application.arguments())
+    for (const auto &argument : application.arguments()) {
       if (argument.startsWith("--exit-loop="))
         return exitLoopFixture(application, argument.mid(12));
+      if (argument == "--diagnostic-forwarding=0" || argument == "--diagnostic-forwarding=1")
+        return diagnosticForwardingFixture(argument.endsWith('1'));
+    }
     normalLaunchAndStop();
+    diagnosticForwarding();
     refusedLaunches();
     startupAndDeath();
     coldStartupAllowance();
@@ -1248,6 +1297,7 @@ int main(int argc, char **argv)
         stdout
     ) << "PASS: fixed verified companion, exclusive inheritance, cold-start and handshake deadlines, child death, "
          "bounded stop, callback deletion/stop/drop/throw, no restart, loader environment isolation, "
+         "explicit stderr forwarding with stdout discarded, "
          "startup expiry at use, detached reaping, event-loop exit, core session default-deny, "
          "failure drain, deletion during stop, selected-peer mailbox closure, configured shutdown "
          "budget, graceful EOF drain "

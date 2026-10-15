@@ -20,6 +20,8 @@ struct LocalInputCompanionLimits
   int gracefulMs = 300;
   int terminateMs = 1000;
   LocalInputLimits channel;
+  // Explicit diagnostics only: inherit stderr without a parent-side output queue.
+  bool forwardStandardError = false;
 };
 
 // Main Qt thread only. Create the socketpair before QApplication or any worker

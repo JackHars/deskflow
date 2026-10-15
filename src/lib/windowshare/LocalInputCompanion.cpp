@@ -57,7 +57,10 @@ struct LocalInputCompanion::Run final : QObject
     observation.setInterval(25);
     process.setStandardInputFile(QProcess::nullDevice());
     process.setStandardOutputFile(QProcess::nullDevice());
-    process.setStandardErrorFile(QProcess::nullDevice());
+    if (companion->m_limits.forwardStandardError)
+      process.setProcessChannelMode(QProcess::ForwardedErrorChannel);
+    else
+      process.setStandardErrorFile(QProcess::nullDevice());
     auto environment = QProcessEnvironment::systemEnvironment();
     for (const auto &name : environment.keys())
       if (name.startsWith(QStringLiteral("DYLD_")) || name == QStringLiteral("QT_PLUGIN_PATH") ||

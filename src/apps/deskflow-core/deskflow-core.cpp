@@ -181,6 +181,7 @@ int main(int argc, char **argv)
       LocalInputCompanionLimits limits;
       limits.gracefulMs = 5000;
       limits.terminateMs = 5000;
+      limits.forwardStandardError = bool(inputEvidenceRuntime);
       inputSession = LocalInputCoreSession::start(
           std::move(*inputBootstrap->pair), inputHostConfiguration->hostArguments(), &failure, limits
       );
@@ -191,6 +192,15 @@ int main(int argc, char **argv)
       inputSession->onStopped = [](const QString &reason) {
         LOG_WARN("experimental window host stopped: %s", qPrintable(reason));
       };
+      if (inputEvidenceRuntime) {
+        auto *channel = inputSession->channel();
+        channel->onClosed = [closed = std::move(channel->onClosed)](const QString &reason) {
+          // Preserve immediate capture/mailbox revocation before diagnostic I/O.
+          if (closed)
+            closed(reason);
+          LOG_WARN("experimental private input channel closed in Core: %s", qPrintable(reason.left(512)));
+        };
+      }
       if (!inputHostConfiguration->peerPolicy().empty()) {
         QString admissionError;
         inputAdmission = LocalInputCodeAdmission::request(*inputSession->channel(), &admissionError);

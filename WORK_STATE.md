@@ -1,5 +1,29 @@
 # Seamless Windows work state
 
+## Active H04 session lost its private channel — 2026-10-15
+
+The fourth attempt (`build/h04-r4-aa2qy2tm/session-1`) reached Active, confirmed
+by the user. Packaged admission passed, both machines connected, and all three
+recorders retained loss 0. During priming the authenticated Host stopped with
+`Trusted companion private channel lost authority`. Evidence never armed and
+full original-input readiness never became true. This is a failed session,
+not an H04/P5 acceptance result. The specific channel-close reason was discarded;
+the downstream Linux TLS disconnect does not establish the initiating cause.
+
+Core and source exited 0, the exact Host stopped, the fresh final source receipt
+was neutral with its frame restored, and ordinary configurations were preserved.
+The Linux controller failed after the TLS loss and its Core required bounded
+termination; exact owned-container/socket cleanup was separately verified.
+
+Explicit evidence sessions now forward Host stderr directly into the coordinator's
+Core log and report bounded channel-close reasons in both processes. Default
+launches remain silent; stdout stays discarded. No parent-side output queue,
+authority, timeout extension or automatic retry is added. The Mac companion
+suite and home Ubuntu ASan/UBSan companion suite pass (11.80 s / 6.60 s).
+Evidence is under `build/h04-channel-20261015-qo_wfxih/`; a fresh signed attended
+run is still required. All six hosted jobs on recorder commit `0f77188a8`
+passed in run `38763970033`; those do not cover this subsequent diagnostic edit.
+
 ## Recorder publication overlap follow-up — 2026-10-15
 
 The third attended H04 attempt (`build/h04-r3-spns1sz_/session-1`) stopped
@@ -22,8 +46,9 @@ channel tests pass; four Mac input/capture suites pass under ASan/UBSan.
 Home Ubuntu's recorder/channel ASan/UBSan suites and 98 Python coordinator/
 normalizer tests pass in an offline disposable container. The exact source
 snapshot and logs are under `build/h04-recorder-20261015-ayzo9bsd/`.
-A fresh signed candidate and new physical preparation are staged. A rerun is
-required; these checks do not establish physical input or roadmap acceptance.
+A fresh signed candidate reached Active in the fourth attempt above. That run
+failed before evidence arm; these checks do not establish physical input or
+roadmap acceptance.
 
 ## Attended startup and cleanup follow-up — 2026-10-15
 

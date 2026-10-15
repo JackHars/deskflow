@@ -4,6 +4,46 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 reached Active, then lost its private channel — 2026-10-15
+
+Fourth attended attempt: **failed session; physical acceptance not assessed**.
+Evidence is under `build/h04-r4-aa2qy2tm/session-1/`, with remote failure logs
+under `build/h04-r4-aa2qy2tm/linux-collected/`. The user confirmed Active.
+The inert packaged probe passed (7.641 s admission, 13.650 s total); real
+admission and the Linux TLS/native endpoints subsequently connected. During
+priming the Host stopped with `Trusted companion private channel lost authority`.
+Core/Host readiness never became true, no recorder armed, and all three ended
+with loss 0 / denied state. No input delivery or H04/P5 pass is inferred.
+
+Core exited 0 through private IPC, its exact Host stopped, and source exit was
+0. The fresh final source receipt records held keys/buttons 0 and the original
+frame restored. Ordinary Mac and Ubuntu configurations were preserved. The
+Linux relay failed when TLS ended before coordinated stop; its Core required
+termination (-15), and its controller/container returned failure. Separate
+cleanup confirmed the exact owned container and sockets gone. These failures
+are retained rather than treated as clean coordinated shutdown.
+
+Mac runtime: `0f77188a811eceeff70d9ebbf997fea74fa878c8`. The physical Linux
+package remains `286328d055478692ea877c5d5d61d5c619e5093f`; the newer recorder
+source was separately tested in an offline Ubuntu container, not substituted
+into this physical run. `source-binding.json` records that distinction.
+
+The original reason was not retained by the session callback and Host stderr
+was discarded. The diagnostic follow-up forwards stderr only for an explicit
+evidence session and logs bounded close reasons after revocation begins.
+The direct inherited descriptor adds no QProcess output buffer. The subprocess
+regression checks default silence, explicit stderr forwarding, discarded stdout,
+default-deny authority and normal authenticated child cleanup. Verification
+under `build/h04-channel-20261015-qo_wfxih/`:
+
+- PASS: Mac Core/Host build and companion suite (11.80 s).
+- PASS: home Ubuntu GCC ASan/UBSan companion suite (6.60 s), including the real
+  two-level subprocess output checks. The offline container and temporary
+  source/build tree were removed.
+- PASS: formatting, whitespace and full REUSE (1133/1133 files).
+- Recorder commit `0f77188a8`: all six hosted jobs in run `38763970033` passed.
+  This hosted result precedes the diagnostic follow-up.
+
 ## Recorder publication overlap repair — 2026-10-15
 
 Third attended H04 attempt: **failed setup, physical acceptance not assessed**.
@@ -38,7 +78,8 @@ Evidence under `build/h04-recorder-20261015-ayzo9bsd/`:
 - Prior runtime `58ab63674`: all six hosted jobs in run `38760298734` passed.
   This hosted result does not cover the subsequent recorder repair.
 
-The new physical session is pending. H04/P5 and later attended gates remain open.
+The fourth physical session reached Active but failed as recorded above.
+H04/P5 and later attended gates remain open.
 
 ## Attended setup failures and startup/cleanup repairs — 2026-10-15
 
