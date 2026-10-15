@@ -4,6 +4,31 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Actual-desktop attempt thirteen — 2026-10-15
+
+The user explicitly approved attempt thirteen (`build/h04-r13-3qf8w10p/`).
+It refused startup before opening any test window or starting the experimental
+Core/Host because the ordinary Mac Core was already running. Ubuntu cleanup
+reports no provider activation, all owned processes stopped, desktop restored
+and ordinary state preserved. No physical input was tested.
+
+The original failed result also contains a misleading configuration-change
+error: the old coordinator checked for another Core before capturing the
+configuration baseline. Keep that result unchanged. The coordinator now takes
+the baseline first and does not claim a comparison when that read fails. Its
+read-only conflict check is available during preparation and is repeated at
+launch and Start. Both unchanged and genuinely edited configurations are
+covered; all 70 Mac coordinator regressions pass on the Mac and home Ubuntu.
+
+The user reports stopping the regular Mac session; the ordinary Ubuntu Core
+is also absent. Linux now accepts an explicit `--no-ordinary-core` preparation
+and rechecks that absence at startup and cleanup. Its 30 coordinator regressions
+pass on both machines. The earlier preparation failure against the stale Ubuntu
+PID remains in the evidence; it started no native session. Fresh actual-desktop
+preparation is in `build/h04-r14-el4lnrkj/`; it is not launch permission. Check
+current ordinary processes and the actual desktop again, then request fresh
+permission immediately before this next physical launch. H04/P5 remains open.
+
 ## Actual Ubuntu monitor test preparation — 2026-10-15
 
 The user explicitly requires physical testing on the active desktop of host
@@ -40,10 +65,10 @@ pass; its Linux-only exec check is skipped. These tests do not open a physical
 window, enable the actual provider or deliver physical input. The production
 Mac and Linux binaries are reused from their previously verified frozen builds.
 
-Fresh actual-desktop attempt: `build/h04-r13-3qf8w10p/`, with fresh private
-identities and matching physical-desktop plans. Its configuration-only review
-is retained separately from the unlaunched session. No launch is authorized by
-the user's sign-in reply. H04/P5 and physical roadmap acceptance remain open.
+Historical actual-desktop preparation: `build/h04-r13-3qf8w10p/`, with fresh
+private identities and matching plans. Its separately approved failed launch
+is recorded above. The sign-in reply itself did not authorize a physical launch.
+H04/P5 and physical roadmap acceptance remain open.
 See [the actual-desktop procedure](deploy/windowshare/physical-desktop.md).
 
 ## H04 hidden desktop and Record readiness — 2026-10-15

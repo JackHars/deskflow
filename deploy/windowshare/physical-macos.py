@@ -58,6 +58,14 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def no_other_primary():
+    """Read-only check, also usable before requesting physical launch permission."""
+    rows = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True,
+                          text=True, timeout=10, check=True).stdout.splitlines()
+    require(not any(row.split() and row.split()[-1].endswith("/deskflow-core") for row in rows),
+            "Another Mac primary is running; overlapping capture refused")
+
+
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
@@ -633,14 +641,9 @@ def run(arguments):
             time.sleep(0.025)
         raise RuntimeError("Timed out waiting for " + description)
 
-    def no_other_primary():
-        rows = command(["ps", "-axo", "pid=,comm="]).splitlines()
-        require(not any(row.split() and row.split()[-1].endswith("/deskflow-core") for row in rows),
-                "Another Mac primary is running; overlapping capture refused")
-
     try:
-        no_other_primary()
         report["ordinaryMacConfigBefore"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
+        no_other_primary()
         report["remoteHostname"] = remote(["hostname"]).strip()
         host_executable = mac["hostArgv"][0]
         if production:
@@ -992,12 +995,13 @@ def run(arguments):
                 report["sourceFallbackExit"] = stop_owned(owned.get("source"), "source", output, report)
             except Exception as fallback:
                 cleanup_errors.append("Source fallback: " + str(fallback))
-        try:
-            report["ordinaryMacConfigAfter"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
-            require(report["ordinaryMacConfigAfter"] == report.get("ordinaryMacConfigBefore"),
-                    "Ordinary Mac configuration changed")
-        except Exception as error:
-            cleanup_errors.append("Ordinary Mac audit: " + str(error))
+        if "ordinaryMacConfigBefore" in report:
+            try:
+                report["ordinaryMacConfigAfter"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
+                require(report["ordinaryMacConfigAfter"] == report["ordinaryMacConfigBefore"],
+                        "Ordinary Mac configuration changed")
+            except Exception as error:
+                cleanup_errors.append("Ordinary Mac audit: " + str(error))
         if publisher:
             try:
                 publisher.close()

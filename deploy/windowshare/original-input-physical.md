@@ -82,7 +82,10 @@ python3 deploy/windowshare/physical-linux.py prepare \
 ```
 
 Repeat the ordinary PID/config options for all relevant existing processes
-and settings. This mode uses the existing physical GNOME Wayland desktop;
+and settings. If ordinary Deskflow is stopped on Ubuntu, use the explicit
+`--no-ordinary-core` option instead of `--ordinary-pid`. This audits the absence
+of a Core at preparation, startup and after cleanup; a newly running Core fails
+the audit. This mode uses the existing physical GNOME Wayland desktop;
 the exported source appears on its actual monitor. Both plans must explicitly
 select `user-desktop`, and no container/image/preview may be substituted.
 Preparation is inert. The temporary provider session and experimental Linux
@@ -126,6 +129,19 @@ comes from this validation. Version-1/v2 legacy plans and version-2/v3
 production plans cannot be mixed.
 
 ## Run H04 with the person at the Mac
+
+Before requesting launch permission, run the same read-only Mac conflict check
+used at launch and Start:
+
+```sh
+python3 -c "import runpy; runpy.run_path('deploy/windowshare/physical-macos.py')['no_other_primary']()"
+```
+
+If the regular Mac Deskflow session is running, ask the person to click Stop
+in that app. Do not signal or replace its process. Refresh ordinary-process
+snapshots after the person changes their running sessions, then obtain fresh
+permission for the physical attempt. This check opens no test window, runs no
+native input hooks and changes no settings.
 
 Use an existing SSH key and an already verified known-host entry. The
 coordinator uses strict host-key checking and never accepts a password through

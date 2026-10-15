@@ -37,7 +37,9 @@ Follow [original-input-physical.md](original-input-physical.md), selecting Mac
 preview. Use fresh private directories and identities each time. Preparation
 hashes the installed provider, ordinary settings/processes and experimental
 binaries, and retains the actual boot, login session, Shell PID/birth identity,
-Shell bus owner and Wayland socket identity. It refuses an already enabled
+Shell bus owner and Wayland socket identity. When ordinary Deskflow is stopped,
+select `--no-ordinary-core` instead of `--ordinary-pid`; the absence of a Core is
+audited again before startup and after cleanup. It refuses an already enabled
 provider, a locked/remote/non-Wayland session or a source mismatch. Identity
 generation uses Qt offscreen; it opens no window or input session. The plan
 pair can then be checked with `--validate-only`.

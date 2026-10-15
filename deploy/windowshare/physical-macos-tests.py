@@ -510,6 +510,69 @@ class ProductionPlans(unittest.TestCase):
         self.assertEqual(result['maximumSessionSeconds'], 120)
         self.assertNotIn('--h11-input', result['prospectiveSourceArgv'])
 
+    def test_existing_primary_refuses_before_native_start_and_retains_a_real_config_baseline(self):
+        mac_plan, linux_plan = self.base / 'mac.json', self.base / 'linux.json'
+        module.atomic_json(mac_plan, self.mac)
+        module.atomic_json(linux_plan, self.linux)
+        ordinary = self.base / 'ordinary.ini'
+        for changed in (False, True):
+            with self.subTest(changed=changed):
+                ordinary.write_text('ordinary settings before startup\n')
+                before = module.digest(ordinary)
+                args = SimpleNamespace(mac_plan=mac_plan, linux_plan=linux_plan, source=None,
+                                       production_original_input=True, ssh_key=self.base / 'unused-key',
+                                       ssh_target='unused-target', ordinary_mac_config=[ordinary],
+                                       output=self.base / ('blocked-' + str(changed)))
+
+                def external(argv, **_kwargs):
+                    if argv == ['ps', '-axo', 'pid=,comm=']:
+                        if changed:
+                            ordinary.write_text('unrelated user edit\n')
+                        return SimpleNamespace(returncode=0, stderr='', stdout=
+                            '123 /Applications/Ordinary Deskflow.app/Contents/MacOS/deskflow-core\n')
+                    self.assertEqual(argv[0], 'ssh')
+                    self.assertEqual(argv[-1], 'python3 /private/controller cleanup')
+                    return SimpleNamespace(returncode=0, stderr='', stdout='{"event":"cleaned"}\n')
+
+                with patch.object(module, 'original_support', return_value=self.support), \
+                        patch.object(self.support, 'ProcessInspector'), \
+                        patch.object(module.subprocess, 'run', side_effect=external), \
+                        patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native process launched')), \
+                        patch.object(module.signal, 'alarm'), patch.object(module.signal, 'signal'), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.run(args), 1)
+                result = module.read_json(args.output / 'result.json')
+                self.assertIn('Another Mac primary', result['failure'])
+                self.assertEqual(result['ordinaryMacConfigBefore'], {str(ordinary): before})
+                self.assertEqual(result['ordinaryMacConfigAfter'], {str(ordinary): module.digest(ordinary)})
+                self.assertEqual(result.get('cleanupErrors', []),
+                                 ['Ordinary Mac audit: Ordinary Mac configuration changed'] if changed else [])
+                self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+                self.assertTrue(result['localProcessesStopped'])
+                self.assertFalse((args.output / 'source.json').exists())
+
+    def test_unreadable_starting_config_does_not_invent_a_changed_config_audit(self):
+        mac_plan, linux_plan = self.base / 'mac.json', self.base / 'linux.json'
+        module.atomic_json(mac_plan, self.mac)
+        module.atomic_json(linux_plan, self.linux)
+        args = SimpleNamespace(mac_plan=mac_plan, linux_plan=linux_plan, source=None,
+                               production_original_input=True, ssh_key=self.base / 'unused-key',
+                               ssh_target='unused-target', ordinary_mac_config=[self.base / 'missing.ini'],
+                               output=self.base / 'unreadable-config')
+        with patch.object(module, 'original_support', return_value=self.support), \
+                patch.object(self.support, 'ProcessInspector'), \
+                patch.object(module.subprocess, 'run', return_value=SimpleNamespace(
+                    returncode=0, stderr='', stdout='{"event":"cleaned"}\n')), \
+                patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native process launched')), \
+                patch.object(module.signal, 'alarm'), patch.object(module.signal, 'signal'), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.run(args), 1)
+        result = module.read_json(args.output / 'result.json')
+        self.assertIn('missing.ini', result['failure'])
+        self.assertNotIn('ordinaryMacConfigBefore', result)
+        self.assertNotIn('ordinaryMacConfigAfter', result)
+        self.assertFalse(result.get('cleanupErrors'))
+
     def test_h11_plan_predeclares_all_recorders_and_source_without_native_execution(self):
         mac_plan, linux_plan = self.base / 'h11-mac.json', self.base / 'linux.json'
         mac = {**self.mac, 'recordingProfile': 'h11'}

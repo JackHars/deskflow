@@ -520,11 +520,34 @@ def read_owned_json(path, limit=131072):
         os.close(descriptor)
 
 
+def running_core_pids(proc_root=Path('/proc')):
+    """Read-only census for an explicitly stopped ordinary Deskflow session."""
+    result = []
+    for proc in proc_root.iterdir():
+        if not proc.name.isdecimal():
+            continue
+        try:
+            if proc.stat().st_uid != os.getuid():
+                continue
+            # Core keeps its executable name as the Linux process name. Avoid
+            # inspecting protected unrelated processes (for example systemd).
+            if (proc / 'comm').read_text().strip() != 'deskflow-core':
+                continue
+            executable = os.readlink(proc / 'exe').removesuffix(' (deleted)')
+            if Path(executable).name == 'deskflow-core':
+                result.append(int(proc.name))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return sorted(result)
+
+
 def ordinary_snapshot(pids, configs):
     """Hash explicitly supplied ordinary settings, never return their contents."""
     result = {'bootId': Path('/proc/sys/kernel/random/boot_id').read_text().strip(), 'processes': [], 'configs': []}
     require(len(pids) <= 8 and len(set(pids)) == len(pids) and len(configs) <= 16,
             'Ordinary audit inventory exceeds bound or repeats a PID')
+    if not pids:
+        require(not running_core_pids(), 'Expected no ordinary Deskflow Core, but one is running')
     for pid in pids:
         require(type(pid) is int and pid > 1, 'Invalid ordinary PID')
         proc = Path('/proc') / str(pid)
@@ -937,7 +960,10 @@ def main():
     preparation.add_argument('--mac-viewer-pin', required=True)
     preparation.add_argument('--mac-core-port', type=int, default=24860)
     preparation.add_argument('--mac-viewer-port', type=int, default=24861)
-    preparation.add_argument('--ordinary-pid', type=int, action='append', required=True)
+    ordinary = preparation.add_mutually_exclusive_group(required=True)
+    ordinary.add_argument('--ordinary-pid', type=int, action='append', default=[])
+    ordinary.add_argument('--no-ordinary-core', action='store_true',
+                          help='Explicitly audit that no ordinary Deskflow Core is running')
     preparation.add_argument('--ordinary-config', type=Path, action='append', required=True)
     preparation.add_argument('--production-original-input', action='store_true',
                              help='Create a distinct v3 plan for the opt-in production Mac original-input harness')

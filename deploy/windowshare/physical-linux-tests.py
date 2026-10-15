@@ -252,7 +252,8 @@ class OrdinaryAudit(unittest.TestCase):
             config = Path(directory) / 'config'
             absent = Path(directory) / 'missing'
             config.write_text('private-value-one')
-            with patch.object(Path, 'read_text', return_value='test-boot'):
+            with patch.object(Path, 'read_text', return_value='test-boot'), \
+                    patch.object(module, 'running_core_pids', return_value=[]):
                 before = module.ordinary_snapshot([], [config, absent])
                 config.write_text('private-value-two')
                 changed = module.ordinary_snapshot([], [config, absent])
@@ -267,9 +268,44 @@ class OrdinaryAudit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fifo = Path(directory) / 'settings'
             os.mkfifo(fifo)
-            with patch.object(Path, 'read_text', return_value='test-boot'):
+            with patch.object(Path, 'read_text', return_value='test-boot'), \
+                    patch.object(module, 'running_core_pids', return_value=[]):
                 with self.assertRaisesRegex(RuntimeError, 'bounded regular'):
                     module.ordinary_snapshot([], [fifo])
+
+    def test_explicit_empty_inventory_detects_a_core_started_after_preparation(self):
+        with patch.object(Path, 'read_text', return_value='test-boot'), \
+                patch.object(module, 'running_core_pids', return_value=[]) as inventory:
+            self.assertEqual(module.ordinary_snapshot([], [])['processes'], [])
+            inventory.return_value = [123]
+            with self.assertRaisesRegex(RuntimeError, 'Expected no ordinary Deskflow Core'):
+                module.ordinary_snapshot([], [])
+
+    def test_core_census_uses_executables_and_handles_exiting_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for pid, executable in [('12', '/app/bin/deskflow-core'),
+                                    ('13', '/app/bin/deskflow-core (deleted)'),
+                                    ('14', '/usr/bin/python3'), ('15', '/app/bin/Deskflow'),
+                                    ('16', None), ('self', '/app/bin/deskflow-core')]:
+                process = root / pid
+                process.mkdir()
+                (process / 'comm').write_text(
+                    'deskflow-core\n' if pid in ('12', '13', '16', 'self') else 'other\n')
+                if executable:
+                    (process / 'exe').symlink_to(executable)
+            readlink = os.readlink
+
+            def restricted(path):
+                if Path(path).parent.name in ('14', '15'):
+                    raise PermissionError('Protected unrelated process')
+                return readlink(path)
+
+            with patch.object(module.os, 'readlink', side_effect=restricted):
+                self.assertEqual(module.running_core_pids(root), [12, 13])
+            with patch.object(module.os, 'readlink', side_effect=PermissionError('Unreadable Core')):
+                with self.assertRaises(PermissionError):
+                    module.running_core_pids(root)
 
 
 FAKE_CHILD = r'''
