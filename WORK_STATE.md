@@ -1,5 +1,34 @@
 # Seamless Windows work state
 
+## P7 retained steady-load failure and bounded diagnostics — 2026-10-14
+
+All six hosted jobs and source export pass on `affdad48b`; downloaded Linux
+and ARM64 ad-hoc Mac packages match their source and checksums. The local Intel
+package is separately Apple-issued and staged. Five predeclared private Mac
+channel repetitions pass. Those results do not explain the earlier transient
+hosted epoch failure, whose original close reason was not recorded.
+
+The completed synthetic hour passes its fixed resource comparison (254.41 MiB
+peak RSS, 94.17 MiB/h upper net growth, 105.73% upper average CPU, 1801 samples)
+but **fails the steady workload**: one decoder overflow/recovery on stream 1.
+Both streams drain with zero decode errors. Local builds/tests and a memory
+probe overlapped collection; the recovery timestamp was unavailable, and its
+cause is unknown. Thirty-second control and memory-probe checks both pass, so
+neither establishes a cause. All failures and raw data are retained.
+
+New explicit diagnostics retain bounded recovery timestamps, complete failed
+workload reports and decoder-queue/worker/GUI elapsed maxima. Exact timing and
+regression tests, the Mac Viewer and mixed-load sanitizers, and Ubuntu full
+application/eight suites/16-stream/two-HD-stream checks pass. No queue limit,
+deadline, resource threshold or steady-workload rule changed. `TESTING.md`
+records the exact evidence and frozen source hash.
+
+Next: package and host-test this diagnostic candidate, then collect one new
+predeclared hour after all local build/test/signing work, without local probes
+or competing test suites. Keep the previous failed hour. The user explicitly
+deferred attended testing; do not start physical input, relocation or sleep.
+Full native/OS queue certification and H07–H12 physical acceptance remain open.
+
 ## P7 automated matrix green; package retention follow-up — 2026-10-14
 
 Runtime candidate `bbb847796d361b0056178948b1cbf97cdd2e6e0f` passes all six

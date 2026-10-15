@@ -4,6 +4,103 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 completed hour and diagnostic follow-up — 2026-10-14
+
+The first complete two-stream 1080p/30-fps synthetic hour **failed its steady
+workload check** because stream 1 recovered from one decoder overflow. Its
+resource comparison passed the unchanged `pilot-20261013-v1` limits:
+
+| Observation | Measured result |
+| --- | --- |
+| Complete resource interval | 3600.000357 seconds; 1801 samples |
+| Sampled peak RSS | 266,772,480 bytes (254.41 MiB) |
+| Upper net RSS growth per hour | 98,742,262.21 bytes (94.17 MiB) |
+| Upper average CPU | 105.73% |
+| Steady workload | FAIL: one overflow/recovery on stream 1 |
+| Decode errors and queued frames at exit | Zero on both streams |
+
+`build/p7-completion-20261014/mac-image-reuse-hour/verification.json` records
+these separate verdicts and the source/binary hashes. The raw trace SHA-256 is
+`59100567dfdf3608b4e75bef614bf32166ed1a7a77c1cdbb3524ea5489886466`.
+The workload remained alive through the final sample and its temporary signed
+copy was removed. This combined sender/viewer fixture is only a diagnostic
+resource comparison; it cannot establish native H11 performance.
+
+Local builds, private-channel tests and one memory inspection overlapped that
+run. The old workload report did not timestamp recovery, so its cause is
+unknown. A predeclared 30-second control and 30-second run with three memory
+inspections both passed; neither reproduces nor explains the earlier failure.
+Their complete results remain in `media-recovery-diagnostics/result.json`.
+The failed hour remains evidence and is not replaced by those shorter passes.
+
+The workload now retains complete stream counters on invariant failure and up
+to 64 timestamped recovery transitions. Explicit Viewer diagnostics also record
+checked decoder-queue, worker and GUI-completion elapsed times in fixed storage.
+These wall times include descheduling and native waits; they do not identify
+CPU or GPU causes. Ordinary launches leave collection disabled. The strict
+steady check still rejects any recovery; capacities and deadlines are unchanged.
+
+Validation of these diagnostics:
+
+- Mac Viewer tests pass, including exact phase boundaries and rejection of a
+  regressed timestamp. Viewer and four-stream mixed load also pass ASan/UBSan
+  with no invalid timing tuples; leak detection is disabled.
+- `linux-media-phases/result.json`: Ubuntu application build, eight Qt/Xvfb/load
+  suites, nine sampler tests, 15 budget tests, 16-stream steady load and two
+  1080p streams pass. The isolated container removes its temporary directory.
+  Source archive SHA-256:
+  `e0c9203d3d278edb0a089a6445879a0720e444be6a5dae92400d3ae2dec48a44`.
+
+One new hour is planned after all local builds, signing and tests finish, with
+unchanged workload/limits and no local build, test suite, debugger or memory
+probe during collection. Its result and hosted verification of this diagnostic
+change must be recorded separately. Attended H07–H12 remain deferred.
+
+## Final CI artifact verification — 2026-10-14
+
+All six jobs pass on `affdad48bc93ce6b1c47272edc087130b0da0984` in
+[run 38664125034](https://github.com/JackHars/deskflow/actions/runs/38664125034).
+The intervening commits change CI retention, licensing and documentation;
+runtime sources still match `bbb847796`. Source run `38664125025` also passes.
+Both platform artifacts were downloaded and independently verified:
+
+| Artifact in that run | Scope | Verified archive SHA-256 |
+| --- | --- | --- |
+| `windowshare-linux-affdad48bc93ce6b1c47272edc087130b0da0984` | x86_64; inert Linux archive, complete internal manifest and source commit verified | `8344a4d5e66ec039f89ca7e43abae6f36fd03f42262a50f538cdc3a19d51c842` |
+| `windowshare-macos-adhoc-affdad48bc93ce6b1c47272edc087130b0da0984` — Core ZIP | ARM64; CI ad-hoc signature, minimum macOS 15.0 | `223792cd7dc86c4b3e9b428d5f9e706458c75cd30ea8c123952674437a9dac38` |
+| Same Mac artifact — standalone Viewer ZIP | ARM64; CI ad-hoc signature, minimum macOS 15.0 | `a4204a46467edc7757cc74a5fdff618d221bacc633ba0ec3e3503622bd13cf09` |
+
+Artifacts expire after seven days and contain `SOURCE_COMMIT` and `SHA256SUMS`.
+Use a new destination directory, then verify before staging, for example:
+
+```sh
+gh run download 38664125034 \
+  -n windowshare-linux-affdad48bc93ce6b1c47272edc087130b0da0984 \
+  -D /absolute/new/private/download
+cd /absolute/new/private/download
+shasum -a 256 -c SHA256SUMS
+```
+
+No downloaded executable was run locally. The user's Intel Mac instead has the
+separately rebuilt Apple-issued exact-library package recorded below; CI's
+ARM64/ad-hoc archives do not replace it for attended production-input testing.
+Full run logs, artifact identities and `github-*-package-affdad48b-verification.json`
+are retained under `build/p7-completion-20261014`.
+
+Run `38663112081` retained a genuine Linux provenance-step failure after its
+builds/tests passed: Git rejected the container's differently owned checkout.
+The correction scopes `safe.directory` to one read of `GITHUB_WORKSPACE` and
+requires HEAD to equal `GITHUB_SHA`. No global Git policy is changed. The isolated
+Ubuntu fixture verifies default rejection, exact-checkout success and rejection
+for a different directory; see `linux-git-provenance-check.json`.
+
+Five predeclared sequential Mac private-channel repetitions all pass, including
+`captureEpochCutover`, with no retry-on-failure. `mac-channel-repeat/result.json`
+retains every result and binary/source hashes. The earlier hosted epoch failure
+was not reproduced; its missing original close reason is still unknown.
+Attended tests remain deferred. The completed hour's resource pass and steady
+workload failure are recorded above; they do not establish native acceptance.
+
 ## P7 current hosted and staged-package result — 2026-10-14
 
 All six jobs pass for runtime candidate `bbb847796d361b0056178948b1cbf97cdd2e6e0f`
@@ -32,8 +129,9 @@ It is staged only; original input remains disabled in this smoke.
 
 The workflow follow-up adds seven-day download retention for verified Linux
 and ad-hoc Mac packages, with `SOURCE_COMMIT` and `SHA256SUMS`. Its actual run
-and downloaded-artifact result must be recorded separately. The full synthetic
-hour is still running. Native/physical H07–H11 and install/upgrade H12 remain
+and downloaded-artifact result are recorded above. The full synthetic hour's
+resource pass and workload failure are also retained above. Native/physical
+H07–H11 and install/upgrade H12 remain
 pending; the user requested unattended checks and attended testing later.
 
 ## P7 decoder reuse and resource retest — 2026-10-14
@@ -64,8 +162,8 @@ Evidence under `build/p7-completion-20261014`:
   on `3c4263f03`: five jobs pass, including the repaired GNOME report ordering;
   Mac fails on the short resource fixture corrected above. A new run is needed.
 - `mac-image-reuse-hour/plan.json`: replacement steady workload and unchanged
-  limits declared before launch. Full-hour collection is still running; no
-  resource or native-performance pass is claimed from partial samples.
+  limits declared before launch. The completed run passes the resource
+  comparison but fails steady workload validation, as detailed above.
 
 The user requested unattended checks and attended testing later. Physical
 H07–H11 remain deferred. A complete synthetic hour would establish only this

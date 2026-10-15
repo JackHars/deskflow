@@ -923,25 +923,29 @@ void Viewer::receiveFrame(const QByteArray &accessUnit, std::uint64_t geometry)
       m_decodeWorker,
       [target, decoder, generation, capturedGeneration, resetDecoder, accessUnit, geometry, metricSequence,
        receivedAt] {
+        const auto startedAt = metricSequence ? MediaMetrics::Clock::now() : MediaMetrics::Clock::time_point{};
         std::optional<VideoDecoder::Result> result;
         if (generation->load(std::memory_order_acquire) == capturedGeneration) {
           if (resetDecoder)
             decoder->reset();
           result = decoder->decode(accessUnit);
         }
+        const auto finishedAt = metricSequence ? MediaMetrics::Clock::now() : MediaMetrics::Clock::time_point{};
         if (!target)
           return;
         QMetaObject::invokeMethod(
             target,
             [target, result = std::move(result), generation, capturedGeneration, resetDecoder, size = accessUnit.size(),
-             geometry, metricSequence, receivedAt]() mutable {
+             geometry, metricSequence, receivedAt, startedAt, finishedAt]() mutable {
               if (!target)
                 return;
               auto *self = target.data();
               --self->m_pendingFrames;
               self->m_pendingBytes -= size;
-              if (self->m_mediaMetrics)
+              if (self->m_mediaMetrics) {
                 ++self->m_mediaMetrics->retired;
+                self->m_mediaMetrics->completion(receivedAt, startedAt, finishedAt, MediaMetrics::Clock::now());
+              }
               if (self->m_videoRecovering && !self->m_videoRecoveryRequestSent && !self->m_pendingFrames) {
                 const QPointer<Viewer> guard(self);
                 self->requestVideoRecoveryWhenDrained();

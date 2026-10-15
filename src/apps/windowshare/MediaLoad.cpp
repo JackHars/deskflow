@@ -89,6 +89,11 @@ QJsonObject metrics(const MediaMetrics &m)
       {"peakBytes", qint64(m.peakBytes)},
       {"frameCapacity", qint64(m.frameCapacity)},
       {"byteCapacity", qint64(m.byteCapacity)},
+      {"timedRetirements", qint64(m.timedRetirements)},
+      {"invalidTimings", qint64(m.invalidTimings)},
+      {"decodeQueueMaxMs", double(m.maxDecodeQueueNs) / 1000000.},
+      {"decodeWorkMaxMs", double(m.maxDecodeWorkNs) / 1000000.},
+      {"completionQueueMaxMs", double(m.maxCompletionQueueNs) / 1000000.},
       {"receiveToQtPaintMaxMs", double(m.maxReceiveToPaintNs) / 1000000.},
       {"receiveToQtPaintP95UpperMs", percentile(95)},
       {"receiveToQtPaintP99UpperMs", percentile(99)},
@@ -123,7 +128,7 @@ int main(int argc, char **argv)
        {"fps", "Offered frames/second/stream (1..60).", "rate", "30"},
        {"scenario", "steady or mixed (decoder burst injection and one hidden stream).", "name", "mixed"},
        {"frame", "Optional single independent Annex B IDR; default 64x48 test image.", "path"},
-       {"progress", "Publish a workload-started JSON line on stderr after warm-up."}}
+       {"progress", "Publish warm-up completion and bounded recovery diagnostics on stderr."}}
   );
   if (!parser.parse(arguments)) {
     QTextStream(stderr) << parser.errorText() << '\n';
@@ -138,6 +143,7 @@ int main(int argc, char **argv)
       {"status", "FAIL"},
       {"scope", "synthetic-loopback-tls-decode-offscreen-qt-paint"},
       {"h11_complete", false},
+      {"performanceAcceptance", "NOT_RUN"},
       {"physicalInput", false},
       {"nativeHostStarted", false}
   };
@@ -200,7 +206,39 @@ int main(int argc, char **argv)
     std::vector<std::unique_ptr<Viewer>> viewers;
     std::vector<std::uint64_t> sent(streams), received(streams);
     std::vector<std::uint64_t> offered(streams), replaced(streams), injected(streams);
+    std::vector<std::uint64_t> observedOverflows(streams), observedRecoveries(streams);
     std::vector<bool> pending(streams);
+    QElapsedTimer clock;
+    QJsonArray recoveryEvents;
+    std::uint64_t omittedRecoveryEvents = 0;
+    constexpr int recoveryEventCapacity = 64;
+    const auto observeRecovery = [&](int index) {
+      const auto m = *viewers[index]->mediaMetrics();
+      if (m.overflows == observedOverflows[index] && m.recoveryRequests == observedRecoveries[index])
+        return;
+      observedOverflows[index] = m.overflows;
+      observedRecoveries[index] = m.recoveryRequests;
+      if (recoveryEvents.size() >= recoveryEventCapacity) {
+        ++omittedRecoveryEvents;
+        return;
+      }
+      const QJsonObject event{
+          {"event", "media-recovery"},
+          {"stream", index + 1},
+          {"elapsedSeconds",
+           clock.isValid() ? QJsonValue(double(clock.nsecsElapsed()) / 1000000000.) : QJsonValue(QJsonValue::Null)},
+          {"overflows", qint64(m.overflows)},
+          {"recoveryRequests", qint64(m.recoveryRequests)},
+          {"pendingFrames", qint64(m.pendingFrames)},
+          {"decodeQueueMaxMs", double(m.maxDecodeQueueNs) / 1000000.},
+          {"decodeWorkMaxMs", double(m.maxDecodeWorkNs) / 1000000.},
+          {"completionQueueMaxMs", double(m.maxCompletionQueueNs) / 1000000.},
+          {"received", qint64(m.received)}
+      };
+      recoveryEvents.append(event);
+      if (parser.isSet("progress"))
+        QTextStream(stderr) << QJsonDocument(event).toJson(QJsonDocument::Compact) << '\n' << Qt::flush;
+    };
     Channel host(hostIdentity, parseFingerprint(viewerIdentity.fingerprint()));
     Channel peer(viewerIdentity, parseFingerprint(hostIdentity.fingerprint()));
     Listener listener;
@@ -210,6 +248,11 @@ int main(int argc, char **argv)
         error = reason;
     };
     const auto cleanup = qScopeGuard([&] {
+      report.insert("recoveryEvents", recoveryEvents);
+      report.insert("recoveryEventCapacity", recoveryEventCapacity);
+      report.insert("omittedRecoveryEvents", qint64(omittedRecoveryEvents));
+      if (clock.isValid())
+        report.insert("elapsedSecondsAtExit", double(clock.nsecsElapsed()) / 1000000000.);
       if (!report.contains("streams")) {
         QJsonArray partial;
         for (const auto &viewer : viewers)
@@ -279,9 +322,10 @@ int main(int argc, char **argv)
       );
       if (packet.type == MessageType::Ready)
         viewers[packet.session - 1]->committed();
-      else if (packet.type == MessageType::Input && parseObject(packet).value("kind") == "video-recovery")
+      else if (packet.type == MessageType::Input && parseObject(packet).value("kind") == "video-recovery") {
+        observeRecovery(int(packet.session - 1));
         offer(int(packet.session - 1));
-      else if (packet.type == MessageType::Input && parseObject(packet).value("kind") == "focus") {
+      } else if (packet.type == MessageType::Input && parseObject(packet).value("kind") == "focus") {
         // The fixture never grants input authority. Explicitly reject Qt's
         // automatic activation request so a media-only run cannot time out
         // waiting for a NativeHost that intentionally does not exist.
@@ -299,6 +343,7 @@ int main(int argc, char **argv)
       auto payload = parseFramePayload(packet);
       ++received[packet.session - 1];
       viewers[packet.session - 1]->receiveFrame(payload.accessUnit, payload.geometry);
+      observeRecovery(int(packet.session - 1));
     };
     for (int i = 0; i < streams; ++i)
       offer(i);
@@ -308,7 +353,6 @@ int main(int argc, char **argv)
         },
         error
     );
-    QElapsedTimer clock;
     clock.start();
     if (parser.isSet("progress"))
       QTextStream(stderr) << "{\"event\":\"workload-started\",\"durationSeconds\":" << seconds << "}\n" << Qt::flush;
@@ -333,6 +377,7 @@ int main(int argc, char **argv)
           ++injected[0];
           viewers[0]->receiveFrame(frame, 1);
         }
+        observeRecovery(0);
       }
       if (scenario == "mixed" && !hidden && elapsed >= std::int64_t(seconds) * 500000000LL) {
         hidden = true;
@@ -377,13 +422,33 @@ int main(int argc, char **argv)
     for (auto &viewer : viewers)
       viewer->repaint();
     QJsonArray results;
+    std::vector<MediaMetrics> finalMetrics;
     for (int i = 0; i < streams; ++i) {
       const auto m = *viewers[i]->mediaMetrics();
+      finalMetrics.push_back(m);
+      auto entry = metrics(m);
+      entry.insert("stream", i + 1);
+      entry.insert("sourceOffers", qint64(offered[i]));
+      entry.insert("sourceIdrReplacements", qint64(replaced[i]));
+      entry.insert("tlsFrames", qint64(sent[i]));
+      entry.insert("injectedDecoderBurstFrames", qint64(injected[i]));
+      entry.insert("workloadPaintedFrames", qint64(paintedDuring[i]));
+      entry.insert("workloadQtPaintRateHz", double(paintedDuring[i]) * 1000000000. / workloadNs);
+      results.append(entry);
+    }
+    // Preserve the complete measured interval and every stream even when an
+    // invariant fails. A failed long run must remain diagnosable without a retry.
+    report.insert("streams", results);
+    report.insert("workloadSeconds", double(workloadNs) / 1000000000.);
+    report.insert("drainSeconds", double(clock.nsecsElapsed() - workloadNs) / 1000000000.);
+    report.insert("missedOfferSlots", qint64(missedSlots));
+    for (int i = 0; i < streams; ++i) {
+      const auto &m = finalMetrics[i];
       require(
           m.received == received[i] + injected[i] && m.received == m.admitted + m.ignored && m.admitted == m.retired &&
               m.retired == m.decoded + m.decodeErrors + m.discardedCompletions + m.emptyDecodes && !m.pendingFrames &&
               !m.pendingBytes && m.peakFrames <= m.frameCapacity && m.peakBytes <= m.byteCapacity && !m.decodeErrors &&
-              m.painted > 1,
+              m.painted > 1 && !m.invalidTimings && m.timedRetirements == m.retired,
           "Media accounting, capacity, decode or stream progress check failed"
       );
       if (scenario == "steady")
@@ -395,23 +460,10 @@ int main(int argc, char **argv)
             m.ignored > 0 && m.recoveryRequests > 0 && m.painted > hiddenPaints,
             "Hidden Viewer did not resume with a fresh painted frame"
         );
-      auto entry = metrics(m);
-      entry.insert("stream", i + 1);
-      entry.insert("sourceOffers", qint64(offered[i]));
-      entry.insert("sourceIdrReplacements", qint64(replaced[i]));
-      entry.insert("tlsFrames", qint64(sent[i]));
-      entry.insert("injectedDecoderBurstFrames", qint64(injected[i]));
-      entry.insert("workloadPaintedFrames", qint64(paintedDuring[i]));
-      entry.insert("workloadQtPaintRateHz", double(paintedDuring[i]) * 1000000000. / workloadNs);
-      results.append(entry);
       viewers[i]->disconnected();
       viewers[i]->onSend = {};
     }
-    report.insert("streams", results);
     sender.stop();
-    report.insert("workloadSeconds", double(workloadNs) / 1000000000.);
-    report.insert("drainSeconds", double(clock.nsecsElapsed() - workloadNs) / 1000000000.);
-    report.insert("missedOfferSlots", qint64(missedSlots));
     report.insert("status", "PASS");
     // These are workload invariants, not FPS, fairness or H11 latency acceptance.
     report.insert("performanceAcceptance", "NOT_RUN");

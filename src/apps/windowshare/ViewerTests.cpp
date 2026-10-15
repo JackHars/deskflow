@@ -312,6 +312,15 @@ void testMediaMetrics()
       !histogram.percentileUpperNs(99) && histogram.receiveToPaint.back() == 1,
       "Histogram overflow invented a finite percentile"
   );
+  const auto tick = MediaMetrics::Clock::time_point{};
+  using namespace std::chrono_literals;
+  histogram.completion(tick, tick + 2ms, tick + 5ms, tick + 9ms);
+  histogram.completion(tick, tick - 1ms, tick, tick);
+  check(
+      histogram.timedRetirements == 1 && histogram.invalidTimings == 1 && histogram.maxDecodeQueueNs == 2000000 &&
+          histogram.maxDecodeWorkNs == 3000000 && histogram.maxCompletionQueueNs == 4000000,
+      "Media phase timings lost their boundaries or accepted a regressed clock"
+  );
 
   Recording recording;
   Viewer viewer(30, 2, metadata());
@@ -324,8 +333,8 @@ void testMediaMetrics()
   const auto first = *viewer.mediaMetrics();
   check(
       first.received == 1 && first.admitted == 1 && first.retired == 1 && first.decoded == 1 && first.painted == 1 &&
-          first.pendingFrames == 0 && first.pendingBytes == 0 && first.peakFrames == 1 &&
-          first.peakBytes == std::uint64_t(frame().size()),
+          first.pendingFrames == 0 && first.pendingBytes == 0 && first.peakFrames == 1 && first.timedRetirements == 1 &&
+          first.invalidTimings == 0 && first.peakBytes == std::uint64_t(frame().size()),
       "Actual decode/paint diagnostics lost queue accounting"
   );
   for (int i = 0; i < 3; ++i)

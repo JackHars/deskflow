@@ -60,6 +60,10 @@ do not silently shorten sampling if either fails. The extra 60-second maximum
 permits this collection envelope without turning startup growth into a claimed
 steady-state memory leak. Raw RSS and the fixed resource limits are unchanged.
 The combined fixture still cannot be interpreted as separate host/viewer costs.
+Keep local builds, other test suites, debuggers and memory-inspection probes
+outside the declared steady collection. Retain any interference in the run
+record; do not discard a resulting failure or attribute it to a probe without
+evidence. Passive resource sampling remains part of the declared workload.
 
 ## Workload and result contract
 
@@ -114,6 +118,20 @@ The maximum is measured directly. These values measure **local receiveFrame
 entry to completed Qt paint**; they exclude transport before admission,
 ScreenCaptureKit and physical/compositor display completion. They do not meet
 H11's separate capture-to-visible latency boundary.
+
+Fixed-storage maxima also split the receive-to-completion path into decoder
+queue wait, decoder-worker handler time, and completion wait for the GUI.
+These are elapsed wall times, including OS descheduling and native calls;
+they do not attribute CPU time or prove a GPU cause. Every retired completion
+has a checked monotonic timing tuple; a regressed tuple invalidates the check.
+
+Reports retain up to 64 timestamped recovery-counter transitions, including
+stream identity and the phase maxima observed so far. Additional transitions
+are counted as omitted. `--progress` also writes those bounded records to stderr.
+The full per-stream counters, elapsed workload and missed offer slots are
+preserved if a final workload invariant fails. `steady` still rejects any
+overflow or recovery request; diagnostics do not change admission limits,
+recovery deadlines or the workload verdict.
 
 The production decoder reuses up to three conversion images only while no
 returned result or Viewer still shares them. Retained conversion storage is
