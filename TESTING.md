@@ -4,6 +4,41 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## P7 native-batch and hosted follow-up — 2026-10-14
+
+Native queue review: [`native-queue-audit.md`](deploy/windowshare/native-queue-audit.md).
+The guarded libei consumer now limits processed native events to 4096 per
+System callback, checks two seconds around library dispatch and handlers, and
+invalidates the prefix on failure. This limits application processing, not
+libei's earlier allocations. There is no new input authority or synthetic
+native delivery. Linux test builds additionally need `libeis-dev`.
+
+Actual evidence:
+
+- `build/p7-completion-20261014/linux-native-batch-2/result.json`: ON Core,
+  nine suites and private GNOME/Xvfb checks pass; OFF Core and five ASan/UBSan
+  suites pass. `EiComputerTests` uses a real private EIS server to compare
+  ordinary/guarded 4096/4098-event batches and a delay inside library dispatch.
+  The 40 normalization, 35 H11 and 35 physical-coordinator checks also pass.
+  Archive SHA-256: `fe80d8d2f01ee09c0687cf5aa17724e74df25c24772e50db71e4f47f4a9a2814`.
+- `build/p7-queue-20261014/p7-completion-recovery-tests.json`: Mac watchdog,
+  native journal/input-construction and holding policy suites pass. These
+  fixtures do not relocate a live desktop window or establish H10.
+- `build/p7-queue-20261014/p7-completion-guard-tests.json`: Mac EventQueue and
+  private local-input suites pass, including the new failure diagnostics.
+- Hosted run [38659292670](https://github.com/JackHars/deskflow/actions/runs/38659292670)
+  on `cb506b6e1`: four jobs pass; Mac local-input epoch preparation and GNOME
+  report-directory setup fail. The latter has a corrected ordering; the former
+  now retains channel/child failure details. Neither deadline is loosened.
+  A fresh hosted result is required for these changes.
+- `build/p7-completion-20261014/mac-soak-plan.json` predeclares an automated
+  two-stream 1080p/30-fps hour. Its offscreen media and combined-process resource
+  outcome is pending and is separate from native H11 acceptance.
+
+The user chose unattended checks and deferred attended recovery/input/display
+tests. H07–H11 physical rows are unchanged. The upstream native queue gaps must
+remain visible even after successful application tests.
+
 ## P7 whole-Core backlog verification — 2026-10-14
 
 The candidate adds production admission limits to explicitly configured

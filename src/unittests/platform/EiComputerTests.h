@@ -19,6 +19,8 @@ private Q_SLOTS:
   void producerAndConsumerAgreeOnLayout();
   void freshSenderProcessesFirstBatchWithoutCutoff_data();
   void freshSenderProcessesFirstBatchWithoutCutoff();
+  void nativeBatchBudget_data();
+  void nativeBatchBudget();
 
 private:
   Arch m_arch;

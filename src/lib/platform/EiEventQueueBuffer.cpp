@@ -63,9 +63,9 @@ void EiEventQueueBuffer::waitForEvent(double msTimeout)
       // kSystemEvent whenever there's data on the fd, shove that event
       // into our event queue and once we process the event (see
       // getEvent()), the EiComputer will call ei_dispatch() and process
-      // all actual pending ei events. In theory this means that a
-      // flood of ei events could starve the events added with
-      // addEvents() but let's hope it doesn't come to that.
+      // actual pending ei events. Experimental Core bounds each processed
+      // batch separately; ordinary launches retain the existing behavior.
+      // This marker does not count or bound libei's internal allocations.
       m_queue.push({true, 0U});
     }
     // the pipefd data doesn't matter, it only exists to wake up the thread

@@ -1,5 +1,41 @@
 # Seamless Windows work state
 
+## P7 native-batch audit and hosted checks resumed — 2026-10-14
+
+GitHub Actions accepts dispatch again. Run `38659292670` tested `cb506b6e1`:
+Linux application, transport and both portable sanitizer jobs passed. The Mac
+private-channel epoch test failed without a retained close reason; it passes
+locally. Failure unwinding now prints the bounded existing channel/child
+diagnostics without changing deadlines. GNOME reached the family checks, then
+failed because their output directory already existed when the provider
+fixture tried to create it. The container now runs the provider before tests
+that create its report subdirectories. Hosted retesting follows this change.
+
+The native audit found libei's many-events-per-System-callback gap. Explicit
+experimental Core now processes at most 4096 native events per batch and checks
+the existing two-second deadline before/after library dispatch and handlers.
+Failure invalidates the prefix observation and terminates the session. The
+private EIS test sends actual protocol seat notifications and exercises both
+capacity and an expired library dispatch, without devices or desktop input.
+`deploy/windowshare/native-queue-audit.md` records inspected source hashes and
+the remaining upstream allocation/OS-capacity gaps. A processing limit does
+not certify library storage or preempt a blocked native call.
+
+`build/p7-completion-20261014/linux-native-batch-2/result.json` passes the full
+ON Core build and nine suites, private GNOME/Xvfb smoke, and the OFF Core build
+with five ASan/UBSan suites. The existing 40/35/35 evidence/coordinator checks
+also pass. Its frozen source archive is
+`fe80d8d2f01ee09c0687cf5aa17724e74df25c24772e50db71e4f47f4a9a2814`;
+the offline fixture removes its temporary directory. The first configure
+attempt exposed a CMake mixed-signature error, corrected in this final run.
+Mac watchdog/native/holding tests and the updated EventQueue/private-channel
+suites pass in `build/p7-queue-20261014/p7-completion-*-tests.json`.
+
+The user explicitly deferred attended testing again. H10/H11 physical tests
+remain pending. A separate predeclared 3600-second, two-stream 1080p/30-fps
+offscreen load is collecting private evidence; its outcome is not yet known
+and cannot establish native capture/display performance.
+
 ## P7 Core backlog implementation and Actions enablement — 2026-10-14
 
 Explicit experimental Core launches now enforce 4096 outstanding Event

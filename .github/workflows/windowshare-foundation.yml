@@ -157,7 +157,7 @@ jobs:
             qt6-base-dev qt6-tools-dev libavcodec-dev libavutil-dev libswscale-dev libx264-dev openssl libssl-dev help2man \
             libx11-dev libx11-xcb-dev libxtst-dev libxkbfile-dev libxinerama-dev libxrandr-dev libxi-dev \
             libxcb-randr0-dev libxcb-xinput-dev libxcb-cursor0 xvfb xauth dbus-daemon dbus-bin \
-            libxkbregistry-dev libxkbcommon-dev libei-dev libportal-dev
+            libxkbregistry-dev libxkbcommon-dev libei-dev libeis-dev libportal-dev
       - uses: actions/checkout@v4
       - name: Configure the opt-in application
         run: cmake -S src/apps/windowshare -B build/app -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=Debug

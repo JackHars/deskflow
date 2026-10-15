@@ -53,6 +53,8 @@ using ClipboardInfo = IComputer::ClipboardInfo;
 //! Implementation of IPlatformComputer for X11
 class EiComputer : public PlatformComputer
 {
+  friend struct EiComputerTestAccess;
+
 public:
   EiComputer(bool isPrimary, IEventQueue *events, bool usePortal);
 #ifdef BUILD_WINDOWSHARE

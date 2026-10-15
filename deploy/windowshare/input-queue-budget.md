@@ -14,6 +14,7 @@ cannot authorize original input. Limits are fixed in
 | --- | --- | --- |
 | Outstanding Core Events | 4096 | Admission through pending, saved, retrieved and dispatch completion |
 | Active Core dispatch scopes | 64 | Includes immediate and nested borrowed callbacks |
+| Processed libei events per System dispatch | 4096 | Separate native-batch processing limit, not upstream storage capacity |
 | Event residence | 2 seconds | Checked before dispatch and after its handler returns |
 | Admission compare/exchange attempts | 16 | Excess contention terminates the experimental session |
 | Empty-buffer fault detection | At most 50 ms between waits | Subject to OS scheduling; not a real-time guarantee |
@@ -55,11 +56,24 @@ That marker does not represent every event retained inside libei. X11 IDs can
 pass through Xlib/the X server; the shared permit stays held until Core retrieves
 and completes the corresponding Event.
 
+The guarded EI consumer separately refuses a batch beyond 4096 processed
+native events. It checks the existing two-second deadline before and after
+`ei_dispatch`, before each event and after each handler. Overflow or expiry
+invalidates the GNOME prefix observation and returns through terminal Core
+failure; a partial batch cannot publish its completed-prefix acknowledgement
+or resume input. The remaining libei objects are released by context teardown.
+Ordinary launches retain their previous native-batch processing behavior.
+This check cannot preempt `ei_dispatch` or bound allocations it made before
+returning. The batch count is deliberately not emitted as a queue-capacity
+descriptor in input evidence.
+
 OS HID/WindowServer buffers, libei's decoded native batch, Xlib's other native
 events, Qt/compositor input, device buffers and display presentation are outside
 this admission boundary. Their complete capacities/latencies are not certified.
 A Core System event may cover multiple native events. The actual Mac/EI buffer
 tests and private Xvfb smoke do not establish limits for those upstream queues.
+The inspected libei, Clutter and Qt paths and their specific gaps are recorded
+in [native-queue-audit.md](native-queue-audit.md).
 
 Evidence v2 adds `event-all-outstanding` and `event-all-dispatch`, including
 configured actions, timers and control events, alongside the original-stamped
@@ -76,6 +90,11 @@ Repeat ordinary compatibility with it OFF. On Mac also build
 `windowshare-original-input-capture-mac-tests`; this constructs private CGEvents
 without installing taps or posting input. On Linux build/run `EiComputerTests`;
 its owned Unix listener never accesses a desktop or input device.
+The additional EIS fixture queues 4096 and 4098 real native seat notifications,
+checks the ordinary/guarded difference, and delays the library's actual
+dispatch to verify that expired events remain unprocessed. It creates no
+devices and does not inject keyboard or pointer input. Linux tests require
+`libeis-dev` as well as `libei-dev`.
 
 Run EventQueue/capture checks under ASan/UBSan, plus:
 

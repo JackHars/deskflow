@@ -494,6 +494,10 @@ or production original-input authority.
   Core through existing recovery. Evidence v2 records both the original-stamped
   subset and all-event counts with their actual shared limits. Ordinary launches
   retain their admission policy; legacy evidence retains its original null bounds.
+- [x] Audit native queue boundaries and limit libei batch processing separately
+  from Core Events. The actual private EIS fixture covers capacity and expiry;
+  the audit records unbounded enqueue paths and unknown OS/device capacities
+  without treating them as certified. See `deploy/windowshare/native-queue-audit.md`.
 - [ ] Complete full native/library/OS/kernel queue certification on the frozen
   runtime and collect the actual stimulus/display measurements. Core admission
   cannot certify input buffered before it, compositor/device queues or a blocked

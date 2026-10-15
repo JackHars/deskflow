@@ -10,14 +10,29 @@
 #include "deskflow/AppUtil.h"
 #include "platform/EiComputer.h"
 
+#include <QElapsedTimer>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QScopeGuard>
 #include <QTemporaryDir>
 
+#include <libeis.h>
+
 #include <array>
 #include <cstddef>
+#include <cstring>
 #include <memory>
+#include <thread>
+
+namespace deskflow {
+struct EiComputerTestAccess
+{
+  static ei *context(EiComputer &computer)
+  {
+    return computer.m_ei;
+  }
+};
+} // namespace deskflow
 
 std::array<std::size_t, 2> eiComputerPlatformLayout() noexcept;
 
@@ -36,6 +51,27 @@ public:
   std::string getCurrentLanguageCode() override
   {
     return "en";
+  }
+};
+
+struct NativeBatchObservation
+{
+  unsigned seats = 0;
+  bool connected = false, delay = false;
+  static void log(ei *context, ei_log_priority, const char *message, ei_log_context *)
+  {
+    auto &self = *static_cast<NativeBatchObservation *>(ei_get_user_data(context));
+    if (std::strstr(message, "queuing event type EI_EVENT_CONNECT"))
+      self.connected = true;
+    if (std::strstr(message, "queuing event type EI_EVENT_SEAT_ADDED")) {
+      ++self.seats;
+      if (self.delay) {
+        self.delay = false;
+        // Delay inside the actual library dispatch, before Core can consume
+        // its newly queued event. No input device or compositor is involved.
+        std::this_thread::sleep_for(deskflow::EventQueueBudget::maximumAge + std::chrono::milliseconds(100));
+      }
+    }
   }
 };
 } // namespace
@@ -128,6 +164,113 @@ void EiComputerTests::freshSenderProcessesFirstBatchWithoutCutoff()
     QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
     QCOMPARE(budget->snapshot().admitted, budget->snapshot().retired);
   }
+}
+
+void EiComputerTests::nativeBatchBudget_data()
+{
+  QTest::addColumn<bool>("bounded");
+  QTest::addColumn<unsigned>("count");
+  QTest::addColumn<bool>("delay");
+  const auto limit = unsigned(deskflow::EventQueueBudget::nativeBatchCapacity);
+  QTest::newRow("ordinary-large-native-batch") << false << limit + 2 << false;
+  QTest::newRow("experimental-at-limit") << true << limit << false;
+  QTest::newRow("experimental-over-limit") << true << limit + 2 << false;
+  QTest::newRow("expired-inside-native-dispatch") << true << 1U << true;
+}
+
+void EiComputerTests::nativeBatchBudget()
+{
+  QFETCH(bool, bounded);
+  QFETCH(unsigned, count);
+  QFETCH(bool, delay);
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  Settings::setSettingsFile(directory.filePath("core.ini"));
+  Settings::setValue(Settings::Core::PreventSleep, false);
+  Settings::setValue(Settings::Client::LanguageSync, false);
+  std::unique_ptr<eis, decltype(&eis_unref)> server(eis_new(nullptr), eis_unref);
+  QVERIFY(server);
+  const auto path = directory.filePath("batch.sock").toLocal8Bit();
+  QCOMPARE(eis_setup_backend_socket(server.get(), path.constData()), 0);
+  const auto previousSocket = qgetenv("LIBEI_SOCKET");
+  const bool hadSocket = qEnvironmentVariableIsSet("LIBEI_SOCKET");
+  const auto restoreSocket = qScopeGuard([&] {
+    if (hadSocket)
+      qputenv("LIBEI_SOCKET", previousSocket);
+    else
+      qunsetenv("LIBEI_SOCKET");
+  });
+  QVERIFY(qputenv("LIBEI_SOCKET", path));
+  std::unique_ptr<eis_client, decltype(&eis_client_unref)> client(nullptr, eis_client_unref);
+  TestAppUtil appUtil;
+  NativeBatchObservation observed;
+  const auto budget = bounded ? std::make_shared<deskflow::EventQueueBudget>() : nullptr;
+  EventQueue events(budget);
+  auto computer = std::make_unique<deskflow::EiComputer>(false, &events, false);
+  auto *context = deskflow::EiComputerTestAccess::context(*computer);
+  ei_set_user_data(context, &observed);
+  ei_log_set_priority(context, EI_LOG_PRIORITY_DEBUG);
+  ei_log_set_handler(context, NativeBatchObservation::log);
+  QElapsedTimer timeout;
+  timeout.start();
+  while (!observed.connected && timeout.elapsed() < 2000) {
+    eis_dispatch(server.get());
+    while (auto *event = eis_get_event(server.get())) {
+      if (eis_event_get_type(event) == EIS_EVENT_CLIENT_CONNECT) {
+        client.reset(eis_client_ref(eis_event_get_client(event)));
+        eis_client_connect(client.get());
+      }
+      eis_event_unref(event);
+    }
+    QVERIFY(events.dispatchEvent(Event(EventTypes::System, events.getSystemTarget())));
+    QTest::qWait(1);
+  }
+  QVERIFY(observed.connected);
+  QVERIFY(client);
+  // Queue real native objects through the owned EIS protocol. There are no
+  // devices, input events, display access, or test-only production queues.
+  for (unsigned i = 0; i < count; ++i) {
+    const auto name = QByteArray("batch-seat-") + QByteArray::number(i);
+    auto *seat = eis_client_new_seat(client.get(), name.constData());
+    QVERIFY(seat);
+    eis_seat_configure_capability(seat, EIS_DEVICE_CAP_POINTER);
+    eis_seat_add(seat);
+    eis_seat_unref(seat);
+  }
+  observed.delay = delay;
+  if (!delay) {
+    timeout.restart();
+    while (observed.seats < count && timeout.elapsed() < 2000) {
+      eis_dispatch(server.get());
+      ei_dispatch(context);
+      QTest::qWait(1);
+    }
+    // Debug observations establish the fixture's actual prefilled population;
+    // they are not production queue accounting or an input-delivery receipt.
+    QCOMPARE(observed.seats, count);
+  }
+  QVERIFY(events.dispatchEvent(Event(EventTypes::System, events.getSystemTarget())));
+  auto *remaining = ei_peek_event(context);
+  const bool nativeRemaining = remaining != nullptr;
+  if (remaining)
+    ei_event_unref(remaining);
+  const bool overflow = bounded && count > deskflow::EventQueueBudget::nativeBatchCapacity;
+  QCOMPARE(nativeRemaining, overflow || delay);
+  if (budget) {
+    using Failure = deskflow::EventQueueBudget::Failure;
+    QCOMPARE(
+        budget->snapshot().failure, delay      ? Failure::Deadline
+                                    : overflow ? Failure::NativeBatchCapacity
+                                               : Failure::Healthy
+    );
+    if (overflow || delay)
+      QCOMPARE(events.loop(), 1);
+  }
+  // Destruction frees any unconsumed native tail. The failed session never
+  // drains only part of a batch and then resumes forwarding or prefix ACKs.
+  computer.reset();
+  if (budget)
+    QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
 }
 
 QTEST_MAIN(EiComputerTests)

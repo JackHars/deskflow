@@ -9,6 +9,11 @@ To build Deskflow you will a minimum of:
 
 > ^ Will be fetched if not found on the host system.
 
+Linux/BSD builds with libei and `BUILD_TESTS=ON` also require the matching
+libeis development package (`libeis-dev` on Ubuntu). `EiComputerTests` uses a
+private EIS server to check native batch overload and shutdown without a desktop
+or input device. This is a test dependency; it is not linked into Deskflow Core.
+
 By default a build of Deskflow will: 
      - The GUI application `deskflow`
      - The Core application `deskflow-core`

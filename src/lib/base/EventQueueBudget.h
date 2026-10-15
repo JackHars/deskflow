@@ -24,6 +24,9 @@ public:
   using Clock = std::chrono::steady_clock;
   static constexpr std::uint64_t capacity = 4096;
   static constexpr std::uint64_t dispatchCapacity = 64;
+  // Processing limit for one native libei batch, not a capacity claim about
+  // libei's internal queues or the compositor/socket before it.
+  static constexpr std::uint64_t nativeBatchCapacity = 4096;
   static constexpr auto maximumAge = std::chrono::seconds(2);
   enum class Failure : std::uint8_t
   {
@@ -34,6 +37,7 @@ public:
     Deadline,
     ForeignQueue,
     PlatformBuffer,
+    NativeBatchCapacity,
     Accounting
   };
   struct Snapshot

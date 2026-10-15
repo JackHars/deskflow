@@ -1,0 +1,44 @@
+{
+  "format": "deskflow-native-queue-audit-sources-v1",
+  "date": "2026-10-14",
+  "fullCapacityCertification": "INCOMPLETE",
+  "linuxFixtureImage": "sha256:65f389a94c05ac9eb2b72d62424d80a52650849918582b0bacc9f12507290086",
+  "sources": [
+    {
+      "component": "libei/libeis 1.5.0",
+      "path": "src/libei.c",
+      "source": "upstream libei-1.5.0 source archive",
+      "sha256": "f4648325ffcd8e086918470268b2da20072c620b8403b4089e7ae2010a7e63b4"
+    },
+    {
+      "component": "libei/libeis 1.5.0",
+      "path": "src/libeis.c",
+      "source": "upstream libei-1.5.0 source archive",
+      "sha256": "c05f180e38a27a95fe179f3f5e5979e643a5affe1c2052e128fb6178ad3d0348"
+    },
+    {
+      "component": "Mutter 50.1-0ubuntu2.4",
+      "path": "clutter/clutter/clutter-event.c",
+      "source": "Ubuntu source package, Debian patches applied",
+      "sha256": "992a0667b80f188a1122a0d69af82b10520de1bbcf87a35b032223874ecee405"
+    },
+    {
+      "component": "Mutter 50.1-0ubuntu2.4",
+      "path": "src/backends/meta-eis-client.c",
+      "source": "Ubuntu source package, Debian patches applied",
+      "sha256": "fe22c28e5f5484196048e875073a15add59997bd2d2ae5b3484f6a9f89ac0e6d"
+    },
+    {
+      "component": "Qt 6.10.2",
+      "path": "src/gui/kernel/qwindowsysteminterface.cpp",
+      "source": "https://raw.githubusercontent.com/qt/qtbase/v6.10.2/src/gui/kernel/qwindowsysteminterface.cpp",
+      "sha256": "47aad63ab015b4e953e793b7bdbc226e6f3fce535054765ae5bddf8ed953c7e2"
+    },
+    {
+      "component": "Qt 6.10.2",
+      "path": "src/plugins/platforms/wayland/qwaylanddisplay.cpp",
+      "source": "https://raw.githubusercontent.com/qt/qtbase/v6.10.2/src/plugins/platforms/wayland/qwaylanddisplay.cpp",
+      "sha256": "9e504f838265b5784ba18bb13494565276451b0b6e50a3becb9d3ecb34f9f027"
+    }
+  ]
+}

@@ -1952,12 +1952,43 @@ void EiComputer::handleSystemEvent(const Event &)
 {
   std::scoped_lock lock{m_mutex};
 
+  const auto budget = m_events->queueBudget();
+  const auto started = EventQueueBudget::Clock::now();
+  const auto live = [&] {
+    if (!budget)
+      return true;
+    if (EventQueueBudget::Clock::now() - started > EventQueueBudget::maximumAge)
+      budget->fail(EventQueueBudget::Failure::Deadline);
+    if (budget->live())
+      return true;
+#ifdef DESKFLOW_GNOME_EI_PING
+    // Never publish a prefix observation from a partial native batch. The
+    // terminal Core budget causes the enclosing loop to exit and disconnect.
+    invalidateGnomeInputCutoff();
+#endif
+    return false;
+  };
+  if (!live())
+    return;
+
   // Only one ei_dispatch per system event, see the comment in
   // EiEventQueueBuffer::addEvent
   ei_dispatch(m_ei);
+  // A library call cannot be preempted by this check. Once it returns, do not
+  // consume or acknowledge an expired batch, even when it produced no events.
+  if (!live())
+    return;
   struct ei_event *event;
+  std::uint64_t consumed = 0;
 
   while ((event = ei_get_event(m_ei)) != nullptr) {
+    if (budget && consumed == EventQueueBudget::nativeBatchCapacity)
+      budget->fail(EventQueueBudget::Failure::NativeBatchCapacity);
+    if (!live()) {
+      ei_event_unref(event);
+      return;
+    }
+    ++consumed;
     auto type = ei_event_get_type(event);
     auto seat = ei_event_get_seat(event);
     auto device = ei_event_get_device(event);
@@ -2107,6 +2138,8 @@ void EiComputer::handleSystemEvent(const Event &)
       break;
     }
     ei_event_unref(event);
+    if (!live())
+      return;
   }
 #ifdef DESKFLOW_GNOME_EI_PING
   // libei explicitly permits a synthetic PONG immediately before disconnect.

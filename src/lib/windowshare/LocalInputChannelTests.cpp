@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <stdexcept>
 #include <thread>
@@ -419,10 +420,11 @@ struct Fixture
   }
   ~Fixture()
   {
+    const bool failureDiagnostics = identityFailureDiagnostics || std::uncaught_exceptions() > 0;
     const auto childStateBeforeCleanup = child.state();
     bool cleanupKillRequested = false;
-    if (identityFailureDiagnostics) {
-      QTextStream(stderr) << "Identity authentication failure: waitElapsedMs=" << identityWaitElapsedMs
+    if (failureDiagnostics) {
+      QTextStream(stderr) << "Private channel fixture failure: waitElapsedMs=" << identityWaitElapsedMs
                           << " waitBudgetMs=4000 ready=" << ready << " closed=" << closed
                           << " closeReason=" << reason.left(4096) << '\n';
       if (core)
@@ -445,7 +447,7 @@ struct Fixture
       child.kill();
       child.waitForFinished(2000);
     }
-    if (identityFailureDiagnostics) {
+    if (failureDiagnostics) {
       // These reads never wait. Preserve output after the existing cleanup
       // wait too, without extending its deadline or confusing our kill with
       // an independently observed child crash.

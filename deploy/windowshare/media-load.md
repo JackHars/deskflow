@@ -107,5 +107,6 @@ H11's separate capture-to-visible latency boundary.
 Use [resource-soak.md](resource-soak.md) for passive per-process samples and
 the fixed resource budget report. Use [h11-evidence.md](h11-evidence.md) for the
 actual physical input/latency procedure. GPU use, bandwidth, native multi-stream
-fairness, full platform/kernel queue coverage, configured bounds for Core's
-EventQueue lifetimes, and physical H10/H11 remain separate open checks.
+fairness, full platform/kernel queue coverage and physical H10/H11 remain
+separate open checks. Core's configured EventQueue and native-batch processing
+limits are documented in [input-queue-budget.md](input-queue-budget.md).

@@ -43,6 +43,9 @@ elseif(UNIX)
       SOURCE EiComputerTests.cpp
       WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/platform"
     )
+    # A private EIS server exercises the real libei queue without a desktop.
+    pkg_check_modules(LIBEIS REQUIRED IMPORTED_TARGET libeis-1.0)
+    target_link_libraries(EiComputerTests PkgConfig::LIBEIS)
     set_tests_properties(EiComputerTests PROPERTIES TIMEOUT 15)
   endif()
 
