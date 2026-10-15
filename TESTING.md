@@ -4,6 +4,102 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Current candidate: unattended verification complete — 2026-10-15
+
+Runtime candidate **`d57e78a0da972d29b9e71201c3efdae8c00fac18`** passes all six
+[hosted jobs](https://github.com/JackHars/deskflow/actions/runs/38675705240),
+local Mac native hardware/color/reset and scoped sanitizer checks, the isolated
+Ubuntu application/Qt/Xvfb/load checks, and the complete synthetic hour below.
+The earlier failures remain in the dated entries. No admission limit, recovery
+deadline, resource budget or steady-workload rule was relaxed.
+
+The decoder reuses one private hardware-download buffer for the same retained
+hardware context and dimensions, and converts directly to opaque native RGB32.
+Tests verify changing colors, retained images, resize and reset. Existing image
+cache limits remain unchanged. Hardware counters distinguish real hardware
+frames and buffer reuse from software fallback.
+
+### Completed synthetic hour
+
+The declared workload was two 1920×1080 streams offered at 30 fps for 3630
+seconds, with 3600 seconds of passive CPU/RSS collection after warm-up.
+No local builds, other tests, signing, debugger or memory probes were started
+by this task during collection. This exercises actual loopback TLS, decoding
+and offscreen Qt paint. It does not capture native source windows or measure
+physical display/input latency.
+
+| Check | Final result |
+| --- | --- |
+| Workload / fixed `pilot-20261013-v1` resource comparison | PASS / PASS |
+| Resource samples / observed lower interval | 1801 / 3600.001405 seconds |
+| Sampled peak RSS | 141,189,120 bytes (134.65 MiB); limit <1 GiB |
+| Upper net RSS growth per hour | 10,948,603.73 bytes (10.44 MiB); limit <100 MiB |
+| Upper average CPU | 100.001%; limit <200% |
+| Hardware decoded frames, streams 1 / 2 | 108840 / 108839 |
+| Reused hardware transfers, streams 1 / 2 | 108839 / 108838 |
+| Overflow / recovery / decode errors / invalid timing tuples | Zero on both streams |
+| Final queued frames and bytes | Zero on both streams |
+| Maximum queued frames | 12 / 11, below the unchanged 16-frame limit |
+| Workload completed Qt paints per second | 29.9829 / 29.9826 |
+| Receive-to-Qt-paint histogram p95 / p99 upper bounds | 64 / 256 ms on both streams |
+| Missed source offer slots | 46, retained in the report |
+
+The local paint histogram includes warm-up and is not H11's end-to-end latency
+boundary. The workload reports `performanceAcceptance: NOT_RUN`; the resource
+evaluator also leaves authenticity/workload verification and `h11_complete`
+flags unchanged. This pass is scoped to the declared synthetic workload and
+resource comparison, not full native performance or an absence-of-leaks claim.
+
+Evidence: `build/p7-completion-20261014/mac-transfer-rgb-hour/` contains the
+predeclared plan, source/binary hashes, workload, raw samples, budget result and
+independent verification. Trace SHA-256:
+`2cb333f09f3ec69c76213d68c95401e4815b6dfe7bdf46f4e881ac6a24a77efd`.
+The load stayed alive through the final sample. Both owned processes exited,
+the temporary signed copy was removed, and all recorded runtime sources stayed
+unchanged during the run. Reproduce with `deploy/windowshare/media-load.md` and
+`resource-soak.md`; do not replace a full hour with the short comparison below.
+
+### Verified delivery artifacts
+
+The source [export](https://github.com/JackHars/deskflow/actions/runs/38675705333)
+passes. Its raw commit object, index, archive modes/symlinks and all **1157** Git
+blob identities match `d57e78a0d`. Package source commits, checksums, archive
+inventory and executable architectures also match; the Linux internal manifest
+passes `package-linux.py --verify`. No downloaded executable was launched locally.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Source tar | `deb41b1f2a5d8abffa14e8c92cbf8f09eb566fa04a64322489d63f236ae18a99` |
+| Linux x86_64 tar | `721395859a11bc24db71ab385f189da4dbe37447c85420677ce8a744d4dd7f88` |
+| CI Mac ARM64 ad-hoc Core ZIP | `68363485b3668e2ec9953e561d0f90b34bfbe819c1adc89fac15ff93d57cb7f8` |
+| CI Mac ARM64 ad-hoc Viewer ZIP | `1005c9b28c49c94a892e7ab95da440ed2b17fe516c1192f9180f407ab7c78b6f` |
+| Local Intel Apple-issued exact-library Core ZIP | `ac9fc9e16f5d9f76e6bb11a18cfe5d75c19d2acff981cd700a8b663e71582f2a` |
+
+CI artifacts expire after seven days. For example, download the verified Linux
+package into a new directory, then check its recorded checksums:
+
+```sh
+gh run download 38675705240 \
+  -n windowshare-linux-d57e78a0da972d29b9e71201c3efdae8c00fac18 \
+  -D /absolute/new/private/download
+cd /absolute/new/private/download
+shasum -a 256 -c SHA256SUMS
+```
+
+The separate local bundle is
+`build/p7-completion-20261014/mac-transfer-rgb-package/DeskflowSeamless-Core-Experimental.app`.
+Its dependency/signature audit and private Core/Host handshake pass, with
+original input disabled. It requires macOS 26.0 because of its bundled local
+libraries and was tested on 26.1; the hosted ARM64 archives declare macOS 15.0.
+Artifact verification JSON, complete CI logs and local package manifest/smoke
+results are retained under `build/p7-completion-20261014`.
+
+**Remaining:** full native/library/OS queue certification and applicable H02–H12
+acceptance on this final candidate. H01 has automated build/package evidence;
+installation and desktop capability acceptance remain pending. The user
+explicitly deferred attended tests. Do not launch physical routing, relocation
+or sleep tests until they are ready.
+
 ## P7 quiet-hour failure and decoder follow-up — 2026-10-14
 
 The predeclared quiet hour on `6108bd2853c173ccba19b4913d95195a7f0e8110`
@@ -1702,11 +1798,11 @@ sections after receiving the final branch.
 ## Candidate identity and result rules
 
 - Baseline implementation: `ef51456659edae1acf06a6c03b730bcaf66f2f8b`.
-- Current runtime implementation: `bbb847796d361b0056178948b1cbf97cdd2e6e0f`.
-  This includes the P5/P6 code, P7 Core/native-batch guards and bounded decoder
-  image reuse. Packaging-workflow and documentation follow-ups are identified
-  in the newest entry; full native queue certification and hardware acceptance
-  remain incomplete. Earlier checkpoint results are historical.
+- Current runtime implementation: `d57e78a0da972d29b9e71201c3efdae8c00fac18`.
+  This includes P5/P6, P7 Core/native-batch guards, bounded image and hardware
+  transfer reuse, and direct native RGB32 paint. All six hosted jobs and the
+  declared synthetic hour pass. Full native queue certification and hardware
+  acceptance remain incomplete. Earlier checkpoint results are historical.
 - Returned branch: `feature/seamless-windows` in `JackHars/deskflow`; incremental changes pushed directly, no PR.
 - Local runtime/toolchain: Intel macOS 26.1 (25B78), SDK 15.5, Qt 6.8.3;
   isolated Ubuntu 26.04, GCC 15.2, Qt 6.10.2, libei/libeis 1.5.0 and Mutter
@@ -1732,7 +1828,7 @@ Implementation-to-test map (later commits include earlier runtime work):
 | P4 | `e461d2b31` and subsequent holding/recovery fixes | C04/C08/C10; H05/H06/H10 |
 | P5 | `63396d630`, `c748915cc` | C04/C07/C08; H07 |
 | P6 | `bfb9cb9e8` | C06/C07/C09; H08/H09 |
-| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `bbb847796` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
+| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `6108bd285`, `d57e78a0d` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
 | P8 | Existing package scripts and the current CI retention follow-up | C10–C12; installation/upgrade/removal H12 remains open |
 
 Use `PASS`, `FAIL`, `NOT_RUN` or `NOT_APPLICABLE` with a reason. A skipped case is
@@ -1894,18 +1990,18 @@ does not promote a native/physical H row or certify unknown upstream queues.
 
 | ID | Required check | Current candidate result / command / evidence |
 | --- | --- | --- |
-| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `bbb847796`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
+| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `d57e78a0d`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
 | C02 | Actual Linux core with window sharing ON and OFF; ordinary protocol compatibility | PASS: current hosted integrated ON/OFF build/tests; independent home Ubuntu frozen Core and private EIS results are retained above. |
-| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `bbb847796`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
+| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `d57e78a0d`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
 | C04 | Bounded async preparation, ownership, overflow, timeout, selection change, reentry and destruction | PASS: production coordinator, Core EventQueue and private channel regressions on Mac/Ubuntu, including overflow, expiry, reentry and exact cleanup. No physical delivery claim. |
 | C05 | Ordered cutoff/drain and exact point validation; delayed queues, duplicates and same-batch disconnect | PASS for implemented prefix, routed-point and private GNOME/Qt fixtures. Full native/OS queue capacities and actual physical delivery remain uncertified; see the native audit and H04. |
-| C06 | Actual Viewer/Bridge/transport; pending focus, pause/resume and old queued events | PASS: current Mac/Ubuntu Viewer, Bridge, viewport, transport and bounded media-load suites, plus decoder image-ownership regressions and scoped Mac sanitizers. |
-| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `bbb847796`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
+| C06 | Actual Viewer/Bridge/transport; pending focus, pause/resume and old queued events | PASS: current Mac/Ubuntu Viewer, Bridge, viewport, transport and bounded media-load suites, plus image-ownership/hardware-transfer/color regressions, scoped Mac sanitizers and the complete synthetic hour. |
+| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `d57e78a0d`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
 | C08 | Multi-window/topology/holding lifecycle, drag transaction and failure regressions | PASS automated policy/transaction/native-fixture coverage for integrated bidirectional P5 dragging, holding restoration and watcher/helper lifecycle. Real-window transfer and failure acceptance remains H05–H07/H10. |
 | C09 | Dialog/clipboard/shortcut associations and resource scheduling/recovery tests | PASS component regressions, including actual private GNOME/X11 child surfaces and bounded overload/hidden recovery. Named app dialogs, clipboard and shortcut acceptance remains H08/H09. |
-| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `bbb847796`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local Apple-issued exact-library package and private handshake also pass. |
-| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `bbb847796`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
-| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `bbb847796` source archive matches all 1156 Git tree entries and blob identities. Full-repository REUSE lint NOT_RUN. |
+| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `d57e78a0d`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local Apple-issued exact-library package and private handshake also pass. |
+| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `d57e78a0d`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
+| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `d57e78a0d` source archive matches all 1157 Git tree entries and blob identities. Full-repository REUSE lint NOT_RUN. |
 
 ### Reproducible baseline commands
 
@@ -2033,7 +2129,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 
 | ID | Procedure and required observations | Result / evidence |
 | --- | --- | --- |
-| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `bbb847796`: local and hosted Mac/Ubuntu automated results and exact local Mac package/handshake pass as recorded above. Final desktop capability and installation acceptance remains pending. |
+| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `d57e78a0d`: local and hosted Mac/Ubuntu automated results and exact local Mac package/handshake pass as recorded above. Final desktop capability and installation acceptance remains pending. |
 | H02 | Repeat actual disposable Mac capture → Ubuntu viewer → Mac tagged native-receiver tests at Qt scales 1 and 1.25. Check frame identity/geometry, pointer/click/scroll/key receipts, no stuck input and restoration. This is synthetic, not physical acceptance. | NOT_RUN |
 | H03 | Run visible user-started physical flow. Confirm Start/Stop and countdown, actual Option hotkeys, type a/Shift+b/c, hold/release x, move/click/drag and scroll both axes, return to Mac. Match exact native source/host receipts and human result; no duplicate text or missing release. | NOT_RUN |
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |
@@ -2043,7 +2139,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 | H08 | Test native dialogs, modal child windows, popup/context menus, browser and Electron app. Check intended window association, stacking, focus and input targeting; no unrelated application receives an event. Record app/OS versions. | NOT_RUN |
 | H09 | Verify copy/paste directions and focus policy; modifiers, shortcuts, key repeat, Unicode/composition and both scroll axes/momentum. Check clipboard feedback and unsupported IME behavior. | NOT_RUN |
 | H10 | Terminate only recorded owned experimental processes at defined host/core/viewer/helper stages; test connection loss and sleep/wake. Confirm automatic/journal recovery, no orphan display/process, no stuck input and no changes to ordinary Deskflow. | NOT_RUN |
-| H11 | Run a documented long-duration/multiple-stream scenario; measure end-to-end latency, CPU/GPU, memory, bandwidth, dropped frames and fairness. Record hardware/settings, duration and thresholds before running. Verify bounded resources and cleanup. | NOT_RUN |
+| H11 | Run a documented long-duration/multiple-stream scenario; measure end-to-end latency, CPU/GPU, memory, bandwidth, dropped frames and fairness. Record hardware/settings, duration and thresholds before running. Verify bounded resources and cleanup. | NOT_RUN for native end-to-end acceptance. The separately scoped synthetic hour/resource comparison passes at `d57e78a0d`; it does not close H11. |
 | H12 | Install, launch, upgrade, restart and remove the separate experimental packages on both machines. Verify code/dependency identity, permission messages, provider version diagnostics and preservation of ordinary Deskflow/settings. | NOT_RUN |
 
 ### Existing local test entry points

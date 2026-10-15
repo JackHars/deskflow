@@ -1,5 +1,38 @@
 # Seamless Windows work state
 
+## P7 unattended candidate verified; attended gates remain — 2026-10-15
+
+Runtime `d57e78a0da972d29b9e71201c3efdae8c00fac18` passes all six hosted jobs
+(run `38675705240`), source export and independent artifact verification. Mac
+native hardware-transfer/color/resize/reset checks and scoped ASan/UBSan pass;
+the isolated Ubuntu application and Qt/Xvfb/load suites pass. The local Intel
+Apple-issued exact-library package passes its audit and private launch check.
+The downloaded source matches all 1157 tracked entries and blob identities.
+
+The full, unchanged two-stream 1080p/30-fps synthetic workload and one-hour
+resource comparison now both PASS. There are 1801 samples, zero overflow,
+recovery or decode errors, and empty queues at exit. Peak sampled RSS is
+134.65 MiB, upper net growth 10.44 MiB/h and upper average CPU 100.001%, within
+1 GiB / 100 MiB/h / 200% limits. Hardware transfer storage is reused after the
+first frame on both streams. The final load has 46 missed source offer slots;
+local receive-to-Qt-paint p95/p99 histogram upper bounds are 64/256 ms. These
+remain explicit and do not establish native latency acceptance.
+
+Evidence and cleanup are verified in
+`build/p7-completion-20261014/mac-transfer-rgb-hour/verification.json`.
+No local build/test/signing/profiler work was launched by this task during
+collection. Earlier failed hours remain recorded. `TESTING.md` contains exact
+commit, artifact/source hashes, test scope and reproduction instructions.
+The staged local bundle is `mac-transfer-rgb-package` under the same evidence
+root. CI archives are separate ARM64 ad-hoc Mac and x86_64 Linux packages.
+
+Next work requires the deferred native/attended acceptance: current desktop
+capabilities and installation, real routing/dragging/app behavior, owned-process
+crash and sleep/wake restoration, and end-to-end input/display measurements.
+Full native/library/OS queue certification is still incomplete. Do not mark
+P7/H10/H11 or the whole product accepted from this synthetic pass, and do not
+start attended fixtures until the user returns ready to test.
+
 ## P7 reproducible quiet-hour failure; transfer/paint follow-up — 2026-10-14
 
 The quiet hour on `6108bd285` completes but fails: 70/68 decoder recoveries and

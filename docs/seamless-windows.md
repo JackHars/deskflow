@@ -1,6 +1,6 @@
 # Experimental window sharing
 
-## Current implementation — 2026-10-14
+## Current implementation — 2026-10-15
 
 P7 now includes bounded experimental Core admission (4096 Events, 64 dispatch
 scopes and two-second age checks), a separate 4096-event libei processing limit,
@@ -8,8 +8,13 @@ and opt-in Viewer queue/unique-paint diagnostics. The reproducible loopback
 TLS/decoder/offscreen workload and resource evaluator use the predeclared
 hour-long pilot budgets. The decoder reuses unshared conversion images within
 a 32 MiB cache after an initial long-load attempt exceeded the RSS comparison.
-Mac and isolated Ubuntu regressions, overload recovery, 16-stream and generated
-1080p workloads pass; scoped Mac sanitizers also pass. Native latency, full
+It also reuses a private hardware-transfer buffer for the same retained context
+and dimensions, and converts directly to opaque native RGB32 for Qt painting.
+Runtime `d57e78a0d` passes all six hosted jobs and the full two-stream 1080p/30-fps
+synthetic hour: no overflow/recovery/decode errors, 134.65 MiB sampled peak RSS
+and 10.44 MiB/h upper net growth. Earlier failed hours remain in `TESTING.md`.
+Mac hardware/color/reset tests, scoped sanitizers and isolated Ubuntu suites
+also pass; source and package artifacts are verified. Native latency, full
 platform/kernel queue bounds and H10/H11 acceptance remain open. Application
 processing limits do not bound earlier native-library allocations. See the
 [native queue audit](../deploy/windowshare/native-queue-audit.md),

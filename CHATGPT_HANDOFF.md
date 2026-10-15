@@ -22,12 +22,15 @@ attached-window capture/lifecycle changes are part of the current working candid
 first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
 P7 media/resource tooling and whole-Core queue admission/evidence are implemented.
-The newest local verification results are recorded in `TESTING.md`.
+The newest local verification results are recorded in `TESTING.md`. Runtime
+`d57e78a0d` passes all six hosted jobs, verified source/packages and a complete
+one-hour two-HD-stream synthetic workload/resource comparison. This does not
+close native or attended acceptance.
 Full platform/kernel queue certification and physical H07–H11
 acceptance remain open. Historical
 results below do not cover later source changes.
 
-As of 2026-10-14, queue/admission commit `a2aa7a5e8` passes the home Ubuntu
+Earlier 2026-10-14 checkpoints: queue/admission commit `a2aa7a5e8` passes the home Ubuntu
 37-suite enabled/5-suite disabled run and a fixed 12-session native matrix.
 Commit `c8a9617aa` requires libei >= 1.5 for experimental Linux builds after
 reproducing an upstream early-teardown crash in older releases; all six hosted
@@ -38,7 +41,8 @@ and private smoke. A subsequent owned AppKit sheet probe observes a distinct
 child native ID and exact parent link. These results do not establish
 drag ownership or remote child support. Two user-operated drag probes observed
 continued movement after targeted PID mouse-up. Normal titlebar dragging is
-still required, and the P5 checklist remains open.
+still required; those checkpoints did not yet complete P5. The current
+implementation checklist below supersedes their status.
 
 A later explicitly selected system-stream experiment on `f5517122c` has a
 positive physical observation: the user confirmed the owned window stopped
@@ -498,6 +502,11 @@ or production original-input authority.
   from Core Events. The actual private EIS fixture covers capacity and expiry;
   the audit records unbounded enqueue paths and unknown OS/device capacities
   without treating them as certified. See `deploy/windowshare/native-queue-audit.md`.
+- [x] Complete the declared synthetic two-stream 1080p/30-fps hour and fixed
+  resource comparison on `d57e78a0d`: zero overflow/recovery/decode errors,
+  134.65 MiB peak RSS and 10.44 MiB/h upper net growth. Retain failed earlier
+  runs. This exercises loopback TLS, hardware decode and offscreen Qt paint;
+  it does not complete H10/H11 native acceptance.
 - [ ] Complete full native/library/OS/kernel queue certification on the frozen
   runtime and collect the actual stimulus/display measurements. Core admission
   cannot certify input buffered before it, compositor/device queues or a blocked
@@ -528,9 +537,9 @@ owned-process cases, sleep/wake and actual performance/soak in H10/H11.
   credentials are available. Otherwise provide the commit/patch and explain how
   to transfer it. Leave no essential code only in ignored build directories.
 
-Runtime candidate `bbb847796` passes all six hosted jobs in run `38661949281`
-and the verified source archive. The local Apple-issued exact-library bundle
-passes staging/handshake checks. The CI retention follow-up preserves verified
+Runtime candidate `d57e78a0d` passes all six hosted jobs in run `38675705240`
+and the independently verified 1157-entry source archive. Its local Apple-issued
+exact-library bundle passes staging/handshake checks. CI retains verified
 Linux and ad-hoc Mac archives for seven days. See `TESTING.md` for exact hashes,
 commands and remaining hardware tests; these checks do not complete H12.
 
