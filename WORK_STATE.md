@@ -1,5 +1,28 @@
 # Seamless Windows work state
 
+## P7 automated matrix green; package retention follow-up — 2026-10-14
+
+Runtime candidate `bbb847796d361b0056178948b1cbf97cdd2e6e0f` passes all six
+jobs in Actions run `38661949281`: GCC/Clang foundations, transport/private
+sanitizers, Linux app/Core ON/OFF, native headless GNOME, and Mac app/Core
+ON/OFF/packaging. The earlier epoch and resource-fixture failures are retained
+and are not suppressed. Source run `38661949207` also passes; its downloaded
+archive matches all 1156 tracked Git entries and blobs.
+
+The local Apple-issued exact-library Mac package passes its dependency audit
+and private Core/Host launch check. Evidence and package hashes are in
+`build/p7-completion-20261014/mac-image-reuse-package-manifest.json`; this stages
+the candidate without installing it or starting native input. The current CI
+follow-up retains already verified Linux and ad-hoc Mac archives for seven
+days, with source commit and checksums. It does not use the local signing key.
+
+The roadmap and C01–C12 matrix now describe current implementation and actual
+tests instead of the original cloud baseline. The replacement synthetic hour
+is still collecting; no final resource verdict is available yet. Native queue
+certification and physical acceptance remain open, and the user explicitly
+deferred attended tests. Next: verify the new CI artifacts and finish the
+existing hour collection without changing its plan or thresholds.
+
 ## P7 decoder allocation follow-up — 2026-10-14
 
 The first offscreen hour attempt crossed the predeclared 1 GiB RSS comparison

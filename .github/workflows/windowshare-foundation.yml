@@ -217,6 +217,21 @@ jobs:
           tar -xzf build/DeskflowSeamless-Linux-Experimental.tar.gz -C build/verify-stage
           QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-viewer --help
           QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-core --help
+      - name: Record verified Linux package provenance
+        run: |
+          mkdir -p build/ci-artifacts
+          cp build/DeskflowSeamless-Linux-Experimental.tar.gz build/ci-artifacts/
+          git rev-parse HEAD > build/ci-artifacts/SOURCE_COMMIT
+          cd build/ci-artifacts
+          sha256sum DeskflowSeamless-Linux-Experimental.tar.gz SOURCE_COMMIT > SHA256SUMS
+      - name: Retain verified experimental Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windowshare-linux-${{ github.sha }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          path: build/ci-artifacts/
   gnome-provider:
     runs-on: ubuntu-24.04
     container:
@@ -298,5 +313,23 @@ jobs:
         run: |
           deploy/windowshare/package-macos.sh build/app build/core-package - build/integrated/bin/deskflow-core
           python3 deploy/windowshare/launch-smoke.py build/core-package/DeskflowSeamless-Core-Experimental.app
+      - name: Record verified Mac package provenance
+        run: |
+          mkdir -p build/ci-artifacts
+          cp build/package/DeskflowWindowShare-Experimental.zip build/ci-artifacts/
+          cp build/core-package/DeskflowSeamless-Core-Experimental.zip build/ci-artifacts/
+          git rev-parse HEAD > build/ci-artifacts/SOURCE_COMMIT
+          cd build/ci-artifacts
+          shasum -a 256 DeskflowWindowShare-Experimental.zip DeskflowSeamless-Core-Experimental.zip SOURCE_COMMIT > SHA256SUMS
+      - name: Retain verified experimental Mac packages
+        uses: actions/upload-artifact@v4
+        with:
+          # CI uses ad-hoc signing; these do not carry the local Apple-issued
+          # identity or its exact-library admission policy.
+          name: windowshare-macos-adhoc-${{ github.sha }}
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
+          path: build/ci-artifacts/
       # Native capture/input needs an unlocked desktop and explicit TCC grants.
       # This job builds the smoke tools but never reports them as hardware tests.

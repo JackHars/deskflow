@@ -35,6 +35,15 @@ python3 deploy/windowshare/package-linux.py \
 sha256sum build/DeskflowSeamless-Linux-Experimental.tar.gz
 ```
 
+Successful `windowshare-foundation.yml` Linux jobs retain this verified archive
+for seven days as `windowshare-linux-<commit>`, together with `SOURCE_COMMIT`
+and `SHA256SUMS`. Download it from that exact Actions run and check the sums
+before staging. The sibling `windowshare-macos-adhoc-<commit>` artifact contains
+the two verified Mac ZIPs, signed ad hoc by CI. Those Mac artifacts do not carry
+the local Apple-issued identity or its exact-library admission policy; rebuild
+and sign locally for the attended production-input tests. Neither upload grants
+permissions or installs a package on either machine.
+
 The output parent directory must already exist. The destination archive must
 **not** exist: the writer uses exclusive creation and refuses to overwrite
 existing files/symlinks. A failed archive write removes only its own partially

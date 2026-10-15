@@ -2,13 +2,18 @@
 
 ## Current implementation — 2026-10-14
 
-P7 now includes opt-in production Viewer queue/unique-paint diagnostics, a
-reproducible loopback TLS/decoder/offscreen multi-stream workload, and an offline
-resource evaluator using the predeclared hour-long pilot budgets. Mac and
-isolated Ubuntu regressions, overload recovery, 16-stream and generated 1080p
-workloads pass; scoped Mac sanitizers also pass. These are functional tool
-checks. Native latency, full platform/kernel queue bounds and H10/H11 acceptance
-remain open. See [media-load.md](../deploy/windowshare/media-load.md) and
+P7 now includes bounded experimental Core admission (4096 Events, 64 dispatch
+scopes and two-second age checks), a separate 4096-event libei processing limit,
+and opt-in Viewer queue/unique-paint diagnostics. The reproducible loopback
+TLS/decoder/offscreen workload and resource evaluator use the predeclared
+hour-long pilot budgets. The decoder reuses unshared conversion images within
+a 32 MiB cache after an initial long-load attempt exceeded the RSS comparison.
+Mac and isolated Ubuntu regressions, overload recovery, 16-stream and generated
+1080p workloads pass; scoped Mac sanitizers also pass. Native latency, full
+platform/kernel queue bounds and H10/H11 acceptance remain open. Application
+processing limits do not bound earlier native-library allocations. See the
+[native queue audit](../deploy/windowshare/native-queue-audit.md),
+[media-load.md](../deploy/windowshare/media-load.md) and
 [resource-soak.md](../deploy/windowshare/resource-soak.md).
 
 P6 implements negotiated attached-window families: exact Mac child identity and
@@ -48,15 +53,16 @@ First-click preparation now has a distinct `IPP1` gate and focus-only activation
 before the genuine Host All lease. Actual Mac and Ubuntu application/Core builds and enabled/disabled regression
 suites pass. Actual Core/EI and GNOME/Qt integration pass at Qt scales 1 and
 1.25. A separate repeated native diagnostic retains intermittent failures;
-see `TESTING.md` for their cause and follow-up status. Natural bidirectional
-edge dragging remains open.
+see `TESTING.md` for their cause and follow-up status. Physical acceptance of
+natural bidirectional edge dragging remains open.
 The subsequent fixes preserve exact seals across unchanged Mutter notifications
 and retain one pending mapped-input request across brief client mutex contention.
 The latter passes deterministic private-bus and sanitizer regressions, the
 home Ubuntu full build (37 enabled/5 disabled suites), and all 12 planned
-repeated native sessions without retries. Generic stamped Core EventQueue lifetimes are
-also measured, with explicit unbounded counters and no claim of full queue or
-performance acceptance.
+repeated native sessions without retries. The later P7 Core budget and evidence
+v2 record bounded whole-Core and original-stamped lifetimes. Historical v1
+traces retain their original unbounded counters; neither version establishes
+full native queue or performance acceptance.
 The experimental Linux build now requires libei >= 1.5 because older unpatched
 releases can crash during early connection teardown. All six hosted checks pass
 for that change. Mac export/recovery now uses an
@@ -261,11 +267,11 @@ pending until the returned code is tested on the actual machines.
 | --- | --- | --- |
 | Capture, viewer and transport | The native own-window smoke passes. Actual Mac capture to the home Ubuntu GNOME/Qt viewer, exact native pointer/click/scroll/F8 receipts and disconnect cleanup pass at Qt scale factors 1 and 1.25. | Verify the complete interactive flow across the two machines using physical Mac input. |
 | Original input integration | Production coordinator, private v5 mapped delivery, IPC5 retained prefix/batches, first-click preparation and audited Mutter build ordering are implemented. Exact cleanup requires both Host release and Core resume. | Run final native/physical acceptance. |
-| Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Complete input integration and verify compositor monitor scaling and both physical monitor destinations. |
+| Linux and two monitors | Home Ubuntu builds and targeted tests pass with window sharing enabled and disabled. Native GNOME/Qt tests and both synthetic two-machine runs also pass. The physical desktop has one active monitor. | Verify the current input integration, compositor monitor scaling and both physical monitor destinations. |
 | Multiple windows and holding display | Actual Qt role challenges select unique owned Mutter windows; holding relocation retains the first-painted geometry and exact restore journal. | Verify the new native multi-window fixture, focus changes, both monitors and physical failure recovery. |
 | Drag out and drag back | Bidirectional ordinary-titlebar code, native preview/release joining, durable restoration and automated regressions are integrated. | Complete H07 attended acceptance, including cancellation, recovery and repeated transfers. |
 | App compatibility | Attached child capture, modal fencing, popup dismissal, shared recovery, exact original modifiers/repeats and opt-in focused text clipboard are implemented. Private X11/GNOME family tests pass; GNOME popup placement and IME limits are documented. | Complete H08/H09 native, browser and Electron shortcut/dialog/menu/copy-paste acceptance and resolve supported-path failures. |
-| Recovery, performance and release | Journal/watchdog recovery, lifecycle fencing, bounded media queues, production media diagnostics, real TLS/decoder/offscreen load tools, fixed resource-budget evaluation and experimental packaging exist. | Complete platform/kernel queue coverage and bounded Core backlog; verify final packaging, real-window crash recovery, latency/resource soak and installation/upgrade/removal. |
+| Recovery, performance and release | Journal/watchdog recovery, lifecycle fencing, bounded Core/media admission, libei processing limits, decoder image reuse, measured offscreen workloads and experimental packaging exist. GitHub Actions is enabled. | Complete native/library/OS queue certification, real-window crash recovery, actual input/display performance and sustained native load, plus installation/upgrade/removal. See the latest `TESTING.md` for exact automated results. |
 
 WiFiman access to home Ubuntu was restored on 2026-10-12, and SSH verified
 hostname `jack` at `192.168.1.12`. The GNOME viewport milestone

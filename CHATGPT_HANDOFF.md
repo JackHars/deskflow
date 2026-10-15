@@ -519,14 +519,20 @@ owned-process cases, sleep/wake and actual performance/soak in H10/H11.
   extension or overwrite the ordinary Deskflow installation.
   The archive now verifies its complete provider/diagnostic inventory;
   end-user installation and upgrade acceptance remain H12.
-- [ ] Run available clean builds, ON/OFF compatibility and meaningful regression
+- [x] Run available clean builds, ON/OFF compatibility and meaningful regression
   suites. Use existing CI for Mac compilation/packaging if access is available;
   otherwise record exactly what was not compiled.
-- [ ] Finish `TESTING.md` with all implementation deltas, actual cloud results,
+- [x] Finish `TESTING.md` with implementation deltas, actual cloud results,
   exact candidate SHA, artifact instructions and local verification steps.
-- [ ] Push ordinary commits to the authorized feature branch/descendant when
+- [x] Push ordinary commits to the authorized feature branch/descendant when
   credentials are available. Otherwise provide the commit/patch and explain how
   to transfer it. Leave no essential code only in ignored build directories.
+
+Runtime candidate `bbb847796` passes all six hosted jobs in run `38661949281`
+and the verified source archive. The local Apple-issued exact-library bundle
+passes staging/handshake checks. The CI retention follow-up preserves verified
+Linux and ad-hoc Mac archives for seven days. See `TESTING.md` for exact hashes,
+commands and remaining hardware tests; these checks do not complete H12.
 
 The cloud task can finish with hardware acceptance pending. The complete product
 cannot be declared finished until the local chat executes the applicable H tests
