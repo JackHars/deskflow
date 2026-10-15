@@ -4,7 +4,48 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
-## Current candidate: Host progress recovery — 2026-10-15
+## Current candidate: independent Core dispatch expiration — 2026-10-15
+
+The experimental Core now enforces its existing two-second event residence
+deadline even when a handler never returns. An independent thread scans 64
+fixed dispatch slots every 25 ms, subject to scheduling. Each slot retains the
+original admission deadline; nested and concurrent callbacks cannot refresh
+it. An overdue active scope exits only Core with code 71, without invoking a
+revocation callback, logger, Qt or native destructor. The guard outlives Core
+thread/queue shutdown, and ordinary launches create no watchdog thread.
+See [input-queue-budget.md](deploy/windowshare/input-queue-budget.md).
+
+Local results in `build/p7-core-dispatch-20261015/`:
+
+- PASS: Core builds with `BUILD_WINDOWSHARE=ON` and `OFF`.
+- PASS: EventQueue suite on both builds, **29 Qt entries each** (17.43/17.46
+  seconds inside the test runner). Three directly owned child processes expire
+  with code 71 under blocked, nested and concurrent callback load. Healthy
+  idle/reuse, exception/destructive dispatch, cancellation and ordinary
+  unguarded callbacks survive. Admission age, moves and slot reuse are checked.
+- PASS: Server, ClientProxy and ServerProxy suites on both builds, plus enabled
+  Core argument checks. Disabled ClientProxy has 41 intentional feature skips.
+- PASS: EventQueue ASan/UBSan, 29 entries, 18.10 seconds inside the runner;
+  leak detection disabled. All temporary ad-hoc-signed copies were removed.
+- PASS: changed-file REUSE, formatting and whitespace checks.
+- Retained initial harness failure: timeout children exited correctly, but a
+  diagnostic `readAll()` consumed their output before the marker assertion.
+  Fixed the harness and reran the full suite; `event-queue-on.log` retains the
+  original three assertion failures, `event-queue-on-fixed.log` the passing run.
+
+The existing CI matrix already selects `EventQueueTests` in Mac/Linux enabled
+and disabled builds and in the Linux sanitizer job. Exact hosted/source/package
+results for this candidate are pending and must be recorded separately.
+
+These fixtures never start Core, a Host, an input source, a native window or a
+desktop connection. Expiration closes private channels for existing disconnect
+recovery, but does not prove physical restoration. Blocking startup, platform
+buffer waits and teardown outside an active dispatch remain outside this
+monitor. Native/physical H02–H12, full native queue certification, H10 crash/
+sleep restoration and H11 input/display acceptance remain open. The unchanged
+media hour remains a result for `d57e78a0d`, not this candidate.
+
+## Previous candidate: Host progress recovery — 2026-10-15
 
 Runtime **`e154f94e0676b299b225080658c3d5c3dfbf9f50`** adds an independent
 progress monitor inside the experimental Mac Host. The existing recovery child

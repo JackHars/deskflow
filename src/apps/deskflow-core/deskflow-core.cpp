@@ -10,6 +10,7 @@
 
 #include "arch/Arch.h"
 #include "base/EventQueue.h"
+#include "base/EventQueueWatchdog.h"
 #include "base/Log.h"
 #include "common/Constants.h"
 #include "common/ExitCodes.h"
@@ -279,6 +280,16 @@ int main(int argc, char **argv)
   boundedEvents = boundedEvents || parser.windowShareObserveX11();
 #endif
   auto eventBudget = boundedEvents ? std::make_shared<deskflow::EventQueueBudget>(std::move(revokeBacklog)) : nullptr;
+  // Outlive every callback and Core-thread shutdown. Qt main-thread progress
+  // cannot prove that a separate Core callback is making progress.
+  std::unique_ptr<deskflow::EventQueueWatchdog> eventWatchdog;
+  try {
+    if (eventBudget)
+      eventWatchdog = std::make_unique<deskflow::EventQueueWatchdog>(eventBudget);
+  } catch (const std::exception &error) {
+    LOG_ERR("cannot monitor experimental Core dispatch: %s", error.what());
+    return s_exitFailed;
+  }
   EventQueue events(eventBudget);
   const auto processName = QFileInfo(argv[0]).fileName();
 

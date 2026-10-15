@@ -15,7 +15,8 @@ cannot authorize original input. Limits are fixed in
 | Outstanding Core Events | 4096 | Admission through pending, saved, retrieved and dispatch completion |
 | Active Core dispatch scopes | 64 | Includes immediate and nested borrowed callbacks |
 | Processed libei events per System dispatch | 4096 | Separate native-batch processing limit, not upstream storage capacity |
-| Event residence | 2 seconds | Checked before dispatch and after its handler returns |
+| Event residence | 2 seconds | Checked before/after dispatch; independently enforced while dispatch is active |
+| Active-dispatch watchdog scan | Every 25 ms | Subject to OS scheduling; terminates only its own experimental Core |
 | Admission compare/exchange attempts | 16 | Excess contention terminates the experimental session |
 | Empty-buffer fault detection | At most 50 ms between waits | Subject to OS scheduling; not a real-time guarantee |
 
@@ -35,14 +36,35 @@ release and keep routing. On Mac, the first failure synchronously stops the
 retained capture source, revoking its epoch, completed inbox and held-motion
 gate before the failing producer returns. The event loop exits unsuccessfully;
 the existing Core shutdown disconnects the peer and drains/restores the owned
-companion. The two-second age limit cannot preempt a blocked handler
-or an OS/library call. A caller-retained Event is denied on reuse after the age
-limit; no separate expiry thread preempts its owner.
+companion.
+
+An independent `EventQueueWatchdog` thread also watches the 64 fixed dispatch
+slots. Each slot retains its original admission deadline, including time spent
+waiting before dispatch. Nested callbacks and concurrent dispatch cannot renew
+an older scope. Retirement clears only its own slot; expiration claims the
+exact still-active deadline atomically, preventing a stale observation from
+expiring a later lease. Moves, exceptions and destruction of a queue inside its
+callback retain the same admission/retirement ownership.
+
+An overdue active scope calls `std::_Exit(71)` in Core. It does not invoke the
+revocation callback, log, wait for Qt or run native destructors. Process exit
+closes the peer/Host channels, invoking their existing disconnect recovery.
+This covers a handler stuck in an OS/library call while the monitor thread is
+still scheduled. Construction must succeed before producers start, and the
+guard outlives the Core thread and queue teardown. Successful teardown cancels
+and joins it. Ordinary launches create no watchdog thread.
+
+This is **active-dispatch recovery**, not a whole-process liveness or real-time
+guarantee. Blocking startup, buffer initialization/waits, teardown outside an
+active callback, process suspension and kernel stalls remain outside its
+scope. A caller-retained Event is denied on reuse after the age limit; its
+inactive owner is not preempted. Upstream queues and allocations remain outside
+the budget, including allocations made inside a callback before expiration.
 
 The Mac Host separately has an independent event-loop progress monitor; see
 [host-recovery.md](host-recovery.md). A Host stall terminates that Host so its
-recovery child can reopen the journal. This does not preempt a blocked Core
-handler or certify the native queues before either process.
+recovery child can reopen the journal. Neither monitor certifies the native
+queues before either process or proves physical window restoration.
 
 Startup transfer and producer publication are serialized, preserving the
 pending prefix. Cleanup timers also run when the guarded queue remains busy.
@@ -67,9 +89,10 @@ invalidates the GNOME prefix observation and returns through terminal Core
 failure; a partial batch cannot publish its completed-prefix acknowledgement
 or resume input. The remaining libei objects are released by context teardown.
 Ordinary launches retain their previous native-batch processing behavior.
-This check cannot preempt `ei_dispatch` or bound allocations it made before
-returning. The batch count is deliberately not emitted as a queue-capacity
-descriptor in input evidence.
+The active-dispatch watchdog also expires a System handler stuck inside
+`ei_dispatch`; neither mechanism bounds allocations made before expiration.
+The batch count is deliberately not emitted as a queue-capacity descriptor in
+input evidence.
 
 OS HID/WindowServer buffers, libei's decoded native batch, Xlib's other native
 events, Qt/compositor input, device buffers and display presentation are outside
@@ -99,6 +122,14 @@ checks the ordinary/guarded difference, and delays the library's actual
 dispatch to verify that expired events remain unprocessed. It creates no
 devices and does not inject keyboard or pointer input. Linux tests require
 `libeis-dev` as well as `libei-dev`.
+
+`EventQueueTests` runs the real two-second deadline in directly owned disposable
+test processes. Blocked, nested and concurrent callbacks must exit with code
+71; healthy idle/reused slots, exception/destructive dispatch, cancellation and
+ordinary unguarded callbacks must survive. A deliberately blocking revocation
+callback verifies that emergency exit does not depend on it. The fixture never
+launches Core, a Host, an input source or a native window. It also checks
+original admission deadlines, moved leases and retirement/reuse directly.
 
 Run EventQueue/capture checks under ASan/UBSan, plus:
 

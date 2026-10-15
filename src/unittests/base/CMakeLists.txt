@@ -52,6 +52,7 @@ create_test(
   SOURCE EventQueueTests.cpp
   WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/base"
 )
+set_tests_properties(EventQueueTests PROPERTIES TIMEOUT 90)
 if(APPLE)
   # Exercise the production buffer without starting a native input source.
   target_sources(EventQueueTests PRIVATE ../../lib/platform/OSXEventQueueBuffer.cpp)

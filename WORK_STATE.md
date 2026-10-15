@@ -1,5 +1,28 @@
 # Seamless Windows work state
 
+## Independent Core dispatch expiration implemented — 2026-10-15
+
+Experimental Core now arms an independent monitor before EventQueue producers
+start. Its 64 fixed slots retain each active dispatch's original two-second
+admission deadline; nested or concurrent work cannot renew an older scope.
+Expiry exits only Core with code 71, closing peer/Host channels for existing
+disconnect recovery. It performs no callbacks, logging or native cleanup.
+Ordinary launches create no monitor. Calls outside an active dispatch, process
+suspension and kernel stalls remain outside this guard's scope.
+
+Both local Mac Core builds (window sharing ON/OFF), their EventQueue/Server/
+proxy suites, the enabled argument checks and EventQueue ASan/UBSan pass.
+All six disposable-process scenarios pass, including actual blocked, nested
+and concurrent dispatch expiration and healthy/cancelled/ordinary survival.
+The first normal test run consumed its own diagnostic output prematurely;
+that harness bug is fixed and its failed log retained. Evidence is under
+`build/p7-core-dispatch-20261015/`. Hosted matrix and fresh package results will
+be recorded separately; previous candidate results do not cover this code.
+
+No physical input, window relocation or sleep was started. H10 real restoration
+and H11 input/display acceptance, full native queue certification and the other
+attended gates remain deferred. See `deploy/windowshare/input-queue-budget.md`.
+
 ## Host progress recovery implemented — 2026-10-15
 
 Runtime `e154f94e0676b299b225080658c3d5c3dfbf9f50` closes an unattended recovery

@@ -4,16 +4,20 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <utility>
 
 struct EventQueueTestAccess;
 
 namespace deskflow {
+
+class EventQueueWatchdog;
 
 // Production admission, independent of optional diagnostics. Explicit
 // experimental launches install one budget before starting any producers.
@@ -24,6 +28,7 @@ public:
   using Clock = std::chrono::steady_clock;
   static constexpr std::uint64_t capacity = 4096;
   static constexpr std::uint64_t dispatchCapacity = 64;
+  static constexpr auto noDispatch = dispatchCapacity;
   // Processing limit for one native libei batch, not a capacity claim about
   // libei's internal queues or the compositor/socket before it.
   static constexpr std::uint64_t nativeBatchCapacity = 4096;
@@ -52,6 +57,9 @@ public:
   {
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic<Failure>::is_always_lock_free);
+    static_assert(std::atomic<DispatchDeadline>::is_always_lock_free);
+    for (auto &deadline : m_dispatchDeadlines)
+      deadline.store(freeDispatch, std::memory_order_relaxed);
   }
   bool live() const noexcept
   {
@@ -93,30 +101,44 @@ public:
       fail(Failure::Accounting);
     ++m_retired;
   }
-  bool enterDispatch() noexcept
+  std::uint64_t enterDispatch(Clock::time_point entered) noexcept
   {
     auto count = m_dispatching.load(std::memory_order_relaxed);
     for (unsigned attempt = 0; attempt != 16 && live(); ++attempt) {
       if (count >= dispatchCapacity) {
         fail(Failure::DispatchCapacity);
-        return false;
+        return noDispatch;
       }
       if (m_dispatching.compare_exchange_strong(count, count + 1, std::memory_order_acq_rel)) {
         auto peak = m_dispatchPeak.load(std::memory_order_relaxed);
         while (peak < count + 1 &&
                !m_dispatchPeak.compare_exchange_strong(peak, count + 1, std::memory_order_relaxed)) {
         }
-        if (live())
-          return true;
-        leaveDispatch();
-        return false;
+        // Slots cover nested and concurrent callbacks independently. Publish
+        // the original admission deadline, never a new lease at dispatch.
+        const auto deadline = (entered + maximumAge).time_since_epoch().count();
+        for (std::uint64_t slot = 0; slot != dispatchCapacity && live(); ++slot) {
+          auto expected = freeDispatch;
+          if (m_dispatchDeadlines[slot].compare_exchange_strong(expected, deadline, std::memory_order_acq_rel)) {
+            if (live())
+              return slot;
+            leaveDispatch(slot);
+            return noDispatch;
+          }
+        }
+        --m_dispatching;
+        fail(Failure::Contention);
+        return noDispatch;
       }
     }
     fail(Failure::Contention);
-    return false;
+    return noDispatch;
   }
-  void leaveDispatch() noexcept
+  void leaveDispatch(std::uint64_t slot) noexcept
   {
+    if (slot >= dispatchCapacity ||
+        m_dispatchDeadlines[slot].exchange(freeDispatch, std::memory_order_acq_rel) == freeDispatch)
+      fail(Failure::Accounting);
     if (!m_dispatching.fetch_sub(1, std::memory_order_acq_rel))
       fail(Failure::Accounting);
   }
@@ -128,10 +150,31 @@ public:
   }
 
 private:
+  friend class EventQueueWatchdog;
+  friend struct ::EventQueueTestAccess;
+  using DispatchDeadline = Clock::duration::rep;
+  // Reserve the clock's extreme values, unreachable during a process lifetime.
+  static constexpr auto freeDispatch = std::numeric_limits<DispatchDeadline>::max();
+  static constexpr auto expiredDispatch = std::numeric_limits<DispatchDeadline>::min();
+  bool claimExpiredDispatch(Clock::time_point now) noexcept
+  {
+    for (auto &slot : m_dispatchDeadlines) {
+      auto deadline = slot.load(std::memory_order_acquire);
+      // Claim the exact still-active deadline. A stale observation of a slot
+      // that retired or acquired a later deadline cannot terminate the process.
+      // Reuse with the same deadline is also overdue, so needs no generation.
+      if (deadline == expiredDispatch ||
+          (deadline != freeDispatch && deadline < now.time_since_epoch().count() &&
+           slot.compare_exchange_strong(deadline, expiredDispatch, std::memory_order_acq_rel)))
+        return true;
+    }
+    return false;
+  }
   const std::function<void()> m_revoke;
   std::atomic<Failure> m_failure{Failure::Healthy};
   std::atomic<std::uint64_t> m_outstanding{0}, m_admitted{0}, m_retired{0}, m_peak{0};
   std::atomic<std::uint64_t> m_dispatching{0}, m_dispatchPeak{0};
+  std::array<std::atomic<DispatchDeadline>, dispatchCapacity> m_dispatchDeadlines{};
 };
 
 // Owns one budget slot across pending, saved, retrieved and callback storage.
@@ -193,8 +236,10 @@ public:
   {
     if (!m_budget)
       return true;
-    m_dispatching = m_owned && m_budget->enterDispatch();
-    return m_dispatching;
+    if (!m_owned)
+      return false;
+    m_dispatchSlot = m_budget->enterDispatch(m_entered);
+    return m_dispatchSlot != EventQueueBudget::noDispatch;
   }
 
 private:
@@ -202,11 +247,10 @@ private:
   void release() noexcept
   {
     if (std::exchange(m_owned, false)) {
-      if (m_dispatching) {
+      if (m_dispatchSlot != EventQueueBudget::noDispatch) {
         if (EventQueueBudget::Clock::now() - m_entered > EventQueueBudget::maximumAge)
           m_budget->fail(EventQueueBudget::Failure::Deadline);
-        m_budget->leaveDispatch();
-        m_dispatching = false;
+        m_budget->leaveDispatch(std::exchange(m_dispatchSlot, EventQueueBudget::noDispatch));
       }
       m_budget->release();
     }
@@ -216,10 +260,11 @@ private:
     m_budget = std::move(other.m_budget);
     m_entered = other.m_entered;
     m_owned = std::exchange(other.m_owned, false);
-    m_dispatching = std::exchange(other.m_dispatching, false);
+    m_dispatchSlot = std::exchange(other.m_dispatchSlot, EventQueueBudget::noDispatch);
   }
   std::shared_ptr<EventQueueBudget> m_budget;
   EventQueueBudget::Clock::time_point m_entered{};
-  bool m_owned = false, m_dispatching = false;
+  bool m_owned = false;
+  std::uint64_t m_dispatchSlot = EventQueueBudget::noDispatch;
 };
 } // namespace deskflow

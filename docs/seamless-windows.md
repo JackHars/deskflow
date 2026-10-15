@@ -2,6 +2,14 @@
 
 ## Current implementation — 2026-10-15
 
+Experimental Core additionally monitors every active dispatch independently of
+callback return. Its original two-second admission deadline cannot be renewed
+by nested/concurrent work; expiry exits only Core with code 71 and closes its
+peer/Host channels for existing recovery. Ordinary launches create no monitor.
+Local ON/OFF and sanitizer checks pass; exact hosted/package results are in
+`TESTING.md`. Calls outside active dispatch and native queue capacities remain
+outside this guard. See [Core event limits](../deploy/windowshare/input-queue-budget.md).
+
 Runtime `e154f94e0` adds a Host progress monitor: stalled startup or event-loop
 work expires inside the Host, enabling its independent child to run existing
 journal recovery. Local deadline/crash/teardown fixtures, scoped sanitizers,

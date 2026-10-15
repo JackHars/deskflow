@@ -22,7 +22,10 @@ attached-window capture/lifecycle changes are part of the current working candid
 first-click preparation now passes actual Core/GNOME integration at both Qt
 scales. P5 bidirectional edge-drag and P6 supported child/menu code are integrated;
 P7 media/resource tooling and whole-Core queue admission/evidence are implemented.
-The newest local verification results are recorded in `TESTING.md`. Runtime
+The newest local verification results are recorded in `TESTING.md`. The working
+candidate additionally expires blocked Core callbacks through an independent
+dispatch monitor; Mac enabled/disabled and sanitizer checks pass. See the
+current candidate entry for its hosted/package status. Earlier runtime
 `e154f94e0` adds independent Host progress expiration and passes all six hosted
 jobs, local recovery/sanitizer/package checks and exact source verification.
 The verified one-hour two-HD-stream synthetic workload/resource result remains attached to
@@ -487,6 +490,12 @@ or production original-input authority.
 - [x] Make teardown/recovery idempotent for disconnect, host/helper/viewer/core
   failure, sleep/wake, session deactivation and emergency return. Bound shutdown
   and retain diagnostics for hung owned children.
+- [x] Enforce the existing two-second Core dispatch deadline independently of
+  callback return. Fixed retained slots cover nested/concurrent callbacks;
+  expiry exits only the experimental Core with code 71. Ordinary launches
+  create no monitor. Disposable-process tests cover blocked and healthy work,
+  cancellation, exception/queue destruction and lease reuse. Startup and
+  native calls outside active dispatch remain outside this guard's scope.
 - [x] Implement fair active-stream scheduling/backpressure and bounded media
   queues, including hidden/minimized viewers, resize and slow consumers.
 - [x] Add reproducible latency/resource/load measurement tools and define
@@ -501,8 +510,9 @@ or production original-input authority.
 - [x] Bound the complete experimental Core EventQueue, including configured
   actions/control events, pending/saved/retrieved lifetimes and nested callbacks.
   Admission enforces 4096 outstanding Events, 64 dispatch scopes and a two-second
-  residence deadline. Failure revokes Mac capture synchronously and terminates
-  Core through existing recovery. Evidence v2 records both the original-stamped
+  residence deadline. Cooperative failure revokes Mac capture synchronously;
+  the independent monitor directly exits Core on a stuck callback. Existing
+  disconnect recovery applies. Evidence v2 records both the original-stamped
   subset and all-event counts with their actual shared limits. Ordinary launches
   retain their admission policy; legacy evidence retains its original null bounds.
 - [x] Audit native queue boundaries and limit libei batch processing separately

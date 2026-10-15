@@ -20,6 +20,8 @@ add_library(base STATIC ${PLATFORM_CODE}
   EventQueue.cpp
   EventQueue.h
   EventQueueBudget.h
+  EventQueueWatchdog.cpp
+  EventQueueWatchdog.h
   EventQueueTimer.h
   EventTypes.h
   FinalAction.h
@@ -47,7 +49,8 @@ add_library(base STATIC ${PLATFORM_CODE}
   Unicode.h
 )
 
-target_link_libraries(base PUBLIC arch)
+find_package(Threads REQUIRED)
+target_link_libraries(base PUBLIC arch PRIVATE Threads::Threads)
 if (CMAKE_CXX_BYTE_ORDER STREQUAL "BIG_ENDIAN")
   target_compile_definitions(base PUBLIC WORDS_BIGENDIAN=1)
 endif()

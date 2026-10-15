@@ -43,6 +43,12 @@ kernel, suspended computer or stalled recovery executable requires separate
 handling/acceptance. The progress guard does not certify Core, compositor, HID,
 GPU or application queues, nor prove that a window was physically restored.
 
+Experimental Core separately uses an [active-dispatch watchdog](input-queue-budget.md)
+for its two-second event residence policy. A blocked Core callback exits Core
+with code 71, closing its Host channel. This Host monitor remains independent
+and can expire a Host that stalls while handling that disconnect. Physical
+restoration across the combined failure still requires H10.
+
 ## Automated checks
 
 Build and run `windowshare-recovery-watchdog-tests` on Mac. Its private recovery

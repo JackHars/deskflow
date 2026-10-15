@@ -7,14 +7,20 @@
 #include "EventQueueTests.h"
 
 #include "base/EventQueue.h"
+#include "base/EventQueueWatchdog.h"
 #include "base/SimpleEventQueueBuffer.h"
 #include "windowshare/InputEvidence.h"
 #ifdef __APPLE__
 #include "platform/OSXEventQueueBuffer.h"
 #endif
 
+#include <QElapsedTimer>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QTest>
 
+#include <cstdio>
+#include <cstdlib>
 #include <latch>
 #include <memory>
 #include <stdexcept>
@@ -47,6 +53,15 @@ struct EventQueueTestAccess
   {
     for (auto &[id, event] : events.m_events)
       expire(event);
+  }
+  static auto entered(const deskflow::EventQueueAdmission &admission)
+  {
+    return admission.m_entered;
+  }
+  static bool
+  claimExpiredDispatch(deskflow::EventQueueBudget &budget, deskflow::EventQueueBudget::Clock::time_point now)
+  {
+    return budget.claimExpiredDispatch(now);
   }
 };
 
@@ -697,6 +712,153 @@ void EventQueueTests::backlog_expiredRetrievalDisposesPayload()
   QCOMPARE(destroyed, 1U);
   QCOMPARE(budget->snapshot().failure, deskflow::EventQueueBudget::Failure::Deadline);
   QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+}
+
+void EventQueueTests::backlog_dispatchDeadlinesFollowAdmissionAndMoves()
+{
+  using Budget = deskflow::EventQueueBudget;
+  const auto budget = std::make_shared<Budget>();
+  deskflow::EventQueueAdmission first;
+  QVERIFY(first.admit(budget));
+  const auto firstDeadline = EventQueueTestAccess::entered(first) + Budget::maximumAge;
+  QVERIFY(first.beginDispatch());
+  QVERIFY(!EventQueueTestAccess::claimExpiredDispatch(*budget, firstDeadline));
+  auto moved = std::move(first);
+  QVERIFY(!EventQueueTestAccess::claimExpiredDispatch(*budget, firstDeadline));
+  moved = {}; // Retire the first slot before reusing it with a later admission.
+  QTest::qSleep(2);
+  deskflow::EventQueueAdmission next;
+  QVERIFY(next.admit(budget));
+  QVERIFY(next.beginDispatch());
+  QVERIFY(!EventQueueTestAccess::claimExpiredDispatch(*budget, firstDeadline + Budget::Clock::duration{1}));
+  // Expiration uses admission time, including any wait before beginDispatch.
+  QVERIFY(
+      EventQueueTestAccess::claimExpiredDispatch(
+          *budget, EventQueueTestAccess::entered(next) + Budget::maximumAge + Budget::Clock::duration{1}
+      )
+  );
+  next = {};
+  QVERIFY(!EventQueueTestAccess::claimExpiredDispatch(*budget, Budget::Clock::now() + std::chrono::hours(1)));
+  QCOMPARE(budget->snapshot().outstanding, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().dispatching, std::uint64_t{0});
+  QCOMPARE(budget->snapshot().failure, Budget::Failure::Healthy);
+}
+
+namespace {
+// Only called in this test executable's directly owned QProcess. It never
+// starts Core, a Host, an input source, a native window or a desktop connection.
+int runWatchdogFixture(const QString &mode)
+{
+  using Budget = deskflow::EventQueueBudget;
+  const auto block = [] {
+    for (;;)
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+  };
+  const bool ordinary = mode == QStringLiteral("ordinary");
+  const auto budget =
+      ordinary ? nullptr
+               : std::make_shared<Budget>(mode == QStringLiteral("blocked") ? block : std::function<void()>{});
+  auto watchdog = std::make_unique<deskflow::EventQueueWatchdog>(budget);
+  auto events = std::make_unique<EventQueue>(budget);
+  int outer = 0, inner = 0;
+  const auto dispatch = [&](int *target) {
+    return events->dispatchEvent(Event(EventTypes::ClientDisconnected, target));
+  };
+  events->addHandler(EventTypes::ClientDisconnected, &inner, [](const Event &) {});
+  const auto churn = [&] {
+    for (;;) {
+      if (!dispatch(&inner))
+        std::_Exit(10);
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  };
+  events->addHandler(EventTypes::ClientDisconnected, &outer, [&](const Event &) {
+    std::puts("watchdog-fixture-entered");
+    std::fflush(stdout);
+    if (mode == QStringLiteral("blocked") || mode == QStringLiteral("concurrent"))
+      block();
+    else if (mode == QStringLiteral("nested"))
+      churn();
+    else {
+      if (mode == QStringLiteral("cancelled"))
+        watchdog.reset();
+      std::this_thread::sleep_for(Budget::maximumAge + std::chrono::milliseconds(200));
+    }
+  });
+  if (mode == QStringLiteral("concurrent")) {
+    std::thread stalled([&] { (void)dispatch(&outer); });
+    churn();
+    stalled.join();
+  } else if (mode == QStringLiteral("healthy")) {
+    // An idle queue and repeated new callbacks may each live longer than an
+    // individual lease. Exceptions/queue destruction must leave no stale lease.
+    std::this_thread::sleep_for(Budget::maximumAge + std::chrono::milliseconds(200));
+    const auto end = Budget::Clock::now() + Budget::maximumAge + std::chrono::milliseconds(200);
+    do {
+      if (!dispatch(&inner))
+        return 11;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    } while (Budget::Clock::now() < end);
+    events->addHandler(EventTypes::ClientDisconnected, &inner, [](const Event &) {
+      throw std::runtime_error("fixture");
+    });
+    try {
+      (void)dispatch(&inner);
+      return 12;
+    } catch (const std::runtime_error &) {
+    }
+    events->addHandler(EventTypes::ClientDisconnected, &inner, [&](const Event &) { events.reset(); });
+    if (!dispatch(&inner))
+      return 13;
+    std::this_thread::sleep_for(Budget::maximumAge + std::chrono::milliseconds(200));
+    const auto counts = budget->snapshot();
+    if (!budget->live() || counts.outstanding || counts.dispatching || counts.admitted != counts.retired)
+      return 14;
+  } else if (!dispatch(&outer)) {
+    return 15;
+  }
+  if (mode == QStringLiteral("cancelled") && budget->snapshot().failure != Budget::Failure::Deadline)
+    return 16;
+  return 0;
+}
+} // namespace
+
+void EventQueueTests::watchdog_processDeadlines_data()
+{
+  QTest::addColumn<QString>("mode");
+  QTest::addColumn<int>("expectedExit");
+  for (const auto *mode : {"blocked", "nested", "concurrent"})
+    QTest::newRow(mode) << QString::fromLatin1(mode) << deskflow::EventQueueWatchdog::timeoutExitCode;
+  for (const auto *mode : {"healthy", "cancelled", "ordinary"})
+    QTest::newRow(mode) << QString::fromLatin1(mode) << 0;
+}
+
+void EventQueueTests::watchdog_processDeadlines()
+{
+  QFETCH(QString, mode);
+  QFETCH(int, expectedExit);
+  if (qEnvironmentVariable("DESKFLOW_TEST_EVENT_WATCHDOG_CHILD") == QStringLiteral("1"))
+    std::_Exit(runWatchdogFixture(mode));
+  QProcess child;
+  auto environment = QProcessEnvironment::systemEnvironment();
+  environment.insert(QStringLiteral("DESKFLOW_TEST_EVENT_WATCHDOG_CHILD"), QStringLiteral("1"));
+  child.setProcessEnvironment(environment);
+  child.setProcessChannelMode(QProcess::MergedChannels);
+  QElapsedTimer elapsed;
+  elapsed.start();
+  child.start(QCoreApplication::applicationFilePath(), {QStringLiteral("watchdog_processDeadlines:") + mode});
+  QVERIFY2(child.waitForStarted(5000), qPrintable(child.errorString()));
+  // QProcess owns and kills only this child on an assertion/timeout. Every
+  // expiration case uses the real production two-second residence deadline.
+  const auto finished = child.waitForFinished(12000);
+  const auto output = child.readAll();
+  QVERIFY2(finished, output.constData());
+  QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+  QVERIFY2(child.exitCode() == expectedExit, output.constData());
+  if (expectedExit == deskflow::EventQueueWatchdog::timeoutExitCode) {
+    QVERIFY(output.contains("watchdog-fixture-entered"));
+    QVERIFY(elapsed.elapsed() >= 2000);
+  }
 }
 
 #ifdef __APPLE__

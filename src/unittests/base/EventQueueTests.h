@@ -36,6 +36,9 @@ private Q_SLOTS:
   void backlog_ordinaryQueueKeepsAdmissionPolicy();
   void backlog_recursiveDispatchHasItsOwnLimit();
   void backlog_expiredRetrievalDisposesPayload();
+  void backlog_dispatchDeadlinesFollowAdmissionAndMoves();
+  void watchdog_processDeadlines_data();
+  void watchdog_processDeadlines();
 #ifdef __APPLE__
   void backlog_nativeMacBufferRetainsTheBound();
 #endif
