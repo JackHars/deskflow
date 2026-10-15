@@ -24,6 +24,14 @@ Evidence is under `build/h04-channel-20261015-qo_wfxih/`; a fresh signed attende
 run is still required. All six hosted jobs on recorder commit `0f77188a8`
 passed in run `38763970033`; those do not cover this subsequent diagnostic edit.
 
+Diagnostic runtime `efb9398b9` is pushed. Its Apple-issued exact-library bundle
+and inert admission probe pass. Attempt five (`build/h04-r5-u7ubid0p/session-1`)
+timed out waiting for visible Start; input sharing never began. Source exited
+0, the remote controller/container stopped without starting a native session,
+and ordinary processes/configurations were preserved. The evidence cleanup
+timeout remains recorded; no measurement or acceptance is claimed. A new
+attended Start is needed to capture the original live disconnect reason.
+
 ## Recorder publication overlap follow-up — 2026-10-15
 
 The third attended H04 attempt (`build/h04-r3-spns1sz_/session-1`) stopped

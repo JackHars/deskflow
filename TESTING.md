@@ -44,6 +44,20 @@ under `build/h04-channel-20261015-qo_wfxih/`:
 - Recorder commit `0f77188a8`: all six hosted jobs in run `38763970033` passed.
   This hosted result precedes the diagnostic follow-up.
 
+Diagnostic runtime **`efb9398b9a488113cca8b7b02351f02d2e7d9b8b`** is packaged
+and pushed. The Apple-issued exact-library bundle verifies successfully; ZIP
+SHA-256 is `e209d8c5a31b365b8a5c5163fd44d9da28905695cfd582d121cb0a7dfc05fe1d`.
+The next run's inert admission probe passed (9.372 s admission, 15.213 s total,
+input disabled, companion stopped). Attempt five, under
+`build/h04-r5-u7ubid0p/session-1/`, then timed out waiting for the visible Start
+button. No physical route or recording started. Source exited 0, the remote
+controller/container completed without start, exact local processes stopped,
+and ordinary Mac/Ubuntu processes and configuration hashes were preserved.
+Its evidence-stop timeout remains in `cleanupErrors`; absent unstarted roles
+cannot supply terminal evidence. This is not a successful recording or a
+reproduction of the earlier active-session failure. Source export run
+`38766497090` passed; hosted checks `38766497148` were still running when recorded.
+
 ## Recorder publication overlap repair — 2026-10-15
 
 Third attended H04 attempt: **failed setup, physical acceptance not assessed**.
