@@ -427,6 +427,45 @@ class ProductionPlans(unittest.TestCase):
                       'remoteSockets': {'core': '/private/core.sock', 'viewer': '/private/viewer.sock'},
                       'runArgv': ['python3', '/private/controller', 'run', '{windowId}'],
                       'cleanupArgv': ['python3', '/private/controller', 'cleanup']}
+        (self.base / 'tls').mkdir(mode=0o700)
+        (Path(self.mac['environmentOverrides']['XDG_CONFIG_HOME']) / 'Deskflow/tls').mkdir(
+            mode=0o700, parents=True)
+
+    def test_trust_path_type_is_rejected_during_read_only_plan_validation(self):
+        trust = self.base / 'tls/trusted-clients'
+        for kind in ('directory', 'fifo', 'symlink'):
+            with self.subTest(kind=kind):
+                if kind == 'directory':
+                    trust.mkdir()
+                elif kind == 'fifo':
+                    os.mkfifo(trust)
+                else:
+                    trust.symlink_to(self.settings)
+                with patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native process launched')), \
+                        patch.object(module.subprocess, 'run', side_effect=AssertionError('External command launched')):
+                    with self.assertRaisesRegex(RuntimeError, 'trust list must be a private regular file'):
+                        module.validate_plans(self.mac, self.linux, self.base, production=True)
+                if kind == 'directory':
+                    trust.rmdir()
+                else:
+                    trust.unlink()
+        stage = trust.with_name(trust.name + '.physical-next')
+        stage.write_text('incomplete earlier setup')
+        with self.assertRaisesRegex(RuntimeError, 'staging path already exists'):
+            module.validate_plans(self.mac, self.linux, self.base, production=True)
+        self.assertEqual(stage.read_text(), 'incomplete earlier setup')
+
+    def test_private_trust_preparation_writes_exact_pin_without_native_execution(self):
+        with patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native process launched')), \
+                patch.object(module.subprocess, 'run', side_effect=AssertionError('External command launched')):
+            trust = module.prepare_trust(self.mac, self.linux, self.base, True)
+            self.assertEqual(trust, self.base / 'tls/trusted-clients')
+            self.assertEqual(trust.read_text(), 'v2:sha256:' + self.linux['corePin'] + '\n')
+            self.assertEqual(trust.stat().st_mode & 0o777, 0o600)
+            before = trust.read_bytes()
+            module.validate_plans(self.mac, self.linux, self.base, production=True)
+            self.assertEqual(trust.read_bytes(), before)
+            self.assertFalse(trust.with_name(trust.name + '.physical-next').exists())
 
     def test_explicit_mode_uses_one_exact_peer_pair_and_core_owned_host(self):
         artifacts = module.validate_plans(self.mac, self.linux, self.base, production=True)

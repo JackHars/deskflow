@@ -36,7 +36,11 @@ loopback-only server with fresh test certificates:
 
 All configuration, trust, identity and IPC paths must remain under the Mac
 preparation directory. Create that directory and its state directories privately
-(mode 0700), with configuration and certificate/key files mode 0600.
+(mode 0700), with configuration and certificate/key files mode 0600. Create `tls`
+as a directory. `tls/trusted-clients` is a regular file, not a directory; leave
+it absent until the coordinator writes the exact public pin. Plan validation
+rejects non-file targets and stale staging paths. The write happens before the
+source window opens, and its hash is rechecked after Start.
 The separate core INI must enable TLS and peer fingerprint checking, disable
 clipboard and enter/exit commands, use DEBUG logging, identity modifier maps
 for both screens, and bind to `127.0.0.1`. Its external server configuration

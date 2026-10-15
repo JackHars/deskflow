@@ -405,6 +405,34 @@ def private_path(value, base):
     return path
 
 
+def trust_file(mac, base, production):
+    parent = (Path(mac["coreArgv"][4]).parent if production else
+              Path(mac["environmentOverrides"]["XDG_CONFIG_HOME"]) / "Deskflow")
+    trust = private_path(str(parent / "tls/trusted-clients"), base)
+    require(trust.parent.is_dir(), "Private TLS directory is missing")
+    try:
+        info = trust.lstat()
+    except FileNotFoundError:
+        info = None
+    if info is not None:
+        require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and
+                info.st_nlink == 1 and not info.st_mode & 0o077,
+                "Private TLS trust list must be a private regular file, not a directory or link")
+    require(not os.path.lexists(trust.with_name(trust.name + ".physical-next")),
+            "Private TLS trust-list staging path already exists; prepare a fresh attempt")
+    return trust
+
+
+def prepare_trust(mac, plan, base, production):
+    trust = trust_file(mac, base, production)
+    temporary = trust.with_name(trust.name + ".physical-next")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as stream:
+        stream.write("v2:sha256:" + plan["corePin"] + "\n")
+    temporary.replace(trust)
+    return trust
+
+
 def original_support():
     spec = importlib.util.spec_from_file_location("production_physical", Path(__file__).with_name("original-input-physical.py"))
     support = importlib.util.module_from_spec(spec)
@@ -468,6 +496,7 @@ def validate_plans(mac, plan, base, production=False, source=None, holding=False
             "Test must use only the two explicit Option hotkeys and no screen-edge links")
     private_path(config["security"]["certificate"], base)
     private_path(mac["coreIpcExpectedPath"], base)
+    trust_file(mac, base, production)
     for screen in (mac["coreScreen"], mac["linuxScreen"]):
         for key, value in (("Shift", "shift"), ("Ctrl", "ctrl"), ("Alt", "alt"),
                            ("AltGr", "altgr"), ("Meta", "meta"), ("Super", "super")):
@@ -664,6 +693,9 @@ def run(arguments):
                 reservation.bind(("127.0.0.1", port))
         for endpoint in plan["remoteSockets"].values():
             remote(["test", "!", "-e", endpoint])
+        # Complete file-only setup before opening the visible Start window.
+        # No input capture or Linux native session is started by writing a pin.
+        report["privateTrustSha256"] = digest(prepare_trust(mac, plan, base, production))
         publisher = StatusPublisher(output / "manual-status.json", session_seconds)
         source_argv = [str(source_executable), title, str(source_path), "--manual-status", str(publisher.path)]
         if production:
@@ -714,13 +746,8 @@ def run(arguments):
         publisher.set("preparing")
         started = True
         no_other_primary()
-        trust_parent = (Path(mac["coreArgv"][4]).parent if production else
-                        Path(mac["environmentOverrides"]["XDG_CONFIG_HOME"]) / "Deskflow")
-        trust = private_path(str(trust_parent / "tls/trusted-clients"), base)
-        temporary = trust.with_name(trust.name + ".physical-next")
-        with temporary.open("x") as stream:
-            stream.write("v2:sha256:" + plan["corePin"] + "\n")
-        temporary.replace(trust)
+        require(digest(trust_file(mac, base, production)) == report["privateTrustSha256"],
+                "Private TLS trust list changed before Start")
         host_identity = private_path(mac["hostArgv"][mac["hostArgv"].index("--identity") + 1], base)
         if production:
             # Recheck the frozen roles after the human Start wait. A validated

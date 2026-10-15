@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## Actual-desktop attempt fourteen — 2026-10-15
+
+After fresh explicit permission, attempt fourteen (`build/h04-r14-el4lnrkj/`)
+opened Ready on the Mac, then closed immediately after Start. The user saw no
+window on Ubuntu. The Mac preparation incorrectly made `tls/trusted-clients`
+a directory; replacing it with the peer-pin file failed before Core/Host or
+Ubuntu's native session started. This was a preparation mistake, not evidence
+of an input-delivery or Ubuntu rendering failure.
+
+Ubuntu completed its prepared-only stop with controller exit 0, all owned
+processes stopped, desktop restored and ordinary state preserved. The provider
+was never enabled. The Mac source exited 0 and restored its geometry/input;
+ordinary configuration hashes match. Retain the original failed result,
+including its Linux SSH exit 255 and recorder-stop timeout. The collected
+Ubuntu archive SHA-256 is
+`80644ab79f13b72e522572655037b70e57424ffbc6da7cf36f56270efa2a2e1c`.
+
+Plan validation now rejects a directory, link, FIFO or stale staging path at
+the private trust-list location. The atomic public-pin write completes before
+opening the source window and its hash is rechecked after Start. Regression
+coverage verifies actual file creation and exact contents without native apps
+or SSH. All 72 Mac coordinator tests pass on Mac and home Ubuntu.
+Fresh preparation: `build/h04-r15-b6shuoux/`. Obtain fresh permission immediately
+before its physical launch. Actual-monitor input and H04/P5 remain unaccepted.
+
 ## Actual-desktop attempt thirteen — 2026-10-15
 
 The user explicitly approved attempt thirteen (`build/h04-r13-3qf8w10p/`).
@@ -69,7 +94,7 @@ See [the actual-desktop procedure](deploy/windowshare/physical-desktop.md).
 
 ## Attended-test permission — current user instruction, 2026-10-15
 
-The user explicitly authorized attempt thirteen above. Ask for fresh permission immediately before
+The user explicitly authorized attempt fourteen above. Ask for fresh permission immediately before
 executing the next physical test, and wait for an affirmative reply before
 opening its test window or starting its physical session. Earlier Start/Ready
 answers do not authorize another attempt. Unattended builds, unit tests and

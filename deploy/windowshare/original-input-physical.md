@@ -35,6 +35,9 @@ and the sibling Host and holding helper. Use the matching newly built
 An installed ordinary Deskflow app is not a substitute. Grant the experimental
 package's required Accessibility and Screen Recording permissions normally;
 the harness checks its native probe before offering Start.
+The private `tls/trusted-clients` location is a file. Create only its `tls`
+parent directory; plan validation rejects a folder or link at the file path.
+The coordinator writes the public pin before opening the source window.
 
 First create a fresh private Mac preparation as specified in
 [physical-macos.md](physical-macos.md), including its private INI, identity
