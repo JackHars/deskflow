@@ -22,6 +22,7 @@ private Q_SLOTS:
   void dispatchEvent_handlerRemovesItself_keepsHandlerAliveUntilReturn();
   void inputObservation_pendingSavedRetrievedAndMoves();
   void inputObservation_dispatchAndArmBoundaries();
+  void inputObservation_concurrentPreparation();
   void inputObservation_nestedAndDestructiveDispatch();
   void inputObservation_dropThrowAndAdoptBuffer();
   void inputObservation_stampMutationAndInstallation();

@@ -1,5 +1,31 @@
 # Seamless Windows work state
 
+## Concurrent preparation Event accounting — 2026-10-15
+
+Attempt six (`build/h04-r6-e1zqbfc2/session-1`) received the user's Start and
+passed packaged/real code admission, then stopped during Linux startup with
+Core `Contention`, site `queue-mutation`, queue `event-all-outstanding`.
+No recorder armed. Core/source exited 0, the exact Host stopped, and Linux
+completed startup cancellation with private Core IPC, drained relays and
+container exit 0. Ordinary processes/settings were preserved. The specific
+active-session disconnect from attempt four remains unresolved.
+
+Concurrent Event producers/consumers now maintain only an atomic live depth
+before measurement; cumulative counts and rows still start at the empty arm
+boundary. Each complete observation has an activity guard, so in-flight work
+cannot be mistaken for a quiescent baseline. Underflow, capacity violation,
+boundary overlap and any existing loss still deny the run. Recording keeps
+its strict counter/journal ordering and contention rejection.
+
+The new eight-worker regression reproduces the old failure and passes on the
+home Ubuntu repair under ASan/UBSan; recorder/channel suites pass in 23.68 s.
+The old failing run is retained, with exact source archive and patch, under
+`build/h04-event-preparation-aawd8i2l/`. Mac recorder tests pass (0.66 s), and
+all 30 integrated EventQueue checks pass (17.91 s), including eight concurrent
+dispatch workers. Core, Host and source build; formatting and full REUSE pass.
+The signed candidate is being prepared for another attended attempt.
+H04/P5 remains unaccepted.
+
 ## Active H04 session lost its private channel — 2026-10-15
 
 The fourth attempt (`build/h04-r4-aa2qy2tm/session-1`) reached Active, confirmed

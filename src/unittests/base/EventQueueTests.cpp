@@ -19,6 +19,7 @@
 #include <QProcessEnvironment>
 #include <QTest>
 
+#include <barrier>
 #include <cstdio>
 #include <cstdlib>
 #include <latch>
@@ -303,6 +304,33 @@ void EventQueueTests::inputObservation_dispatchAndArmBoundaries()
     QVERIFY(called);
     QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::Contention);
   }
+}
+
+void EventQueueTests::inputObservation_concurrentPreparation()
+{
+  Evidence evidence;
+  EventQueue events;
+  constexpr unsigned workers = 8, rounds = 100;
+  std::barrier inside(workers);
+  events.addHandler(EventTypes::KeyStateKeyDown, this, [&](const Event &) { inside.arrive_and_wait(); });
+  std::atomic<unsigned> handled{0};
+  std::vector<std::thread> threads;
+  for (unsigned worker = 0; worker < workers; ++worker)
+    threads.emplace_back([&] {
+      for (unsigned round = 0; round < rounds; ++round)
+        handled += events.dispatchEvent(evidence.key(this));
+    });
+  for (auto &thread : threads)
+    thread.join();
+  QCOMPARE(handled.load(), workers * rounds);
+  QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::None);
+  QCOMPARE(evidence.recorder->written(), std::uint64_t{0});
+  QVERIFY(evidence.recorder->readyOwner());
+  QVERIFY(evidence.recorder->arm(1000000000));
+  evidence.recorder->stop();
+  evidence.recorder->finish();
+  QCOMPARE(evidence.recorder->loss(), InputEvidenceLoss::None);
+  QCOMPARE(evidence.recorder->state(), InputEvidenceState::Stopped);
 }
 
 void EventQueueTests::inputObservation_nestedAndDestructiveDispatch()

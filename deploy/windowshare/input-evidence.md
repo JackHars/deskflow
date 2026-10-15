@@ -71,6 +71,13 @@ the coordinator's Core log; both processes report bounded private-channel
 close reasons after revocation begins. Ordinary launches still discard Host
 stderr, and stdout is always discarded. No parent-side output buffer or input
 authority is introduced by this diagnostic option.
+
+Before arm, concurrent Core Event observations maintain an exact atomic live
+depth without producing cumulative measured counters or rows. A full-operation
+activity guard excludes the empty baseline while any observation is in flight.
+Underflow, capacity failure or boundary overlap still denies the run. Only a
+quiescent empty arm begins the measured counters; during recording, existing
+counter and journal contention remains a terminal diagnostic failure.
 Standalone, probe, identity-init and help/action combinations cannot use the
 private Host evidence option. Evidence paths and role labels never supply code
 admission, peer trust, a native owner or input authority.

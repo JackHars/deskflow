@@ -657,8 +657,25 @@ private:
     const auto counter =
         all ? (dispatch ? InputEvidenceQueue::EventAllDispatch : InputEvidenceQueue::EventAllOutstanding)
             : (dispatch ? InputEvidenceQueue::EventDispatch : InputEvidenceQueue::EventOutstanding);
-    if (recorder.beginMutation(counter, queue))
+    if (!recorder.beginQueueActivity(counter, queue))
+      return;
+    if (recorder.state() == InputEvidenceState::Waiting) {
+      // Independent Core workers legitimately admit/retire Events together.
+      // Before arm there are no measured cumulative counters or journal rows;
+      // retain the exact live depth atomically instead of taking their lock.
+      // The activity boundary excludes arm until every update has returned.
+      auto &q = recorder.m_queues[static_cast<std::size_t>(counter)];
+      if (q.busy.test(std::memory_order_acquire))
+        recorder.fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueMutation, counter);
+      else {
+        const auto before =
+            added ? q.depth.fetch_add(1, std::memory_order_acq_rel) : q.depth.fetch_sub(1, std::memory_order_acq_rel);
+        if (added ? before == UINT64_MAX || (q.capacity && before >= q.capacity) : before == 0)
+          recorder.fail(InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::QueueMutation, counter);
+      }
+    } else if (recorder.beginMutation(counter, queue))
       recorder.endMutation(counter, added ? 1 : 0, added ? 0 : 1);
+    recorder.endQueueActivity(counter);
   }
   static constexpr std::uint64_t captureBoundary = 1ULL << 63;
   bool lockCaptureBoundary() noexcept

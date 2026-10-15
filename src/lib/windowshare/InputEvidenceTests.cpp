@@ -10,6 +10,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
+#include <barrier>
 #include <cstdio>
 #include <stdexcept>
 #include <thread>
@@ -19,6 +20,10 @@ using namespace deskflow::windowshare;
 namespace deskflow::windowshare {
 struct InputEvidenceTestAccess
 {
+  static std::uint64_t depth(const InputEvidenceRecorder &recorder, InputEvidenceQueue queue)
+  {
+    return recorder.m_queues[static_cast<std::size_t>(queue)].depth.load();
+  }
   static bool lockBoundary(InputEvidenceRecorder &recorder)
   {
     return recorder.lockCaptureBoundary();
@@ -131,6 +136,78 @@ void baselinesAndLifecycle()
       sourceCount == 2 && queueCount == 2 * InputEvidenceRecorder::queueCount && recorder->drained(),
       "incomplete source/queue boundaries"
   );
+}
+void concurrentEventPreparation()
+{
+  auto recorder = core();
+  const auto &observer = recorder->eventObserver();
+  using Action = deskflow::EventInputObservation;
+  constexpr std::array eventQueues{
+      InputEvidenceQueue::EventOutstanding, InputEvidenceQueue::EventDispatch, InputEvidenceQueue::EventAllOutstanding,
+      InputEvidenceQueue::EventAllDispatch
+  };
+  constexpr unsigned workers = 8, rounds = 200;
+  std::barrier phase(workers + 1);
+  const auto observe = [&](Action action) { observer.observe(observer.context, recorder.get(), {5, 1, 1}, action); };
+  std::vector<std::thread> threads;
+  for (unsigned worker = 0; worker < workers; ++worker)
+    threads.emplace_back([&] {
+      for (unsigned round = 0; round < rounds; ++round) {
+        phase.arrive_and_wait();
+        for (const auto action : {Action::AllAdmit, Action::Admit, Action::AllDispatch, Action::Dispatch})
+          observe(action);
+        phase.arrive_and_wait();
+        phase.arrive_and_wait();
+        for (const auto action : {Action::Return, Action::AllReturn, Action::Retire, Action::AllRetire})
+          observe(action);
+        phase.arrive_and_wait();
+      }
+    });
+  bool exact = true;
+  for (unsigned round = 0; round < rounds; ++round) {
+    phase.arrive_and_wait();
+    phase.arrive_and_wait();
+    exact = exact && !recorder->readyOwner();
+    for (const auto queue : eventQueues)
+      exact = exact && InputEvidenceTestAccess::depth(*recorder, queue) == workers;
+    phase.arrive_and_wait();
+    phase.arrive_and_wait();
+    exact = exact && recorder->readyOwner().has_value();
+    for (const auto queue : eventQueues)
+      exact = exact && InputEvidenceTestAccess::depth(*recorder, queue) == 0;
+  }
+  for (auto &thread : threads)
+    thread.join();
+  check(
+      exact && recorder->loss() == InputEvidenceLoss::None && recorder->written() == 0,
+      "concurrent pre-arm Event lifetimes lost exact depth or invented measured rows"
+  );
+  check(recorder->arm(1000000000), "quiescent concurrent Event preparation could not arm");
+  for (const auto action :
+       {Action::AllAdmit, Action::Admit, Action::AllDispatch, Action::Dispatch, Action::Return, Action::AllReturn,
+        Action::Retire, Action::AllRetire})
+    observe(action);
+  recorder->stop();
+  recorder->finish();
+  unsigned peaks = 0;
+  while (const auto row = recorder->pop())
+    if (eventInputEvidenceQueue(row->queue)) {
+      check(row->enqueued <= 1 && row->retired <= 1, "preparation counts leaked past the empty measurement boundary");
+      peaks += row->depth == 1;
+    }
+  check(peaks == 4 && recorder->loss() == InputEvidenceLoss::None, "measured Event mutations lost their exact peaks");
+
+  auto underflow = core();
+  underflow->eventObserver().observe(underflow.get(), underflow.get(), {}, Action::AllRetire);
+  check(
+      underflow->loss() == InputEvidenceLoss::QueueAccounting && !underflow->arm(1000000000),
+      "preparation Event underflow was accepted"
+  );
+  auto boundary = core();
+  check(boundary->beginQueueActivity(InputEvidenceQueue::EventAllOutstanding, boundary.get()), "Event activity failed");
+  check(!boundary->readyOwner() && !boundary->arm(1000000000), "unfinished Event observation crossed the arm boundary");
+  boundary->endQueueActivity(InputEvidenceQueue::EventAllOutstanding);
+  check(boundary->loss() == InputEvidenceLoss::Baseline, "racing Event preparation silently recovered");
 }
 void stickyFailures()
 {
@@ -647,6 +724,7 @@ int main(int argc, char **argv)
   QuitGuardApplication app(argc, argv);
   try {
     baselinesAndLifecycle();
+    concurrentEventPreparation();
     stickyFailures();
     publicationBoundaries();
     unboundedEventMetrics();

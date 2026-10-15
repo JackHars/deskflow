@@ -4,6 +4,39 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H04 concurrent Event preparation repair — 2026-10-15
+
+Attempt six: **failed preparation; no physical acceptance**. The user clicked
+Start in the new countdown window. Evidence under
+`build/h04-r6-e1zqbfc2/session-1/` identifies Core recorder loss `Contention`,
+site `queue-mutation`, queue `event-all-outstanding`. Both real packaged
+endpoints had authenticated and passed exact admission. The inert probe had
+also passed (7.697 s admission / 12.632 s total). Linux startup was cancelled
+before Active or recording. The Core and source exited 0, exact Host stopped,
+Linux Core stopped through private IPC, relays drained, and container exit was
+0. Ordinary Mac/Ubuntu processes and settings were preserved. Unarmed evidence
+remains denied; the attempt-four active disconnect is not diagnosed by this run.
+
+Event observations from multiple connection workers can legitimately overlap.
+Before recording, they now update the exact live depth with one atomic
+operation instead of taking the measured counter lock. Their full observation
+activity excludes arm/drain. Only an empty, quiescent baseline resets measured
+counters; measured rows, strict ordering, one-shot rejection and all recording
+contention checks are unchanged. Underflow/capacity/boundary failures remain
+terminal. No preparation payload or artificial measurement is recorded.
+
+Evidence under `build/h04-event-preparation-aawd8i2l/` retains an eight-worker,
+200-round synchronized observer regression: exact occupied/empty phases,
+no pre-arm rows, fresh measured peaks, underflow rejection and refusal to arm
+with unfinished observation activity. The same test fails against the prior
+header and passes against the repair on home Ubuntu with GCC ASan/UBSan.
+The fixed recorder and private-channel suites pass together in 23.68 s; the
+offline container and temporary build directory were removed. Mac recorder
+tests pass in 0.66 s and all 30 integrated EventQueue checks pass in 17.91 s,
+including a separate eight-worker real-dispatch regression. Core, Host and
+the source build; formatting, whitespace and full REUSE pass. The next signed
+package and fresh attended attempt are pending in this entry.
+
 ## H04 reached Active, then lost its private channel — 2026-10-15
 
 Fourth attended attempt: **failed session; physical acceptance not assessed**.
