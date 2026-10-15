@@ -2,7 +2,8 @@
 
 ## H11 physical recording interval implemented — 2026-10-15
 
-The final roadmap audit found that the physical recorder's fixed 30-second
+Collection/source-fixture commit `286328d055478692ea877c5d5d61d5c619e5093f`
+closes a gap found in the roadmap audit: the physical recorder's fixed 30-second
 interval could not collect H11's required two minutes. The explicit frozen
 `h11` profile now records 120 seconds within a 150-second visible session;
 ordinary H04 remains 30/120 seconds. The source UI and receipt/status readers
@@ -17,6 +18,23 @@ under `build/p7-h11-profile-20261015/`. Core/Host runtime code is unchanged.
 Home Ubuntu is reachable with an active Wayland session; the staged Mac native
 capability probe passes. Readiness for attended tests has been requested, but
 not confirmed. No physical input, window transfer or sleep has been started.
+
+The home Ubuntu run on this exact source passes all 13 steps: nine enabled
+Core suites, evidence runtime, private GNOME/Xvfb shutdown, five disabled
+ASan/UBSan suites and all 151 Python tests. Its container and temporary build
+directory were removed. The GitHub source export verifies all 1160 entries;
+the Linux archive verifies its source, manifest and x86_64 binaries. A separately
+ad-hoc-signed Intel source helper is retained in the evidence directory for the
+next attended run. See `TESTING.md` for exact artifact hashes.
+
+All six hosted jobs in run `38750248886` pass on `286328d05`, including Mac
+27 standalone / nine integrated / four disabled / 19 sanitizer suites, Linux
+22 standalone / 11 integrated / five disabled / one sanitizer suite and the
+native GNOME matrix. Both downloaded ad-hoc ARM64 Mac archives also verify
+their source, checksums, inventory and executable architecture. The existing
+local Intel Apple-issued `8132c8554` Core package stays staged; only the source
+fixture and collection tools changed. No installation or attended result is
+implied by these package checks.
 
 Full native/library/OS queue certification is still incomplete; the harness
 cannot turn unknown or unbounded upstream capacity into a guarantee. The

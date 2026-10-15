@@ -566,6 +566,13 @@ exact-library bundle passes staging/handshake checks. CI retains verified
 Linux and ad-hoc Mac archives for seven days. See `TESTING.md` for exact hashes,
 commands and remaining hardware tests; these checks do not complete H12.
 
+Collection/source-fixture follow-up `286328d05` also passes all six hosted jobs
+in run `38750248886`, a fresh home Ubuntu enabled/disabled/sanitizer pass, and
+151 Python checks on both local platforms. Its source export and downloaded
+Mac/Linux archives verify independently. The local staged Core/Host runtime
+is unchanged from `8132c8554`; the new signed source helper is separately
+hashed. `TESTING.md` records the exact artifacts and remaining acceptance.
+
 The cloud task can finish with hardware acceptance pending. The complete product
 cannot be declared finished until the local chat executes the applicable H tests
 and resolves failures. Do not request a Mac/SSH session merely to finish cloud

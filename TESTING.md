@@ -6,7 +6,8 @@ SPDX-License-Identifier: MIT
 
 ## H11 physical recording profile — 2026-10-15
 
-The physical harness now offers a frozen `h11` profile: a 120-second recording
+Collection/source-fixture commit **`286328d055478692ea877c5d5d61d5c619e5093f`**
+offers a frozen `h11` profile: a 120-second recording
 inside a 150-second visible session. The existing H04 profile remains 30/120
 seconds. Every role receives the same predeclared duration; the source,
 receipt collector and status publisher enforce the selected session cap.
@@ -29,6 +30,44 @@ Local evidence under `build/p7-h11-profile-20261015/`:
   available. The staged Mac package's native `--probe` reports Accessibility,
   Screen Capture, holding display, exact window identity and targeted pointer
   support. No input routing or physical test started.
+
+Home Ubuntu verification on that exact source also **PASS**: nine enabled Core
+suites (20.35 s), one evidence-runtime suite, private GNOME-bus and Xvfb
+startup/shutdown checks, and five disabled Core ASan/UBSan suites (20.45 s;
+leak detection disabled). All 151 Python tests pass there too. The offline
+container used the existing frozen Ubuntu image with no network, host desktop
+mounts or devices; its temporary build directory and container were removed.
+`linux-results.json` records all 13 steps and the exact source/binary hashes;
+`linux-verification.json` confirms every step succeeded. The desktop preflight
+records GNOME 50.1, libei 1.5.0 and Qt 6.10.2, separately from this private run.
+
+The [source export](https://github.com/JackHars/deskflow/actions/runs/38750248860)
+matches the raw commit and all **1160** tracked entries/modes/blob identities.
+Source tar SHA-256:
+`f0ed021f99f8cbfd33e3a3915f88aabedafea246eac4826ba32638bbcb3d7bd7`.
+The downloaded Linux archive's provenance, all manifest members and both
+x86_64 ELF architectures verify without launching them; SHA-256:
+`2c73eca2062538a24711c4a9f04f9db6eb71980cab34018a2c42f040d1f3d5f9`.
+The locally rebuilt, separately ad-hoc-signed Intel source helper is retained
+as `build/p7-h11-profile-20261015/windowshare-smoke-source`, SHA-256
+`d648cd6ff021dc4dfa2feffbb893f715c39abd0080e5ce909e519ddef38f2864`.
+Its signature verifies; it has not been launched for physical testing.
+
+Hosted [run 38750248886](https://github.com/JackHars/deskflow/actions/runs/38750248886)
+**PASS — all six jobs** on `286328d05`. Mac passes 27 standalone, nine integrated,
+four disabled and 19 private/native sanitizer suites. Linux passes 22 standalone,
+11 integrated, five disabled and one EventQueue sanitizer suite. Both compiler
+foundations, transport and native GNOME/Qt jobs pass. `ci-final.json` verifies
+the exact commit and all six job conclusions; `ci.log` retains their results.
+The downloaded ad-hoc Mac artifacts also verify source/checksums, archive
+inventory and ARM64 executables (minimum macOS 15.0), without launching them:
+
+- Core ZIP: `a04c3fa89a7855938daca12c35e50ef9389be199616f11e6297f605a1d906977`.
+- Viewer ZIP: `e59fdecfd57ab0cf6b09575923dc0e69093a03a2585434b886c6cf91ea838478`.
+
+The existing local Intel Apple-issued Core/Host package remains the staged
+`8132c8554` runtime; its production code did not change in this collection
+follow-up. The new standalone source helper has its own separately frozen hash.
 
 These are collection and preflight results, **not** physical acceptance. P5
 bidirectional dragging, P6 application behavior, P7 H10/H11 and P8 installation
@@ -2014,7 +2053,7 @@ Implementation-to-test map (later commits include earlier runtime work):
 | P4 | `e461d2b31` and subsequent holding/recovery fixes | C04/C08/C10; H05/H06/H10 |
 | P5 | `63396d630`, `c748915cc` | C04/C07/C08; H07 |
 | P6 | `bfb9cb9e8` | C06/C07/C09; H08/H09 |
-| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `6108bd285`, `d57e78a0d`, `e154f94e0`, `8132c8554` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
+| P7 | `796495b86`, `cb506b6e1`, `3c4263f03`, `6108bd285`, `d57e78a0d`, `e154f94e0`, `8132c8554`; collection profile `286328d05` | C01–C10 and recorded offscreen load; full native queue certification and H10/H11 remain open |
 | P8 | Existing package scripts and the current CI retention follow-up | C10–C12; installation/upgrade/removal H12 remains open |
 
 Use `PASS`, `FAIL`, `NOT_RUN` or `NOT_APPLICABLE` with a reason. A skipped case is
@@ -2176,18 +2215,18 @@ does not promote a native/physical H row or certify unknown upstream queues.
 
 | ID | Required check | Current candidate result / command / evidence |
 | --- | --- | --- |
-| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `8132c8554`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
+| C01 | Clean build and pure C++ foundations; GCC/Clang and applicable sanitizers | PASS at `286328d05`: both hosted compiler jobs run 16 foundation/sanitizer suites plus nine library-policy checks. |
 | C02 | Actual Linux core with window sharing ON and OFF; ordinary protocol compatibility | PASS: current hosted integrated ON/OFF build/tests; independent home Ubuntu frozen Core and private EIS results are retained above. |
-| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `8132c8554`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
+| C03 | Full-input private lease/framing/preflight; old peers, malformed scope, stale lifetime and cancellation | PASS at `286328d05`: hosted transport 11 suites and five private-protocol ASan/UBSan suites; Mac standalone suites include the same channel/preflight regressions. |
 | C04 | Bounded async preparation, ownership, overflow, timeout, selection change, reentry and destruction | PASS: production coordinator, Core EventQueue and private channel regressions on Mac/Ubuntu, including overflow, expiry, reentry and exact cleanup. No physical delivery claim. |
 | C05 | Ordered cutoff/drain and exact point validation; delayed queues, duplicates and same-batch disconnect | PASS for implemented prefix, routed-point and private GNOME/Qt fixtures. Full native/OS queue capacities and actual physical delivery remain uncertified; see the native audit and H04. |
 | C06 | Actual Viewer/Bridge/transport; pending focus, pause/resume and old queued events | PASS: current Mac/Ubuntu Viewer, Bridge, viewport, transport and bounded media-load suites, plus image-ownership/hardware-transfer/color regressions, scoped Mac sanitizers and the earlier complete synthetic hour on unchanged media sources at `d57e78a0d`. |
-| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `8132c8554`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
+| C07 | Private X11 and GNOME/Qt headless integration when the cloud supports it | PASS at `286328d05`: hosted real private GNOME/Qt and X11 fixtures, including attached surfaces; no user-desktop or physical-monitor claim. |
 | C08 | Multi-window/topology/holding lifecycle, drag transaction and failure regressions | PASS automated policy/transaction/native-fixture coverage for integrated bidirectional P5 dragging, holding restoration and watcher/helper lifecycle. Real-window transfer and failure acceptance remains H05–H07/H10. |
 | C09 | Dialog/clipboard/shortcut associations and resource scheduling/recovery tests | PASS component regressions, including actual private GNOME/X11 child surfaces and bounded overload/hidden recovery. Named app dialogs, clipboard and shortcut acceptance remains H08/H09. |
-| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `8132c8554`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local Core dispatch/Host stall/teardown and ASan/UBSan checks, Apple-issued exact-library package and private handshake also pass. |
-| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `8132c8554`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
-| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `8132c8554` source archive matches all 1160 Git tree entries and blob identities. Full-repository REUSE 3.3 lint PASS on 2026-10-15: 1132/1132 licensed files, no errors. |
+| C10 | Mac compilation and private-event construction/packaging tests through available CI | PASS at `286328d05`: 27 standalone, nine integrated, four OFF compatibility and 19 portable/native-private sanitizer suites; 21 bundle tests and both package smoke paths pass. Local unchanged `8132c8554` Core dispatch/Host recovery, ASan/UBSan, Apple-issued exact-library package and private handshake checks remain recorded above. |
+| C11 | Linux packaging/install/uninstall in a disposable environment | PASS at `286328d05`: inert archive/manifest/staging and both wrapper help checks. End-user install/upgrade/removal H12 remains NOT_RUN. No host installation performed. |
+| C12 | Formatting, REUSE, diff check and final source/commit reproducibility | PASS changed C++ formatting, changed-file REUSE and diff checks. Downloaded `286328d05` source archive matches all 1160 Git tree entries and blob identities. Full-repository REUSE 3.3 lint PASS on 2026-10-15: 1132/1132 licensed files, no errors. |
 
 ### Reproducible baseline commands
 
@@ -2315,7 +2354,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 
 | ID | Procedure and required observations | Result / evidence |
 | --- | --- | --- |
-| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `8132c8554`: current hosted Mac/Ubuntu tests, local Mac recovery checks and exact local Mac package/handshake pass as recorded above; the earlier home Ubuntu run remains attached to its recorded baseline. Final desktop capability and installation acceptance remains pending. |
+| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `286328d05` source-fixture build and all 151 Python tests pass on Mac; the home Ubuntu enabled/disabled Core, private GNOME/Xvfb, evidence runtime and ASan/UBSan checks pass on this exact source. Mac native permissions and Ubuntu desktop versions are freshly probed. The staged Mac runtime remains the verified unchanged `8132c8554` package; final desktop behavior and installation acceptance remain pending. |
 | H02 | Repeat actual disposable Mac capture → Ubuntu viewer → Mac tagged native-receiver tests at Qt scales 1 and 1.25. Check frame identity/geometry, pointer/click/scroll/key receipts, no stuck input and restoration. This is synthetic, not physical acceptance. | NOT_RUN |
 | H03 | Run visible user-started physical flow. Confirm Start/Stop and countdown, actual Option hotkeys, type a/Shift+b/c, hold/release x, move/click/drag and scroll both axes, return to Mac. Match exact native source/host receipts and human result; no duplicate text or missing release. | NOT_RUN |
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |
