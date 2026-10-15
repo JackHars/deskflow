@@ -1,5 +1,41 @@
 # Seamless Windows work state
 
+## Actual-desktop attempt sixteen — 2026-10-15
+
+Fresh permission launched `build/h04-r16-awg5w2ql/` from commit `50b61497b`.
+The user clicked Start and confirmed the shared window appeared on jack's
+actual Ubuntu monitor. The previous mapped-target error did not recur.
+This run failed before Record; it does not establish physical input acceptance.
+
+At 18:35:49.402, macOS replayd logged `cacheDeleteUrgencyHigh`, then
+`handleMemoryWarningForCurrentActiveSession` and `stopAllStreamsWithError`.
+The Host received ScreenCaptureKit `SCStreamErrorSystemStoppedStream` (-3821)
+at 18:35:49.408, before its own stop request. At 18:36:00.760 Core closed the
+private channel with `Trusted companion private channel lost authority`.
+The coordinator then reported its generic changed-process failure. The capture
+service's urgent purge is the observed trigger; the later Host responsiveness
+failure remains a separate recovery concern. Do not mislabel this as the
+previous fixed handoff race or infer that the user stopped recording.
+
+The Mac had only 8.2 GiB available on its 932 GiB APFS container during diagnosis;
+swap usage was zero. The scoped Host and replayd logs are retained with the run.
+Mac Core/source exited 0, the companion stopped, and ordinary settings match.
+The source retained one held key and its final frame (100,160,640,448) differed
+from the initial frame (400,190,640,448). Restoration is not accepted.
+Core/native ended denied with zero measured rows, loss 0 and drained true;
+Host has no end row. Readiness was Core 0/323, Host 0/234, native 610/610.
+Ubuntu reports owned processes stopped, desktop restored and ordinary state
+preserved, with Core/controller exit 1. The archived Ubuntu evidence SHA-256 is
+`edac8375b48d5192e48012087fd401c7d26346adbaf91298722c7f2d654262bf`.
+
+No new attempt is prepared or authorized. A concrete storage-cleanup proposal
+is saved in `build/h04-r16-awg5w2ql/storage-cleanup-proposal.json`: archive and
+verify the 41 historical `build/packages/` entries on Ubuntu before removing
+their Mac copies (up to 5.61 GiB estimated). Current builds and all failed-run
+logs/receipts remain. The user has been asked to approve this removal; no
+package has moved or been deleted. Storage cleanup does not authorize a
+physical test. Obtain fresh permission immediately before another launch.
+
 ## Actual-desktop attempt fifteen — 2026-10-15
 
 Fresh permission launched `build/h04-r15-b6shuoux/`. This attempt reached
@@ -33,10 +69,9 @@ Core/Host builds and the separate Apple-signed package's inert admission and
 bootstrap checks pass. These checks neither use the user's desktop nor inject
 physical input. Both rebuilt Linux executables are retained with the evidence.
 
-Fresh actual-desktop preparation: `build/h04-r16-awg5w2ql/`, using the rebuilt
-binaries and fresh identities. Physical H04/P5 acceptance remains open.
-Attempt fifteen's permission is consumed; request fresh permission immediately
-before the next launch.
+Historical actual-desktop preparation: `build/h04-r16-awg5w2ql/`, using the
+rebuilt binaries and fresh identities. Its separately approved launch is
+recorded above. Physical H04/P5 acceptance remains open.
 
 ## Actual-desktop attempt fourteen — 2026-10-15
 
@@ -132,7 +167,7 @@ See [the actual-desktop procedure](deploy/windowshare/physical-desktop.md).
 
 ## Attended-test permission — current user instruction, 2026-10-15
 
-The user explicitly authorized attempt fifteen above. Ask for fresh permission immediately before
+The user explicitly authorized attempt sixteen above. Ask for fresh permission immediately before
 executing the next physical test, and wait for an affirmative reply before
 opening its test window or starting its physical session. Earlier Start/Ready
 answers do not authorize another attempt. Unattended builds, unit tests and
