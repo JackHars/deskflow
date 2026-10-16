@@ -1055,6 +1055,64 @@ class EvidenceTests(unittest.TestCase):
             self.session.poll()
         self.assertFalse(self.session.attempted)
         self.assertFalse(any(path.exists() for path in self.session.controls.values()))
+        self.assertEqual(self.session.diagnostic_snapshot()['roles']['core']['readiness']['failure'],
+                         {'site': 'queue-mutation', 'queue': 'capture'})
+
+    def test_nested_runtime_preparation_survives_in_coordinator_diagnostics(self):
+        # Match InputEvidenceRuntime's actual wire shape, including misleading
+        # top-level fields that must not override the preparation snapshot.
+        preparation = {'snapshotAvailable': True, 'ownerLive': False, 'captureIdle': True,
+                       'blockedQueues': [{'queue': 'server-pending', 'uninitialized': False,
+                                          'mutationBusy': False, 'activityInFlight': False, 'nonempty': True}]}
+        self.write('core', {'type': 'readiness', 'timeNs': '100', 'readyCandidate': False, 'loss': 0,
+                            'ownerLive': True, 'blockedQueues': [], 'preparation': preparation})
+        self.session.poll()
+        snapshot = self.session.diagnostic_snapshot()
+        self.assertEqual(snapshot['roles']['core']['readiness'],
+                         {'readyCandidate': False, 'loss': 0, 'failure': None, **preparation})
+        self.assertIn('core: eligible original-input owner and idle queues', snapshot['waitingFor'])
+        self.assertFalse(self.session.attempted)
+        # A subsequent ready publication does not retain obsolete blockers.
+        self.ready('core')
+        self.session.poll()
+        detail = self.session.diagnostic_snapshot()['roles']['core']['readiness']
+        self.assertTrue(detail['readyCandidate'])
+        self.assertIsNone(detail['blockedQueues'])
+        self.assertIsNone(detail['ownerLive'])
+
+    def test_missing_preparation_details_stay_unknown_and_do_not_authorize_arm(self):
+        self.session.start_boundary()
+        self.request()
+        self.ready(candidate=False)
+        self.assertFalse(self.session.try_arm())
+        for detail in self.session.diagnostic_snapshot()['roles'].values():
+            self.assertIsNone(detail['readiness']['ownerLive'])
+            self.assertIsNone(detail['readiness']['blockedQueues'])
+        self.assertFalse(any(path.exists() for path in self.session.controls.values()))
+
+    def test_diagnostics_identify_stale_post_record_and_mismatched_readiness(self):
+        self.session.start_boundary()
+        self.ready()
+        self.request()
+        self.assertIn('core: readiness after Record', self.session.diagnostic_snapshot()['waitingFor'])
+        self.now += 1
+        self.assertIn('host: fresh readiness publication', self.session.diagnostic_snapshot()['waitingFor'])
+        self.owners['host']['identity'] = 'cd' * 96
+        self.ready()
+        self.assertFalse(self.session.try_arm())
+        self.assertEqual(self.session.diagnostic_snapshot()['waitingFor'], ['core/host: matching input owner'])
+        self.assertIn('core/host: matching input owner', self.session.arm_wait_failure())
+        self.owners['host']['identity'] = self.owners['core']['identity']
+        self.ready()
+        self.assertTrue(self.session.try_arm())
+        self.assertEqual(self.session.diagnostic_snapshot()['waitingFor'], [])
+
+    def test_malformed_preparation_object_cannot_be_used_for_diagnostics_or_arm(self):
+        self.write('core', {'type': 'readiness', 'timeNs': '100', 'readyCandidate': False, 'loss': 0,
+                            'preparation': ['ownerLive', True]})
+        with self.assertRaisesRegex(RuntimeError, 'Invalid evidence preparation'):
+            self.session.poll()
+        self.assertIsNone(self.session.readers['core'].readiness)
 
     def test_candidate_change_during_the_three_independent_arm_checks_fails(self):
         self.session.start_boundary()

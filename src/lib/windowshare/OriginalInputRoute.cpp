@@ -39,20 +39,60 @@ bool OriginalInputRouteJoin::live() const noexcept
 {
   return m_epoch.live() && m_routes && m_routes->live();
 }
-void OriginalInputRouteJoin::revoke() noexcept
+void OriginalInputRouteJoin::revoke(Failure reason) noexcept
 {
+  if (m_failure == Failure::None)
+    m_failure = reason == Failure::None ? Failure::Stopped : reason;
   if (m_routes)
     m_routes->revoke();
+}
+OriginalInputRouteJoin::Failure OriginalInputRouteJoin::failure() const noexcept
+{
+  if (m_failure != Failure::None)
+    return m_failure;
+  if (!m_epoch.live())
+    return Failure::Epoch;
+  return !m_routes || !m_routes->live() ? Failure::Conduit : Failure::None;
+}
+const char *OriginalInputRouteJoin::failureName() const noexcept
+{
+  switch (failure()) {
+  case Failure::None:
+    return "none";
+  case Failure::Stopped:
+    return "stopped";
+  case Failure::Epoch:
+    return "capture-epoch";
+  case Failure::Conduit:
+    return "route-conduit";
+  case Failure::SequenceWindow:
+    return "sequence-window";
+  case Failure::SlotReuse:
+    return "slot-reuse";
+  case Failure::CaptureOrder:
+    return "capture-order";
+  case Failure::DuplicateCapture:
+    return "duplicate-capture";
+  case Failure::DecisionOrder:
+    return "decision-order";
+  case Failure::UndeclaredPart:
+    return "undeclared-part";
+  case Failure::Deadline:
+    return "deadline";
+  case Failure::Exhausted:
+    return "sequence-exhausted";
+  }
+  return "unknown";
 }
 OriginalInputRouteJoin::Slot *OriginalInputRouteJoin::slot(std::uint64_t sequence) noexcept
 {
   if (!live() || sequence < m_next || sequence - m_next >= capacity) {
-    revoke();
+    revoke(live() ? Failure::SequenceWindow : failure());
     return nullptr;
   }
   auto &result = m_slots[sequence % capacity];
   if (result.sequence && result.sequence != sequence) {
-    revoke();
+    revoke(Failure::SlotReuse);
     return nullptr;
   }
   result.sequence = sequence;
@@ -66,12 +106,12 @@ bool OriginalInputRouteJoin::capture(OriginalInputCaptured captured, Clock::time
       m_captured == std::numeric_limits<std::uint64_t>::max() || record.sequence != m_captured + 1 ||
       translation.stamp != OriginalInputStamp{record.epoch, record.sequence, 0} ||
       translation.parts > maximumOriginalInputParts) {
-    revoke();
+    revoke(live() ? Failure::CaptureOrder : failure());
     return false;
   }
   auto *entry = slot(record.sequence);
   if (!entry || entry->captured) {
-    revoke();
+    revoke(Failure::DuplicateCapture);
     return false;
   }
   ++m_captured;
@@ -85,7 +125,7 @@ bool OriginalInputRouteJoin::decision(OriginalInputRouteDecision decision, Clock
   if (!live() || stamp.epoch != m_epoch.id() || !stamp.sequence || !stamp.part ||
       stamp.part > maximumOriginalInputParts || stamp.sequence < m_lastDecisionSequence ||
       (stamp.sequence == m_lastDecisionSequence && stamp.part <= m_lastDecisionPart)) {
-    revoke();
+    revoke(live() ? Failure::DecisionOrder : failure());
     return false;
   }
   m_lastDecisionSequence = stamp.sequence;
@@ -95,7 +135,7 @@ bool OriginalInputRouteJoin::decision(OriginalInputRouteDecision decision, Clock
   if (stamp.sequence < m_next) {
     const auto &retired = m_retired[stamp.sequence % capacity];
     if (retired.sequence != stamp.sequence || !retired.allowLate || stamp.part > retired.parts) {
-      revoke();
+      revoke(Failure::UndeclaredPart);
       return false;
     }
     return true;
@@ -103,8 +143,12 @@ bool OriginalInputRouteJoin::decision(OriginalInputRouteDecision decision, Clock
   auto *entry = slot(stamp.sequence);
   if (!entry)
     return false;
-  if (entry->captured && entry->captured->translation.parts == 1 && now >= entry->deadline) {
-    revoke();
+  // Uncertain/expanded captures are diagnostic denials regardless of when
+  // pop() retires them. A late decision cannot upgrade them to delivered input,
+  // and must not revoke the route merely because it arrived before that pop.
+  if (entry->captured && !entry->captured->translation.uncertain && entry->captured->translation.parts == 1 &&
+      now >= entry->deadline) {
+    revoke(Failure::Deadline);
     return false;
   }
   if (!entry->decision)
@@ -131,7 +175,7 @@ std::optional<OriginalInputRouted> OriginalInputRouteJoin::pop(Clock::time_point
   else if (translation.parts > 1)
     result.outcome = OriginalInputRouteOutcome::Expanded;
   else if (now >= entry.deadline) {
-    revoke();
+    revoke(Failure::Deadline);
     return {};
   } else if (!entry.decision)
     return {};
@@ -148,7 +192,7 @@ std::optional<OriginalInputRouted> OriginalInputRouteJoin::pop(Clock::time_point
   m_retired[m_next % capacity] = {m_next, translation.parts, translation.uncertain || translation.parts > 1};
   entry = {};
   if (m_next == std::numeric_limits<std::uint64_t>::max()) {
-    revoke();
+    revoke(Failure::Exhausted);
     return {};
   }
   ++m_next;

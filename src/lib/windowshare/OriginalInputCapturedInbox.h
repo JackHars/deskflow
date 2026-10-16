@@ -20,11 +20,22 @@ class OriginalInputCapturedInbox final
 {
 public:
   static constexpr std::size_t capacity = 256;
+  enum class Failure : std::uint8_t
+  {
+    None,
+    Stopped,
+    Binding,
+    Capture,
+    Sequence,
+    Capacity,
+    Epoch
+  };
   explicit OriginalInputCapturedInbox(OriginalInputEpoch epoch) : m_epoch(std::move(epoch))
   {
     inputEvidenceInitialize(InputEvidenceQueue::Completed, this, capacity);
     static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
     static_assert(std::atomic_bool::is_always_lock_free);
+    static_assert(std::atomic<Failure>::is_always_lock_free);
   }
   ~OriginalInputCapturedInbox()
   {
@@ -40,7 +51,7 @@ public:
     std::uint64_t expected = 0;
     if (server && live() && m_server.compare_exchange_strong(expected, server, std::memory_order_acq_rel))
       return live();
-    revoke();
+    revoke(Failure::Binding);
     return false;
   }
   bool bound() const noexcept
@@ -62,15 +73,19 @@ public:
     if (!captured.input.live() || !captured.input.epoch.sameEpoch(m_epoch) || !validOriginalInputRecord(record) ||
         (captured.pointer && !captured.pointer->matches(record)) ||
         translation.stamp != OriginalInputStamp{record.epoch, record.sequence, 0} ||
-        translation.parts > maximumOriginalInputParts || m_lastSequence == std::numeric_limits<std::uint64_t>::max() ||
+        translation.parts > maximumOriginalInputParts) {
+      revoke(Failure::Capture);
+      return false;
+    }
+    if (m_lastSequence == std::numeric_limits<std::uint64_t>::max() ||
         (m_lastSequence && record.sequence != m_lastSequence + 1) || record.sourceTimestampNs < m_lastTimestamp) {
-      revoke();
+      revoke(Failure::Sequence);
       return false;
     }
     const auto written = m_written.load(std::memory_order_relaxed);
     if (written == std::numeric_limits<std::uint64_t>::max() ||
         written - m_read.load(std::memory_order_acquire) >= capacity) {
-      revoke();
+      revoke(Failure::Capacity);
       return false;
     }
     InputEvidenceMutation evidence(InputEvidenceQueue::Completed, this, 1, 0);
@@ -100,14 +115,41 @@ public:
   }
   bool live() const noexcept
   {
-    if (!m_epoch.live())
+    if (!m_epoch.live()) {
+      noteFailure(Failure::Epoch);
       m_revoked->store(true, std::memory_order_release);
+    }
     return !m_revoked->load(std::memory_order_acquire);
   }
-  void revoke() noexcept
+  void revoke(Failure reason = Failure::Stopped) const noexcept
   {
+    noteFailure(reason == Failure::None ? Failure::Stopped : reason);
     inputEvidenceInvalidate(InputEvidenceLoss::PipelineRevoked);
     m_revoked->store(true, std::memory_order_release);
+  }
+  Failure failure() const noexcept
+  {
+    return m_failure.load(std::memory_order_acquire);
+  }
+  const char *failureName() const noexcept
+  {
+    switch (failure()) {
+    case Failure::None:
+      return "none";
+    case Failure::Stopped:
+      return "stopped";
+    case Failure::Binding:
+      return "server-binding";
+    case Failure::Capture:
+      return "invalid-capture";
+    case Failure::Sequence:
+      return "capture-order";
+    case Failure::Capacity:
+      return "capacity";
+    case Failure::Epoch:
+      return "capture-epoch";
+    }
+    return "unknown";
   }
   std::shared_ptr<const std::atomic_bool> evidence() const noexcept
   {
@@ -116,10 +158,16 @@ public:
   }
 
 private:
+  void noteFailure(Failure reason) const noexcept
+  {
+    auto expected = Failure::None;
+    m_failure.compare_exchange_strong(expected, reason, std::memory_order_acq_rel);
+  }
   const OriginalInputEpoch m_epoch;
   std::array<OriginalInputCaptured, capacity> m_records;
   std::shared_ptr<std::atomic_bool> m_revoked = std::make_shared<std::atomic_bool>(false);
   std::atomic<std::uint64_t> m_server{0}, m_written{0}, m_read{0};
+  mutable std::atomic<Failure> m_failure{Failure::None};
   std::uint64_t m_lastSequence = 0, m_lastTimestamp = 0; // Session producer only.
 };
 

@@ -567,6 +567,7 @@ private:
   const OriginalRouteObservation *m_originalExecutingObservation = nullptr;
   std::uint64_t m_originalLastPreparation = 0;
   bool m_originalDraining = false, m_originalDispatchTerminal = false, m_originalAbortSent = false;
+  std::uint32_t m_originalEligibilityLogged = 0;
   OriginalRouteObservation *m_originalRouteObservation = nullptr;
   std::shared_ptr<deskflow::windowshare::OriginalInputRoutes> m_originalInputRoutes;
   InputRoutes m_inputRoutes;

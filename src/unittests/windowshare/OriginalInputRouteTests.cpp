@@ -138,6 +138,9 @@ void expiryDiscontinuityAndRevocation()
       !late.join.decision(late.decision(1), late.now + OriginalInputRouteJoin::timeout) && !late.join.live(),
       "late queued route cannot revive expired join"
   );
+  check(late.join.failure() == OriginalInputRouteJoin::Failure::Deadline, "late decision identifies its deadline");
+  late.join.revoke();
+  check(late.join.failure() == OriginalInputRouteJoin::Failure::Deadline, "cleanup preserves first join failure");
   Fixture missing;
   missing.join.capture(missing.capture(), missing.now);
   check(
@@ -148,6 +151,7 @@ void expiryDiscontinuityAndRevocation()
   auto bad = stale.decision(1);
   ++bad.stamp.epoch;
   check(!stale.join.decision(bad, stale.now), "other capture epoch rejected");
+  check(stale.join.failure() == OriginalInputRouteJoin::Failure::DecisionOrder, "wrong route epoch is identified");
   Fixture duplicate;
   check(
       duplicate.join.decision(duplicate.decision(1), duplicate.now) &&
@@ -166,6 +170,7 @@ void expiryDiscontinuityAndRevocation()
   auto raw = order.capture();
   ++raw.input.record.sequence;
   check(!order.join.capture(raw, order.now), "missing capture terminal");
+  check(order.join.failure() == OriginalInputRouteJoin::Failure::CaptureOrder, "missing capture identifies ordering");
   Fixture f;
   f.join.capture(f.capture(), f.now);
   f.join.decision(f.decision(1), f.now);
@@ -176,6 +181,42 @@ void expiryDiscontinuityAndRevocation()
   check(!f.routes->publish(f.decision(10000)) && !retained->live(), "overflow after pop revokes retained values");
   Fixture replaced;
   check(!replaced.routes->bind(12) && !replaced.routes->live(), "new server cannot reuse bound publication");
+}
+void lateDeniedCorrelation()
+{
+  // Session drains decisions before popping completed captures. A delayed
+  // decision for an already-uncorrelatable record must have the same outcome
+  // on either side of that pop; it can never acquire input authority.
+  for (const bool retiredFirst : {false, true}) {
+    for (const auto &[parts, uncertain, expected] :
+         {std::tuple{std::uint16_t(1), true, OriginalInputRouteOutcome::Uncorrelated},
+          std::tuple{std::uint16_t(2), false, OriginalInputRouteOutcome::Expanded}}) {
+      Fixture f;
+      const auto captured = f.capture(parts, uncertain);
+      check(f.join.capture(captured, f.now), "retain denied capture for diagnostic correlation");
+      const auto late = f.now + OriginalInputRouteJoin::timeout + 1ms;
+      std::optional<OriginalInputRouted> denied;
+      if (retiredFirst)
+        denied = f.join.pop(late);
+      for (std::uint16_t part = 1; part <= parts; ++part)
+        check(f.join.decision(f.decision(1, part), late), "late denied decision cannot revoke the live route");
+      if (!retiredFirst)
+        denied = f.join.pop(late);
+      check(
+          denied && denied->live() && denied->route.outcome == expected && !denied->route.recipient &&
+              !denied->route.ticket.live() && !denied->route.pointKnown && !f.join.pop(late),
+          "late denial is emitted once without delivery authority"
+      );
+      check(f.join.failure() == OriginalInputRouteJoin::Failure::None, "unusable correlation is not a route failure");
+      check(f.join.capture(f.capture(), late) && f.join.decision(f.decision(2), late), "next exact record still joins");
+      const auto next = f.join.pop(late);
+      check(
+          next && next->live() && next->route.outcome == OriginalInputRouteOutcome::Dispatched,
+          "denied correlation cannot poison a later timely decision"
+      );
+      check(!f.join.decision(f.decision(1), late) && !next->live(), "late denial still obeys strict stream order");
+    }
+  }
 }
 void concurrency()
 {
@@ -414,6 +455,7 @@ void completedCaptureInbox()
   const auto evidence = inbox.evidence();
   const auto beforeBind = fixture.capture(0);
   check(!inbox.bound() && inbox.live() && !inbox.pop(), "completed capture conduit starts unbound and empty");
+  check(inbox.failure() == OriginalInputCapturedInbox::Failure::None, "new inbox has no invented failure");
   check(
       !inbox.publish(beforeBind) && inbox.live() && !evidence->load() && !inbox.pop(),
       "pre-bind capture is skipped without poisoning or filling the conduit"
@@ -450,6 +492,11 @@ void completedCaptureInbox()
       "conduit overflow never revokes raw capture, independent route diagnostics or retained epoch evidence"
   );
   check(!inbox.bind(12), "a revoked completed capture conduit cannot be rebound");
+  inbox.revoke();
+  check(
+      inbox.failure() == OriginalInputCapturedInbox::Failure::Capacity,
+      "overflow remains the reason after attempted rebind and ordinary cleanup"
+  );
 }
 void completedCaptureValidation()
 {
@@ -498,6 +545,7 @@ void completedCaptureValidation()
             fixture.source.epoch().live() && fixture.routes->live(),
         "malformed completion or wrong epoch revokes only the completed capture conduit"
     );
+    check(inbox.failure() == OriginalInputCapturedInbox::Failure::Capture, "invalid capture has a retained cause");
   }
   for (int order = 0; order != 4; ++order) {
     Fixture fixture;
@@ -518,12 +566,16 @@ void completedCaptureValidation()
         !inbox.publish(next) && !inbox.live() && fixture.source.epoch().live(),
         "duplicate, skipped, regressed or exhausted capture order is terminal only for the conduit"
     );
+    check(
+        inbox.failure() == OriginalInputCapturedInbox::Failure::Sequence, "ordering failure is distinct from capacity"
+    );
   }
   for (const auto rebound : {0u, 11u, 12u}) {
     Fixture fixture;
     OriginalInputCapturedInbox inbox(fixture.source.epoch());
     check(inbox.bind(11), "rebind fixture claims its single Server");
     check(!inbox.bind(rebound) && !inbox.live(), "invalid, duplicate and replacement Server bindings fail closed");
+    check(inbox.failure() == OriginalInputCapturedInbox::Failure::Binding, "rebind failure is retained");
   }
   Fixture fixture;
   OriginalInputCapturedInbox invalidBind(fixture.source.epoch());
@@ -533,6 +585,7 @@ void completedCaptureValidation()
   );
   OriginalInputCapturedInbox noEpoch({});
   check(!noEpoch.bind(11) && !noEpoch.live(), "no completed capture conduit can bind without a live epoch");
+  check(noEpoch.failure() == OriginalInputCapturedInbox::Failure::Epoch, "missing epoch precedes failed binding");
 }
 void completedCaptureLifetime()
 {
@@ -554,6 +607,7 @@ void completedCaptureLifetime()
       !epochLoss.pop() && !epochLoss.live() && epochEvidence->load() && !retained->input.live(),
       "revoked original epoch cannot escape through queued completed copies or retained evidence"
   );
+  check(epochLoss.failure() == OriginalInputCapturedInbox::Failure::Epoch, "independent capture loss is diagnosed");
 }
 void completedCaptureConcurrency()
 {
@@ -601,6 +655,7 @@ int main()
     eventStamping();
     joinsAndDenials();
     expiryDiscontinuityAndRevocation();
+    lateDeniedCorrelation();
     concurrency();
     deferredRouteOrder();
     deferredRouteFailures();

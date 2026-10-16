@@ -38,6 +38,7 @@ using namespace deskflow::server;
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "windowshare/InputEvidence.h"
+#include "windowshare/LifecycleDiagnostics.h"
 using deskflow::windowshare::inputEvidenceApply;
 using deskflow::windowshare::InputEvidenceMutation;
 using deskflow::windowshare::InputEvidenceQueue;
@@ -2211,8 +2212,9 @@ void Server::cancelOriginalDispatch(const char *reason) noexcept
     LOG_WARN("original input dispatch stopped: %s", reason);
     if (m_originalInputCaptured)
       LOG_WARN(
-          "original input stop context: captureLive=%d routesLive=%d epochReason=%d", m_originalInputCaptured->live(),
-          m_originalInputRoutes && m_originalInputRoutes->live(), int(m_originalInputCaptured->epoch().reason())
+          "original input stop context: captureLive=%d routesLive=%d epochReason=%d inboxFailure=%s",
+          m_originalInputCaptured->live(), m_originalInputRoutes && m_originalInputRoutes->live(),
+          int(m_originalInputCaptured->epoch().reason()), m_originalInputCaptured->failureName()
       );
   }
   deskflow::windowshare::inputEvidenceInvalidate(deskflow::windowshare::InputEvidenceLoss::PipelineRevoked);
@@ -2638,6 +2640,52 @@ bool Server::executeOriginalInput(
       }
     } else {
       eligible = std::holds_alternative<OriginalInputScroll>(payload) && pending.route.pointKnown;
+    }
+  }
+  if (inputEvidence()) {
+    // These observations explain refusals before reserve() can report them.
+    // At most one line per boundary per Server, outside the native event tap;
+    // no key code, text, clipboard value or native payload is retained here.
+    const unsigned boundary = eligible                                                               ? 14
+                              : !captured                                                            ? 0
+                              : !captured->input.live()                                              ? 1
+                              : captured->translation.parts != 1                                     ? 2
+                              : captured->translation.uncertain                                      ? 3
+                              : pending.route.stamp.part != 1                                        ? 4
+                              : modifierCommand                                                      ? 5
+                              : m_originalDispatchTerminal                                           ? 6
+                              : !m_originalInputCaptured->live()                                     ? 7
+                              : !pending.selected || !pending.selected->live()                       ? 8
+                              : !m_selectedPeer || !m_selectedPeer->sameSelection(*pending.selected) ? 9
+                              : pending.route.recipient != pending.selected->recipient()             ? 10
+                              : pending.route.outcome != OriginalInputRouteOutcome::Dispatched       ? 11
+                              : control && (held ? !existingOwner : !down)                           ? 12
+                                                                                                     : 13;
+    const auto bit = std::uint32_t{1} << boundary;
+    if (!(m_originalEligibilityLogged & bit)) {
+      m_originalEligibilityLogged |= bit;
+      constexpr const char *reasons[]{"missing-completed-capture", "capture-not-live",
+                                      "translation-count",         "translation-uncertain",
+                                      "translation-part",          "modifier-command",
+                                      "dispatch-terminal",         "capture-inbox-not-live",
+                                      "selection-not-live",        "selection-changed",
+                                      "recipient-changed",         "route-not-dispatched",
+                                      "control-not-acquirable",    "payload-or-point-not-eligible",
+                                      "eligible-for-reservation"};
+      lifecycleDiagnostic(
+          "Core input", "dispatch.eligibility", "observed", reasons[boundary],
+          {{"eligible", eligible},
+           {"epoch", QString::number(pending.route.stamp.epoch)},
+           {"sequence", QString::number(pending.route.stamp.sequence)},
+           {"part", int(pending.route.stamp.part)},
+           {"translatedParts", captured ? int(captured->translation.parts) : -1},
+           {"uncertain", captured && captured->translation.uncertain},
+           {"routeKind", int(pending.route.kind)},
+           {"routeOutcome", int(pending.route.outcome)},
+           {"pointKnown", pending.route.pointKnown},
+           {"controlHeld", held.has_value()},
+           {"originalOwnerHeld", existingOwner != 0}}
+      );
     }
   }
   const auto ticket = pending.preparation;

@@ -246,6 +246,21 @@ struct OriginalInputRouted
 class OriginalInputRouteJoin final
 {
 public:
+  enum class Failure : std::uint8_t
+  {
+    None,
+    Stopped,
+    Epoch,
+    Conduit,
+    SequenceWindow,
+    SlotReuse,
+    CaptureOrder,
+    DuplicateCapture,
+    DecisionOrder,
+    UndeclaredPart,
+    Deadline,
+    Exhausted
+  };
   using Clock = std::chrono::steady_clock;
   static constexpr auto timeout = std::chrono::milliseconds(250);
   static constexpr std::size_t capacity = OriginalInputStream::capacity;
@@ -254,7 +269,9 @@ public:
   bool decision(OriginalInputRouteDecision decision, Clock::time_point now = Clock::now()) noexcept;
   std::optional<OriginalInputRouted> pop(Clock::time_point now = Clock::now()) noexcept;
   bool live() const noexcept;
-  void revoke() noexcept;
+  void revoke(Failure reason = Failure::Stopped) noexcept;
+  Failure failure() const noexcept;
+  const char *failureName() const noexcept;
 
 private:
   struct Slot
@@ -277,6 +294,7 @@ private:
   std::array<Retired, capacity> m_retired{};
   std::uint64_t m_captured = 0, m_next = 1, m_lastDecisionSequence = 0;
   std::uint16_t m_lastDecisionPart = 0;
+  Failure m_failure = Failure::None;
 };
 
 } // namespace deskflow::windowshare

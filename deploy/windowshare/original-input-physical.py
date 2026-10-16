@@ -295,14 +295,21 @@ class EvidenceReader:
                 require(self.arm is None and type(value.get('readyCandidate')) is bool and
                         type(value.get('loss')) is int,
                         'Evidence readiness was invalid or arrived after arm')
+                # Runtime emits preparation details in a nested object, only
+                # while unready. Older logs may omit it. Missing diagnostics
+                # must remain unknown, not become invented readiness evidence.
+                preparation = value.get('preparation')
+                require(preparation is None or isinstance(preparation, dict),
+                        'Invalid evidence preparation details')
+                self.readiness_details = {key: value.get(key) for key in ('readyCandidate', 'loss', 'failure')}
+                self.readiness_details.update({key: (preparation or {}).get(key) for key in
+                    ('ownerLive', 'captureIdle', 'blockedQueues', 'snapshotAvailable')})
                 require(value['loss'] == 0,
                         f"{self.role} evidence failed during preparation: loss={value['loss']}, "
                         f"details={value.get('failure', 'unavailable')}")
                 owner = evidence_owner(value, self.role) if value['readyCandidate'] else None
                 self.readiness_count += 1
                 self.readiness = (self.readiness_count, self.now(), owner)
-                self.readiness_details = {key: value.get(key) for key in
-                    ('readyCandidate', 'ownerLive', 'captureIdle', 'blockedQueues', 'snapshotAvailable', 'loss', 'failure')}
             elif kind == 'arm':
                 require(self.arm is None and type(value.get('accepted')) is bool, 'Repeated or invalid evidence arm')
                 self.arm = value
@@ -371,10 +378,36 @@ class EvidenceSession:
     def diagnostic_snapshot(self):
         return {'recordRequested': self.record_identity is not None, 'armRequested': self.attempted,
                 'armed': self.armed, 'stopped': self.stopped,
+                'waitingFor': self.arm_blockers() if not self.attempted and not self.stopped else [],
                 'roles': {role: {'headerSeen': reader.header is not None,
                                 'readiness': reader.readiness_details,
                                 'arm': reader.arm is not None, 'end': reader.end is not None}
                           for role, reader in self.readers.items()}}
+
+    def arm_blockers(self):
+        """Explain the same boundaries used by try_arm; never grant authority."""
+        blockers = []
+        if self.record_identity is None:
+            blockers.append('visible Record request')
+        for role, reader in self.readers.items():
+            if role not in self.pids:
+                blockers.append(role + ': owned process identity')
+            if not reader.header:
+                blockers.append(role + ': evidence header')
+            elif not reader.readiness:
+                blockers.append(role + ': readiness publication')
+            else:
+                count, arrived, owner = reader.readiness
+                if self.record_boundary is not None and count <= self.record_boundary[role]:
+                    blockers.append(role + ': readiness after Record')
+                if self.now() - arrived > 0.5:
+                    blockers.append(role + ': fresh readiness publication')
+                if not owner:
+                    blockers.append(role + ': eligible original-input owner and idle queues')
+        owners = [self.readers[role].readiness for role in ('core', 'host')]
+        if all(value and value[2] for value in owners) and owners[0][2] != owners[1][2]:
+            blockers.append('core/host: matching input owner')
+        return blockers
 
     def try_arm(self):
         self.poll()
@@ -425,7 +458,8 @@ class EvidenceSession:
     def arm_wait_failure(self):
         if self.record_identity is None:
             return 'No visible Record request before the recording and safe-return cutoff'
-        return 'Record was requested, but matching input readiness was unavailable before the recording cutoff'
+        return ('Record was requested, but matching input readiness was unavailable before the recording cutoff: ' +
+                '; '.join(self.arm_blockers()))
 
     def stop(self):
         if self.stopped:

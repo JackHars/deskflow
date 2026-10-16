@@ -313,6 +313,7 @@ void LocalInputCoreSession::drainCapturedInput()
           {{"epoch", QString::number(captured->input.record.epoch)},
            {"sequence", QString::number(captured->input.record.sequence)},
            {"epochLive", completed->epoch().live()},
+           {"inboxFailure", completed->failureName()},
            {"reason", int(completed->epoch().reason())},
            {"routesLive", source->routes()->live()}}
       );
@@ -334,6 +335,13 @@ void LocalInputCoreSession::drainCapturedInput()
       callback(*joined);
     if (!*lifetime)
       return;
+  }
+  if (!m_captureJoin->live() && !m_routeFailureLogged) {
+    m_routeFailureLogged = true;
+    lifecycleDiagnostic(
+        "Core input", "capture.route-join", "failed", "Captured input and Core route correlation stopped",
+        {{"epoch", QString::number(epoch.id())}, {"reason", m_captureJoin->failureName()}}
+    );
   }
   if (m_pointerJoin) {
     if (!m_pointerJoin->live()) {
