@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QTemporaryDir>
 #include <barrier>
+#include <chrono>
 #include <cstdio>
 #include <stdexcept>
 #include <thread>
@@ -62,6 +63,22 @@ void check(bool value, const char *message)
 {
   if (!value)
     throw std::runtime_error(message);
+}
+template <class F> void runCase(const char *name, F &&function)
+{
+  std::fprintf(stderr, "[input-evidence] %s started\n", name);
+  std::fflush(stderr);
+  const auto start = std::chrono::steady_clock::now();
+  try {
+    function();
+  } catch (...) {
+    std::fprintf(stderr, "[input-evidence] %s failed\n", name);
+    std::fflush(stderr);
+    throw;
+  }
+  const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  std::fprintf(stderr, "[input-evidence] %s completed in %.3fs\n", name, elapsed);
+  std::fflush(stderr);
 }
 template <class F> void denied(F &&function)
 {
@@ -836,20 +853,22 @@ void nativePreparationDeadline()
 } // namespace
 int main(int argc, char **argv)
 {
+  std::fputs("[input-evidence] process entered main; constructing Qt application\n", stderr);
+  std::fflush(stderr);
   QuitGuardApplication app(argc, argv);
   try {
-    baselinesAndLifecycle();
-    readinessDiagnostics();
-    concurrentEventPreparation();
-    stickyFailures();
-    publicationBoundaries();
-    unboundedEventMetrics();
-    actualPortableQueues();
-    revokeDuringDrain();
-    nativeFields();
-    privateConfiguration();
-    nativePreparationDeadline();
-    explicitNativeClose(app);
+    runCase("baselinesAndLifecycle", baselinesAndLifecycle);
+    runCase("readinessDiagnostics", readinessDiagnostics);
+    runCase("concurrentEventPreparation", concurrentEventPreparation);
+    runCase("stickyFailures", stickyFailures);
+    runCase("publicationBoundaries", publicationBoundaries);
+    runCase("unboundedEventMetrics", unboundedEventMetrics);
+    runCase("actualPortableQueues", actualPortableQueues);
+    runCase("revokeDuringDrain", revokeDuringDrain);
+    runCase("nativeFields", nativeFields);
+    runCase("privateConfiguration", privateConfiguration);
+    runCase("nativePreparationDeadline", nativePreparationDeadline);
+    runCase("explicitNativeClose", [&] { explicitNativeClose(app); });
     std::puts("Bounded input evidence, actual portable queue mutations, native fields and strict opt-in config passed");
     return 0;
   } catch (const std::exception &error) {

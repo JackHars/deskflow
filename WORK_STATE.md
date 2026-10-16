@@ -31,9 +31,29 @@ The rebuilt local Apple-issued package under this evidence root's `mac-package`
 passes its exact-library audit (77 records, no errors); Core archive SHA-256 is
 `9cea1103fcd178257edf91d5d9df12c9b361bfd2fc9a17c4d693cad5aaa13dad`.
 
+The change is published as `4854f84a9b345538a198ba8c3e0b1231a981f27f`.
+Its hosted source bundle `38838517071` independently verifies all 1176 tracked
+files, modes and Git blob/commit identities. Source archive SHA-256:
+`7b967ee9f7d46a15c5129a601049c08801e2d765288de5377186ba1a7e903ad3`.
+Foundation run `38838517207` passed the new startup test on Mac and Linux,
+including the portable sanitizer step. Its Mac job failed at the existing
+`windowshare-input-evidence` suite's 15-second CTest deadline, without output
+identifying the stalled stage. The same suite with stage diagnostics passes
+locally in 0.64s. Each test case now flushes start/completion/failure markers and
+elapsed time; an entry marker distinguishes pre-main launch from Qt startup.
+The Mac workflow retains CTest logs even on failure. Assertions, workload and
+the 15-second test timeout are unchanged; no automatic retry or sleep is added.
+This is diagnostic coverage, not a demonstrated fix for the hosted timeout.
+
 The previously prepared attempt 22 uses the earlier binary and is superseded;
-do not launch it. Freeze the updated signed package in a fresh preparation and
-ask immediately before the next physical launch. The latest actual failure is
+do not launch it. Fresh attempt 23 is `build/h06-r23-uk2ivwf9/`, with source
+`4854f84a9`, the package above and matching private plans on actual jack.
+Validation, Mac permission/conflict checks and packaged admission pass (11.69s,
+native input hooks disabled, companion stopped). Jack's local Wayland session 2
+is active and its temporary provider is disabled. Holding, separate Mac controls,
+no desktop preview and no results popup are selected. No session or launch
+permission receipt exists. Fresh permission has been requested; do not execute
+the prepared launch until the user grants it. The latest actual failure is
 still attempt 21 below; physical H04/H06 remain unaccepted. The full native/OS
 queue audit has unresolved upstream bounds, which cannot be inferred from a
 passing finite test or the application queue limits.

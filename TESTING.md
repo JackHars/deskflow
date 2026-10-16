@@ -14,6 +14,7 @@ The new portable suite runs the production gate with a controlled clock, without
 sleep statements, real displays, helpers or input. Destructive completion and
 late events after cancellation are included.
 
+Implementation: `4854f84a9b345538a198ba8c3e0b1231a981f27f`.
 Evidence: `build/roadmap-startup-3noptkp0/`.
 
 - Mac Host/helper builds: PASS.
@@ -31,11 +32,25 @@ Evidence: `build/roadmap-startup-3noptkp0/`.
 - Local Apple-issued `mac-package/DeskflowSeamless-Core-Experimental.zip`:
   exact-library audit PASS (77 records, no errors), SHA-256
   `9cea1103fcd178257edf91d5d9df12c9b361bfd2fc9a17c4d693cad5aaa13dad`.
+- New source bundle `38838517071`: all 1176 tracked files/modes/blob identities
+  and exact Git commit verify independently. Source archive SHA-256
+  `7b967ee9f7d46a15c5129a601049c08801e2d765288de5377186ba1a7e903ad3`.
+  New foundation run `38838517207` passes the startup checks but its Mac job
+  fails the existing `windowshare-input-evidence` suite's 15-second CTest timeout.
+  That run is not an all-green candidate. No stage output was retained by the
+  old fixture. The diagnostic follow-up prints and flushes every case boundary
+  and elapsed time, and preserves Mac CTest logs on CI failure. Its local Mac
+  evidence suite passes in 0.64s; workload, assertions and timeout are unchanged.
+  Hosted revalidation is required; local success does not explain the timeout.
 
 Physical input and hidden placement were not run. Attempt 22's unused plan is
-superseded by this change. The latest executed attempt remains 21 below; freeze
-fresh artifacts and obtain fresh permission before retrying. Current completion
-gates are listed at the top of `CHATGPT_HANDOFF.md`.
+superseded by this change. Fresh attempt 23 is `build/h06-r23-uk2ivwf9/`:
+plan validation, permissions, conflicts and packaged private admission pass;
+actual jack session 2 is active. It uses the package above and code `4854f84a9`,
+with holding enabled, separate Mac controls and no preview/results popup.
+Preparation did not open a test window. Fresh launch permission is pending.
+The latest executed attempt remains 21 below. Current completion gates are
+listed at the top of `CHATGPT_HANDOFF.md`.
 
 ## H06 attempt twenty-one: native display notification race — 2026-10-15
 
@@ -2765,9 +2780,12 @@ sections after receiving the final branch.
 ## Candidate identity and result rules
 
 - Baseline implementation: `ef51456659edae1acf06a6c03b730bcaf66f2f8b`.
-- Current runtime implementation: `e154f94e0676b299b225080658c3d5c3dfbf9f50`.
-  This adds independent Host progress expiration to P5/P6 and the P7 queue/media
-  work. All six hosted jobs and local recovery/package checks pass. The declared
+- Current runtime implementation: `4854f84a9b345538a198ba8c3e0b1231a981f27f`.
+  This includes asynchronous holding startup and absolute deadline enforcement,
+  following the P5/P6 and P7 queue/media/recovery work. Current local checks and
+  exact package/preparation results are recorded at the top of this file. All six
+  hosted jobs pass for its parent runtime `7453a4c77`; the new run is tracked above.
+  The declared
   synthetic hour remains a `d57e78a0d` result on unchanged media sources; it did
   not exercise the new Host monitor. Full native queue certification and hardware
   acceptance remain incomplete. Earlier checkpoint results are historical.

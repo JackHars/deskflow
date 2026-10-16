@@ -340,5 +340,18 @@ jobs:
           compression-level: 0
           if-no-files-found: error
           path: build/ci-artifacts/
+      - name: Retain Mac test diagnostics even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windowshare-macos-test-logs-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: ignore
+          path: |
+            build/app/Testing/Temporary/LastTest.log
+            build/app/Testing/Temporary/LastTestsFailed.log
+            build/integrated/src/unittests/Testing/Temporary/LastTest.log
+            build/legacy/src/unittests/Testing/Temporary/LastTest.log
+            build/keyboard/Testing/Temporary/LastTest.log
       # Native capture/input needs an unlocked desktop and explicit TCC grants.
       # This job builds the smoke tools but never reports them as hardware tests.
