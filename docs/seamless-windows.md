@@ -2,23 +2,22 @@
 
 ## Current implementation — 2026-10-16
 
-P1–P8 code is integrated, but the product is not physically accepted. The latest
-attended run verified hidden source placement and reached Active; original-input
-ownership never became ready, then capture/heartbeat failures ended the run.
-Current fixes cover asynchronous placement, atomic heartbeat publication,
-switching-shortcut consumption, a reproduced denied-correlation race and a
-history timeout that expired before valid input preparation could finish.
-Bounded diagnostics identify capture/inbox/join and pre-reservation blockers.
-See the current checklist in `CHATGPT_HANDOFF.md` and exact results in
-`TESTING.md`. Physical testing is deferred while the user is away; obtain fresh
-permission immediately before each launch. Tests use jack's actual Ubuntu
-desktop, separate Mac controls, saved diagnostics and no results popup.
+P1–P8 code is integrated, but the product is not physically accepted. Latest
+attended attempt 26 authenticated both machines, then stopped before Active
+because registering a Mac movement notification returned `CannotComplete`.
+Source restoration and owned-process cleanup passed. Runtime `b20bbf39d2`
+allows the existing Host watchdog to wake placement verification when a
+notification is unavailable, preserving exact native readback and the fixed
+deadline. Mac regressions, scoped sanitizers, package audit and fresh Ubuntu
+Core/Viewer checks pass; see `TESTING.md` for exact evidence and hosted results.
 
+The earlier run's original-input readiness failure remains unverified. Current
+fixes also cover asynchronous placement, atomic heartbeat publication,
+switching-shortcut consumption, denied-correlation ordering and a history
+lifetime that was shorter than valid preparation. The current checklist is in
+`CHATGPT_HANDOFF.md`. Every physical attempt needs fresh permission immediately
+before launch, uses jack's actual desktop and retains printed diagnostics.
 
-Current runtime `26b2bc6a4` passes the scoped Mac and actual-jack Ubuntu checks
-and all six [hosted jobs](https://github.com/JackHars/deskflow/actions/runs/38856650856).
-Matching packages are staged with verified source and binary identities. These
-unattended checks leave the physical readiness failure and acceptance rows open.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

@@ -8,21 +8,25 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 ## Current completion checklist — 2026-10-16
 
-The P1–P8 implementation is integrated, with the supported-capability limits
-below. The product is **not physically accepted**. Attempt 24 verified the
-hidden source placement and reached Active, but original-input readiness never
-armed; capture revoked and a heartbeat failure stopped the run. Frame restoration
-passed, while a leaked switching-key repeat left the fixture ledger nonneutral.
-The heartbeat race and shortcut follow-up, automated results and remaining
-input diagnostics are recorded at the top of `TESTING.md`.
-Current runtime `26b2bc6a4` adds reproduced route-correlation fixes and precise
-readiness/failure diagnostics. Scoped Mac/Ubuntu tests and all six hosted jobs in
-[run 38856650856](https://github.com/JackHars/deskflow/actions/runs/38856650856)
-pass. Matching Mac and actual-jack Ubuntu packages are staged and verified.
-The user has deferred physical testing while away. Attempt 25 was prepared but
-never launched and retains an older frozen build; do not launch that stale plan.
-See `TESTING.md` for the current builds and unexecuted preparation helper.
-Fresh permission is required immediately before any physical launch.
+P1–P8 implementation is integrated, with the supported-capability limits below.
+The product is **not physically accepted**. Latest attended attempt 26 connected
+to actual jack but aborted before Active when macOS failed an AX movement
+notification registration. The source and both desktops were restored, with
+neutral input receipts; full input recording never armed. Earlier attempt 24
+reached Active but did not establish original-input owner readiness.
+
+Current runtime `b20bbf39d2` keeps placement verification live when a notification
+is unavailable. It retains the exact owner/frame checks and fixed deadline.
+Mac regressions, scoped sanitizers, package audit and freshly rebuilt Ubuntu
+Core/Viewer checks pass. See `TESTING.md` for package identities and current
+[hosted results](https://github.com/JackHars/deskflow/actions/runs/38924548952).
+The previous runtime `26b2bc6a4` passed all six hosted jobs.
+
+Attempt 26's permission is consumed. Do not launch an older prepared plan.
+Refresh the current candidate's live preflight and obtain fresh permission
+immediately before any further physical launch. Tests use jack's actual Ubuntu
+monitor, separate Mac controls, hidden source placement and saved diagnostics
+with no results popup.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.

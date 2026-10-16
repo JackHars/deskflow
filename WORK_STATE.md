@@ -1,5 +1,76 @@
 # Seamless Windows work state
 
+## H06 attempt 26: AX notification registration failure — 2026-10-16
+
+Fresh permission `call_65bb3e495b6f4b93a2db2146d028f89e` was consumed by
+`build/h06-r26-nqwk_g_1/`, runtime `26b2bc6a4`, on jack's actual Ubuntu desktop.
+The user reported that everything closed when the connection started. The
+saved sequence identifies an intentional setup abort before Active: both peers
+authenticated, the native observer was created, then registering `AXMoved`
+returned `-25204` (`kAXErrorCannotComplete`) after about 100ms. Placement failed
+at 15:23:00.651 UTC (11:23:00 locally), before any `source.holding.place` write.
+The outer diagnostic reported unverified hidden-display placement. This run
+does not test the earlier original-input owner/readiness failure.
+
+Source restoration to (400,188,640,448) passed, the final receipt had zero held
+keys/buttons, the Mac Core stopped through private IPC with exit 0, its companion
+and the owned local processes stopped, and both ordinary Mac settings hashes
+were preserved. Ubuntu reported owned processes stopped, desktop restored and
+ordinary settings preserved. SSH exit 255 and unarmed input-evidence cleanup
+remain recorded; no input acceptance is claimed. The full remote results were
+copied and verified with archive SHA-256
+`6b728e13f0ba0e5b8033b13409b854ec295e19bb21fb84238921136001d07c31`.
+
+Runtime `b20bbf39d2da5cb5211e87151b98d971fe0dc4ac` treats an unavailable
+movement notification as a missing wakeup, using the Host's existing watchdog
+for fresh placement readback. This is consistent with the existing path for
+unsupported notifications. Neither the notification result nor a successful
+native write authorizes placement: the exact owner, AX/WindowServer frames,
+permissions, holding layout and original two-second deadline still must pass.
+Permanent invalid-element/observer, argument, API-disabled and memory failures
+still stop setup. No sleeps, registration retries, repeated moves or extended
+deadlines were added. Logs mark when watchdog readback is required.
+Apple documents `CannotComplete` as a messaging failure in its
+[notification API reference](https://developer.apple.com/documentation/applicationservices/1462089-axobserveraddnotification).
+
+The regression exercises the production registration policy and asynchronous
+placement gate without opening a window or subscribing to another application.
+The old policy fails the exact timeout case. The correction passes a missing
+notification at each position, all notifications unavailable, fresh later
+readback, unchanged deadline expiry, and permanent errors after a transient
+error. Mac placement and recovery suites pass 2/2 (1.35s); the placement suite
+also passes scoped ASan/UBSan (0.10s). The initial sanitizer invocation requested
+unsupported macOS leak detection and stopped before running tests; the corrected
+run disables that facility, with the initial output retained. Qt/system
+libraries are not instrumented. Evidence is in
+`build/placement-notification-fcw2ecg2/`.
+
+The separately signed Mac package passes its exact-library audit (77 records,
+no errors). ZIP SHA-256:
+`e3e6e6465964d1819b945eebce861f370a10fc8ffbdba5ee0ee873e1cbbf4ddb`.
+Hosted source bundle `38924548926` verifies all 1185 tracked files/modes/blob
+identities and the exact commit; archive SHA-256:
+`766c28d4ac4ef89b648bd16a0ebb855b85f0c93849fef41d02ea3324a6e0d91a`.
+[Hosted run 38924548952](https://github.com/JackHars/deskflow/actions/runs/38924548952)
+is in progress. The next physical launch requires fresh permission; attempt
+26's permission is consumed.
+
+
+A fresh isolated build on actual jack passes the Ubuntu Core and Viewer builds
+and the portable placement suite (1/1; the native AX cases are Mac-only). The
+26-member inert package verifies; both executables resolve their actual-host
+libraries and pass offscreen `--help` without desktop connection variables.
+Linux archive SHA-256:
+`5b17f69c1d5fcddb50da5c7cdd10a79f2cba16e7d9bef8f28dca6104a901c3e5`.
+
+Prepared attempt 27 is `build/h06-r27-ocvmxz5k/`, frozen to this runtime with
+fresh paired identities. Both live preflights pass: actual jack's unlocked
+Wayland session, matching staged binary hashes, separate Mac controls and
+hidden-source configuration, no competing Mac Core, permissions, and exact
+packaged admission (12.017s, native input disabled).
+Preparation did not open a test window or start sharing. Fresh launch permission
+is still required.
+
 ## Unattended input hardening — 2026-10-16
 
 The user is away and deferred physical testing. Prepared attempt 25 remains
