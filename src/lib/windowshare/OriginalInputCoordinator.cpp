@@ -8,6 +8,7 @@
 #include <QPointer>
 #include <QThread>
 #include <algorithm>
+#include <atomic>
 #include <deque>
 #include <limits>
 #include <mutex>
@@ -63,6 +64,34 @@ struct OriginalInputCoordinator::Shared
   };
   struct Operation
   {
+    Operation(
+        std::uint64_t id, OriginalInputCaptured input, OriginalInputRouteDecision decision, Clock::time_point expires,
+        std::shared_ptr<Owner> inputOwner, Phase state
+    )
+        : ticket(id),
+          captured(std::move(input)),
+          route(std::move(decision)),
+          deadline(expires),
+          owner(std::move(inputOwner)),
+          phase(state),
+          diagnosticDeadline(expires),
+          initialPreparation(!owner->active)
+    {
+    }
+    void trace(unsigned stage, const char *step, const char *state)
+    {
+      if (!initialPreparation || (diagnosticStages.fetch_or(1u << stage) & (1u << stage)))
+        return;
+      const auto now = Clock::now();
+      lifecycleDiagnostic(
+          "Core input", step, state, "Original input handoff progress",
+          {{"ticket", QString::number(ticket)},
+           {"owner", QString::number(owner->id)},
+           {"elapsedMs", qint64(std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count())},
+           {"initialBudgetRemainingMs",
+            qint64(std::chrono::duration_cast<std::chrono::milliseconds>(diagnosticDeadline - now).count())}}
+      );
+    }
     std::uint64_t ticket = 0;
     OriginalInputCaptured captured;
     OriginalInputRouteDecision route;
@@ -70,6 +99,9 @@ struct OriginalInputCoordinator::Shared
     std::shared_ptr<Owner> owner;
     std::optional<InputCutoffObservation> observation;
     Phase phase = Phase::Requested;
+    const Clock::time_point started = Clock::now(), diagnosticDeadline;
+    const bool initialPreparation;
+    std::atomic<unsigned> diagnosticStages{0};
   };
   mutable std::mutex mutex;
   bool closed = false, available = false, dispatcherCreated = false;
@@ -169,15 +201,11 @@ public:
     if (existingOwner && existingOwner != owner->id)
       return Result::revoked();
     diagnose(3, "Original input preparation was requested", captured, route);
-    m_preparing = std::make_shared<Shared::Operation>(Shared::Operation{
-        ++m_state->nextTicket,
-        captured,
-        route,
-        deadline,
-        owner,
-        {},
+    m_preparing = std::make_shared<Shared::Operation>(
+        ++m_state->nextTicket, captured, route, deadline, owner,
         owner->prepareFocus && !owner->active ? Shared::Phase::FocusPreparing : Shared::Phase::Requested
-    });
+    );
+    m_preparing->trace(0, "input.handoff", "started");
     inputEvidenceApply(InputEvidenceQueue::CoordinatorOperations, m_state.get(), 1, 0, [&] {
       m_state->operations.push_back(m_preparing);
     });
@@ -210,6 +238,7 @@ public:
         return Result::revoked(ticket);
       if (m_state->closed || !Shared::live(*operation->owner) || !operation->captured.input.live() ||
           Clock::now() >= operation->deadline || operation->phase == Shared::Phase::Revoked) {
+        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked");
         // A Host that declined before reserving any Viewer/native lease can
         // explicitly acknowledge that empty handoff. Preserve ordinary input
         // after that exact completion, rather than dropping every fresh key
@@ -277,6 +306,7 @@ public:
                                     selected, operation->route.stamp, forwarding(*lease), target->viewerConnection,
                                     {operation->route.x, operation->route.y}, deadline
                                 );
+      operation->trace(5, "input.cutoff", cutoff ? "started" : "failed");
       // Even a result returned after cancellation retains exact cleanup
       // ownership. Never discard the new binding just because reentry revoked
       // its preparation during the backend write.
@@ -406,6 +436,7 @@ public:
         return Result::revoked(ticket);
       m_seal = observed->seal();
       operation->owner->seal = m_seal;
+      operation->trace(6, "input.cutoff", "mapped");
       // The validated mapped receipt consumes the preparation gate. From
       // this point only the real origin seal owns backend cleanup.
       operation->owner->prepared.reset();
@@ -641,6 +672,7 @@ private:
       const auto binding = m_backend.prepare(
           owner->selected, operation->route.stamp, {operation->route.x, operation->route.y}, operation->deadline
       );
+      operation->trace(1, "input.focus-preparation", binding ? "started" : "failed");
       if (binding) {
         m_preparation = binding;
         m_preparationOwner = owner;
@@ -683,6 +715,7 @@ private:
         return Result::revoked(ticket);
       owner->prepared = prepared;
       operation->phase = Shared::Phase::Requested;
+      operation->trace(2, "input.focus-preparation", "completed");
       return Result::pending(ticket);
     }
     const auto state = m_backend.preparationState(owner->selected, binding);
@@ -892,6 +925,7 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         auto &operation = *alive->m_shared->operations.front();
         operation.deadline = std::min(operation.deadline, deadline);
         operation.phase = Shared::Phase::Preparing;
+        operation.trace(4, "input.host-quiescence", "completed");
       },
       [alive](const LocalInputLease &lease, const LocalInputTarget &target) {
         if (!alive)
@@ -1031,6 +1065,7 @@ bool OriginalInputCoordinator::tickOne()
     if (!m_shared->operations.empty()) {
       operation = m_shared->operations.front();
       if (Clock::now() >= operation->deadline || operation->phase == Shared::Phase::Revoked) {
+        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked");
         m_shared->revoke();
         revoke = true;
       }
@@ -1066,6 +1101,7 @@ bool OriginalInputCoordinator::tickOne()
       std::lock_guard lock(m_shared->mutex);
       operation->phase = Shared::Phase::Preparing;
     } else if (m_preflight->phase() == LocalInputPreflight::Phase::Idle) {
+      operation->trace(3, "input.host-offer", "started");
       const bool begun = m_preflight->begin(operation->captured.input.epoch, ForwardingScope::All);
       if (!alive)
         return false;
@@ -1086,14 +1122,17 @@ bool OriginalInputCoordinator::tickOne()
       operation->owner->revoked = true;
       return false;
     }
-    if (m_preflight->phase() == LocalInputPreflight::Phase::Quiesced)
+    if (m_preflight->phase() == LocalInputPreflight::Phase::Quiesced) {
+      operation->trace(7, "input.native-preparation", "started");
       (void)m_preflight->continuePreparation(*lease);
+    }
     if (!alive)
       return false;
     if (m_preflight->phase() == LocalInputPreflight::Phase::Active) {
       std::lock_guard lock(m_shared->mutex);
       operation->owner->active = true;
       operation->phase = Shared::Phase::Ready;
+      operation->trace(8, "input.handoff", "ready");
     }
     return false;
   }

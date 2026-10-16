@@ -288,7 +288,9 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
       },
       Qt::QueuedConnection
   );
-  connect(&m_socket, &QSslSocket::readyRead, this, [this] { read(); }, Qt::QueuedConnection);
+  // Coalesce notifications and continuations before posting work. Dispatch
+  // remains outside the socket signal stack, including during nested loops.
+  connect(&m_socket, &QSslSocket::readyRead, this, [this] { scheduleRead(); });
   connect(&m_socket, &QSslSocket::disconnected, this, [this] {
     finishClose("Peer disconnected", m_authenticated ? CloseCause::Network : CloseCause::Authentication, true);
   });
@@ -398,6 +400,16 @@ bool Channel::fresh()
   }
   return true;
 }
+void Channel::scheduleRead()
+{
+  if (m_closed || m_reading || m_readScheduled)
+    return;
+  m_readScheduled = true;
+  QTimer::singleShot(0, this, [this] {
+    m_readScheduled = false;
+    read();
+  });
+}
 void Channel::read()
 {
   if (m_reading || m_closed)
@@ -418,7 +430,7 @@ void Channel::read()
       // work in those callbacks must not starve other channels' heartbeats.
       // Leave the remaining bytes in the bounded socket/decoder buffers, and
       // yield after either the byte, packet or elapsed-work budget is spent.
-      const auto started = Clock::now();
+      const auto started = m_dispatchNow();
       std::size_t remaining = 64 * 1024;
       unsigned delivered = 0;
       while (remaining && delivered < 32) {
@@ -455,7 +467,7 @@ void Channel::read()
               callback(std::move(*packet));
           }
         }
-        if (Clock::now() - started >= std::chrono::milliseconds(8))
+        if (!alive || m_dispatchNow() - started >= std::chrono::milliseconds(8))
           return;
       }
     }();
@@ -470,7 +482,7 @@ void Channel::read()
     return;
   m_reading = false;
   if (!m_closed && m_socket.bytesAvailable() != 0)
-    QTimer::singleShot(0, this, [this] { read(); });
+    scheduleRead();
 }
 void Channel::connectTo(const QString &host, quint16 port)
 {

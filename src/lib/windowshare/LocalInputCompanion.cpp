@@ -353,7 +353,9 @@ void LocalInputCompanion::observeChannel()
       m_run->startup.stop();
     }
   } else if (m_state == State::Running) {
-    m_run->stop(QStringLiteral("Trusted companion private channel lost authority"));
+    m_run->stop(
+        QStringLiteral("Trusted companion private channel lost authority: %1").arg(m_channel->authorityFailureReason())
+    );
   }
 }
 

@@ -4,6 +4,7 @@
  */
 #include "LocalInputChannel.h"
 #include "InputEvidence.h"
+#include "LifecycleDiagnostics.h"
 #include <QFile>
 #include <QPointer>
 #include <QThread>
@@ -539,7 +540,10 @@ LocalInputChannel::LocalInputChannel(
       &m_socket, &QLocalSocket::bytesWritten, this,
       [this](qint64 bytes) {
         if (bytes <= 0 || static_cast<std::uint64_t>(bytes) > m_evidencePendingBytes) {
-          inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
+          inputEvidenceFail(
+              InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::PrivateOutputWritten,
+              InputEvidenceQueue::PrivateOutput
+          );
           return;
         }
         InputEvidenceMutation evidence(InputEvidenceQueue::PrivateOutput, this, 0, static_cast<std::uint64_t>(bytes));
@@ -571,7 +575,7 @@ LocalInputChannel::LocalInputChannel(
   observeBufferedInput();
   // A notification may destroy this channel and its by-value socket/timer.
   // Dispatch after those senders have unwound their Qt signal/event stacks.
-  connect(&m_socket, &QLocalSocket::readyRead, this, [this] { read(); }, Qt::QueuedConnection);
+  connect(&m_socket, &QLocalSocket::readyRead, this, [this] { scheduleRead(); });
   connect(
       &m_socket, &QLocalSocket::disconnected, this, [this] { close("Local input peer disconnected"); },
       Qt::QueuedConnection
@@ -611,6 +615,20 @@ bool LocalInputChannel::authenticated() const
 {
   return m_authenticated && !m_closed && m_socket.state() == QLocalSocket::ConnectedState &&
          m_lastRead.elapsed() < m_limits.timeoutMs && peerAlive();
+}
+QString LocalInputChannel::authorityFailureReason() const
+{
+  if (m_closed)
+    return m_closeReason;
+  if (m_socket.state() != QLocalSocket::ConnectedState || !peerAlive())
+    return QStringLiteral("Local input peer lost");
+  if (m_authenticated && m_lastRead.elapsed() >= m_limits.timeoutMs)
+    return QStringLiteral("Local input heartbeat expired (elapsed=%1ms, budget=%2ms)")
+        .arg(m_lastRead.elapsed())
+        .arg(m_limits.timeoutMs);
+  if (!m_authenticated)
+    return QStringLiteral("Local input handshake is incomplete");
+  return {};
 }
 bool LocalInputChannel::supports(ForwardingScope scope) const
 {
@@ -792,7 +810,10 @@ void LocalInputChannel::observeBufferedInput()
 {
   const auto available = m_socket.bytesAvailable();
   if (available < 0 || static_cast<std::uint64_t>(available) < m_evidenceBufferedBytes) {
-    inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
+    inputEvidenceFail(
+        InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::PrivateBufferObserved,
+        InputEvidenceQueue::PrivateBufferedInput
+    );
     return;
   }
   const auto count = static_cast<std::uint64_t>(available);
@@ -801,85 +822,103 @@ void LocalInputChannel::observeBufferedInput()
     m_evidenceBufferedBytes = count;
   }
 }
+void LocalInputChannel::scheduleRead()
+{
+  if (m_closed || m_reading || m_readScheduled)
+    return;
+  m_readScheduled = true;
+  QTimer::singleShot(0, this, [this] {
+    m_readScheduled = false;
+    read();
+  });
+}
 void LocalInputChannel::read()
 {
+  if (m_closed || m_reading)
+    return;
   const QPointer<LocalInputChannel> alive(this);
+  m_reading = true;
   try {
-    for (int count = 0; count < 64; ++count) {
-      // A timer may be overdue behind readyRead after an event-loop stall.
-      // Queued traffic must never revive authority that has already expired.
-      if (!fresh())
-        return;
-      const auto missing = m_expected - m_incoming.size();
-      if (missing > 0) {
-        observeBufferedInput();
-        QByteArray bytes;
-        {
-          InputEvidenceMutation evidence(InputEvidenceQueue::PrivateBufferedInput, this, 0, 0);
-          bytes = m_socket.read(missing);
-          evidence.removed(bytes.size());
-          if (!alive)
+    [&] {
+      const auto started = m_dispatchNow();
+      for (int count = 0; count < 64; ++count) {
+        // A timer may be overdue behind readyRead after an event-loop stall.
+        // Queued traffic must never revive authority that has already expired.
+        if (!fresh())
+          return;
+        const auto missing = m_expected - m_incoming.size();
+        if (missing > 0) {
+          observeBufferedInput();
+          QByteArray bytes;
+          {
+            InputEvidenceMutation evidence(InputEvidenceQueue::PrivateBufferedInput, this, 0, 0);
+            bytes = m_socket.read(missing);
+            evidence.removed(bytes.size());
+            if (!alive)
+              return;
+            if (static_cast<std::uint64_t>(bytes.size()) > m_evidenceBufferedBytes)
+              inputEvidenceFail(
+                  InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::PrivateBufferRead,
+                  InputEvidenceQueue::PrivateBufferedInput
+              );
+            else
+              m_evidenceBufferedBytes -= static_cast<std::uint64_t>(bytes.size());
+          }
+          if (!alive || !fresh())
             return;
-          if (static_cast<std::uint64_t>(bytes.size()) > m_evidenceBufferedBytes)
-            inputEvidenceFail(InputEvidenceLoss::QueueAccounting);
-          else
-            m_evidenceBufferedBytes -= static_cast<std::uint64_t>(bytes.size());
+          inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, bytes.size(), 0, [&] { m_incoming += bytes; });
         }
+        if (m_incoming.size() < m_expected)
+          break;
+        Reader header{m_incoming};
+        require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
+        const auto typeNumber = header.number(1);
+        require(
+            typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::WindowMove), "Unknown local input message"
+        );
+        const auto type = static_cast<Type>(typeNumber);
+        require(
+            header.number(1) ==
+                static_cast<unsigned>(m_role == LocalInputRole::Core ? LocalInputRole::Host : LocalInputRole::Core),
+            "Invalid local input sender role"
+        );
+        const auto size = header.number(4);
+        require(size <= maxPayloadBytes, "Oversized local input frame");
+        m_expected = headerBytes + size;
+        if (m_incoming.size() < m_expected)
+          continue;
+        const auto sequence = header.number(8);
+        require(
+            m_received != std::numeric_limits<std::uint64_t>::max() && sequence == m_received + 1,
+            "Replayed or skipped local input sequence"
+        );
+        const auto core = header.fixed<16>(), host = header.fixed<16>();
+        require(nonzero(core) && nonzero(host) && core != host, "Invalid local input incarnation");
+        if (m_role == LocalInputRole::Host && m_handshake == 0) {
+          require(type == Type::CoreHello, "Local input bootstrap required");
+          m_coreIncarnation = core;
+          m_hostIncarnation = host;
+        }
+        require(core == m_coreIncarnation && host == m_hostIncarnation, "Stale local input process incarnation");
+        require(peerAlive(), "Local input peer process identity lost");
+        InputEvidenceExecution evidence(this, InputEvidenceQueue::PrivateDispatch);
+        const auto payload = m_incoming.mid(headerBytes);
+        inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, 0, m_incoming.size(), [&] {
+          m_incoming.clear();
+        });
+        m_expected = headerBytes;
+        m_received = sequence;
+        if (!m_authenticated)
+          bootstrap(type, payload);
+        else
+          receive(type, payload);
         if (!alive || !fresh())
           return;
-        inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, bytes.size(), 0, [&] { m_incoming += bytes; });
+        m_lastRead.restart();
+        if (m_dispatchNow() - started >= std::chrono::milliseconds(8))
+          break;
       }
-      if (m_incoming.size() < m_expected)
-        break;
-      Reader header{m_incoming};
-      require(header.number(4) == magic && header.number(2) == version, "Invalid local input protocol");
-      const auto typeNumber = header.number(1);
-      require(typeNumber >= 1 && typeNumber <= static_cast<unsigned>(Type::WindowMove), "Unknown local input message");
-      const auto type = static_cast<Type>(typeNumber);
-      require(
-          header.number(1) ==
-              static_cast<unsigned>(m_role == LocalInputRole::Core ? LocalInputRole::Host : LocalInputRole::Core),
-          "Invalid local input sender role"
-      );
-      const auto size = header.number(4);
-      require(size <= maxPayloadBytes, "Oversized local input frame");
-      m_expected = headerBytes + size;
-      if (m_incoming.size() < m_expected)
-        continue;
-      const auto sequence = header.number(8);
-      require(
-          m_received != std::numeric_limits<std::uint64_t>::max() && sequence == m_received + 1,
-          "Replayed or skipped local input sequence"
-      );
-      const auto core = header.fixed<16>(), host = header.fixed<16>();
-      require(nonzero(core) && nonzero(host) && core != host, "Invalid local input incarnation");
-      if (m_role == LocalInputRole::Host && m_handshake == 0) {
-        require(type == Type::CoreHello, "Local input bootstrap required");
-        m_coreIncarnation = core;
-        m_hostIncarnation = host;
-      }
-      require(core == m_coreIncarnation && host == m_hostIncarnation, "Stale local input process incarnation");
-      require(peerAlive(), "Local input peer process identity lost");
-      InputEvidenceExecution evidence(this, InputEvidenceQueue::PrivateDispatch);
-      const auto payload = m_incoming.mid(headerBytes);
-      inputEvidenceApply(InputEvidenceQueue::PrivateIncoming, this, 0, m_incoming.size(), [&] { m_incoming.clear(); });
-      m_expected = headerBytes;
-      m_received = sequence;
-      if (!m_authenticated)
-        bootstrap(type, payload);
-      else
-        receive(type, payload);
-      if (!alive || !fresh())
-        return;
-      m_lastRead.restart();
-    }
-    if (!m_closed && m_socket.bytesAvailable() > 0 && !m_readScheduled) {
-      m_readScheduled = true;
-      QTimer::singleShot(0, this, [this] {
-        m_readScheduled = false;
-        read();
-      });
-    }
+    }();
   } catch (const std::exception &error) {
     if (alive)
       alive->close(QString::fromUtf8(error.what()));
@@ -887,6 +926,11 @@ void LocalInputChannel::read()
     if (alive)
       alive->close(QStringLiteral("Local input frame processing failed"));
   }
+  if (!alive)
+    return;
+  m_reading = false;
+  if (!m_closed && m_socket.bytesAvailable() > 0)
+    scheduleRead();
 }
 void LocalInputChannel::bootstrap(Type type, const QByteArray &payload)
 {
@@ -1358,9 +1402,22 @@ void LocalInputChannel::close(const QString &reason)
     return;
   const QPointer<LocalInputChannel> alive(this);
   const auto why = reason;
+  m_closeReason = why;
   m_closed = true;
   m_authenticated = false;
   m_timer.stop();
+  lifecycleDiagnostic(
+      m_role == LocalInputRole::Core ? "Core private input" : "Host private input", "private.channel.close", "stopped",
+      why,
+      {{"lastReadAgeMs", m_lastRead.elapsed()},
+       {"heartbeatBudgetMs", m_limits.timeoutMs},
+       {"socketState", int(m_socket.state())},
+       {"sent", QString::number(m_sent)},
+       {"received", QString::number(m_received)},
+       {"socketBufferedBytes", m_socket.bytesAvailable()},
+       {"accountedBufferedBytes", QString::number(m_evidenceBufferedBytes)},
+       {"outputBufferedBytes", m_socket.bytesToWrite()}}
+  );
   observeBufferedInput();
   {
     if (m_evidencePendingBytes)

@@ -2045,6 +2045,7 @@ struct NativeHost::Impl
   }
   bool handleAssociatedChild(Owner owner)
   {
+    const SlowOperationDiagnostic timing("Host", "native.associated-child");
     if (!familiesEnabled)
       return handleLegacyAttachedChild(owner);
     auto *parent = entry(owner.session, owner.epoch);
@@ -3629,6 +3630,7 @@ struct NativeHost::Impl
   }
   void input(std::uint64_t session, std::uint64_t epoch, const QJsonObject &event)
   {
+    const SlowOperationDiagnostic timing("Host", "native.input");
     const auto admitted = lifecycle->admission();
     const QPointer<NativeHost> alive(q);
     auto *e = entry(session, epoch);
@@ -4143,6 +4145,7 @@ struct NativeHost::Impl
   }
   void poll()
   {
+    const SlowOperationDiagnostic timing("Host", "native.poll");
     if (!recovered || !lifecycle->admission())
       return;
     if (titlebar && WindowDragTransaction::Clock::now() >= titlebarDeadline) {

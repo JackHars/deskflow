@@ -61,6 +61,23 @@ struct ChannelTestAccess
   {
     QTimer::singleShot(0, &channel, [&channel] { channel.read(); });
   }
+  static void resumeReads(Channel &channel)
+  {
+    channel.m_reading = false;
+  }
+  static void suspendDispatch(Channel &channel)
+  {
+    channel.m_reading = true;
+  }
+  static void notifyReads(Channel &channel)
+  {
+    for (int i = 0; i < 50; ++i)
+      channel.m_socket.readyRead();
+  }
+  static void dispatchClock(Channel &channel, const std::shared_ptr<Clock::time_point> &now)
+  {
+    channel.m_dispatchNow = [now] { return *now; };
+  }
   static qintptr descriptor(const Channel &channel)
   {
     return channel.m_socket.socketDescriptor();
@@ -266,6 +283,8 @@ void packetBurstYield(const Identity &host, const Identity &client, bool slowCal
   const int total = slowCallback ? 8 : 128;
   int delivered = 0, deliveredAtYield = 0, closed = 0;
   bool yielded = false, ordered = true;
+  const auto workNow = std::make_shared<ChannelTestAccess::Clock::time_point>();
+  ChannelTestAccess::dispatchClock(*pair.server, workNow);
   pair.server->onClosed = [&](QString, CloseCause) { ++closed; };
   pair.server->onPacket = [&](Packet packet) {
     ordered = ordered && parseObject(packet)["index"].toInt(-1) == delivered;
@@ -277,7 +296,7 @@ void packetBurstYield(const Identity &host, const Identity &client, bool slowCal
           *pair.serverNow += AuthenticatedPeerObservation::freshness;
       });
       if (slowCallback)
-        QThread::msleep(20);
+        *workNow += std::chrono::milliseconds(20);
     }
   };
   qint64 expectedBytes = 0;
@@ -300,6 +319,32 @@ void packetBurstYield(const Identity &host, const Identity &client, bool slowCal
     );
   else
     check(delivered == total && closed == 0, "Yielding lost or terminated valid ordered input");
+}
+
+void repeatedReadNotifications(const Identity &host, const Identity &client)
+{
+  EvidencePair pair(host, client);
+  ChannelTestAccess::suspendDispatch(*pair.server);
+  int delivered = 0, atYield = 0;
+  bool yielded = false;
+  pair.server->onPacket = [&](Packet packet) {
+    check(parseObject(packet)["index"].toInt(-1) == delivered++, "Coalesced TLS burst lost ordering");
+  };
+  qint64 expected = 0;
+  for (int i = 0; i < 128; ++i) {
+    const QJsonObject object{{"index", i}};
+    expected += headerSize + jsonBytes(object).size();
+    check(pair.peer->send(MessageType::Input, object, 1, 1), "Cannot send repeated-notification TLS burst");
+  }
+  waitFor([&] { return ChannelTestAccess::available(*pair.server) == expected; }, "TLS burst did not buffer");
+  ChannelTestAccess::resumeReads(*pair.server);
+  ChannelTestAccess::notifyReads(*pair.server);
+  QTimer::singleShot(0, pair.server.get(), [&] {
+    yielded = true;
+    atYield = delivered;
+  });
+  waitFor([&] { return yielded && delivered == 128; }, "Coalesced TLS burst did not drain");
+  check(atYield > 0 && atYield <= 32, "Repeated TLS notifications bypassed the per-turn work budget");
 }
 
 void terminalEvidence(const Identity &host, const Identity &client)
@@ -1167,6 +1212,7 @@ int main(int argc, char **argv)
     retainedEvidence(host, client);
     lateReadEvidence(host, client, false);
     lateReadEvidence(host, client, true);
+    repeatedReadNotifications(host, client);
     packetBurstYield(host, client, false, false);
     packetBurstYield(host, client, true, false);
     packetBurstYield(host, client, false, true);

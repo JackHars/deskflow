@@ -830,7 +830,8 @@ def native_first_click_acceptance(processes, host, driver, initial, focus, focus
                  and message["payload"] == {"request": int(prepared["snapshot"]["paint"]["focusRequest"]),
                                            "focusRevision": int(prepared["snapshot"]["paint"]["focusRevision"])}]
     require(len(focus_ack) == 1, "Preparation lacked exactly one matching actual TLS Host focus acknowledgement")
-    activation = preparation_input_receipts(host.events(), begin, len(host.events()))
+    messages = host.events()
+    activation = preparation_input_receipts(messages, begin, len(messages))
     # Cross the now-completed prefix's 250 ms wait limit before promotion.
     # This is inside the unchanged 500 ms preparation lifetime, not a retry
     # or extension; slow/expired preparation still fails the exact live check.
@@ -854,7 +855,8 @@ def native_first_click_acceptance(processes, host, driver, initial, focus, focus
             and cleaned.get("originalDeliveryAuthority") is False
             and cleaned.get("clientRequest") == prepared.get("clientRequest"),
             f"Exact asynchronous preparation cleanup did not release: {cleaned}")
-    closed = preparation_input_receipts(host.events(), begin, len(host.events()))
+    messages = host.events()
+    closed = preparation_input_receipts(messages, begin, len(messages))
     # Confirm the gate actually reopened by requiring a fresh legacy packet.
     driver.command("key", code=68)
     expected = [{"kind": "key", "code": 16777273, "down": down, "repeat": False} for down in (True, False)]

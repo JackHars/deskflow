@@ -46,8 +46,11 @@ const char *roleName(InputEvidenceRole role)
 }
 QJsonObject failureDetails(const InputEvidenceRecorder &recorder)
 {
-  constexpr const char *sites[]{"unspecified",      "owner-bind",     "owner-revoke",
-                                "queue-initialize", "queue-mutation", "journal-reserve"};
+  constexpr const char *sites[]{
+      "unspecified",        "owner-bind",      "owner-revoke",           "queue-initialize",
+      "queue-mutation",     "journal-reserve", "private-output-written", "private-buffer-observed",
+      "private-buffer-read"
+  };
   const auto queue = static_cast<std::size_t>(recorder.failureQueue());
   return {
       {"site", sites[static_cast<std::size_t>(recorder.failureSite())]},

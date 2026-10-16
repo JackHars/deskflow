@@ -102,6 +102,29 @@ struct LocalInputChannelTestAccess
   {
     channel.read();
   }
+  static void pauseReads(LocalInputChannel &channel)
+  {
+    QObject::disconnect(&channel.m_socket, &QLocalSocket::readyRead, &channel, nullptr);
+    QObject::connect(&channel.m_socket, &QLocalSocket::readyRead, &channel, [&channel] {
+      channel.observeBufferedInput();
+    });
+  }
+  static void
+  dispatchClock(LocalInputChannel &channel, const std::shared_ptr<std::chrono::steady_clock::time_point> &now)
+  {
+    channel.m_dispatchNow = [now] { return *now; };
+  }
+  static void expireRead(LocalInputChannel &channel)
+  {
+    channel.m_limits.timeoutMs = 0;
+  }
+  static void authorizeNestedOriginal(LocalInputChannel &channel, const QByteArray &payload)
+  {
+    // Exercise the authority recheck independently of the now-serialized wire
+    // dispatcher: a callback can validate a newer retired capture before it
+    // returns. The older record must still never roll back that high-water.
+    channel.receive(static_cast<LocalInputChannel::Type>(11), payload);
+  }
   static void ready(LocalInputChannel &channel)
   {
     QByteArray payload;
@@ -817,7 +840,9 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     return bufferedEvidenceChild(application, descriptor, *expectedCore, mode == "buffered-evidence-recording");
   if (mode == "late-ready" || mode == "late-ready-transition" || mode == "slow-ready")
     return delayedReadyChild(application, descriptor, *expectedCore, mode);
-  auto hostLimits = mode == "patient" ? LocalInputLimits{20, 2000, 2000} : limits;
+  auto hostLimits = mode == "read-burst" ? LocalInputLimits{1000, 10000, 2000}
+                    : mode == "patient"  ? LocalInputLimits{20, 2000, 2000}
+                                         : limits;
   if (mode == "keyboard-only")
     hostLimits.capabilities = localInputKeyboardCapability;
   auto host = LocalInputChannel::adoptHost(descriptor, *expectedCore, hostLimits);
@@ -835,7 +860,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       --retired.routeGeneration;
       auto newer = fixtureEvent(2);
       newer.payload = OriginalInputMotion{-9, 11, 32};
-      LocalInputChannelTestAccess::incoming(*host, 11, originalPayload(retired, newer));
+      LocalInputChannelTestAccess::authorizeNestedOriginal(*host, originalPayload(retired, newer));
       return true;
     }
     if (phase == LocalInputCheck::Deliver && mode.startsWith("host-authority-")) {
@@ -988,6 +1013,16 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
       host->revoke();
   };
   host->onClosed = [&](QString) { application.quit(); };
+  if (mode == "read-burst") {
+    host->onOffer = [&](const auto &) {
+      auto move = fixtureMove();
+      for (int i = 0; i < 8; ++i) {
+        check(host->sendWindowMove(move), "Cannot send private read scheduling fixture");
+        move.phase = LocalWindowMove::Phase::Motion;
+        ++move.sequence;
+      }
+    };
+  }
   if (mode == "window-move") {
     host->authorize = {};
     host->onAuthenticated = [&] {
@@ -2847,6 +2882,49 @@ void bufferedInputEvidence()
   }
 #endif
 }
+void readBurstYield()
+{
+  for (bool expire : {false, true}) {
+    Fixture fixture("read-burst", {1000, 10000, 2000});
+    fixture.establish();
+    LocalInputChannelTestAccess::pauseReads(*fixture.core);
+    LocalInputChannelTestAccess::stopTimer(*fixture.core);
+    check(fixture.core->offer(leaseOffer(fixtureLease())), "Cannot request private read burst");
+    const auto expectedBytes = 8 * (LocalInputChannel::headerBytes + movePayload(fixtureMove()).size());
+    check(
+        until([&] { return LocalInputChannelTestAccess::buffered(*fixture.core) == expectedBytes; }),
+        "Private read burst did not buffer"
+    );
+    const auto now = std::make_shared<std::chrono::steady_clock::time_point>();
+    LocalInputChannelTestAccess::dispatchClock(*fixture.core, now);
+    int delivered = 0, atYield = 0;
+    bool yielded = false;
+    fixture.core->onWindowMove = [&](const LocalWindowMove &move) {
+      check(move.sequence == std::uint64_t(++delivered), "Private burst lost ordering");
+      *now += std::chrono::milliseconds(9);
+      if (delivered == 1) {
+        LocalInputChannelTestAccess::read(*fixture.core);
+        check(delivered == 1, "Nested dispatch bypassed the private read work budget");
+        QTimer::singleShot(0, fixture.core.get(), [&] {
+          atYield = delivered;
+          yielded = true;
+          if (expire)
+            LocalInputChannelTestAccess::expireRead(*fixture.core);
+        });
+      }
+    };
+    LocalInputChannelTestAccess::read(*fixture.core);
+    check(until([&] { return yielded && (fixture.closed || delivered == 8); }), "Private burst failed to finish");
+    check(atYield == 1, "Private input callback work starved other event-loop work");
+    check(
+        expire ? fixture.closed && delivered == 1 && fixture.reason.contains("heartbeat expired")
+               : !fixture.closed && delivered == 8,
+        "Yielding lost valid input or revived expired authority"
+    );
+    fixture.core->close();
+    fixture.childExitedCleanly();
+  }
+}
 void lossAndLimits()
 {
   {
@@ -2861,6 +2939,10 @@ void lossAndLimits()
     Fixture fixture("freeze");
     fixture.activate();
     check(until([&] { return fixture.closed; }) && fixture.revoked == 1, "Heartbeat loss did not release lease owner");
+    check(
+        fixture.core->authorityFailureReason() == fixture.reason && fixture.reason.contains("heartbeat expired"),
+        "Private liveness diagnostics lost the first heartbeat failure"
+    );
   }
   for (bool output : {false, true}) {
     Fixture fixture;
@@ -3104,6 +3186,8 @@ int main(int argc, char **argv)
     mixedInputAndMalformedRecords();
     QTextStream(stdout) << "RUN: captureEpochCutover\n" << Qt::flush;
     captureEpochCutover();
+    QTextStream(stdout) << "RUN: readBurstYield\n" << Qt::flush;
+    readBurstYield();
     QTextStream(stdout) << "RUN: bufferedInputEvidence\n" << Qt::flush;
     bufferedInputEvidence();
     QTextStream(stdout) << "RUN: lossAndLimits\n" << Qt::flush;

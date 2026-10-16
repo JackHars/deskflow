@@ -17,6 +17,7 @@
 #include <QProcess>
 #include <QTimer>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -156,6 +157,8 @@ public:
   ~LocalInputChannel() override;
 
   bool authenticated() const;
+  // Diagnostic only; never refreshes liveness or grants input authority.
+  QString authorityFailureReason() const;
   // Qt owner thread only. Negotiated code support is not a delivery permit.
   bool supports(ForwardingScope scope) const;
   bool supportsMappedInput() const;
@@ -243,6 +246,7 @@ private:
   LocalInputChannel(int descriptor, LocalInputRole role, LocalInputProcess peer, LocalInputLimits limits);
   bool send(Type type, const QByteArray &payload = {});
   void read();
+  void scheduleRead();
   void observeBufferedInput();
   void receive(Type type, const QByteArray &payload);
   void bootstrap(Type type, const QByteArray &payload);
@@ -267,7 +271,11 @@ private:
   std::uint64_t m_evidencePendingBytes = 0;  // Accepted bytes not yet reported by bytesWritten.
   std::uint64_t m_evidenceBufferedBytes = 0; // Actual Qt receive buffer, before queued read().
   int m_handshake = 0;
-  bool m_authenticated = false, m_closed = false, m_readScheduled = false;
+  bool m_authenticated = false, m_closed = false, m_readScheduled = false, m_reading = false;
+  QString m_closeReason;
+  using DispatchClock = std::chrono::steady_clock;
+  // Private test clock affects work scheduling only, never authority deadlines.
+  std::function<DispatchClock::time_point()> m_dispatchNow = [] { return DispatchClock::now(); };
   bool m_authorizing = false, m_authorityInvalidated = false;
   LocalInputPhase m_phase = LocalInputPhase::Idle;
   std::optional<LocalInputLease> m_lease, m_lastRevoked;

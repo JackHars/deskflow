@@ -78,7 +78,10 @@ enum class InputEvidenceFailureSite : std::uint8_t
   OwnerRevoke,
   QueueInitialize,
   QueueMutation,
-  JournalReserve
+  JournalReserve,
+  PrivateOutputWritten,
+  PrivateBufferObserved,
+  PrivateBufferRead
 };
 enum class InputEvidenceKind : std::uint8_t
 {
@@ -760,10 +763,13 @@ inline InputEvidenceRecorder *inputEvidence() noexcept
 {
   return inputEvidenceInstalled.load(std::memory_order_acquire);
 }
-inline void inputEvidenceFail(InputEvidenceLoss reason) noexcept
+inline void inputEvidenceFail(
+    InputEvidenceLoss reason, InputEvidenceFailureSite site = InputEvidenceFailureSite::Unspecified,
+    InputEvidenceQueue queue = InputEvidenceQueue::Count
+) noexcept
 {
   if (auto *r = inputEvidence())
-    r->fail(reason);
+    r->fail(reason, site, queue);
 }
 inline void inputEvidenceInitialize(InputEvidenceQueue q, const void *identity, std::uint64_t capacity) noexcept
 {

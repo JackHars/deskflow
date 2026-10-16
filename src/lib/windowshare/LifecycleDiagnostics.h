@@ -36,4 +36,33 @@ inline void lifecycleDiagnostic(
   std::fwrite(line.constData(), 1, line.size(), stderr);
   std::fflush(stderr);
 }
+
+// Report expensive synchronous native work without printing every motion or
+// recording input contents. This observes duration; it never extends a lease.
+class SlowOperationDiagnostic final
+{
+public:
+  SlowOperationDiagnostic(const char *component, const char *step)
+      : m_component(component),
+        m_step(step),
+        m_started(std::chrono::steady_clock::now())
+  {
+  }
+  ~SlowOperationDiagnostic()
+  {
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_started).count();
+    if (elapsed >= 25)
+      lifecycleDiagnostic(
+          m_component, m_step, "slow", "Synchronous operation delayed event-loop work", {{"elapsedMs", qint64(elapsed)}}
+      );
+  }
+  SlowOperationDiagnostic(const SlowOperationDiagnostic &) = delete;
+  SlowOperationDiagnostic &operator=(const SlowOperationDiagnostic &) = delete;
+
+private:
+  const char *m_component;
+  const char *m_step;
+  std::chrono::steady_clock::time_point m_started;
+};
 } // namespace deskflow::windowshare

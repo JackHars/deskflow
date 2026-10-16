@@ -72,6 +72,7 @@ private:
   bool beginConnection();
   bool fresh();
   void read();
+  void scheduleRead();
   void finishClose(const QString &reason, CloseCause cause, bool deferNotification);
   bool sendPacket(Packet packet);
   QString peerCertificateError() const;
@@ -83,9 +84,10 @@ private:
   AuthenticatedPeerIssuer m_issuer;
   std::optional<AuthenticatedPeerObservation> m_observation;
   std::uint64_t m_outSequence = 0;
-  bool m_authenticated = false, m_closed = false, m_started = false, m_reading = false;
+  bool m_authenticated = false, m_closed = false, m_started = false, m_reading = false, m_readScheduled = false;
   // Private deterministic clock seam; production always uses steady_clock.
   std::function<Clock::time_point()> m_now = [] { return Clock::now(); };
+  std::function<Clock::time_point()> m_dispatchNow = [] { return Clock::now(); };
   Clock::time_point m_startedAt{};
   QTimer m_watchdog;
 };
