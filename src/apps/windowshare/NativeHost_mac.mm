@@ -1455,6 +1455,7 @@ struct NativeHost::Impl
     std::uint64_t focusRequest = 0;
     std::uint64_t producedGeometry = 0;
     std::shared_ptr<ObservedPlacement> placement;
+    std::unique_ptr<NativePlacementVerification> windowObservation;
     bool holdingPending = false;
     std::uint64_t holdingPaintedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
@@ -3275,7 +3276,9 @@ struct NativeHost::Impl
       return item;
     };
     const auto readWindow = [current, expected, window, paintedSource, placementStarted, session, epoch,
-                             paintedGeometry]() -> std::optional<HoldingRelocationWindow> {
+                             paintedGeometry](bool *pending = nullptr) -> std::optional<HoldingRelocationWindow> {
+      if (pending)
+        *pending = false;
       if (!current())
         return std::nullopt;
       lifecycleDiagnostic(
@@ -3289,11 +3292,16 @@ struct NativeHost::Impl
            {"found", bool(observed)},
            {"frame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)}}
       );
-      const auto actual = bounds(window->get(), "source.holding.window");
-      CF<CFTypeRef> minimized(attribute(window->get(), kAXMinimizedAttribute, "source.holding.window.minimized"));
+      AXError frameError = kAXErrorSuccess, minimizedError = kAXErrorSuccess;
+      const auto actual = bounds(window->get(), "source.holding.window", &frameError);
+      CF<CFTypeRef> minimized(
+          attribute(window->get(), kAXMinimizedAttribute, "source.holding.window.minimized", &minimizedError)
+      );
       const QJsonObject details{
           {"windowId", qint64(expected.id)},
           {"placementStarted", *placementStarted},
+          {"frameError", int(frameError)},
+          {"minimizedError", int(minimizedError)},
           {"paintedFrame", diagnosticRect(paintedSource)},
           {"axFrame", actual ? QJsonValue(diagnosticRect(*actual)) : QJsonValue(QJsonValue::Null)},
           {"windowServerFrame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)},
@@ -3308,16 +3316,28 @@ struct NativeHost::Impl
         return rejected("Source authority changed during native reads");
       if (!observed || observed->pid != expected.pid || observed->launch != expected.launch)
         return rejected("WindowServer no longer identifies the exact source process");
+      if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess())
+        return rejected("Accessibility or screen capture permission is unavailable");
+      for (const auto error : {frameError, minimizedError})
+        if (error != kAXErrorSuccess && error != kAXErrorCannotComplete)
+          return rejected(QString("Native window read failed: %1").arg(error));
+      if (frameError == kAXErrorCannotComplete || minimizedError == kAXErrorCannotComplete) {
+        if (pending)
+          *pending = true;
+        lifecycleDiagnostic(
+            "Host", "source.holding.window", "pending", "Native window read is temporarily unavailable", details
+        );
+        return std::nullopt;
+      }
       if (!actual)
         return rejected("Accessibility did not return a valid source frame");
       if (!closeEnough(*actual, observed->frame))
         return rejected("Accessibility and WindowServer frames disagree");
       if (!*placementStarted && !sameGeometry(*actual, paintedSource))
         return rejected("Source frame changed before the explicit placement began");
-      if (minimized && CFEqual(minimized.get(), kCFBooleanTrue))
-        return rejected("Source became minimized");
-      if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess())
-        return rejected("Accessibility or screen capture permission is unavailable");
+      if (!minimized || CFGetTypeID(minimized.get()) != CFBooleanGetTypeID() ||
+          CFEqual(minimized.get(), kCFBooleanTrue))
+        return rejected("Source unminimized state is unavailable or false");
       lifecycleDiagnostic("Host", "source.holding.window", "completed", "Source identity and frame verified", details);
       return HoldingRelocationWindow{{session, epoch}, paintedGeometry, paintedGeometry, *actual};
     };
@@ -3388,8 +3408,7 @@ struct NativeHost::Impl
         q->onCommitted(session, epoch);
       }
     };
-    const auto before = readWindow();
-    if (!before || !current() || !sameGeometry(before->frame, current()->session.source)) {
+    if (!holdingEnabled && !readWindow()) {
       failed("Source identity or geometry changed after the painted frame; preserving its physical visibility");
       return;
     }
@@ -3400,7 +3419,7 @@ struct NativeHost::Impl
     if (holdingEnabled) {
       lifecycleDiagnostic(
           "Host", "source.holding", "started", "Place the source on a verified hidden display",
-          {{"windowId", qint64(expected.id)}, {"beforeFrame", diagnosticRect(before->frame)}}
+          {{"windowId", qint64(expected.id)}, {"beforeFrame", diagnosticRect(paintedSource)}}
       );
       if (holding.available()) {
         // Creating the virtual holding display can itself rearrange existing
@@ -3412,7 +3431,35 @@ struct NativeHost::Impl
           return;
         }
         HoldingRelocationAccess access;
-        access.window = readWindow;
+        access.observeWindow = [current, readWindow, expected](HoldingRelocationAccess::WindowCompletion complete) {
+          auto *item = current();
+          if (!item) {
+            complete(std::nullopt);
+            return;
+          }
+          const auto observed = std::make_shared<std::optional<HoldingRelocationWindow>>();
+          item->windowObservation = std::make_unique<NativePlacementVerification>(
+              [readWindow, observed](QString *reason) {
+                bool pending = false;
+                *observed = readWindow(&pending);
+                *reason = pending ? "Native window read is temporarily unavailable" : "Native window read was rejected";
+                return *observed ? NativePlacementVerification::Observation::Verified
+                       : pending ? NativePlacementVerification::Observation::Pending
+                                 : NativePlacementVerification::Observation::Invalid;
+              },
+              [current, observed, expected, complete = std::move(complete)](bool success, QString reason) {
+                lifecycleDiagnostic(
+                    "Host", "source.holding.window.wait", success ? "completed" : "failed",
+                    success ? "Fresh window observation completed" : reason, {{"windowId", qint64(expected.id)}}
+                );
+                auto *item = current();
+                if (item)
+                  item->windowObservation.reset();
+                complete(success && item ? *observed : std::nullopt);
+              }
+          );
+          item->windowObservation->issued();
+        };
         access.display = [this, layoutCurrent]() -> std::optional<HoldingResizeDisplay> {
           if (!layoutCurrent())
             return std::nullopt;
@@ -4100,6 +4147,7 @@ struct NativeHost::Impl
     if (found->second->session.phase != Phase::Returning)
       found->second->session.beginReturn();
     found->second->pendingChild.reset();
+    found->second->windowObservation.reset();
     if (found->second->placement) {
       found->second->placement->cancel();
       found->second->placement.reset();
@@ -4332,11 +4380,14 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
-      if (e->relocating && e->placement) {
+      if (e->relocating && (e->placement || e->windowObservation)) {
         // Keep identity, topology, permission, capture and preparation watchdogs
         // above active. The placement transaction owns transient geometry and
         // AX timeouts; its queued check cannot erase entries during this loop.
-        e->placement->changed("Host watchdog observed the exact source");
+        if (e->windowObservation)
+          e->windowObservation->changed();
+        else
+          e->placement->changed("Host watchdog observed the exact source");
         continue;
       }
       CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));

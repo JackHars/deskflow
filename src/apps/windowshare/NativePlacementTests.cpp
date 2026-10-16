@@ -11,6 +11,7 @@
 #include <QCoreApplication>
 #include <QEvent>
 #include <cstdio>
+#include <deque>
 #include <memory>
 #include <stdexcept>
 
@@ -316,12 +317,17 @@ struct RelocationFixture
   deskflow::windowshare::Rect destination;
   HoldingRelocationResult result;
   std::function<void(bool)> nativeComplete;
-  void start()
+  std::deque<HoldingRelocationAccess::WindowCompletion> reads;
+  void start(bool asynchronous = false)
   {
     HoldingRelocationAccess access;
     access.window = [&]() -> std::optional<HoldingRelocationWindow> {
       return live ? std::optional(window) : std::nullopt;
     };
+    if (asynchronous)
+      access.observeWindow = [&](HoldingRelocationAccess::WindowCompletion complete) {
+        reads.push_back(std::move(complete));
+      };
     access.display = [&] { return std::optional(display); };
     access.persist = [&] { return journal; };
     access.place = [&](deskflow::windowshare::Rect requested, std::function<void(bool)> complete) {
@@ -335,7 +341,69 @@ struct RelocationFixture
       result = observed;
     });
   }
+  HoldingRelocationAccess::WindowCompletion nextRead()
+  {
+    check(!reads.empty(), "a fresh observation was requested");
+    auto complete = std::move(reads.front());
+    reads.pop_front();
+    return complete;
+  }
 };
+
+void asynchronousWindowReads()
+{
+  using Status = HoldingRelocationResult::Status;
+  {
+    RelocationFixture f;
+    f.start(true);
+    check(f.writes == 0 && f.completions == 0, "pending initial AX read cannot move a source");
+    auto initial = f.nextRead();
+    initial(f.window);
+    check(f.writes == 0 && f.completions == 0, "a fresh observation is required after recovery persistence");
+    initial(std::nullopt);
+    check(f.reads.size() == 1 && f.completions == 0, "duplicate initial observations cannot cancel the next stage");
+    f.nextRead()(f.window);
+    check(f.writes == 1 && f.completions == 0, "verified preparation submits exactly one move");
+    f.window.frame = f.destination;
+    f.nativeComplete(true);
+    f.nativeComplete(false);
+    check(f.reads.size() == 1 && f.completions == 0, "placement awaits fresh readback and ignores duplicate callbacks");
+    auto final = f.nextRead();
+    final(f.window);
+    final(std::nullopt);
+    check(f.completions == 1 && f.result.status == Status::Applied, "fresh asynchronous observations commit once");
+  }
+  for (int change = 0; change < 5; ++change) {
+    RelocationFixture f;
+    f.start(true);
+    f.nextRead()(f.window);
+    if (change == 0)
+      ++f.window.owner.epoch;
+    else if (change == 1)
+      ++f.window.geometry;
+    else if (change == 2)
+      ++f.display.id;
+    else if (change == 3)
+      ++f.window.frame.x;
+    f.nextRead()(change == 4 ? std::nullopt : std::optional(f.window));
+    check(
+        f.writes == 0 && f.completions == 1 && f.result.status == Status::Restore,
+        "changed authority, display, frame or an expired read prevents native mutation"
+    );
+  }
+  RelocationFixture f;
+  f.start(true);
+  f.nextRead()(f.window);
+  f.nextRead()(f.window);
+  f.window.frame = f.destination;
+  f.nativeComplete(true);
+  ++f.display.bounds.x;
+  f.nextRead()(f.window);
+  check(
+      f.writes == 1 && f.completions == 1 && f.result.status == Status::Restore,
+      "display changes during final asynchronous observation require restoration"
+  );
+}
 
 void ownershipAcrossYield()
 {
@@ -407,7 +475,8 @@ int main(int argc, char **argv)
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
              std::pair{"preparation-yields", &preparationYields}, std::pair{"preparation-stops", &preparationStops},
-             std::pair{"ownership-across-yield", &ownershipAcrossYield}
+             std::pair{"ownership-across-yield", &ownershipAcrossYield},
+             std::pair{"asynchronous-window-reads", &asynchronousWindowReads}
 #if defined(__APPLE__)
              ,
              std::pair{"unavailable-notifications", &unavailableNotifications}

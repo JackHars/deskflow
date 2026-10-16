@@ -25,7 +25,12 @@ struct HoldingRelocationWindow
 };
 struct HoldingRelocationAccess
 {
+  using WindowCompletion = std::function<void(std::optional<HoldingRelocationWindow>)>;
   std::function<std::optional<HoldingRelocationWindow>()> window;
+  // Native readers may need to yield while the application's AX bridge is
+  // busy. Each reader owns a bounded deadline and rechecks authority before
+  // completing. A missing result is terminal, never permission to use a cache.
+  std::function<void(WindowCompletion)> observeWindow;
   std::function<std::optional<HoldingResizeDisplay>()> display;
   std::function<bool()> persist;
   std::function<void(Rect, std::function<void(bool)>)> place;
@@ -59,8 +64,8 @@ inline void relocateHoldingWindow(
     if (callback)
       callback(result);
   };
-  if (!owner.session || !owner.epoch || !paintedGeometry || !access.window || !access.display || !access.persist ||
-      !access.place) {
+  if (!owner.session || !owner.epoch || !paintedGeometry || (!access.window && !access.observeWindow) ||
+      !access.display || !access.persist || !access.place) {
     finish({Status::Refused, {}, "request"});
     return;
   }
@@ -71,8 +76,30 @@ inline void relocateHoldingWindow(
     return window && window->owner == owner && window->geometry == paintedGeometry &&
            window->producedGeometry == paintedGeometry && window->frame.valid();
   };
-  try {
-    const auto before = access.window();
+  if (!access.observeWindow)
+    access.observeWindow = [read = access.window](HoldingRelocationAccess::WindowCompletion complete) {
+      complete(read());
+    };
+  // Suppress duplicate callbacks at each stage, including callbacks arriving
+  // while a later asynchronous read is pending.
+  const auto stage = std::make_shared<unsigned>(0);
+  const auto observe = [read = access.observeWindow, once, finish, stage](unsigned expected, auto complete) {
+    try {
+      read([once, finish, stage, expected, complete](auto window) {
+        if (!*once || *stage != expected)
+          return;
+        ++*stage;
+        try {
+          complete(window);
+        } catch (...) {
+          finish({Status::Restore, {}, "callback-exception"});
+        }
+      });
+    } catch (...) {
+      finish({Status::Restore, {}, "callback-exception"});
+    }
+  };
+  observe(0, [=](const auto &before) {
     if (!bound(before)) {
       finish({Status::Refused, {}, "initial-window"});
       return;
@@ -82,49 +109,42 @@ inline void relocateHoldingWindow(
       finish({Status::Restore, {}, "display"});
       return;
     }
-    const auto current = [getDisplay = access.display, getWindow = access.window, display, sameFrame,
-                          bound]() -> std::optional<HoldingRelocationWindow> {
+    const auto current = [getDisplay = access.display, display, sameFrame, bound](const auto &window) {
       const auto observed = getDisplay();
-      const auto window = getWindow();
-      if (!observed || observed->id != display->id || !sameFrame(observed->bounds, display->bounds) || !bound(window))
-        return std::nullopt;
-      return window;
+      return observed && observed->id == display->id && sameFrame(observed->bounds, display->bounds) && bound(window);
     };
     if (!access.persist()) {
       finish({Status::Restore, {}, "journal"});
       return;
     }
-    const auto prepared = current();
-    if (!prepared || !sameFrame(prepared->frame, before->frame)) {
-      finish({Status::Restore, {}, "before-placement"});
-      return;
-    }
-    access.place(fitInside(before->frame, display->bounds), [once, finish, current, display](bool placed) {
-      if (!*once)
-        return; // A duplicate or late native completion cannot re-enter ownership.
-      try {
+    observe(1, [=](const auto &prepared) {
+      if (!current(prepared) || !sameFrame(prepared->frame, before->frame)) {
+        finish({Status::Restore, {}, "before-placement"});
+        return;
+      }
+      access.place(fitInside(before->frame, display->bounds), [=](bool placed) {
+        if (!*once || *stage != 2)
+          return;
+        ++*stage;
         if (!placed) {
           finish({Status::Restore, {}, "native-placement"});
           return;
         }
-        const auto after = current();
-        if (!after) {
-          finish({Status::Restore, {}, "after-placement"});
-          return;
-        }
-        if (after->frame.x < display->bounds.x || after->frame.y < display->bounds.y ||
-            after->frame.x + after->frame.width > display->bounds.x + display->bounds.width ||
-            after->frame.y + after->frame.height > display->bounds.y + display->bounds.height) {
-          finish({Status::Restore, {}, "containment"});
-          return;
-        }
-        finish({Status::Applied, after->frame});
-      } catch (...) {
-        finish({Status::Restore, {}, "callback-exception"});
-      }
+        observe(3, [=](const auto &after) {
+          if (!current(after)) {
+            finish({Status::Restore, {}, "after-placement"});
+            return;
+          }
+          if (after->frame.x < display->bounds.x || after->frame.y < display->bounds.y ||
+              after->frame.x + after->frame.width > display->bounds.x + display->bounds.width ||
+              after->frame.y + after->frame.height > display->bounds.y + display->bounds.height) {
+            finish({Status::Restore, {}, "containment"});
+            return;
+          }
+          finish({Status::Applied, after->frame});
+        });
+      });
     });
-  } catch (...) {
-    finish({Status::Restore, {}, "callback-exception"});
-  }
+  });
 }
 } // namespace deskflow::windowshare
