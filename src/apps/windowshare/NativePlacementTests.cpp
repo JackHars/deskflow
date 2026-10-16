@@ -152,6 +152,102 @@ void cancellationAndDestruction()
   }
 }
 
+void preparationYields()
+{
+  Fixture f;
+  int steps = 0, unrelated = 0;
+  Gate::Preparation actions;
+  for (int i = 0; i < 9; ++i) {
+    actions.emplace_back([&, i] {
+      check(steps++ == i, "preparation preserves native operation order");
+      f.now += 100ms; // Busy native IPC, without sleeping or contacting another app.
+      for (int n = 0; n < 20; ++n)
+        f.gate.changed();
+      dispatch(); // Native reentrancy cannot start the next step or readback.
+      check(steps == i + 1 && f.probes == 0, "preparation does not recurse into native work");
+      return true;
+    });
+  }
+  f.gate.prepare(std::move(actions));
+  f.gate.prepare({[&] {
+    throw std::runtime_error("duplicate preparation ran");
+    return false;
+  }});
+  f.gate.issued(); // A premature/duplicate issued notification cannot skip preparation.
+  QObject context;
+  QMetaObject::invokeMethod(&context, [&] { unrelated = steps; }, Qt::QueuedConnection);
+  check(steps == 0, "preparation never performs native work on its caller's stack");
+  dispatch();
+  check(steps == 1 && unrelated == 1, "independent event-loop work runs before the second native operation");
+  for (int i = 1; i < 9; ++i) {
+    dispatch();
+    check(steps == i + 1 && f.probes == 0, "each turn runs at most one native operation");
+  }
+  f.observation = Gate::Observation::Verified;
+  dispatch();
+  check(f.completions == 0 && f.probes == 0, "native writes alone never commit placement");
+  dispatch();
+  check(f.success && f.completions == 1 && f.probes == 1, "fresh readback follows completed preparation");
+}
+
+void preparationStops()
+{
+  for (int interruption = 0; interruption < 5; ++interruption) {
+    Fixture f;
+    int steps = 0;
+    f.gate.prepare(
+        {[&] {
+           ++steps;
+           if (interruption == 1)
+             f.now += 2s;
+           if (interruption == 2)
+             f.gate.cancel();
+           if (interruption == 3)
+             return false;
+           return true;
+         },
+         [&] {
+           ++steps;
+           return true;
+         }}
+    );
+    if (interruption == 0)
+      f.now += 2s;
+    dispatch();
+    if (interruption == 4)
+      f.gate.fail("authority changed between native operations");
+    for (int i = 0; i < 4; ++i)
+      dispatch();
+    check(steps == (interruption == 0 ? 0 : 1), "expiry, cancellation and authority loss stop remaining writes");
+    check(!f.success && f.probes == 0 && !f.gate.withinDeadline(), "interrupted preparation never starts readback");
+    check(f.completions == (interruption == 2 ? 0 : 1), "preparation failure completes at most once");
+    if (interruption <= 1)
+      check(f.failure.contains("timed out"), "queued operations do not renew the original deadline");
+  }
+  int steps = 0, completions = 0;
+  std::unique_ptr<Gate> gate = std::make_unique<Gate>(
+      [](QString *) {
+        throw std::runtime_error("destroyed preparation probed");
+        return Gate::Observation::Verified;
+      },
+      [&](bool, QString) { ++completions; }
+  );
+  gate->prepare(
+      {[&] {
+         ++steps;
+         gate.reset();
+         return true;
+       },
+       [&] {
+         ++steps;
+         return true;
+       }}
+  );
+  dispatch();
+  dispatch();
+  check(!gate && steps == 1 && completions == 0, "destruction inside a native operation drops all queued work");
+}
+
 #if defined(__APPLE__)
 void unavailableNotifications()
 {
@@ -310,6 +406,7 @@ int main(int argc, char **argv)
     for (const auto &[name, test] : {
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
+             std::pair{"preparation-yields", &preparationYields}, std::pair{"preparation-stops", &preparationStops},
              std::pair{"ownership-across-yield", &ownershipAcrossYield}
 #if defined(__APPLE__)
              ,

@@ -57,6 +57,9 @@ public:
   // arrive. shutdown() cancels pending completions. Same-mode callers join the
   // same owned creation; each must revalidate its source before continuing.
   void createAsync(std::function<void(bool, QString)> completion, unsigned width = 1920, unsigned height = 1080);
+  // Return the ID and bounds from one verified native observation. Callers
+  // must still revalidate before/after mutations, rather than cache authority.
+  std::optional<HoldingResizeDisplay> verifiedSnapshot(QString *reason = nullptr) const;
   bool available(QString *reason = nullptr) const;
   std::uint32_t displayId() const;
   Rect bounds() const;

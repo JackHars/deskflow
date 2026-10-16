@@ -697,49 +697,116 @@ public:
   }
   void start()
   {
-    const auto keepAlive = shared_from_this();
-    AXObserverRef raw = nullptr;
-    const auto created = AXObserverCreate(m_expected.pid, notification, &raw);
-    m_observer = CF<AXObserverRef>(raw);
-    lifecycleDiagnostic(
-        "Host", "source.holding.observe", "observed", "Native observer creation returned",
-        {{"axError", int(created)}, {"windowId", qint64(m_expected.id)}}
-    );
-    if (created != kAXErrorSuccess || !m_observer) {
-      m_verification.fail("Cannot observe the exact source window before placement");
-      return;
-    }
-    const bool notifications = registerPlacementNotifications(
-        [this](CFStringRef name) { return AXObserverAddNotification(m_observer.get(), m_window.get(), name, this); },
-        [](CFStringRef name, AXError status) {
-          lifecycleDiagnostic(
-              "Host", "source.holding.observe", "observed", "Native notification registration returned",
-              {{"notification", string((__bridge NSString *)name)},
-               {"axError", int(status)},
-               {"watchdogReadbackRequired",
-                status == kAXErrorCannotComplete || status == kAXErrorNotificationUnsupported}}
-          );
+    NativePlacementVerification::Preparation steps;
+    steps.emplace_back([this] {
+      const auto keepAlive = shared_from_this();
+      const SlowOperationDiagnostic slow("Host", "source.holding.observe.create");
+      if (!authorityCurrent())
+        return false;
+      AXObserverRef raw = nullptr;
+      const auto created = AXObserverCreate(m_expected.pid, notification, &raw);
+      m_observer = CF<AXObserverRef>(raw);
+      lifecycleDiagnostic(
+          "Host", "source.holding.observe", "observed", "Native observer creation returned",
+          {{"axError", int(created)}, {"windowId", qint64(m_expected.id)}}
+      );
+      if (created != kAXErrorSuccess || !m_observer) {
+        m_verification.fail("Cannot observe the exact source window before placement");
+        return false;
+      }
+      CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
+      return authorityCurrent();
+    });
+    for (const auto name : placementNotificationNames()) {
+      steps.emplace_back([this, name] {
+        const auto keepAlive = shared_from_this();
+        const SlowOperationDiagnostic slow("Host", "source.holding.observe.register");
+        if (!authorityCurrent())
+          return false;
+        const bool registered = registerPlacementNotification(
+            name,
+            [this](CFStringRef notificationName) {
+              return AXObserverAddNotification(m_observer.get(), m_window.get(), notificationName, this);
+            },
+            [](CFStringRef notificationName, AXError status) {
+              lifecycleDiagnostic(
+                  "Host", "source.holding.observe", "observed", "Native notification registration returned",
+                  {{"notification", string((__bridge NSString *)notificationName)},
+                   {"axError", int(status)},
+                   {"watchdogReadbackRequired",
+                    status == kAXErrorCannotComplete || status == kAXErrorNotificationUnsupported}}
+              );
+            }
+        );
+        if (!registered) {
+          m_verification.fail("Cannot register source placement notifications");
+          return false;
         }
-    );
-    if (!notifications) {
-      m_verification.fail("Cannot register source placement notifications");
-      return;
+        return authorityCurrent();
+      });
     }
-    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
-    if (!requestBounds(m_window.get(), m_destination, [this] { return authorityCurrent(); }, "source.holding.place")) {
-      m_verification.fail("Source placement lost its authority during native writes");
-      return;
-    }
-    m_verification.issued(); // One queued check also covers an unchanged frame.
+    steps.emplace_back([this] { return placeAttribute(kAXMinimizedAttribute, "unminimize"); });
+    steps.emplace_back([this] { return placeAttribute(kAXSizeAttribute, "resize"); });
+    steps.emplace_back([this] { return placeAttribute(kAXPositionAttribute, "move"); });
+    m_verification.prepare(std::move(steps));
   }
 
 private:
+  bool placeAttribute(CFStringRef name, const QString &operation)
+  {
+    const auto keepAlive = shared_from_this();
+    const auto step = "source.holding.place." + operation;
+    const SlowOperationDiagnostic slow("Host", "source.holding.place.attribute");
+    if (!authorityCurrent())
+      return false;
+    CGPoint position{m_destination.x, m_destination.y};
+    CGSize size{m_destination.width, m_destination.height};
+    CF<AXValueRef> value(
+        name == kAXPositionAttribute ? AXValueCreate(kAXValueTypeCGPoint, &position)
+        : name == kAXSizeAttribute   ? AXValueCreate(kAXValueTypeCGSize, &size)
+                                     : nullptr
+    );
+    CFTypeRef nativeValue = name == kAXMinimizedAttribute ? static_cast<CFTypeRef>(kCFBooleanFalse) : value.get();
+    if (!nativeValue) {
+      m_verification.fail("Cannot construct native placement attribute");
+      return false;
+    }
+    lifecycleDiagnostic("Host", step, "started", "Write native window attribute");
+    const auto status = AXUIElementSetAttributeValue(m_window.get(), name, nativeValue);
+    lifecycleDiagnostic("Host", step, "observed", "Native attribute write returned", {{"axError", int(status)}});
+    // As for recovery writes, an unsupported unchanged attribute is decided by
+    // the final fresh readback. Never retry the write or extend the deadline.
+    if (!authorityCurrent())
+      return false;
+    if (name == kAXPositionAttribute)
+      lifecycleDiagnostic(
+          "Host", "source.holding.place", "submitted", "Native frame requested; readback remains required"
+      );
+    return true;
+  }
   bool authorityCurrent() const
   {
+    if (!m_verification.withinDeadline()) {
+      lifecycleDiagnostic(
+          "Host", "source.holding.authority", "failed", "Placement was cancelled or its deadline expired"
+      );
+      return false;
+    }
     if (!m_current())
       return false;
     const auto native = identity(m_expected.id);
-    return native && native->pid == m_expected.pid && native->launch == m_expected.launch && m_current();
+    if (!native || native->pid != m_expected.pid || native->launch != m_expected.launch) {
+      lifecycleDiagnostic(
+          "Host", "source.holding.authority", "failed", "Exact native source identity is unavailable or changed",
+          {{"windowId", qint64(m_expected.id)},
+           {"expectedPid", m_expected.pid},
+           {"expectedLaunch", m_expected.launch},
+           {"observedPid", native ? QJsonValue(native->pid) : QJsonValue(QJsonValue::Null)},
+           {"observedLaunch", native ? QJsonValue(native->launch) : QJsonValue(QJsonValue::Null)}}
+      );
+      return false;
+    }
+    return m_current() && m_verification.withinDeadline();
   }
   static void notification(AXObserverRef, AXUIElementRef window, CFStringRef name, void *context)
   {
@@ -3350,11 +3417,12 @@ struct NativeHost::Impl
           if (!layoutCurrent())
             return std::nullopt;
           QString reason;
-          if (!holding.available(&reason)) {
+          const auto observed = holding.verifiedSnapshot(&reason);
+          if (!observed) {
             lifecycleDiagnostic("Host", "source.holding.display", "failed", reason);
             return std::nullopt;
           }
-          return HoldingResizeDisplay{holding.displayId(), holding.bounds()};
+          return observed;
         };
         access.persist = [this, current, sourceTransaction] {
           lifecycleDiagnostic("Host", "source.holding.journal", "started", "Persist window placement intent");
@@ -3365,18 +3433,40 @@ struct NativeHost::Impl
           );
           return persisted;
         };
-        access.place = [this, current, layoutCurrent, sourceTransaction, placementStarted, window,
+        access.place = [this, current, layoutCurrent, sourceTransaction, placementStarted, window, guardFailed,
                         expected](Rect destination, std::function<void(bool)> complete) {
           if (!current() || !sourceTransaction->attemptMutation()) {
             complete(false);
             return;
           }
           *placementStarted = true;
-          const auto displayId = holding.displayId();
-          const auto displayBounds = holding.bounds();
-          const auto placementCurrent = [this, layoutCurrent, displayId, displayBounds] {
-            return layoutCurrent() && AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() && holding.available() &&
-                   holding.displayId() == displayId && sameGeometry(holding.bounds(), displayBounds);
+          QString displayReason;
+          const auto display = holding.verifiedSnapshot(&displayReason);
+          if (!display) {
+            guardFailed(displayReason);
+            complete(false);
+            return;
+          }
+          const auto placementCurrent = [this, current, layoutCurrent, display, guardFailed] {
+            const auto refused = [&](const QString &reason) {
+              guardFailed(reason);
+              return false;
+            };
+            if (!layoutCurrent())
+              return refused("Source authority or physical layout changed during placement");
+            if (!AXIsProcessTrusted())
+              return refused("Accessibility permission was lost during placement");
+            if (!CGPreflightScreenCaptureAccess())
+              return refused("Screen capture permission was lost during placement");
+            if (!current())
+              return false;
+            QString reason;
+            const auto observed = holding.verifiedSnapshot(&reason);
+            if (!observed)
+              return refused(reason);
+            if (observed->id != display->id || !sameGeometry(observed->bounds, display->bounds))
+              return refused("The verified holding display identity or bounds changed during placement");
+            return current() != nullptr;
           };
           auto placement = std::make_shared<ObservedPlacement>(
               window->get(), expected, destination, placementCurrent, std::move(complete)

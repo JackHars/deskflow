@@ -66,7 +66,6 @@
 
 namespace deskflow::windowshare {
 
-
 HoldingResizeResult resizeHoldingWindow(int width, int height, const HoldingResizeAccess &access)
 {
   using Status = HoldingResizeResult::Status;
@@ -780,14 +779,14 @@ void HoldingDisplay::createAsync(std::function<void(bool, QString)> completion, 
 #endif
 }
 
-bool HoldingDisplay::available(QString *reason) const
+std::optional<HoldingResizeDisplay> HoldingDisplay::verifiedSnapshot(QString *reason) const
 {
   if (reason)
     reason->clear();
-  const auto unavailable = [&](const QString &message) {
+  const auto unavailable = [&](const QString &message) -> std::optional<HoldingResizeDisplay> {
     if (reason)
       *reason = message;
-    return false;
+    return std::nullopt;
   };
 #ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
   const bool ownerAvailable = m_impl->display != nil;
@@ -815,17 +814,24 @@ bool HoldingDisplay::available(QString *reason) const
                            .arg(m_impl->height));
   if (!isolated(m_impl->id, bounds))
     return unavailable("The holding display is not isolated from the physical displays");
-  return true;
+  return HoldingResizeDisplay{m_impl->id, asRect(bounds)};
+}
+
+bool HoldingDisplay::available(QString *reason) const
+{
+  return verifiedSnapshot(reason).has_value();
 }
 
 std::uint32_t HoldingDisplay::displayId() const
 {
-  return available() ? m_impl->id : 0;
+  const auto observed = verifiedSnapshot();
+  return observed ? observed->id : 0;
 }
 
 Rect HoldingDisplay::bounds() const
 {
-  return available() ? asRect(CGDisplayBounds(m_impl->id)) : Rect{};
+  const auto observed = verifiedSnapshot();
+  return observed ? observed->bounds : Rect{};
 }
 
 void HoldingDisplay::shutdown()

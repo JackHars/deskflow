@@ -12,6 +12,7 @@
 #include <chrono>
 #include <functional>
 #include <utility>
+#include <vector>
 
 namespace deskflow::windowshare {
 
@@ -32,6 +33,7 @@ public:
   using Now = std::function<Clock::time_point()>;
   using Probe = std::function<Observation(QString *)>;
   using Completion = std::function<void(bool, QString)>;
+  using Preparation = std::vector<std::function<bool()>>;
 
   NativePlacementVerification(Probe probe, Completion completion, Now now = Clock::now)
       : m_probe(std::move(probe)),
@@ -44,9 +46,19 @@ public:
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { expire(); });
     m_timer.start(std::chrono::seconds(2));
   }
+  // Each native registration/write returns to Qt before the next operation.
+  // The original deadline includes preparation and is never renewed by a step.
+  void prepare(Preparation steps)
+  {
+    if (m_done || m_issued || m_preparing)
+      return;
+    m_preparing = true;
+    m_preparation = std::move(steps);
+    queuePreparation();
+  }
   void issued()
   {
-    if (m_done || m_issued)
+    if (m_done || m_issued || m_preparing)
       return;
     m_issued = true;
     changed();
@@ -82,8 +94,46 @@ public:
   {
     return !m_done;
   }
+  bool withinDeadline() const
+  {
+    return !m_done && m_now() < m_due;
+  }
 
 private:
+  void queuePreparation()
+  {
+    QMetaObject::invokeMethod(this, [this] { prepareNext(); }, Qt::QueuedConnection);
+  }
+  void prepareNext()
+  {
+    if (m_done)
+      return;
+    if (m_now() >= m_due) {
+      expire();
+      return;
+    }
+    if (m_preparationIndex == m_preparation.size()) {
+      m_preparing = false;
+      issued();
+      return;
+    }
+    const QPointer<NativePlacementVerification> alive(this);
+    // Either callback may destroy/cancel its owner. Keep the current action
+    // alive independently, and never run another action in this dispatch turn.
+    const auto step = m_preparation[m_preparationIndex++];
+    const bool success = step();
+    if (!alive || m_done)
+      return;
+    if (m_now() >= m_due) {
+      expire();
+      return;
+    }
+    if (!success) {
+      fail("Native placement preparation failed");
+      return;
+    }
+    queuePreparation();
+  }
   void check()
   {
     m_scheduled = false;
@@ -125,6 +175,8 @@ private:
   Clock::time_point m_due;
   QTimer m_timer;
   QString m_reason;
-  bool m_issued = false, m_scheduled = false, m_done = false;
+  Preparation m_preparation;
+  std::size_t m_preparationIndex = 0;
+  bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false;
 };
 } // namespace deskflow::windowshare
