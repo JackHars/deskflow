@@ -697,9 +697,10 @@ def run(arguments):
             if state["receipt"]:
                 receipt = state["receipt"]
                 diagnostics.observe("Source and controls", {key: receipt.get(key) for key in
-                    ("frame", "sourceVisible", "controlFrame", "controlVisible", "heldKeys", "heldButtons")})
+                    ("frame", "sourceVisible", "sourceObservation", "controlFrame", "controlVisible",
+                     "controlObservation", "heldKeys", "heldButtons")})
             if production and initial and state["receipt"]:
-                original.source_identity(state["receipt"], initial, holding)
+                original.source_identity(state["receipt"], initial, holding, controls_ready=started)
                 if holding and state["receipt"].get("frame") != initial["frame"]:
                     # Movement alone is not evidence of placement on a hidden
                     # display (attempt 18 merely moved to x=9 on the Mac).
@@ -777,10 +778,7 @@ def run(arguments):
             if not data or data.get("ready") is not True or data.get("windowId", 0) <= 0 or \
                     not data.get("frame") or data["frame"] != data.get("originalFrame"):
                 return None
-            if production and data.get("sourceVisible") is not True:
-                return None
-            if holding and (data.get("controlVisible") is not True or not data.get("controlFrame") or
-                            data["controlFrame"] != data.get("controlOriginalFrame")):
+            if production and not original.source_ready_for_start(data, holding):
                 return None
             return data
 
@@ -809,6 +807,9 @@ def run(arguments):
               "startWaitSeconds": START_WAIT_SECONDS})
         wait(lambda: collector.snapshot()["receipt"]["manual"]["request"] == "start",
              "the visible Start button", seconds=START_WAIT_SECONDS)
+        wait(own_window, "settled windows after Start")
+        if production:
+            original.source_identity(collector.snapshot()["receipt"], initial, holding)
         if evidence:
             evidence.start_boundary()
         publisher.set("preparing")

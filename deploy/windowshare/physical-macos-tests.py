@@ -483,6 +483,66 @@ class DiagnosticTests(unittest.TestCase):
         self.assertFalse(verify({**receipt, 'controlVisible': False}, initial, native))
 
 
+class PresentationReadinessTests(unittest.TestCase):
+    def setUp(self):
+        self.support = module.original_support()
+        source = dict(x=400, y=190, width=640, height=448)
+        controls = dict(x=480, y=280, width=480, height=268)
+        self.initial = dict(windowId=11274, sourceWindowId=11274, controlWindowId=11275,
+                            frame=source, originalFrame=source, ready=True, sourceVisible=True,
+                            controlFrame=controls, controlOriginalFrame=controls, controlVisible=True)
+        # The exact attempt-19 transform arrived after an initially exact frame.
+        self.transient = {**self.initial, 'frame': dict(x=399, y=190, width=642, height=448),
+                          'controlFrame': dict(x=479, y=280, width=482, height=268),
+                          'ready': False, 'sourceVisible': False, 'controlVisible': False}
+
+    def test_opening_transform_waits_for_a_fresh_settled_receipt_without_sleep(self):
+        self.support.source_identity(self.initial, holding=True)
+        samples = iter([self.transient, self.initial])
+        current = [self.initial]
+        wake = Mock()
+        def check():
+            current[0] = next(samples)
+            self.support.source_identity(current[0], self.initial, holding=True, controls_ready=False)
+        with patch.object(module.time, 'sleep', side_effect=AssertionError('sleep is forbidden')):
+            result = module.DIAGNOSTICS.wait_until(
+                lambda: self.support.source_ready_for_start(current[0], holding=True),
+                'settled windows after Start', 1, wake, check=check)
+        self.assertTrue(result)
+        wake.wait.assert_called_once()
+        self.support.source_identity(current[0], self.initial, holding=True)
+
+    def test_unsettled_or_hidden_windows_cannot_start_or_keep_a_running_test(self):
+        for state in (self.transient, {**self.initial, 'controlVisible': False},
+                      {**self.initial, 'controlFrame': self.transient['controlFrame']}):
+            with self.subTest(state=state):
+                self.assertFalse(self.support.source_ready_for_start(state, holding=True))
+                with self.assertRaisesRegex(RuntimeError, 'stationary'):
+                    self.support.source_identity(state, self.initial, holding=True)
+        for state in ({**self.initial, 'ready': False}, {**self.initial, 'sourceVisible': False},
+                      {**self.initial, 'frame': self.transient['frame']}, None):
+            self.assertFalse(self.support.source_ready_for_start(state, holding=True))
+
+    def test_pre_start_animation_does_not_allow_window_identity_changes(self):
+        for changed in ({'windowId': 14, 'sourceWindowId': 14}, {'controlWindowId': 14},
+                        {'controlWindowId': 11274}, {'controlWindowId': True}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                self.support.source_identity({**self.transient, **changed}, self.initial,
+                                             holding=True, controls_ready=False)
+
+    def test_never_settled_windows_expire_without_starting_input(self):
+        now = [0]
+        wake = Mock()
+        wake.wait.side_effect = lambda interval: now.__setitem__(0, now[0] + interval)
+        with patch.object(module.time, 'sleep', side_effect=AssertionError('sleep is forbidden')), \
+                self.assertRaisesRegex(RuntimeError, 'Timed out waiting for settled windows'):
+            module.DIAGNOSTICS.wait_until(
+                lambda: self.support.source_ready_for_start(self.transient, holding=True),
+                'settled windows', 0.1, wake, now=lambda: now[0],
+                check=lambda: self.support.source_identity(self.transient, self.initial,
+                                                           holding=True, controls_ready=False))
+
+
 class ProductionPlans(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

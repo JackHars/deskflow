@@ -4,6 +4,25 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt nineteen: opening-window regression — 2026-10-15
+
+`build/h06-r19-209et7ms/` consumed fresh permission and stopped before Start.
+The saved timeline identifies a two-pixel opening-frame transform that made the
+fixture's composite visibility flags false after its first settled receipt.
+No native sharing session, holding display or evidence recording started.
+Source returned to its original frame with zero held input, and both machines'
+ordinary state is preserved. The independent report was launched after cleanup;
+the complete first failure and cleanup remain in `session-1/diagnostics.jsonl`.
+
+The test fixture now disables only its own automatic presentation animations,
+logs raw geometry/visibility observations, and treats pre-Start presentation as
+readiness. Exact window identity is checked throughout; fresh settled visible
+windows are required after Start, and active controls must remain stationary.
+No sleep statements were added. The Mac source builds and all 83 coordinator
+tests pass on both Mac and actual Ubuntu, including four new regressions.
+Evidence: `build/h06-presentation-1xwwf524/`. This is not physical acceptance.
+Prepare a fresh run and obtain fresh permission immediately before launching.
+
 ## H06 attempt eighteen and step diagnostics — 2026-10-15
 
 `build/h06-r18-i25moopp/` was launched with fresh permission and failed. The

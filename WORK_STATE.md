@@ -1,5 +1,42 @@
 # Seamless Windows work state
 
+## Attempt nineteen: pre-Start presentation failure — 2026-10-15
+
+Permission `call_98ec79d8d6f644d687e004f5262445e3` was consumed by
+`build/h06-r19-209et7ms/`. Diagnostics caught the first failure at
+00:28:35.860 UTC, before Ready/Start or either machine's input session. An
+initial exact source frame (400,190,640,448) became (399,190,642,448); controls
+changed from (480,280,480,268) to (479,280,482,268). The fixture's composite
+visibility flags became false because geometry no longer matched Qt. The old
+receipt did not retain the separate native visibility flags. This is consistent
+with the opening animation, not evidence that the user hid or moved a window.
+The coordinator incorrectly treated that pre-Start transform as a running-test
+control failure. No holding display was created and no recorder armed.
+
+Source exited 0 with its original frame and zero held keys/buttons. Owned Mac
+test processes stopped, ordinary settings match, and the independent report was
+launched. Ubuntu stopped before native startup, with controller exit 0, provider
+unchanged/disabled and ordinary state preserved. The Mac SSH exit 255 remains
+in the result; it is distinct from the successful Ubuntu cleanup receipt.
+Collected Ubuntu archive SHA-256:
+`00e631c65e2d3a879b0142237d471afbeffb0344c72458ad711dba0136d074c5`.
+
+The fixture now disables its own AppKit presentation animations before showing
+either window, without changing desktop preferences or adding sleeps. Receipts
+separately retain Qt/native visibility, minimization, on-screen status, expected
+frames and geometry agreement. Before Start the coordinator keeps exact window
+identity checks while allowing presentation to settle. After Start is requested,
+a fresh exact visible receipt is required within the existing ten-second wait
+before input can start; running sessions still require visible stationary controls.
+
+Validation is `build/h06-presentation-1xwwf524/`: the Mac source builds, and all
+83 coordinator cases pass on Mac (1.70s) and actual jack over SSH (0.98s). Four
+new regressions cover the captured transform, identity changes, strict active
+checks and expiry without readiness, with sleep calls forbidden. The Core/Host
+package is unchanged from attempt nineteen. Native animation suppression and
+H04/H06 physical acceptance still require an attended run. The consumed approval
+does not authorize a retry; ask again immediately before the next physical launch.
+
 ## Attempt eighteen and persistent diagnostics — 2026-10-15
 
 Permission `call_0c4a5ca69ff04dc5a8b0a97591b9851e` was consumed by

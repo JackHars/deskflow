@@ -150,8 +150,13 @@ def validate_admission_probe(value):
     return value
 
 
-def source_identity(receipt, initial=None, holding=False):
-    """Observe owned window identities; this never grants native input authority."""
+def source_identity(receipt, initial=None, holding=False, *, controls_ready=True):
+    """Observe owned identities; pre-Start presentation never grants input authority.
+
+    Before Start, a show animation can change geometry after an initially exact
+    frame. Keep checking identities while waiting for presentation readiness;
+    once starting the session, require visible stationary controls throughout.
+    """
     source = receipt.get('sourceWindowId')
     require(type(source) is int and 0 < source < 2**32 and source == receipt.get('windowId'),
             'The exact disposable source window was not identified')
@@ -160,15 +165,29 @@ def source_identity(receipt, initial=None, holding=False):
     if holding:
         control = receipt.get('controlWindowId')
         frame = receipt.get('controlFrame')
-        require(type(control) is int and 0 < control < 2**32 and control != source and
-                receipt.get('controlVisible') is True and isinstance(frame, dict) and frame and
-                frame == receipt.get('controlOriginalFrame'),
-                'Holding requires distinct, visible, stationary local controls')
+        require(type(control) is int and 0 < control < 2**32 and control != source,
+                'Holding requires a distinct local control window')
         if initial:
-            require(control == initial['controlWindowId'] and frame == initial['controlFrame'],
-                    'The local control window moved or changed identity')
+            require(control == initial['controlWindowId'], 'The local control window changed identity')
+        if controls_ready:
+            require(receipt.get('controlVisible') is True and isinstance(frame, dict) and frame and
+                    frame == receipt.get('controlOriginalFrame'),
+                    'Holding requires visible, stationary local controls')
+            if initial:
+                require(frame == initial['controlFrame'], 'The local control window moved')
     else:
         require(receipt.get('controlWindowId') == 0, 'H04 requires the default one-window source')
+
+
+def source_ready_for_start(receipt, holding=False):
+    """Require the current presentation, not a previously settled sample."""
+    if not receipt or receipt.get('ready') is not True or receipt.get('sourceVisible') is not True or \
+            not receipt.get('frame') or receipt['frame'] != receipt.get('originalFrame'):
+        return False
+    if holding and (receipt.get('controlVisible') is not True or not receipt.get('controlFrame') or
+                    receipt['controlFrame'] != receipt.get('controlOriginalFrame')):
+        return False
+    return True
 
 
 def hidden_source_verified(receipt, initial, native):

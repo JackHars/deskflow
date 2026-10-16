@@ -70,6 +70,29 @@ id nativeApplication()
   return nativeMessage<id>(reinterpret_cast<id>(objc_getClass("NSApplication")), "sharedApplication");
 }
 
+bool disablePresentationAnimation(QWidget &widget, const QString &role)
+{
+  // Creating the native view before show() lets us disable only this fixture's
+  // automatic orderFront/orderOut animation. Do not change global preferences
+  // or wait an arbitrary duration for WindowServer's transformed bounds.
+  const auto window = nativeMessage<id>(reinterpret_cast<id>(widget.winId()), "window");
+  constexpr long noAnimation = 2; // NSWindowAnimationBehaviorNone, AppKit/NSWindow.h.
+  if (window)
+    nativeMessage<void>(window, "setAnimationBehavior:", noAnimation);
+  const bool disabled = window && nativeMessage<long>(window, "animationBehavior") == noAnimation;
+  lifecycleDiagnostic(
+      "Test controls", "window.animation", disabled ? "completed" : "failed",
+      disabled ? "Disabled automatic presentation animation" : "Could not disable presentation animation",
+      {{"role", role}, {"windowId", window ? qint64(nativeMessage<long>(window, "windowNumber")) : 0}}
+  );
+  return disabled;
+}
+
+QJsonObject frameJson(const QRect &frame)
+{
+  return {{"x", frame.x()}, {"y", frame.y()}, {"width", frame.width()}, {"height", frame.height()}};
+}
+
 struct OwnedWindowObservation
 {
   QJsonObject frame;
@@ -370,18 +393,22 @@ private:
                                 control.frame["height"].toDouble() == controlExpected.height();
     if (m_originalControlFrame.isEmpty() && controlSettled)
       m_originalControlFrame = control.frame;
-    const bool controlVisible = controlSettled && control.onScreen && m_controlWindow->isVisible() &&
-                                nativeMessage<BOOL>(controlWindow, "isVisible") &&
-                                !nativeMessage<BOOL>(controlWindow, "isMiniaturized");
+    const bool controlQtVisible = m_controlWindow && m_controlWindow->isVisible();
+    const bool controlNativeVisible = controlWindow && nativeMessage<BOOL>(controlWindow, "isVisible");
+    const bool controlMiniaturized = controlWindow && nativeMessage<BOOL>(controlWindow, "isMiniaturized");
+    const bool controlVisible =
+        controlSettled && control.onScreen && controlQtVisible && controlNativeVisible && !controlMiniaturized;
     const auto source = observeOwnedWindow(ownId);
     const auto &frame = source.frame;
     const auto expected = m_window ? m_window->frameGeometry() : QRect();
     const bool settled = !frame.isEmpty() && frame["x"].toDouble() == expected.x() &&
                          frame["y"].toDouble() == expected.y() && frame["width"].toDouble() == expected.width() &&
                          frame["height"].toDouble() == expected.height();
-    const bool sourceVisible = settled && source.onScreen && m_window->isVisible() &&
-                               nativeMessage<BOOL>(ownWindow, "isVisible") &&
-                               !nativeMessage<BOOL>(ownWindow, "isMiniaturized");
+    const bool sourceQtVisible = m_window && m_window->isVisible();
+    const bool sourceNativeVisible = ownWindow && nativeMessage<BOOL>(ownWindow, "isVisible");
+    const bool sourceMiniaturized = ownWindow && nativeMessage<BOOL>(ownWindow, "isMiniaturized");
+    const bool sourceVisible =
+        settled && source.onScreen && sourceQtVisible && sourceNativeVisible && !sourceMiniaturized;
     // WindowServer can briefly report a transformed frame during the initial
     // show animation. Latch only the requested Qt frame, not that transient.
     if (m_originalFrame.isEmpty() && settled)
@@ -402,6 +429,24 @@ private:
         {"controlOriginalFrame", m_originalControlFrame},
         {"controlVisible", controlVisible},
         {"sourceVisible", sourceVisible},
+        {"sourceObservation",
+         QJsonObject{
+             {"qtFrame", frameJson(expected)},
+             {"geometrySettled", settled},
+             {"onScreen", source.onScreen},
+             {"qtVisible", sourceQtVisible},
+             {"nativeVisible", sourceNativeVisible},
+             {"miniaturized", sourceMiniaturized}
+         }},
+        {"controlObservation",
+         QJsonObject{
+             {"qtFrame", frameJson(controlExpected)},
+             {"geometrySettled", controlSettled},
+             {"onScreen", control.onScreen},
+             {"qtVisible", controlQtVisible},
+             {"nativeVisible", controlNativeVisible},
+             {"miniaturized", controlMiniaturized}
+         }},
         {"nativePendingDropped", QString::number(m_nativePendingDropped)},
         {"ready", !m_originalFrame.isEmpty() && settled},
         {"title", m_window ? m_window->windowTitle() : QString()},
@@ -885,6 +930,9 @@ int main(int argc, char **argv)
     evidenceControls = std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout, *field);
   if (controls)
     controls->onManualClose = window.onManualClose;
+  if (!disablePresentationAnimation(window, "source") ||
+      (controls && !disablePresentationAnimation(*controls, "local controls")))
+    return 2;
   app.installEventFilter(&recorder);
   app.installNativeEventFilter(&recorder);
   window.show();
