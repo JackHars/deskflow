@@ -1665,6 +1665,7 @@ struct NativeHost::Impl
       ForwardingScope scope = ForwardingScope::Keyboard
   ) const
   {
+    const SlowOperationDiagnostic timing("Host", "native.keyboard-route-candidate");
     const QPointer<NativeHost> alive(q);
     if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild({session, epoch}) || !alive)
       return {};

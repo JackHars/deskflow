@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputPreflight.h"
+#include "LifecycleDiagnostics.h"
 #include <QPointer>
 #include <QThread>
 #include <algorithm>
@@ -729,22 +730,52 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       return !cancelling && !pendingAuthorityControl() && current(offer) && attempt->lease == lease &&
              attempt->phase == phase && live() && !cancelling && !pendingAuthorityControl();
     };
+    const auto timed = [&](const char *step, const auto &call) {
+      if (check == LocalInputCheck::Deliver)
+        return call();
+      const auto started = Clock::now();
+      const QString component = role == LocalInputRole::Host ? "Host preflight" : "Core preflight";
+      const QJsonObject identity{
+          {"routeGeneration", QString::number(lease.routeGeneration)},
+          {"check", check == LocalInputCheck::Prepare ? "prepare" : "commit"}
+      };
+      lifecycleDiagnostic(component, step, "started", "Input admission callback", identity);
+      const bool accepted = call();
+      auto details = identity;
+      details.insert(
+          "elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - started).count())
+      );
+      details.insert("accepted", accepted);
+      lifecycleDiagnostic(component, step, accepted ? "completed" : "denied", "Input admission callback", details);
+      return accepted;
+    };
     bool result = false;
     try {
       const auto integrity = checks.codeAdmission, route = checks.deliveryReady,
                  neutral = checks.neutralBoundary ? checks.neutralBoundary : checks.acquisitionBoundary;
-      result =
-          stillCurrent() && integrity && route && integrity(lease) && stillCurrent() && route(lease) && stillCurrent();
+      result = stillCurrent() && integrity && route &&
+               timed("input.code-admission", [&] { return integrity(lease); }) && stillCurrent() &&
+               timed("input.delivery-ready", [&] { return route(lease); }) && stillCurrent();
       if (result && check != LocalInputCheck::Deliver)
-        result = neutral && neutral(lease) && stillCurrent();
+        result = neutral && timed("input.acquisition-boundary", [&] { return neutral(lease); }) && stillCurrent();
       if (result && role == LocalInputRole::Host) {
         const auto binding = keyboardBinding(lease);
         if (check == LocalInputCheck::Deliver) {
           const auto query = host.isActive;
-          result = attempt->hostActivated && query && query(binding) && stillCurrent();
+          result =
+              attempt->hostActivated && query &&
+              timed(
+                  check == LocalInputCheck::Deliver ? "input.active" : "input.quiesced", [&] { return query(binding); }
+              ) &&
+              stillCurrent();
         } else {
           const auto query = host.isQuiesced;
-          result = query && query(binding) && stillCurrent();
+          result =
+              query &&
+              timed(
+                  check == LocalInputCheck::Deliver ? "input.active" : "input.quiesced", [&] { return query(binding); }
+              ) &&
+              stillCurrent();
           if (result && check == LocalInputCheck::Commit) {
             const auto activate = host.activate, active = host.isActive;
             result = !attempt->hostActivationAttempted && channel && channel->phase() == LocalInputPhase::Prepared &&
@@ -756,8 +787,10 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
               // Activation can synchronously change provider state without
               // changing the private lease. Recheck ongoing admission before
               // allowing its acknowledgment; neutrality belongs before commit.
-              result = activate(binding) && stillCurrent() && integrity(lease) && stillCurrent() && route(lease) &&
-                       stillCurrent() && active(binding) && stillCurrent();
+              result = timed("input.activate", [&] { return activate(binding); }) && stillCurrent() &&
+                       timed("input.code-admission", [&] { return integrity(lease); }) && stillCurrent() &&
+                       timed("input.delivery-ready", [&] { return route(lease); }) && stillCurrent() &&
+                       timed("input.active", [&] { return active(binding); }) && stillCurrent();
               if (result)
                 attempt->hostActivated = true;
             }
