@@ -208,6 +208,12 @@ Channel::Channel(Identity identity, QByteArray peerPin, QObject *parent) : QObje
   configuration.setPeerVerifyMode(QSslSocket::VerifyPeer);
   m_socket.setSslConfiguration(configuration);
   m_socket.setReadBufferSize(maxPayload + headerSize);
+  // Focus and forwarding fences exchange small, deadline-bound messages on
+  // this media connection. Do not hold them for Nagle/delayed-ACK batching.
+  // Apply after the native socket exists, including accepted descriptors.
+  connect(&m_socket, &QSslSocket::connected, this, [this] {
+    m_socket.setSocketOption(QAbstractSocket::LowDelayOption, 1);
+  });
   connect(&m_socket, &QSslSocket::sslErrors, this, [this](const QList<QSslError> &errors) {
     if (m_closed)
       return;
@@ -508,6 +514,7 @@ void Channel::accept(qintptr descriptor)
     close("Cannot accept peer");
     return;
   }
+  m_socket.setSocketOption(QAbstractSocket::LowDelayOption, 1);
   m_socket.startServerEncryption();
 }
 bool Channel::sendPacket(Packet packet)

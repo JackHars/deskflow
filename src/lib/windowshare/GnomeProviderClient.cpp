@@ -35,6 +35,42 @@ constexpr auto service = "org.deskflow.Seamless.Gnome50";
 constexpr auto object = "/org/deskflow/Seamless/Gnome50";
 constexpr auto interface = "org.deskflow.Seamless.Gnome50";
 constexpr int callTimeoutMs = 5000;
+// These setup calls occur once per acquisition, never for each input record.
+// Keep their boundaries visible even when an exception aborts the handoff.
+class PreparationDiagnostic
+{
+public:
+  PreparationDiagnostic(QString stage, std::uint64_t request)
+      : m_stage(std::move(stage)),
+        m_request(request),
+        m_started(std::chrono::steady_clock::now())
+  {
+    report("started");
+  }
+  ~PreparationDiagnostic()
+  {
+    report(m_completed ? "completed" : "failed");
+  }
+  void completed()
+  {
+    m_completed = true;
+  }
+
+private:
+  void report(const char *state) const
+  {
+    const auto elapsed = std::chrono::steady_clock::now() - m_started;
+    lifecycleDiagnostic(
+        "GNOME input", "input.focus-step", state, m_stage,
+        {{"request", QString::number(m_request)},
+         {"elapsedMs", qint64(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count())}}
+    );
+  }
+  QString m_stage;
+  std::uint64_t m_request;
+  std::chrono::steady_clock::time_point m_started;
+  bool m_completed = false;
+};
 constexpr auto orderingLimit = "mutter-eis-sync-build-unverified";
 bool validOrderingContract(std::string_view value)
 {
@@ -1599,10 +1635,13 @@ struct GnomeProviderClient::Impl
       const InputCutoffBinding *all = nullptr
   )
   {
-    return viewportCall(
+    PreparationDiagnostic diagnostic(QStringLiteral("Viewer preparation operation %1").arg(int(operation)), prep.id);
+    auto reply = viewportCall(
         operation, deadline, 0, x, y, all, 0, {}, &prep.request.binding,
         operation == GnomeViewportOperation::PreparationInventory ? nullptr : &prep.target
     );
+    diagnostic.completed();
+    return reply;
   }
   struct PreparationNative
   {
@@ -1614,6 +1653,7 @@ struct GnomeProviderClient::Impl
   PreparationNative
   nativePreparation(Preparation &prep, const char *method, Clock::time_point deadline, bool cleanup = false)
   {
+    PreparationDiagnostic diagnostic(QString::fromUtf8(method), prep.id);
     const auto &point = prep.request.point;
     const auto id = std::to_string(prep.id);
     GVariant *parameters = nullptr;
@@ -1648,8 +1688,10 @@ struct GnomeProviderClient::Impl
     checkpoint(deadline);
     if (!reply.value)
       throw std::runtime_error(error.message("GNOME input preparation call failed"));
-    if (finish)
+    if (finish) {
+      diagnostic.completed();
       return {};
+    }
     static constexpr std::array<std::pair<const char *, const char *>, 17> schema{
         {{"available", "b"},
          {"reason", "s"},
@@ -1709,6 +1751,7 @@ struct GnomeProviderClient::Impl
         (prep.target.windowAssociation != result.association || prep.native.window != result.native.window ||
          prep.native.surface != result.native.surface))
       throw ChannelError("GNOME preparation replaced its retained native target");
+    diagnostic.completed();
     return result;
   }
   void wakeWorker()

@@ -82,6 +82,10 @@ struct ChannelTestAccess
   {
     return channel.m_socket.socketDescriptor();
   }
+  static bool lowDelay(Channel &channel)
+  {
+    return channel.m_socket.socketOption(QAbstractSocket::LowDelayOption).toInt() == 1;
+  }
   static qint64 plaintext(const Channel &channel)
   {
     return channel.m_socket.bytesToWrite();
@@ -161,6 +165,10 @@ struct EvidencePair
     check(listener.listen(QHostAddress::LocalHost, 0), "Cannot listen for evidence fixture");
     peer->connectTo("127.0.0.1", listener.serverPort());
     waitFor([&] { return server && server->authenticated() && peer->authenticated(); }, "Evidence TLS setup failed");
+    check(
+        ChannelTestAccess::lowDelay(*server) && ChannelTestAccess::lowDelay(*peer),
+        "Accepted or outgoing TLS socket can delay small handoff controls"
+    );
     // Deterministic clock tests exercise at-use and queued-read checks without
     // letting a watchdog callback win the race under test.
     ChannelTestAccess::stopWatchdog(*server);
