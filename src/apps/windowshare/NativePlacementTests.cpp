@@ -4,6 +4,9 @@
  */
 #include "HoldingRelocation.h"
 #include "NativePlacementVerification.h"
+#if defined(__APPLE__)
+#include "NativePlacementNotifications_mac.h"
+#endif
 
 #include <QCoreApplication>
 #include <QEvent>
@@ -149,13 +152,72 @@ void cancellationAndDestruction()
   }
 }
 
+#if defined(__APPLE__)
+void unavailableNotifications()
+{
+  // Reproduce attempt 26: observer creation succeeds, but registering AXMoved
+  // returns CannotComplete after the source's AX messaging timeout. No native
+  // window, observer, input tap or input submission is used in this regression.
+  for (int unavailable = 0; unavailable <= 5; ++unavailable) {
+    Fixture f;
+    int registrations = 0, reports = 0;
+    const bool observed = registerPlacementNotifications(
+        [&](CFStringRef) {
+          const bool busy = unavailable == 5 || registrations == unavailable;
+          ++registrations;
+          if (busy)
+            f.now += 100ms;
+          return busy ? kAXErrorCannotComplete : kAXErrorSuccess;
+        },
+        [&](CFStringRef, AXError) { ++reports; }
+    );
+    if (!observed)
+      f.gate.fail("Cannot register source placement notifications");
+    check(f.completions == 0, "a notification timeout must not abort the pending placement");
+    check(registrations == 5 && reports == 5, "all five notification outcomes remain visible without retries");
+    f.gate.issued();
+    dispatch();
+    check(f.completions == 0 && f.probes == 1, "missing notifications cannot establish successful placement");
+    if (unavailable == 5) {
+      f.now = Gate::Clock::time_point{} + 2s;
+      f.observation = Gate::Observation::Verified;
+      f.gate.changed(); // A watchdog observation cannot renew the original deadline.
+      dispatch();
+      check(!f.success && f.completions == 1 && f.probes == 1, "a late frame still requires rollback");
+    } else {
+      f.now = Gate::Clock::time_point{} + 1500ms;
+      f.observation = Gate::Observation::Verified;
+      f.gate.changed(); // The existing Host watchdog provides this wakeup.
+      dispatch();
+      check(f.success && f.completions == 1 && f.probes == 2, "fresh readback verifies without native notifications");
+    }
+  }
+  for (const auto error :
+       {kAXErrorInvalidUIElement, kAXErrorInvalidUIElementObserver, kAXErrorIllegalArgument, kAXErrorAPIDisabled,
+        kAXErrorFailure}) {
+    Fixture f;
+    int registrations = 0;
+    const bool observed = registerPlacementNotifications(
+        [&](CFStringRef) { return ++registrations == 2 ? error : kAXErrorCannotComplete; }, [](CFStringRef, AXError) {}
+    );
+    if (!observed)
+      f.gate.fail("Permanent native notification failure");
+    f.gate.issued();
+    f.gate.changed();
+    dispatch();
+    check(registrations == 2 && !observed, "a permanent error stops registration after a transient timeout");
+    check(f.completions == 1 && !f.success && f.probes == 0, "invalid notification setup cannot start readback");
+  }
+}
+#endif
+
 struct RelocationFixture
 {
   HoldingRelocationWindow window{{71, 2}, 9, 9, {400, 188, 640, 448}};
   HoldingResizeDisplay display{42, {1440, -1, 4096, 4096}};
   bool live = true, journal = true;
   int writes = 0, completions = 0;
-  Rect destination;
+  deskflow::windowshare::Rect destination;
   HoldingRelocationResult result;
   std::function<void(bool)> nativeComplete;
   void start()
@@ -166,7 +228,7 @@ struct RelocationFixture
     };
     access.display = [&] { return std::optional(display); };
     access.persist = [&] { return journal; };
-    access.place = [&](Rect requested, std::function<void(bool)> complete) {
+    access.place = [&](deskflow::windowshare::Rect requested, std::function<void(bool)> complete) {
       check(journal, "durable recovery precedes native mutation");
       ++writes;
       destination = requested;
@@ -245,10 +307,15 @@ int main(int argc, char **argv)
 {
   QCoreApplication app(argc, argv);
   try {
-    for (const auto &[name, test] :
-         {std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
-          std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
-          std::pair{"ownership-across-yield", &ownershipAcrossYield}}) {
+    for (const auto &[name, test] : {
+             std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
+             std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
+             std::pair{"ownership-across-yield", &ownershipAcrossYield}
+#if defined(__APPLE__)
+             ,
+             std::pair{"unavailable-notifications", &unavailableNotifications}
+#endif
+         }) {
       std::fprintf(stderr, "START: %s\n", name);
       std::fflush(stderr);
       test();

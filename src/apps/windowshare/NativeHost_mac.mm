@@ -11,6 +11,7 @@
 #include "NativeHostLifecycle.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
+#include "NativePlacementNotifications_mac.h"
 #include "NativePlacementVerification.h"
 #include "NativeSourceTransaction.h"
 #include "NativeTitlebarObservation.h"
@@ -707,18 +708,21 @@ public:
       m_verification.fail("Cannot observe the exact source window before placement");
       return;
     }
-    for (const auto name :
-         {kAXMovedNotification, kAXResizedNotification, kAXWindowMiniaturizedNotification,
-          kAXWindowDeminiaturizedNotification, kAXUIElementDestroyedNotification}) {
-      const auto status = AXObserverAddNotification(m_observer.get(), m_window.get(), name, this);
-      lifecycleDiagnostic(
-          "Host", "source.holding.observe", "observed", "Native notification registration returned",
-          {{"notification", string((__bridge NSString *)name)}, {"axError", int(status)}}
-      );
-      if (status != kAXErrorSuccess && status != kAXErrorNotificationUnsupported) {
-        m_verification.fail("Cannot register source placement notifications");
-        return;
-      }
+    const bool notifications = registerPlacementNotifications(
+        [this](CFStringRef name) { return AXObserverAddNotification(m_observer.get(), m_window.get(), name, this); },
+        [](CFStringRef name, AXError status) {
+          lifecycleDiagnostic(
+              "Host", "source.holding.observe", "observed", "Native notification registration returned",
+              {{"notification", string((__bridge NSString *)name)},
+               {"axError", int(status)},
+               {"watchdogReadbackRequired",
+                status == kAXErrorCannotComplete || status == kAXErrorNotificationUnsupported}}
+          );
+        }
+    );
+    if (!notifications) {
+      m_verification.fail("Cannot register source placement notifications");
+      return;
     }
     CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
     if (!requestBounds(m_window.get(), m_destination, [this] { return authorityCurrent(); }, "source.holding.place")) {
