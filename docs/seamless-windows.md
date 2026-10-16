@@ -3,20 +3,18 @@
 ## Current implementation — 2026-10-16
 
 P1–P8 code is integrated, but the product is not physically accepted. Latest
-attended attempt 26 authenticated both machines, then stopped before Active
-because registering a Mac movement notification returned `CannotComplete`.
-Source restoration and owned-process cleanup passed. Runtime `b20bbf39d2`
-allows the existing Host watchdog to wake placement verification when a
-notification is unavailable, preserving exact native readback and the fixed
-deadline. Mac regressions, scoped sanitizers, package audit and fresh Ubuntu
-Core/Viewer checks pass; see `TESTING.md` for exact evidence and hosted results.
+attended attempt 27 reached Active with verified hidden placement. Original
+input preparation then expired and the hidden Host later lost its heartbeat.
+Mac system logs confirm App Nap throttling of that exact Host process.
+Runtime `fcd3547516` retains an interactive activity for each export and
+releases it on cleanup, while allowing normal system sleep. Placement,
+recovery and activity tests pass 3/3; actual input still needs verification.
+Linux runtime sources are unchanged; see `TESTING.md` for retained package
+identities, diagnostics, cleanup limitations and hosted checks.
 
-The earlier run's original-input readiness failure remains unverified. Current
-fixes also cover asynchronous placement, atomic heartbeat publication,
-switching-shortcut consumption, denied-correlation ordering and a history
-lifetime that was shorter than valid preparation. The current checklist is in
-`CHATGPT_HANDOFF.md`. Every physical attempt needs fresh permission immediately
-before launch, uses jack's actual desktop and retains printed diagnostics.
+The current checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs
+fresh permission immediately before launch, uses jack's actual desktop and
+retains printed diagnostics. Attempt 27's permission has been consumed.
 
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of

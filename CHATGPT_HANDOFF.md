@@ -9,20 +9,25 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 ## Current completion checklist — 2026-10-16
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Latest attended attempt 26 connected
-to actual jack but aborted before Active when macOS failed an AX movement
-notification registration. The source and both desktops were restored, with
-neutral input receipts; full input recording never armed. Earlier attempt 24
-reached Active but did not establish original-input owner readiness.
+The product is **not physically accepted**. Latest attended attempt 27 reached
+Active on actual jack with verified hidden source placement, but original-input
+preparation expired and recording never armed. The Host later lost its private
+heartbeat; macOS logs confirm App Nap throttling of that exact hidden process.
+Both desktops/settings were restored with neutral final input receipts, while
+broken-pipe cleanup diagnostics remain recorded.
 
-Current runtime `b20bbf39d2` keeps placement verification live when a notification
-is unavailable. It retains the exact owner/frame checks and fixed deadline.
-Mac regressions, scoped sanitizers, package audit and freshly rebuilt Ubuntu
-Core/Viewer checks pass. See `TESTING.md` for package identities and current
-[hosted results](https://github.com/JackHars/deskflow/actions/runs/38924548952).
-The previous runtime `26b2bc6a4` passed all six hosted jobs.
+Current runtime `fcd3547516` adds an activity guard for each shared window,
+released on closure or failed setup, while allowing normal system sleep.
+Mac build and placement/recovery/activity tests pass 3/3. See `TESTING.md` for
+physical evidence and package status. Linux runtime code is unchanged; the
+verified `b20bbf39d2` package remains compatible. That previous runtime passes
+all six [hosted jobs](https://github.com/JackHars/deskflow/actions/runs/38924548952).
+The new fix still needs physical verification, including the preparation timeout.
 
-Attempt 26's permission is consumed. Do not launch an older prepared plan.
+Attempt 28 (`build/h06-r28-3gbg3emp/`) is prepared with a signed Mac package
+and passing live preflight; it has not launched. The new hosted run
+[38959812367](https://github.com/JackHars/deskflow/actions/runs/38959812367) is still
+in progress. Attempt 27's permission is consumed. Do not reuse an older plan.
 Refresh the current candidate's live preflight and obtain fresh permission
 immediately before any further physical launch. Tests use jack's actual Ubuntu
 monitor, separate Mac controls, hidden source placement and saved diagnostics

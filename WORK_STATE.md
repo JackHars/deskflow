@@ -1,5 +1,69 @@
 # Seamless Windows work state
 
+## H06 attempt 27: hidden Host throttled by App Nap — 2026-10-16
+
+Fresh permission `call_7a128b3087b84019a91d1068462f0435` was consumed by
+`build/h06-r27-ocvmxz5k/`, runtime `b20bbf39d2`, on jack's actual Ubuntu desktop.
+The notification fix passed its first physical setup check: unavailable AX
+notifications no longer aborted placement, exact readback verified the hidden
+source, both peers authenticated and the test reached Active at 19:59:35 UTC.
+This is setup evidence, not completed H06 acceptance.
+
+The first original-input acquisition requested preparation at 19:59:51.981 UTC
+and expired at 19:59:52.483 within the unchanged 500ms deadline. Core/Host never
+reported a live original-input owner and recording did not arm. At 20:00:10 the
+Host closed its private channel after a 3358ms heartbeat gap (budget 2500ms).
+The Mac system log independently records App Nap active with timer, socket,
+CPU and priority throttling for this exact Host PID from 19:59:46.961 UTC.
+Host evidence has gaps of 2276ms and 1587ms while Core's largest gap is 179ms.
+There is no new native crash report; the saved failure is companion exit.
+
+Runtime `fcd35475167f21e6e9d4ae598261dab358423150` gives each active export a scoped
+`NSActivityUserInitiatedAllowingIdleSystemSleep` activity, acquired before
+capture and released with that exact export, including setup failure and
+restoration. Logs retain activity acquisition/release. It does not inhibit
+system/display sleep, alter input authority, extend deadlines or add sleeps.
+The observed throttling defect is addressed; whether this also resolves the
+preparation timeout still requires a fresh physical run.
+
+Mac Host build and placement/recovery/activity tests pass 3/3 (1.10s). Activity
+checks cover overlapping exports, individual/last release, setup-error cleanup,
+failed acquisition and actual Foundation acquisition without windows or input.
+Evidence: `build/sharing-activity-ohqg2wo6/`. The first multi-target build regenerated
+the Makefiles and built Host, then could not find the newly added target in the
+old Make invocation; the subsequent test-target build passes. Linux runtime
+sources are unchanged; retain the verified `b20bbf39d2` Ubuntu package.
+All six hosted jobs for that previous runtime now pass in
+[run 38924548952](https://github.com/JackHars/deskflow/actions/runs/38924548952).
+
+Cleanup restored the source to (400,188,640,448) with zero held keys/buttons;
+Mac Core exited 0 through private IPC, companion/owned processes stopped and
+ordinary settings hashes match. Ubuntu reports desktop restoration, owned
+processes stopped and ordinary settings preserved. SSH exit 255, broken-pipe
+stop diagnostics and unarmed evidence remain recorded. No physical pass is
+claimed. Full Ubuntu results archive SHA-256:
+`0a857d0297631d03a53c7750cea56e3606ff92c12abb97781bc8535b28403433`.
+See `build/h06-r27-ocvmxz5k/failure-summary.json` and `mac-scheduling.log`.
+Attempt 27's permission is consumed; obtain fresh permission for the next launch.
+
+
+The signed Mac package passes its 77-library audit with no errors. ZIP SHA-256:
+`655f7343385128f23fdd5829aa36e0e5b876085f518e65f53c6d6b60e7ce3808`.
+Hosted source bundle `38959812726` independently verifies all 1187 tracked
+files/modes/blobs and the exact commit. Its archive SHA-256 is
+`75c47838d5a05411d9f5f4654b76edcd70eb15c170b5942e5a49e8c36af61596`.
+The new [six-job hosted run](https://github.com/JackHars/deskflow/actions/runs/38959812367)
+is still in progress; both portable compiler jobs have passed.
+
+Attempt 28 is prepared, unlaunched, at `build/h06-r28-3gbg3emp/`, frozen to
+`fcd35475167f21e6e9d4ae598261dab358423150` with fresh identities. The separately
+verified Ubuntu `b20bbf39d2` package is reused because the runtime change is
+Mac-only. Actual jack's unlocked Wayland session 2 and binary hashes pass
+preflight. Mac permissions, no competing primary, hidden-source/separate-control
+plans and exact packaged admission pass (11.966s, native input disabled).
+No test window or input sharing started during this preparation. Fresh physical
+launch permission is required.
+
 ## H06 attempt 26: AX notification registration failure — 2026-10-16
 
 Fresh permission `call_65bb3e495b6f4b93a2db2146d028f89e` was consumed by
@@ -52,7 +116,7 @@ Hosted source bundle `38924548926` verifies all 1185 tracked files/modes/blob
 identities and the exact commit; archive SHA-256:
 `766c28d4ac4ef89b648bd16a0ebb855b85f0c93849fef41d02ea3324a6e0d91a`.
 [Hosted run 38924548952](https://github.com/JackHars/deskflow/actions/runs/38924548952)
-is in progress. The next physical launch requires fresh permission; attempt
+passed all six jobs. The next physical launch requires fresh permission; attempt
 26's permission is consumed.
 
 
@@ -63,13 +127,13 @@ libraries and pass offscreen `--help` without desktop connection variables.
 Linux archive SHA-256:
 `5b17f69c1d5fcddb50da5c7cdd10a79f2cba16e7d9bef8f28dca6104a901c3e5`.
 
-Prepared attempt 27 is `build/h06-r27-ocvmxz5k/`, frozen to this runtime with
+Attempt 27 was prepared as `build/h06-r27-ocvmxz5k/`, frozen to this runtime with
 fresh paired identities. Both live preflights pass: actual jack's unlocked
 Wayland session, matching staged binary hashes, separate Mac controls and
 hidden-source configuration, no competing Mac Core, permissions, and exact
 packaged admission (12.017s, native input disabled).
-Preparation did not open a test window or start sharing. Fresh launch permission
-is still required.
+Preparation did not open a test window or start sharing. Its later approved
+physical launch and failure are recorded above; this plan must not be reused.
 
 ## Unattended input hardening — 2026-10-16
 
