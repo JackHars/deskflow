@@ -13,6 +13,7 @@
 #include "NativeOriginalInputState.h"
 #include "NativePlacementNotifications_mac.h"
 #include "NativePlacementVerification.h"
+#include "NativeSharingActivity_mac.h"
 #include "NativeSourceTransaction.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
@@ -1379,6 +1380,7 @@ struct NativeHost::Impl
     SCStream *stream = nil;
     DFWindowStream *delegate = nil;
     SCStreamConfiguration *configuration = nil;
+    std::unique_ptr<SharingActivity> activity;
     std::shared_ptr<Capture> capture;
     qint64 started = 0;
     int pixelWidth = 0, pixelHeight = 0;
@@ -1402,6 +1404,13 @@ struct NativeHost::Impl
     {
       if (window)
         CFRelease(window);
+      if (activity && activity->active()) {
+        activity.reset();
+        lifecycleDiagnostic(
+            "Host", "sharing.activity", "completed", "Released interactive window sharing activity",
+            {{"windowId", qint64(identity.id)}, {"session", QString::number(session.id)}}
+        );
+      }
     }
   };
   struct KeyPress
@@ -2918,6 +2927,16 @@ struct NativeHost::Impl
   }
   void startCapture(std::unique_ptr<Entry> e, NativeHostLifecycle::Admission admitted)
   {
+    e->activity = std::make_unique<SharingActivity>();
+    lifecycleDiagnostic(
+        "Host", "sharing.activity", e->activity->active() ? "started" : "failed",
+        "Acquire interactive window sharing activity while allowing normal sleep",
+        {{"windowId", qint64(e->identity.id)}}
+    );
+    if (!e->activity->active()) {
+      error("Cannot keep the interactive window sharing helper responsive");
+      return;
+    }
     lifecycleDiagnostic(
         "Host", "capture.start", "started", "Start source window capture", {{"windowId", qint64(e->identity.id)}}
     );

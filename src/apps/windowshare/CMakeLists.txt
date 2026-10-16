@@ -467,6 +467,12 @@ if(WINDOWSHARE_APP)
       add_executable(windowshare-native-tests NativeHostTests.cpp)
       target_link_libraries(windowshare-native-tests PRIVATE windowshare-native)
       add_test(NAME windowshare-native-recovery COMMAND windowshare-native-tests)
+      add_executable(windowshare-sharing-activity-tests NativeSharingActivityTests.mm)
+      target_compile_options(windowshare-sharing-activity-tests PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic -Werror)
+      target_link_libraries(windowshare-sharing-activity-tests PRIVATE "-framework Foundation")
+      set_target_properties(windowshare-sharing-activity-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
+      add_test(NAME windowshare-sharing-activity COMMAND windowshare-sharing-activity-tests)
+      set_tests_properties(windowshare-sharing-activity PROPERTIES TIMEOUT 15)
       # Explicit native desktop check: two same-title/frame fixture windows,
       # rename and replacement. No input or arbitrary application access.
       add_executable(windowshare-native-identity-tests NativeWindowIdentityTests.mm)
