@@ -84,7 +84,8 @@ struct ChannelTestAccess
   }
   static bool lowDelay(Channel &channel)
   {
-    return channel.m_socket.socketOption(QAbstractSocket::LowDelayOption).toInt() == 1;
+    // macOS returns its enabled flag (4), Linux returns 1. Both mean enabled.
+    return channel.m_socket.socketOption(QAbstractSocket::LowDelayOption).toBool();
   }
   static qint64 plaintext(const Channel &channel)
   {
