@@ -416,6 +416,19 @@ class DriverTests(unittest.TestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def test_event_payload_names_do_not_interrupt_session_deadline_or_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace'
+            trace = module.DIAGNOSTICS.Diagnostics(path, 'test')
+            payload = dict(message='The fixed session time expired', state='stopped', step='disconnect')
+            trace.emit('session-deadline', 'observed', 'session-deadline', **payload)
+            trace.close()
+            row = json.loads(path.read_text())
+            self.assertEqual(row['details'], payload)
+            self.assertEqual(row['step'], 'session-deadline')
+            self.assertEqual(row['state'], 'observed')
+            self.assertEqual(row['message'], 'session-deadline')
+
     def test_first_failure_survives_cleanup_and_each_stage_is_flushed_before_work(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'diagnostics.jsonl'

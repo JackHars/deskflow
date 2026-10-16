@@ -28,7 +28,9 @@ class Diagnostics:
         self.observations = {}
         self.error = None
 
-    def emit(self, step, state, message, **details):
+    def emit(self, step, state, message, /, **details):
+        # Event payloads can themselves contain message/state/step fields.
+        # Keep them in details without colliding with the diagnostic envelope.
         self.sequence += 1
         row = {'schema': 'deskflow-physical-diagnostic-v1', 'sequence': self.sequence,
                'utc': datetime.now(timezone.utc).isoformat(timespec='milliseconds'),
