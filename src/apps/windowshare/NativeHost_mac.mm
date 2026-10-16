@@ -2459,17 +2459,25 @@ struct NativeHost::Impl
     if (!admitted || QThread::currentThread() != q->thread() || !originalInput.current(binding, record.epoch))
       return false;
     QPointer<NativeHost> alive(q);
-    const auto deny = [&] {
+    const auto deny = [&](const char *reason) {
+      lifecycleDiagnostic(
+          "Host", "input.native-delivery", "denied", reason,
+          {{"routeGeneration", QString::number(binding.generation)},
+           {"receiptRemainingUs", qint64(point.deadlineNs) / 1000 - qint64(localInputMonotonicNs()) / 1000}}
+      );
       if (alive)
         revokeOriginalInput(binding);
       return false;
     };
-    if (!originalInputCurrent(binding, record.epoch) || !alive)
-      return deny();
     const auto target = originalTarget;
+    // Constructing a pending event grants no input. The retained target only
+    // supplies construction data; fresh native authority is checked below,
+    // immediately before posting. Repeated AX walks here consume the receipt.
+    if (!target || target->binding != binding || !lifecycle->current(admitted))
+      return deny("Retained native target is no longer current");
     const auto prepared = originalInput.prepare(binding, record, point, target->frame.width, target->frame.height);
     if (!prepared)
-      return deny();
+      return deny("Native input state or mapped receipt refused preparation");
     std::int64_t number = 0;
     int clicks = 0;
     std::optional<std::uint8_t> buttonSlot;
@@ -2478,7 +2486,7 @@ struct NativeHost::Impl
       buttonSlot = button->button;
       buttonDown = button->down;
       if (buttonDown && mouseSequence == std::numeric_limits<std::int64_t>::max())
-        return deny();
+        return deny("Native button identity exhausted");
       number = buttonDown ? mouseSequence + 1 : target->buttons[*buttonSlot];
       clicks = int(button->clickCount);
     } else if (
@@ -2497,27 +2505,29 @@ struct NativeHost::Impl
           raw.get(), eventSource, target->identity.id, target->frame, {point.x, point.y}, number, clicks
       ));
       if (!event)
-        return deny();
+        return deny("Original event construction failed");
     }
     // Native identity/focus reads may block. The receipt is never renewed by
     // them; recheck it and the pending exact owner immediately before posting.
     if (!originalInputCurrent(binding, record.epoch) || !alive || !liveLocalInputMappedPoint(point) ||
         originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
-      return deny();
+      return deny("Fresh native authority or mapped receipt changed before submission");
     if (prepared->posts)
       CGEventPostToPid(target->identity.pid, event.get());
     // CGEventPostToPid is a synchronous submission and runs no application/Qt
     // callbacks. Record the submitted press before any further native queries.
     if (!originalInput.submitted(prepared->token))
-      return deny();
+      return deny("Native submission no longer owns its pending record");
     if (buttonSlot) {
       target->buttons[*buttonSlot] = buttonDown ? number : 0;
       if (buttonDown)
         mouseSequence = number;
     }
-    if (!liveLocalInputMappedPoint(point) || !originalInputCurrent(binding, record.epoch) || !alive ||
-        !lifecycle->current(admitted))
-      return deny();
+    // Submission cannot dispatch Qt callbacks. Keep the lifetime/owner/deadline
+    // checks without a second blocking native walk after the event was sent.
+    if (!liveLocalInputMappedPoint(point) || originalTarget != target ||
+        !originalInput.current(binding, record.epoch) || !lifecycle->current(admitted))
+      return deny("Native submission lost its lifetime, owner, or receipt");
     return true;
   }
   void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)

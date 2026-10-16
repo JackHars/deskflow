@@ -270,6 +270,7 @@ public:
           return Result::revoked(ticket);
         }
         m_reserved = std::exchange(m_preparing, {});
+        operation->trace(10, "input.reservation", "accepted");
         return Result::accepted({operation->owner->id, ticket}, ticket);
       }
     }
@@ -477,6 +478,7 @@ public:
         Clock::now() >= m_reserved->deadline)
       return false;
     m_reserved->phase = Shared::Phase::Queued;
+    m_reserved->trace(11, "input.delivery", "queued");
     if (const auto *scroll = std::get_if<OriginalInputScroll>(&m_reserved->captured.input.record.payload);
         scroll && scroll->continuous)
       m_reserved->owner->scrolling =
@@ -1152,6 +1154,7 @@ bool OriginalInputCoordinator::tickOne()
   }
   if (!alive)
     return false;
+  operation->trace(12, "input.delivery", sent ? "sent" : "failed");
   std::lock_guard lock(m_shared->mutex);
   operation->phase = sent ? Shared::Phase::Sent : Shared::Phase::Revoked;
   if (!sent)
