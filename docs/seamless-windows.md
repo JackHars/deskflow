@@ -3,17 +3,18 @@
 ## Current implementation — 2026-10-16
 
 P1–P8 code is integrated, but the product is not physically accepted. Latest
-attended attempt 28 reached Active with hidden source placement and App Nap
-inactive. Original-input preparation expired, then the Host stalled and lost
-private authority during the input sequence. Runtime `65dd42362` coalesces read
-notifications, bounds private dispatch work between callbacks, and logs handoff
-stages, slow native calls and precise close/accounting reasons. Mac/Ubuntu
-regressions and scoped Mac sanitizer checks pass; the physical cause still needs
-verification. See `TESTING.md` for exact evidence and cleanup limitations.
+attended attempt 29 stopped before Active when the harness falsely rejected
+movement of the separate Mac controls. Coordinator `f5f7179b9` corrects that
+presentation check; all 96 coordinator checks pass on Mac and actual jack.
+Native runtime `65dd42362` passes all six hosted jobs. The earlier preparation
+expiry and Host stall during input still need physical verification. See
+`TESTING.md` for evidence, cleanup limits and the prepared attempt-30 candidate.
 
 The checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs fresh
 permission immediately before launch, uses jack's actual desktop and retains
-printed diagnostics. Attempt 28's permission has been consumed.
+printed diagnostics. Attempt 29's permission has been consumed. Attempt 30 is
+prepared with the corrected coordinator and unchanged verified native binaries;
+it has not been launched.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

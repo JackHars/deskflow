@@ -1,5 +1,55 @@
 # Seamless Windows work state
 
+## H06 attempt 29: moving local controls aborted preparation — 2026-10-16
+
+Permission `call_8c719a47e7014336b21d23711cee286b` was consumed by
+`build/h06-r29-x9_agpvf/`, native runtime `65dd42362`. Start was clicked at
+20:34:40.689 UTC. At 20:34:55.089 the harness stopped while waiting for the
+companion: `Holding requires visible, stationary local controls`. Active,
+original-input ownership and recording were never reached. This attempt did
+not exercise the earlier scrolling/preparation failure.
+
+The exact local controls remained on screen, native/Qt-visible and not minimized.
+Their native frame moved from (480,278,480,268) to (526,322,480,268), while Qt
+sampled (545,348,480,268). The old aggregate visibility flag also required frame
+agreement, so an ordinary drag falsely failed the stationary-controls rule.
+The source identity/frame stayed unchanged at (400,188,640,448), with zero held
+keys/buttons. Core exited 0 via private IPC, its companion and local owned
+processes stopped, and Ubuntu reports desktop restoration and ordinary settings
+preserved. The original report retains unarmed-evidence and control-presentation
+cleanup errors; the latter masked the intact source. See `failure-summary.json`.
+Ubuntu result archive SHA-256:
+`f572c373386d9e4c4b1b1c582794254d574216a68c34aba35231576ed698c7ee`.
+
+Coordinator `f5f7179b9` accepts movement of the separate controls using their exact
+identity, valid native frame and current native/Qt visibility observations.
+Start still waits for settled presentation, but a new settled controls position
+is valid. Hidden-source verification still requires exact Host readback and no
+physical-display overlap. Source restoration checks retained identities, neutral
+input, the original source frame and an empty restore journal independently of
+controls presentation. Hidden/minimized controls still stop an active session.
+No native runtime, authority rule, deadline or input policy changed; no sleeps
+were added.
+
+Evidence: `build/moving-controls-bi7dnqpk/`. Both new reproductions fail against
+the prior coordinator. All 96 coordinator tests pass on Mac and actual jack, and
+the recorded attempt-29 final receipt passes the corrected identity check.
+These checks start no native input or GUI. Native runtime `65dd42362` also passes
+all six jobs in [hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803),
+including the corrected GNOME fixture. These are not physical acceptance passes.
+
+Attempt 30 is prepared and unlaunched at `build/h06-r30-i4aq8o8x/`. It freezes
+coordinator `f5f7179b9` and unchanged native binaries from `65dd42362`, with fresh
+private identities. The full coordinator source hashes match the two-machine
+checks. All frozen Mac artifact hashes match attempt 29, and Ubuntu binaries
+match the verified native package. Live preflight at 20:42:33 UTC confirms jack's
+actual unlocked Wayland session 2, Mac permissions and no competing primary.
+Packaged admission completes in 12.755s with native input disabled and its
+companion stopped. No test window opened or desktop provider was enabled.
+See `preparation-summary.json` and `final-preflight.json`. Obtain fresh permission
+immediately before its physical launch. H03–H12 and the native/library/OS queue
+review remain open.
+
 ## H06 attempt 28: preparation timeout and Host stall during input — 2026-10-16
 
 Permission `call_25eab23a1a89476583ee2b0ae5c2b65b` was consumed by
@@ -56,8 +106,8 @@ The corrected target builds successfully.
 Previous hosted run `38959812367` finished with five jobs passing and a
 GNOME fixture failure: two separate event-log snapshots produced an invalid
 interval. The fixture now freezes one snapshot for each interval, retaining
-its strict input-leak checks. New [hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
-is in progress. Source run `38962542788` passes and independently verifies
+its strict input-leak checks. [Hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
+passes all six jobs. Source run `38962542788` passes and independently verifies
 all 1187 file contents/modes, the index and exact commit. Source archive SHA-256:
 `d2375b8276f15a27bb9cfadacbc42bfea848fb02c6ecc02f66c8054a78d0dc1b`.
 
@@ -65,18 +115,12 @@ Attempt 28's permission is consumed. Build/package preparation is unattended;
 obtain fresh permission immediately before the next physical launch. H03–H12
 and the native/library/OS queue review remain open.
 
-Attempt 29 is prepared, unlaunched, at `build/h06-r29-x9_agpvf/`, frozen to
-`65dd423626626da0b2071067a855d62f30cc9a7a` with fresh identities. Both platforms
-use the new package. Mac package audit passes 77 libraries with no errors;
-ZIP SHA-256 `9b70aef540350b1c3e1b4a5ed1d464d3f4efc547f9c9096cf055498fbc31fffd`.
+The native packages used in attempts 29/30 are unchanged. Mac package audit
+passes 77 libraries with no errors; ZIP SHA-256
+`9b70aef540350b1c3e1b4a5ed1d464d3f4efc547f9c9096cf055498fbc31fffd`.
 Ubuntu archive SHA-256 `f64fbce9be5281d8edb42604049dfa5707b10d734115c0c2cef3854ad0eb4b6f`;
 all 26 manifest files, native dependencies and offscreen startup checks pass.
-Live preflight at 20:32:19 UTC confirms actual jack's unlocked Wayland session 2,
-matching binary hashes, all Mac permissions and no competing primary. Exact
-packaged admission passes in 11.667s with native input disabled and its companion
-stopped. Preparation did not open a test window or enable desktop sharing.
-Fresh launch permission remains required. See `preparation-summary.json` and
-`final-preflight.json` in that candidate directory.
+See the newer attempt-29 entry for its consumed permission, failure and cleanup.
 
 ## H06 attempt 27: hidden Host throttled by App Nap — 2026-10-16
 
