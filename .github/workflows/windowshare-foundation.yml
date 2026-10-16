@@ -13,6 +13,11 @@ on:
       - 'src/lib/platform/OSXComputer.mm'
       - 'src/lib/platform/OSXComputer.h'
       - 'src/lib/platform/OSXKeyState.*'
+      - 'src/lib/platform/OSXMainThread.h'
+      - 'src/lib/platform/OSXAutoTypes.h'
+      - 'src/lib/platform/IOSXKeyResource.cpp'
+      - 'src/lib/deskflow/unix/AppUtilUnix.*'
+      - 'src/unittests/platform/OSXMainThreadTests.cpp'
       - 'src/unittests/platform/OSXKeyStateTests.*'
       - 'src/unittests/platform/EiComputer*'
       - 'src/unittests/platform/CMakeLists.txt'
@@ -61,6 +66,11 @@ on:
       - 'src/lib/platform/OSXComputer.mm'
       - 'src/lib/platform/OSXComputer.h'
       - 'src/lib/platform/OSXKeyState.*'
+      - 'src/lib/platform/OSXMainThread.h'
+      - 'src/lib/platform/OSXAutoTypes.h'
+      - 'src/lib/platform/IOSXKeyResource.cpp'
+      - 'src/lib/deskflow/unix/AppUtilUnix.*'
+      - 'src/unittests/platform/OSXMainThreadTests.cpp'
       - 'src/unittests/platform/OSXKeyStateTests.*'
       - 'src/unittests/platform/EiComputer*'
       - 'src/unittests/platform/CMakeLists.txt'
@@ -294,8 +304,8 @@ jobs:
       - run: ctest --test-dir build/app --output-on-failure
       - name: Configure opt-in Deskflow integration
         run: cmake -S . -B build/integrated -DBUILD_WINDOWSHARE=ON -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-      - run: cmake --build build/integrated --target deskflow-core EventQueueTests windowshare-core-args-tests OriginalInputCoordinatorTests ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests SecurePeerIdentityTests OSXKeyStateTests --parallel 3
-      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(EventQueueTests|OriginalInputCoordinatorTests|ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests|SecurePeerIdentityTests|windowshare-core-args)$' --output-on-failure
+      - run: cmake --build build/integrated --target deskflow-core EventQueueTests windowshare-core-args-tests OriginalInputCoordinatorTests ServerTests ClientProxyTests ServerProxyTests InputSequenceTests ComputerInputSequenceTests SecurePeerIdentityTests OSXKeyStateTests OSXMainThreadTests --parallel 3
+      - run: QT_QPA_PLATFORM=offscreen ctest --test-dir build/integrated/src/unittests -R '^(EventQueueTests|OriginalInputCoordinatorTests|ServerTests|ClientProxyTests|ServerProxyTests|InputSequenceTests|ComputerInputSequenceTests|SecurePeerIdentityTests|OSXMainThreadTests|windowshare-core-args)$' --output-on-failure
       - name: Verify Mac hotkey modifier mapping without posting input
         env:
           QT_QPA_PLATFORM: offscreen
@@ -303,8 +313,8 @@ jobs:
       - name: Check ordinary Core compatibility with window sharing disabled
         run: |
           cmake -S . -B build/legacy -DBUILD_WINDOWSHARE=OFF -DBUILD_INSTALLER=OFF -DBUILD_OSX_BUNDLE=OFF -DBUILD_TESTS=ON -DSKIP_BUILD_TESTS=ON -DCMAKE_OSX_SYSROOT=/Applications/Xcode_16.4.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-          cmake --build build/legacy --target deskflow-core EventQueueTests ServerTests ClientProxyTests ServerProxyTests --parallel 3
-          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(EventQueueTests|ServerTests|ClientProxyTests|ServerProxyTests)$' --output-on-failure
+          cmake --build build/legacy --target deskflow-core EventQueueTests ServerTests ClientProxyTests ServerProxyTests OSXMainThreadTests --parallel 3
+          QT_QPA_PLATFORM=offscreen ctest --test-dir build/legacy/src/unittests -R '^(EventQueueTests|ServerTests|ClientProxyTests|ServerProxyTests|OSXMainThreadTests)$' --output-on-failure
       - name: Verify mixed input state, capture lifecycle and private CGEvent construction
         run: |
           cmake -S src/unittests/windowshare -B build/keyboard -DWINDOWSHARE_SANITIZERS=ON
