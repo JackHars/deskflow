@@ -2217,6 +2217,7 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
     unsigned queries = 0;
     nativeCandidateObserver = [&] { ++queries; };
     check(fixture.host.originalInputBoundary(binding), "Exact neutral All boundary was missing");
+    check(!fixture.host.originalInputRouteActive(binding), "Quiescence claimed an active original route");
     check(queries == 0, "Local ledger query repeated native focus validation");
     nativeHeldButtons.insert(0);
     check(!fixture.host.originalInputBoundary(binding), "Boundary ignored an outstanding legacy button");
@@ -2227,6 +2228,9 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
     check(fixture.host.activateOriginalKeyboard(binding, 72), "Native endpoint failed to commit");
     check(queries == 1, "Native establishment repeated its own fresh authority query");
     queries = 0;
+    check(fixture.host.originalInputRouteActive(binding), "Committed original route was missing");
+    check(!fixture.host.originalInputRouteActive(wrong), "Route state accepted another geometry binding");
+    check(queries == 0, "Local route state repeated the separate active authority check");
     check(fixture.host.nativeOriginalInputCurrent(binding, 72), "Native endpoint was not current");
     check(queries == 1, "Bridge repeated NativeHost's focus and geometry validation");
     check(!fixture.host.nativeOriginalInputCurrent(binding, 73), "Native endpoint accepted a different capture");
@@ -2259,6 +2263,7 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
       BridgeTestAccess::channel(fixture.host)->close("Disconnect inside native current query", CloseCause::Network);
     };
     check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Native query ignored reentrant connection loss");
+    check(!fixture.host.originalInputRouteActive(binding), "Disconnected route remained active");
     check(fixture.revokes == 1, "Reentrant native query did not revoke ownership");
   }
 }

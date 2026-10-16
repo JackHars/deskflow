@@ -1667,7 +1667,7 @@ struct NativeHost::Impl
   }
   std::optional<KeyboardRouteBinding> keyboardRouteCandidate(
       std::uint64_t session, std::uint64_t epoch, std::uint64_t generation,
-      ForwardingScope scope = ForwardingScope::Keyboard
+      ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr
   ) const
   {
     const SlowOperationDiagnostic timing("Host", "native.keyboard-route-candidate");
@@ -1693,7 +1693,11 @@ struct NativeHost::Impl
         state->minimized.value_or(false) || !sameGeometry(state->frame, e->session.source) ||
         (e->moved && !holding.available()))
       return std::nullopt;
-    return lifecycle->current(admitted) ? std::optional(binding) : std::nullopt;
+    if (!lifecycle->current(admitted))
+      return std::nullopt;
+    if (observedFrame)
+      *observedFrame = state->frame;
+    return binding;
   }
   bool clipboardCurrent(const std::shared_ptr<const ClipboardTarget> &target) const
   {
@@ -2308,21 +2312,20 @@ struct NativeHost::Impl
       return false;
     QPointer<NativeHost> alive(q);
     const auto target = originalTarget;
-    const auto candidate =
-        keyboardRouteCandidate(binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All);
+    Rect frame;
+    const auto candidate = keyboardRouteCandidate(
+        binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame
+    );
     if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
       return false;
     const auto current = identity(target->identity.id);
     if (!alive)
       return false;
-    const auto frame = bounds(target->window.get());
-    if (!alive)
-      return false;
     const auto *e = entry(binding.owner.session, binding.owner.epoch);
     return lifecycle->current(admitted) && originalTarget == target && originalInput.current(binding, captureEpoch) &&
-           current && frame && e && CFEqual(e->window, target->window.get()) && current->pid == target->identity.pid &&
-           current->launch == target->identity.launch && sameGeometry(*frame, target->frame) &&
-           sameGeometry(e->session.source, target->frame);
+           current && e && CFEqual(e->window, target->window.get()) && current->pid == target->identity.pid &&
+           current->launch == target->identity.launch && sameGeometry(frame, target->frame) &&
+           sameGeometry(current->frame, target->frame) && sameGeometry(e->session.source, target->frame);
   }
   bool establishOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch)
   {

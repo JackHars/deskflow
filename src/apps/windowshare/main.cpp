@@ -941,6 +941,12 @@ public:
     const bool current = m_native->originalInputCurrent(binding, captureEpoch);
     return alive && current && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
+  // Local route state only. Preflight's isActive callback independently reads
+  // fresh native authority before acknowledging Commit or allowing delivery.
+  bool originalInputRouteActive(const KeyboardRouteBinding &binding) const
+  {
+    return binding.scope == ForwardingScope::All && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
+  }
   bool deliverNativeOriginalInput(
       const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
   )
@@ -1551,7 +1557,10 @@ private:
             !m_established || m_cleaning || m_shuttingDown)
           return;
         const QPointer<Bridge> alive(this);
-        const bool neutral = originalKeyboardQuiesced(binding);
+        // All quiescence acknowledges only the closed legacy gate and empty
+        // ledger. Prepare/Commit still require their own fresh native checks.
+        const bool neutral =
+            binding.scope == ForwardingScope::All ? originalInputBoundary(binding) : originalKeyboardQuiesced(binding);
         if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
             m_keyboardRoute->phase != KeyboardPhase::Quiesced || m_connectionGeneration != generation)
           return;
@@ -2846,8 +2855,7 @@ int main(int argc, char **argv)
       };
       checks.deliveryReady = [&](const LocalInputLease &lease) {
         const auto binding = inputBinding(lease);
-        return bridge.nativeOriginalInputCurrent(binding, lease.captureEpoch) ||
-               bridge.originalKeyboardQuiesced(binding);
+        return bridge.originalInputRouteActive(binding) || bridge.originalKeyboardQuiesced(binding);
       };
       // Core independently proves the captured fresh transition. The host
       // proves its own old delivered owners are released under the exact All
