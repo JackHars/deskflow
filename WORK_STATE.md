@@ -1,5 +1,83 @@
 # Seamless Windows work state
 
+## H06 attempt 28: preparation timeout and Host stall during input — 2026-10-16
+
+Permission `call_25eab23a1a89476583ee2b0ae5c2b65b` was consumed by
+`build/h06-r28-3gbg3emp/`, runtime `fcd3547516`, on jack's actual Ubuntu
+monitor. Active was reached at 20:10:33.107 UTC. The user reported closure
+when scrolling in the text box. Original-input preparation had already been
+requested at 20:10:50.427 and expired at 20:10:50.928, before the later stall.
+No original-input owner became live and recording never armed.
+
+The App Nap correction worked: macOS records this exact Host PID 18915 as
+inactive for App Nap with Tier0 timers at 20:10:47.312. It did not eliminate
+the later stall. Core revoked the private channel at 20:11:03.409; Host
+readiness gaps reached 2138ms and 1874ms, versus 165ms in Core. The saved
+outer failure was Host `QueueAccounting` with no site. That may be secondary
+to teardown; it is not proof that scrolling or queue accounting caused the
+stall. See `build/h06-r28-3gbg3emp/failure-summary.json` and
+`mac-scheduling-early.log` for the retained sequence.
+
+Cleanup restored the source to (400,188,640,448), with zero held keys/buttons.
+Core exited 0 through private IPC; the companion and owned local processes
+stopped. Ubuntu reports desktop restoration, owned processes stopped and
+ordinary settings preserved. Unarmed evidence and Ubuntu stop exit 1 remain
+recorded. Ubuntu archive SHA-256:
+`a3c9b469292236b2e1cd15bada20a7e7f9c11e35508edf6104dbfc218efad4bf`.
+
+Runtime `65dd423626626da0b2071067a855d62f30cc9a7a` addresses two demonstrated
+scheduling defects: repeated socket notifications could bypass the network
+read work budget, and private reads could recursively dispatch and had no
+elapsed-work budget. Both channels now coalesce deferred reads; private
+reads also yield between callbacks after 8ms. Individual native calls cannot
+be preempted by this budget. No authority deadline or routing rule is relaxed.
+Real socket/process regressions fail against the earlier implementation and
+pass after correction. Slow-callback scheduling uses a fake work clock;
+no sleeps were added. The existing retired-capture authorization test now
+injects at the authorization boundary independently of serialized decoding,
+and still proves that the older record cannot be delivered or reset replay state.
+
+Diagnostics print each initial handoff stage once with elapsed time and the
+original remaining budget, synchronous native input/poll/child checks taking
+25ms or more, the first private-channel close reason with queue/heartbeat
+counts, and the exact private accounting failure site. These diagnostics do
+not authorize input or extend deadlines. The physical cause still needs
+verification; this change is not a claimed H06 pass.
+
+Evidence: `build/read-dispatch-ui9j2vl6/`. Mac private input, both TLS backends,
+preflight, companion and evidence suites pass; integrated coordinator tests
+pass. Ubuntu's five corresponding suites and integrated coordinator tests
+pass. Both machines pass 45 Python fixture checks. Mac scoped ASan/UBSan
+private-channel and transport suites pass 2/2 (73.36s); Qt/system libraries
+are not instrumented. Initial fixture failures and the corrected checks are
+retained, as is the build invocation with an incorrect final target name.
+The corrected target builds successfully.
+
+Previous hosted run `38959812367` finished with five jobs passing and a
+GNOME fixture failure: two separate event-log snapshots produced an invalid
+interval. The fixture now freezes one snapshot for each interval, retaining
+its strict input-leak checks. New [hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
+is in progress. Source run `38962542788` passes and independently verifies
+all 1187 file contents/modes, the index and exact commit. Source archive SHA-256:
+`d2375b8276f15a27bb9cfadacbc42bfea848fb02c6ecc02f66c8054a78d0dc1b`.
+
+Attempt 28's permission is consumed. Build/package preparation is unattended;
+obtain fresh permission immediately before the next physical launch. H03–H12
+and the native/library/OS queue review remain open.
+
+Attempt 29 is prepared, unlaunched, at `build/h06-r29-x9_agpvf/`, frozen to
+`65dd423626626da0b2071067a855d62f30cc9a7a` with fresh identities. Both platforms
+use the new package. Mac package audit passes 77 libraries with no errors;
+ZIP SHA-256 `9b70aef540350b1c3e1b4a5ed1d464d3f4efc547f9c9096cf055498fbc31fffd`.
+Ubuntu archive SHA-256 `f64fbce9be5281d8edb42604049dfa5707b10d734115c0c2cef3854ad0eb4b6f`;
+all 26 manifest files, native dependencies and offscreen startup checks pass.
+Live preflight at 20:32:19 UTC confirms actual jack's unlocked Wayland session 2,
+matching binary hashes, all Mac permissions and no competing primary. Exact
+packaged admission passes in 11.667s with native input disabled and its companion
+stopped. Preparation did not open a test window or enable desktop sharing.
+Fresh launch permission remains required. See `preparation-summary.json` and
+`final-preflight.json` in that candidate directory.
+
 ## H06 attempt 27: hidden Host throttled by App Nap — 2026-10-16
 
 Fresh permission `call_7a128b3087b84019a91d1068462f0435` was consumed by
@@ -23,8 +101,8 @@ Runtime `fcd35475167f21e6e9d4ae598261dab358423150` gives each active export a sc
 capture and released with that exact export, including setup failure and
 restoration. Logs retain activity acquisition/release. It does not inhibit
 system/display sleep, alter input authority, extend deadlines or add sleeps.
-The observed throttling defect is addressed; whether this also resolves the
-preparation timeout still requires a fresh physical run.
+Subsequent attempt 28 verifies App Nap inactive; preparation and a later stall
+remain unresolved, as recorded in the newest entry above.
 
 Mac Host build and placement/recovery/activity tests pass 3/3 (1.10s). Activity
 checks cover overlapping exports, individual/last release, setup-error cleanup,
@@ -52,17 +130,14 @@ The signed Mac package passes its 77-library audit with no errors. ZIP SHA-256:
 Hosted source bundle `38959812726` independently verifies all 1187 tracked
 files/modes/blobs and the exact commit. Its archive SHA-256 is
 `75c47838d5a05411d9f5f4654b76edcd70eb15c170b5942e5a49e8c36af61596`.
-The new [six-job hosted run](https://github.com/JackHars/deskflow/actions/runs/38959812367)
-is still in progress; both portable compiler jobs have passed.
+The [six-job hosted run](https://github.com/JackHars/deskflow/actions/runs/38959812367)
+finished with five passes and one GNOME fixture snapshot race, addressed above.
 
-Attempt 28 is prepared, unlaunched, at `build/h06-r28-3gbg3emp/`, frozen to
-`fcd35475167f21e6e9d4ae598261dab358423150` with fresh identities. The separately
-verified Ubuntu `b20bbf39d2` package is reused because the runtime change is
-Mac-only. Actual jack's unlocked Wayland session 2 and binary hashes pass
-preflight. Mac permissions, no competing primary, hidden-source/separate-control
-plans and exact packaged admission pass (11.966s, native input disabled).
-No test window or input sharing started during this preparation. Fresh physical
-launch permission is required.
+Attempt 28 was prepared at `build/h06-r28-3gbg3emp/` with fresh identities,
+the signed `fcd3547516` Mac package and verified compatible `b20bbf39d2`
+Ubuntu package. Its passing preflight did not authorize delivery. Fresh
+permission was subsequently granted and consumed; the failure is recorded
+in the newest entry above.
 
 ## H06 attempt 26: AX notification registration failure — 2026-10-16
 

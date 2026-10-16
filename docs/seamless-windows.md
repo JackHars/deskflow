@@ -3,19 +3,17 @@
 ## Current implementation — 2026-10-16
 
 P1–P8 code is integrated, but the product is not physically accepted. Latest
-attended attempt 27 reached Active with verified hidden placement. Original
-input preparation then expired and the hidden Host later lost its heartbeat.
-Mac system logs confirm App Nap throttling of that exact Host process.
-Runtime `fcd3547516` retains an interactive activity for each export and
-releases it on cleanup, while allowing normal system sleep. Placement,
-recovery and activity tests pass 3/3; actual input still needs verification.
-Linux runtime sources are unchanged; see `TESTING.md` for retained package
-identities, diagnostics, cleanup limitations and hosted checks.
+attended attempt 28 reached Active with hidden source placement and App Nap
+inactive. Original-input preparation expired, then the Host stalled and lost
+private authority during the input sequence. Runtime `65dd42362` coalesces read
+notifications, bounds private dispatch work between callbacks, and logs handoff
+stages, slow native calls and precise close/accounting reasons. Mac/Ubuntu
+regressions and scoped Mac sanitizer checks pass; the physical cause still needs
+verification. See `TESTING.md` for exact evidence and cleanup limitations.
 
-The current checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs
-fresh permission immediately before launch, uses jack's actual desktop and
-retains printed diagnostics. Attempt 27's permission has been consumed.
-
+The checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs fresh
+permission immediately before launch, uses jack's actual desktop and retains
+printed diagnostics. Attempt 28's permission has been consumed.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

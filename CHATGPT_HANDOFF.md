@@ -9,29 +9,30 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 ## Current completion checklist — 2026-10-16
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Latest attended attempt 27 reached
-Active on actual jack with verified hidden source placement, but original-input
-preparation expired and recording never armed. The Host later lost its private
-heartbeat; macOS logs confirm App Nap throttling of that exact hidden process.
-Both desktops/settings were restored with neutral final input receipts, while
-broken-pipe cleanup diagnostics remain recorded.
+The product is **not physically accepted**. Latest attended attempt 28 reached
+Active on actual jack with hidden source placement; original-input preparation
+expired before the later Host stall and closure reported while scrolling.
+The App Nap guard kept App Nap inactive, but did not solve the entire failure.
+Both desktops and neutral input were restored; cleanup limitations remain logged.
 
-Current runtime `fcd3547516` adds an activity guard for each shared window,
-released on closure or failed setup, while allowing normal system sleep.
-Mac build and placement/recovery/activity tests pass 3/3. See `TESTING.md` for
-physical evidence and package status. Linux runtime code is unchanged; the
-verified `b20bbf39d2` package remains compatible. That previous runtime passes
-all six [hosted jobs](https://github.com/JackHars/deskflow/actions/runs/38924548952).
-The new fix still needs physical verification, including the preparation timeout.
+Current runtime `65dd42362` coalesces queued reads and bounds private dispatch
+work between callbacks. New burst regressions reproduce the old scheduling
+defects. Mac/Ubuntu channel, handoff and fixture checks pass, as do scoped Mac
+sanitizers. Stage timing, slow native work, heartbeat and accounting diagnostics
+now preserve more of the failure sequence. This is not a physical pass.
+See the newest `TESTING.md` entry for precise evidence and package status.
 
-Attempt 28 (`build/h06-r28-3gbg3emp/`) is prepared with a signed Mac package
-and passing live preflight; it has not launched. The new hosted run
-[38959812367](https://github.com/JackHars/deskflow/actions/runs/38959812367) is still
-in progress. Attempt 27's permission is consumed. Do not reuse an older plan.
-Refresh the current candidate's live preflight and obtain fresh permission
-immediately before any further physical launch. Tests use jack's actual Ubuntu
-monitor, separate Mac controls, hidden source placement and saved diagnostics
-with no results popup.
+Hosted run [38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
+is in progress; its source bundle is independently verified. The previous run's
+GNOME test snapshot race is corrected. Attempt 28's permission is consumed.
+Refresh the candidate's live preflight and obtain fresh permission immediately
+before every further physical launch. Use jack's actual Ubuntu monitor, separate
+Mac controls, hidden source placement and saved diagnostics, with no results popup.
+
+Attempt 29 (`build/h06-r29-x9_agpvf/`) is prepared and unlaunched with both new
+packages, matching binaries and passing live preflight at 20:32:19 UTC. Mac
+packaged admission passes with native input disabled. No test window has opened.
+Obtain fresh permission before running its frozen launch plan.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.
