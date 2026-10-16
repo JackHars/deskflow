@@ -87,7 +87,7 @@ public:
   // Reports the runtime API schema, not proof that display creation will work.
   static bool supported(QString *reason = nullptr);
   bool create(QString *error = nullptr, unsigned width = 1920, unsigned height = 1080);
-  bool available() const;
+  bool available(QString *reason = nullptr) const;
   std::uint32_t displayId() const;
   Rect bounds() const;
 

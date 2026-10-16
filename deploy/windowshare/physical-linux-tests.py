@@ -210,8 +210,10 @@ class PreparedSession(unittest.TestCase):
                     patch.object(module, 'pin', return_value=pin), patch.object(module, 'Controls', return_value=controls), \
                     patch.object(module, 'emit', side_effect=replies.append):
                 self.assertEqual(module.session(args), 0)
-            self.assertEqual([r['event'] for r in replies], ['prepared', 'stopped'])
-            self.assertFalse(replies[0]['nativeProcessesStarted'])
+            lifecycle = [r for r in replies if r['event'] != 'diagnostic']
+            self.assertEqual([r['event'] for r in lifecycle], ['prepared', 'stopped'])
+            self.assertTrue(any(r['event'] == 'diagnostic' for r in replies))
+            self.assertFalse(lifecycle[0]['nativeProcessesStarted'])
             self.assertTrue(replies[-1]['lifecycleCompleted'])
             cross.UnixRelay.assert_not_called()
             cross.qt.start_shell.assert_not_called()
@@ -239,7 +241,8 @@ class PreparedSession(unittest.TestCase):
                     patch.object(module, 'pin', return_value=pin), patch.object(module, 'Controls', return_value=controls), \
                     patch.object(module, 'emit', side_effect=replies.append):
                 self.assertEqual(module.session(args), 0)
-            self.assertEqual([r['event'] for r in replies], ['prepared', 'stopped'])
+            self.assertEqual([r['event'] for r in replies if r['event'] != 'diagnostic'], ['prepared', 'stopped'])
+            self.assertTrue(any(r['event'] == 'diagnostic' for r in replies))
             self.assertEqual(replies[-1]['id'], 2)
             self.assertEqual(replies[-1]['status'], 'completed-startup-cancelled')
             self.assertEqual(relay.close.call_count, 2)
@@ -312,6 +315,9 @@ FAKE_CHILD = r'''
 import json,sys
 protocol=int(sys.argv[2])
 scope={'routeMode':'production-original-input','macOriginalInputConfigured':True} if protocol==3 else {}
+for sequence in range(int(sys.argv[3])):
+    print(json.dumps({'event':'diagnostic','diagnostic':{'schema':'deskflow-physical-diagnostic-v1',
+          'sequence':sequence+1,'step':'Provider readiness','state':'observed','message':'waiting'}}),flush=True)
 print(json.dumps({'event':'prepared','controlProtocol':protocol,'windowId':42,**scope}),flush=True)
 for line in sys.stdin:
     value=json.loads(line)
@@ -326,7 +332,7 @@ raise SystemExit(9)
 
 class Supervisor(unittest.TestCase):
     def drive(self, *, exit_code=0, changed_at_start=False, changed_at_exit=False, start=True, early_stop=False,
-              original=False, prepared_protocol=None, user_desktop=False, desktop_changed=False):
+              original=False, prepared_protocol=None, user_desktop=False, desktop_changed=False, diagnostic_count=0):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run = Path(temporary.name)
@@ -368,7 +374,7 @@ class Supervisor(unittest.TestCase):
             if user_desktop:
                 self.assertNotIn('docker', _arguments)
             child = real_popen([sys.executable, '-c', FAKE_CHILD, str(exit_code),
-                               str(prepared_protocol or protocol)], **kwargs)
+                               str(prepared_protocol or protocol), str(diagnostic_count)], **kwargs)
             children.append(child)
             return child
 
@@ -411,6 +417,14 @@ class Supervisor(unittest.TestCase):
                                                 'desktopRestored': True, 'controllerExit': 0})
         self.assertEqual(report['linuxEnvironment'], 'user-desktop')
         self.assertFalse(report['compositorOwned'])
+        self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+
+    def test_diagnostics_relay_does_not_consume_command_reply_limit_or_start_authority(self):
+        result, replies, report = self.drive(original=True, user_desktop=True, diagnostic_count=300)
+        self.assertEqual(result, 0)
+        self.assertEqual(len([row for row in replies if row['event'] == 'diagnostic']), 300)
+        self.assertEqual([row['event'] for row in replies if row['event'] != 'diagnostic'],
+                         ['prepared', 'ready', 'stopped'])
         self.assertEqual(report['physicalAcceptance'], 'not-assessed')
 
     def test_replaced_desktop_before_start_is_not_launched(self):

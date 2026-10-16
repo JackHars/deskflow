@@ -1,5 +1,57 @@
 # Seamless Windows work state
 
+## Attempt eighteen and persistent diagnostics — 2026-10-15
+
+Permission `call_0c4a5ca69ff04dc5a8b0a97591b9851e` was consumed by
+`build/h06-r18-i25moopp/`. Explicit holding/separate controls were enabled on
+jack's actual desktop, without a Mac preview. The first substantive error was
+`The helper's holding display failed independent geometry verification`, followed
+by `Source-visible fallback changed during holding-display creation`. At
+19:52:34 Core lost the trusted companion channel; the coordinator only reported
+`Exact Core or authenticated companion process changed`. No recorder armed.
+This does not establish physical H04/H06 acceptance or the specific native
+predicate that rejected the display.
+
+Source window 11180 moved from (400,190,640,448) to (9,50,640,448); separate
+controls 11181 remained visible and stationary. The old result's
+`sourceRelocationObserved:true` only meant a changed frame and is not hiding
+proof. Preserve the failed result. The final source has zero held keys/buttons
+but the wrong frame. The journal is empty; source restoration was not accepted.
+Mac Core/source exited 0, the companion stopped, and ordinary settings match.
+Ubuntu reports owned processes stopped, desktop restored and ordinary state
+preserved; Core/controller exit 1 and relay/IPC cleanup failures remain recorded.
+Collected Ubuntu archive SHA-256:
+`df0fb1041c01d2aedc250215c8f98e8f8e0f7db33c8b56f8acf7ed06a722da53`.
+
+The user now explicitly requires diagnostic prints at every step, without sleep
+statements, before another physical launch. Added flushed, timestamped Mac and
+Ubuntu stage logs, readiness changes, exact process-loss labels, first-failure
+retention and native capture/holding/restore diagnostics. Helper stderr now
+reaches the Host log; failed display verification names its precise predicate.
+The Mac wait loop uses receipt-change notifications with deadline checks, with
+no artificial visibility delays. After teardown a separate read-only report
+stays open until Dismiss. It never constructs a source recorder or input filter.
+
+H06 now requires the committed Host placement and matching observed source
+frame wholly on the holding display, outside the physical displays, before
+showing Active. Also fixed the recovery bookkeeping gap: a display-creation
+attempt must durably arm restoration before it can rearrange the source, even
+if no explicit window move or Remote commit succeeds. Native-free rollback
+coverage simulates the observed (9,50) displacement and failed creation.
+
+Validation/preparation evidence is `build/physical-diagnostics-fxxw1od6/`.
+Mac coordinator tests: 79 pass; Linux lifecycle tests: 31 pass; desktop tests:
+8 pass/1 Linux-only skip on Mac, all 9 pass on actual jack. All three Python
+suites also pass over SSH on jack without a native session. The persistent Qt
+report tests pass offscreen on Mac and in the private Linux build container.
+Mac Server/coordinator/preflight CTests pass (22.23s). This validates diagnostics,
+not physical display creation or input delivery. The native recovery regression
+also passes (0.54s), including the failed display-creation rollback. Collected
+Linux diagnostics-validation archive SHA-256:
+`c8f5567b67a08dd9d861e8910bcdc80d9f7b1ae64969bd3c86c11270be03fb93`.
+No new physical test has been
+launched by this work; obtain fresh permission immediately before the next one.
+
 ## Seamless test placement and handoff diagnosis — 2026-10-15
 
 The user requests the original Mac window hidden while it is used on jack's
@@ -37,8 +89,8 @@ output; the retry explicitly selected the build's Qt 6.8.3 deployment tool.
 Collected Linux validation archive SHA-256:
 `71b0e27cb66a7b6be8420b21f3435327822d35f5940cab7a07d3d809defa5eab`.
 
-H04 input readiness and H06 hiding/restoration remain unaccepted. No new physical
-test has been launched by this work.
+H04 input readiness and H06 hiding/restoration remain unaccepted. This was the
+preparation record; the separately approved attempt eighteen is recorded above.
 
 Fresh preparation is `build/h06-r18-i25moopp/` (pointer
 `build/h06-r18-current.txt`), source commit `22d7695c0`. It freezes the rebuilt
@@ -46,9 +98,9 @@ signed bundle and revised source, fresh private identities, explicit holding
 display/separate controls, no preview, and jack's existing unlocked session 2.
 Plan validation, permissions and conflict checks pass. The packaged admission
 probe passes in 10.81s with native input hooks disabled and its companion stopped.
-`prepared-launch-argv.json` is reviewable; `physicalLaunchAuthorized:false` remains
-in the preparation record. A fresh launch-permission question is pending. Do not
-reuse any earlier approval or describe this prepared run as launched/passed.
+`prepared-launch-argv.json` remains reviewable; the historical preparation record
+is followed by the consumed launch-permission receipt and failed attempt above.
+Do not reuse that approval or replay the already consumed preparation.
 
 ## Actual-desktop attempt seventeen and display clarification — 2026-10-15
 

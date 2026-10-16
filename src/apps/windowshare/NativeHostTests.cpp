@@ -809,6 +809,29 @@ void preparationCancellation()
       "cancelled preparation cannot revive through delayed persist/Ready completion"
   );
 
+  Fixture failedDisplay;
+  check(
+      failedDisplay.transaction.armMutation([&] {
+        check(failedDisplay.transaction.journalRestoreRequired(), "display change has write-ahead recovery intent");
+        return true;
+      }),
+      "display creation is an attempted source mutation before any AX placement"
+  );
+  // The helper fails geometry verification after WindowServer repositions the
+  // still-local source; no placement or Remote commit has happened.
+  failedDisplay.source = {9, 50, 640, 480};
+  check(
+      failedDisplay.cancel() == NativeSourceReturnResult::Closed && failedDisplay.moves == 1 &&
+          failedDisplay.source.x == 100 && failedDisplay.source.y == 100,
+      "failed display creation restores the source even without an explicit move or remote commit"
+  );
+  Fixture deniedDisplay;
+  check(!deniedDisplay.transaction.armMutation([] { return false; }), "failed journal cannot permit display creation");
+  check(
+      deniedDisplay.cancel() == NativeSourceReturnResult::Closed && !deniedDisplay.nativeQueries,
+      "a display change refused before creation leaves the local source untouched"
+  );
+
   for (const bool committed : {false, true}) {
     Fixture fixture;
     check(fixture.transaction.arm([] { return true; }), "mutation/commit recovery intent persisted");

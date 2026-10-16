@@ -32,6 +32,10 @@ SPEC = importlib.util.spec_from_file_location(
     "crossmachine_mac", Path(__file__).with_name("crossmachine-macos-smoke.py"))
 CROSS = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CROSS)
+DIAGNOSTICS_SPEC = importlib.util.spec_from_file_location(
+    "physical_diagnostics", Path(__file__).with_name("physical-diagnostics.py"))
+DIAGNOSTICS = importlib.util.module_from_spec(DIAGNOSTICS_SPEC)
+DIAGNOSTICS_SPEC.loader.exec_module(DIAGNOSTICS)
 require = CROSS.require
 MAX_SEQUENCE = 2**53 - 1
 # Child authentication has a 15-second deadline and subsequent exact-library
@@ -242,7 +246,7 @@ class ReceiptHistory:
 
 
 class Collector:
-    def __init__(self, path, pid, title, output, session_seconds=120):
+    def __init__(self, path, pid, title, output, session_seconds=120, changed=None):
         self.path, self.pid, self.title = path, pid, title
         self.history = ReceiptHistory(session_seconds)
         self.latest = None
@@ -251,6 +255,7 @@ class Collector:
         self.publication_observed = None
         self.lock = threading.Lock()
         self.stopping = threading.Event()
+        self.changed = changed
         self.stream = output.open("x", buffering=1)
         self.thread = threading.Thread(target=self.loop, daemon=True)
         self.thread.start()
@@ -279,9 +284,13 @@ class Collector:
                         if identity != self.publication_identity:
                             self.publication_identity = identity
                             self.publication_observed = time.monotonic()
+                            if self.changed:
+                                self.changed.set()
                 self.stopping.wait(0.025)
         except Exception as error:
             self.error = str(error)
+            if self.changed:
+                self.changed.set()
 
     def snapshot(self):
         require(self.error is None, "Receipt collector failed: " + str(self.error))
@@ -306,7 +315,7 @@ class Cancelled(RuntimeError):
 
 
 class Driver:
-    def __init__(self, process, transcript, check):
+    def __init__(self, process, transcript, check, diagnostics=None):
         self.process, self.transcript, self.check = process, transcript, check
         self.selector = selectors.DefaultSelector()
         self.selector.register(process.stdout, selectors.EVENT_READ)
@@ -315,6 +324,8 @@ class Driver:
         self.rows = 0
         self.pending = {}
         self.prepared_seen = False
+        self.diagnostics = diagnostics
+        self.diagnostic_rows = 0
 
     def event(self, expected, timeout=30, check=True, request_id=None):
         deadline = time.monotonic() + timeout
@@ -330,13 +341,24 @@ class Driver:
                 require(len(self.buffer) <= 262144, "Linux control reply exceeded bound")
                 continue
             line, self.buffer = self.buffer.split(b"\n", 1)
-            self.rows += 1
-            require(self.rows <= 256, "Too many Linux replies")
             value = json.loads(line, object_pairs_hook=unique_object)
             require(isinstance(value, dict), "Linux reply is not an object")
             self.transcript.write(json.dumps({"received": value}) + "\n")
             self.transcript.flush()
             kind = value.get("event")
+            if kind == "diagnostic":
+                self.diagnostic_rows += 1
+                require(self.diagnostic_rows <= 2048 and self.diagnostics is not None,
+                        "Unexpected or excessive Linux diagnostics")
+                self.diagnostics.remote(value.get("diagnostic"))
+                continue
+            self.rows += 1
+            require(self.rows <= 256, "Too many Linux replies")
+            if kind == "failed":
+                # Preserve the Linux failure before a generic reply-ID/EOF
+                # error can hide it, including failures between commands.
+                raise RuntimeError("Ubuntu test failed: " + str(value.get("failure")) +
+                                   "; cleanup=" + str(value.get("cleanupErrors", [])))
             if kind == "prepared":
                 require(not self.prepared_seen and "id" not in value, "Repeated Linux preparation")
                 self.prepared_seen = True
@@ -360,6 +382,12 @@ class Driver:
         raise RuntimeError("Linux control timed out waiting for " + expected)
 
     def command(self, operation, check=True):
+        if self.diagnostics:
+            with self.diagnostics.step("Ubuntu " + operation + " request"):
+                return self._command(operation, check)
+        return self._command(operation, check)
+
+    def _command(self, operation, check=True):
         self.sequence += 1
         value = {"id": self.sequence, "op": operation}
         self.transcript.write(json.dumps({"sent": value}) + "\n")
@@ -594,28 +622,53 @@ def run(arguments):
     inspector = original.ProcessInspector() if production else None
     core_identity = companion_identity = None
     initial = None
+    wake = threading.Event()
+    diagnostics = DIAGNOSTICS.Diagnostics(output / "diagnostics.jsonl", "Mac coordinator",
+        sink=lambda row: print(json.dumps({"event": "diagnostic", "diagnostic": row}), flush=True))
+    native_log = DIAGNOSTICS.LogObserver(output / "core.log", diagnostics)
+    source_log = DIAGNOSTICS.LogObserver(output / "source.log", diagnostics)
+    phase = None
+
+    def stage(name):
+        nonlocal phase
+        if phase:
+            diagnostics.emit(phase, "completed", phase)
+        phase = name
+        diagnostics.emit(name, "started", name)
 
     def emit(value):
+        diagnostics.emit(value["event"], "observed", value["event"], **{k: v for k, v in value.items() if k != "event"})
         print(json.dumps(value, allow_nan=False), flush=True)
 
-    def command(argv, timeout=15, env=None):
-        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
-        require(result.returncode == 0, "Command failed: " + shlex.join(argv) +
-                "\n" + (result.stderr or result.stdout)[-2500:])
-        return result.stdout
+    def command(argv, timeout=15, env=None, observe=True):
+        # Arguments can include private configuration; label only the program.
+        def execute():
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+            require(result.returncode == 0, "Command failed: " + Path(argv[0]).name +
+                    " (exit " + str(result.returncode) + ")\n" + (result.stderr or result.stdout)[-2500:])
+            return result.stdout
+        if not observe:
+            return execute()
+        with diagnostics.step("Run " + Path(argv[0]).name, timeoutSeconds=timeout):
+            return execute()
 
-    def remote(argv, timeout=15):
-        return command([*ssh, arguments.ssh_target, shlex.join(argv)], timeout)
+    def remote(argv, timeout=15, observe=True):
+        return command([*ssh, arguments.ssh_target, shlex.join(argv)], timeout, observe=observe)
 
     def launch(name, argv, pipe=False, env=None):
-        log = (output / (name + ".log")).open("xb")
-        streams.append(log)
-        process = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE if pipe else subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE if pipe else log, stderr=log, start_new_session=True)
-        owned[name] = process
-        return process
+        with diagnostics.step("Launch " + name):
+            log = (output / (name + ".log")).open("xb")
+            streams.append(log)
+            process = subprocess.Popen(argv, env=env, stdin=subprocess.PIPE if pipe else subprocess.DEVNULL,
+                                       stdout=subprocess.PIPE if pipe else log, stderr=log, start_new_session=True)
+            owned[name] = process
+            diagnostics.observe(name + " process", {"pid": process.pid, "log": str(output / (name + ".log"))})
+            return process
 
     def check(allow_stop=False):
+        native_log.poll()
+        source_log.poll()
+        require(diagnostics.error is None, "Diagnostic logging failed: " + str(diagnostics.error))
         for name, process in owned.items():
             if name == "linux" and linux_stopped:
                 continue
@@ -630,18 +683,27 @@ def run(arguments):
                 require(preview_receiver.visible(display),
                         "Ubuntu test desktop preview is not visible and live")
         if inspector and companion_identity:
-            require(inspector.live(core_identity) and inspector.live(companion_identity),
-                    "Exact Core or authenticated companion process changed")
+            for role, identity in (("Core", core_identity), ("companion", companion_identity)):
+                live = inspector.live(identity)
+                diagnostics.observe(role + " identity", {"pid": identity["pid"], "live": live})
+                require(live, role + " process exited or changed identity (pid " + str(identity["pid"]) + ")")
         if publisher:
             require(publisher.error is None, "Manual status publisher failed")
         if evidence:
             evidence.poll()
+            diagnostics.observe("Input readiness", evidence.diagnostic_snapshot())
         if collector:
             state = collector.snapshot()
+            if state["receipt"]:
+                receipt = state["receipt"]
+                diagnostics.observe("Source and controls", {key: receipt.get(key) for key in
+                    ("frame", "sourceVisible", "controlFrame", "controlVisible", "heldKeys", "heldButtons")})
             if production and initial and state["receipt"]:
                 original.source_identity(state["receipt"], initial, holding)
                 if holding and state["receipt"].get("frame") != initial["frame"]:
-                    report["sourceRelocationObserved"] = True
+                    # Movement alone is not evidence of placement on a hidden
+                    # display (attempt 18 merely moved to x=9 on the Mac).
+                    report["sourceFrameChangeObserved"] = True
             if not allow_stop and state["receipt"] and state["receipt"]["manual"]["request"] == "stop":
                 raise Cancelled("Source requested Stop in the test window")
             return state["receipt"]
@@ -661,26 +723,28 @@ def run(arguments):
                 report[name + "Exit"] = stop_owned(owned[name], name, output, report, grace=2)
 
     def wait(predicate, description, seconds=10, allow_stop=False):
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            check(allow_stop)
-            value = predicate()
-            if value:
-                return value
-            time.sleep(0.025)
-        raise RuntimeError("Timed out waiting for " + description)
+        with diagnostics.step("Wait for " + description, timeoutSeconds=seconds):
+            return DIAGNOSTICS.wait_until(predicate, description, seconds, wake,
+                                          check=lambda: check(allow_stop))
+
+    def cleanup_wait(predicate, description, timeout):
+        with diagnostics.step("Cleanup: " + description, timeoutSeconds=timeout):
+            return DIAGNOSTICS.wait_until(predicate, description, timeout, wake)
 
     try:
+        stage("Check machines and ordinary settings")
         report["ordinaryMacConfigBefore"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
         no_other_primary()
         report["remoteHostname"] = remote(["hostname"]).strip()
         host_executable = mac["hostArgv"][0]
         if production:
+            stage("Check packaged companion admission")
             # Fail unattended before showing Start when this exact production
             # package cannot complete admission. This does not replace the
             # independent live admission checks after the user's Start click.
             report["codeAdmissionDiagnostic"] = original.validate_admission_probe(json.loads(command(
                 [mac["coreArgv"][0], "--windowshare-code-admission-probe"], timeout=60, env=environment)))
+        stage("Check Mac permissions and frozen executables")
         report["permissions"] = json.loads(command([host_executable, "--probe"], env=environment))
         require(all(report["permissions"].get(key) is True
                     for key in ("accessibility", "screenCapture", "targetedPointer")),
@@ -688,6 +752,7 @@ def run(arguments):
         report["executableHashes"] = {name: digest(path) for name, path in (
             ("core", mac["coreArgv"][0]), ("host", host_executable),
             ("source", source_executable), ("coordinator", Path(__file__)))}
+        stage("Reserve private connections and trust")
         for port in (mac["corePort"], mac["hostPort"]):
             with socket.socket() as reservation:
                 reservation.bind(("127.0.0.1", port))
@@ -696,6 +761,7 @@ def run(arguments):
         # Complete file-only setup before opening the visible Start window.
         # No input capture or Linux native session is started by writing a pin.
         report["privateTrustSha256"] = digest(prepare_trust(mac, plan, base, production))
+        stage("Open disposable source and local Start/Stop controls")
         publisher = StatusPublisher(output / "manual-status.json", session_seconds)
         source_argv = [str(source_executable), title, str(source_path), "--manual-status", str(publisher.path)]
         if production:
@@ -705,7 +771,7 @@ def run(arguments):
             if holding:
                 source_argv += ["--separate-controls"]
         source = launch("source", source_argv, env=environment)
-        collector = Collector(source_path, source.pid, title, output / "receipts.jsonl", session_seconds)
+        collector = Collector(source_path, source.pid, title, output / "receipts.jsonl", session_seconds, wake)
         def own_window():
             data = collector.snapshot()["receipt"]
             if not data or data.get("ready") is not True or data.get("windowId", 0) <= 0 or \
@@ -723,12 +789,13 @@ def run(arguments):
             original.source_identity(initial, holding=holding)
             evidence.bind("native", source.pid, initial["sourceWindowId"])
         report["initialReceipt"] = initial
+        stage("Prepare Ubuntu controller without starting input")
         argv = [str(initial["windowId"]) if arg == "{windowId}" else arg for arg in plan["runArgv"]]
         require(all("{" not in arg and "}" not in arg for arg in argv), "Unresolved Linux plan argument")
         linux = launch("linux", [*ssh, arguments.ssh_target, shlex.join(argv)], pipe=True)
         transcript = (output / "linux-control.jsonl").open("x", buffering=1)
         streams.append(transcript)
-        driver = Driver(linux, transcript, check)
+        driver = Driver(linux, transcript, check, diagnostics)
         report["prepared"] = driver.event("prepared", timeout=30)
         if production:
             require(report["prepared"].get("controlProtocol") == 3 and
@@ -736,6 +803,7 @@ def run(arguments):
                     report["prepared"].get("macOriginalInputConfigured") is True and
                     report["prepared"].get("windowId") == initial["windowId"],
                     "Linux did not prepare the exact production route and disposable source")
+        stage("Wait for your Start click")
         publisher.set("ready", START_WAIT_SECONDS)
         emit({"event": "waiting-for-start", "title": title, "routingStarted": False,
               "startWaitSeconds": START_WAIT_SECONDS})
@@ -745,11 +813,13 @@ def run(arguments):
             evidence.start_boundary()
         publisher.set("preparing")
         started = True
+        stage("Recheck frozen setup after Start")
         no_other_primary()
         require(digest(trust_file(mac, base, production)) == report["privateTrustSha256"],
                 "Private TLS trust list changed before Start")
         host_identity = private_path(mac["hostArgv"][mac["hostArgv"].index("--identity") + 1], base)
         if production:
+            stage("Start Core and authenticate its companion")
             # Recheck the frozen roles after the human Start wait. A validated
             # plan is not runtime admission, and no standalone Host can obtain
             # the genuine inherited private input channel.
@@ -789,6 +859,7 @@ def run(arguments):
             report["productionBootstrap"] = {"privateCompanionAuthenticated": True,
                                              "exactLibraryAdmissionObserved": True,
                                              "perRecordNativeAuthority": "not-assessed"}
+        stage("Connect private tunnels")
         tunnel_argv = [*ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=no"]
         for name, key in (("core", "corePort"), ("viewer", "hostPort")):
             tunnel_argv += ["-R", plan["remoteSockets"][name] + ":127.0.0.1:" + str(mac[key])]
@@ -799,12 +870,15 @@ def run(arguments):
 
         def forwards():
             try:
-                return json.loads(remote(["python3", "-c", probe, *plan["remoteSockets"].values()], 8))
+                # A socket not published yet is readiness, not the first
+                # failure. The enclosing wait owns its diagnostic deadline.
+                return json.loads(remote(["python3", "-c", probe, *plan["remoteSockets"].values()], 8, observe=False))
             except RuntimeError:
                 return None
 
         socket_identities = wait(forwards, "owned forwarding sockets", 15)
         report["socketIdentities"] = socket_identities
+        stage("Start Ubuntu viewer and input backend")
         report["linuxReady"] = driver.command("start")
         require(report["linuxReady"]["windowId"] == initial["windowId"] and
                 report["linuxReady"]["originalInputAuthorityGranted"] is False and
@@ -821,7 +895,23 @@ def run(arguments):
                         report["linuxReady"].get("compositorOwned") is False and
                         report["linuxReady"].get("compositorPid") == plan["desktopAtPrepare"]["shell"]["pid"],
                         "Test did not attach to the selected physical Ubuntu compositor")
+        stage("Capture baseline and verify window placement")
         report["baseline"] = {"source": collector.snapshot(), "linux": driver.command("baseline")}
+        if holding:
+            def hidden_source():
+                receipt = collector.snapshot()["receipt"]
+                native = native_log.native.get("Host: source.hidden")
+                failed = [value for key, value in native_log.native.items()
+                          if value.get("state") == "failed" and
+                          (key.startswith("Holding display:") or key == "Host: source.holding")]
+                require(not failed, "Hidden-display setup failed: " + (failed[0]["message"] if failed else ""))
+                committed = native_log.native.get("Host: source.commit", {})
+                return committed.get("state") == "completed" and \
+                    committed.get("details", {}).get("windowId") == initial["sourceWindowId"] and \
+                    committed.get("details", {}).get("hidden") is True and \
+                    original.hidden_source_verified(receipt, initial, native)
+            wait(hidden_source, "verified hidden source on holding display", 15)
+            report["sourceRelocationObserved"] = True
         if desktop_preview:
             frame_path, preview_receipt = output / "preview.frame", output / "preview-visible.json"
             stream = launch("preview-stream", [*ssh, arguments.ssh_target, shlex.join(plan["previewArgv"])], pipe=True)
@@ -835,6 +925,7 @@ def run(arguments):
                 return preview_receiver.visible(value)
             wait(live_preview, "visible live Ubuntu test desktop", 10)
             preview_ready = True
+        stage("Active input: wait for Record and matching readiness")
         publisher.set("active", session_seconds)
         emit({"event": "active", "secondsRemaining": session_seconds, "title": title})
         deadline, next_status = time.monotonic() + session_seconds, time.monotonic() + 5
@@ -843,6 +934,7 @@ def run(arguments):
             emit({"event": "evidence-priming", "runId": evidence.run_id,
                   "physicalAcceptance": "not-assessed"})
         while time.monotonic() < deadline:
+            wake.clear()
             receipt = check(allow_stop=True)
             if receipt["manual"]["request"] == "stop":
                 report["sourceRequestedStop"] = True
@@ -857,6 +949,7 @@ def run(arguments):
                 require(evidence.armed or evidence_arm_deadline is None or time.monotonic() < evidence_arm_deadline,
                         "Not every evidence recorder acknowledged its one-shot arm")
                 if evidence.armed and evidence_deadline is None:
+                    stage("Record physical inputs")
                     evidence_deadline = min(time.monotonic() + recording_seconds, deadline - 5)
                     emit({"event": "evidence-recording", "seconds": recording_seconds, "runId": evidence.run_id})
                 if evidence_deadline is not None and time.monotonic() >= evidence_deadline:
@@ -864,15 +957,18 @@ def run(arguments):
                     wait(lambda: all(reader.end for reader in evidence.readers.values()),
                          "terminal evidence before returning to the Mac", 2, allow_stop=True)
                     report["inputEvidence"] = evidence.finish()
+                    stage("Recording complete: wait for return and Stop")
                     emit({"event": "evidence-complete", "returnAndStop": True,
                           "physicalAcceptance": "not-assessed"})
                     stop_preview()
             if time.monotonic() >= next_status:
                 report["lastLinuxStatus"] = driver.command("status")
                 next_status = time.monotonic() + 5
-            time.sleep(0.025)
+            wake.wait(min(0.025, max(0, deadline - time.monotonic())))
         else:
             report["autoStoppedAtDeadline"] = True
+            emit({"event": "session-deadline", "message": "The fixed session time expired"})
+        stage("Stop recording and disconnect Ubuntu")
         publisher.set("stopped")
         stop_preview()
         if evidence:
@@ -897,6 +993,7 @@ def run(arguments):
                 data["frame"] == initial["frame"] and journal.exists() and \
                 read_json(journal) == {"version": 1, "windows": []} else None
 
+        stage("Verify source restoration while companion is alive")
         report["disconnectRestoration"] = wait(
             restored_on_disconnect, "source restoration before host termination", allow_stop=True)
         report["disconnectRestoredWhileHostAlive"] = True
@@ -907,12 +1004,16 @@ def run(arguments):
         report["status"] = "session-recorded-awaiting-human-and-receipt-review"
     except Cancelled as error:
         report["status"], report["failure"] = "cancelled", str(error)
+        diagnostics.emit(phase or "Session", "observed", str(error))
     except Exception as error:
         report["failure"] = str(error)
+        diagnostics.emit(phase or "Session", "failed", str(error), exception=type(error).__name__)
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
+        phase = None  # A failed phase must never later be marked completed.
+        stage("Cleanup: stop sharing and evidence recorders")
         if publisher:
             publisher.set("stopped")
         try:
@@ -922,7 +1023,7 @@ def run(arguments):
         if evidence:
             try:
                 evidence.stop()
-                CROSS.wait_for(lambda: (evidence.poll(),
+                cleanup_wait(lambda: (evidence.poll(),
                                         all(reader.end for reader in evidence.readers.values()) if started else
                                         evidence.readers["native"].end)[1],
                                "evidence recorder stop", timeout=2)
@@ -934,6 +1035,7 @@ def run(arguments):
                 report["cleanupLinuxStop"] = driver.command("stop", check=False)
             except Exception as error:
                 cleanup_errors.append("Linux stop: " + str(error))
+        stage("Cleanup: stop exact owned processes")
         for name in ("linux", "core", "host", "tunnel"):
             try:
                 if production and name == "core" and owned.get(name) and owned[name].poll() is None:
@@ -944,14 +1046,16 @@ def run(arguments):
                 if production and name == "core" and owned.get(name):
                     require(report[name + "Exit"] == 0, "Packaged Core/Host did not drain successfully")
                     require(companion_identity is not None, "Companion identity was not recorded; cleanup is unverified")
-                    CROSS.wait_for(lambda: not inspector.live(companion_identity),
+                    cleanup_wait(lambda: not inspector.live(companion_identity),
                                    "exact Core-owned Host exit", timeout=3)
                     report["companionStopped"] = True
                 if name == "host" and owned.get(name) and report[name + "Exit"] != 0:
                     cleanup_errors.append("Mac host did not exit gracefully")
                 if report.get(name + "TerminationTimedOut"):
                     cleanup_errors.append(name + " exceeded the termination deadline")
+                diagnostics.emit("Stop " + name, "completed", "Owned process stopped", exitCode=report.get(name + "Exit"))
             except Exception as error:
+                diagnostics.emit("Stop " + name, "failed", str(error))
                 cleanup_errors.append(name + ": " + str(error))
                 # Failed graceful stop remains a failure, but still stop only
                 # this retained child/process group before leaving the run.
@@ -959,6 +1063,7 @@ def run(arguments):
                     report[name + "FallbackExit"] = stop_owned(owned.get(name), name, output, report)
                 except Exception as fallback:
                     cleanup_errors.append(name + " fallback: " + str(fallback))
+        stage("Cleanup: remove owned connections and restore Ubuntu")
         for endpoint, expected in socket_identities.items():
             try:
                 cleanup = ("import json,os,stat,sys; p=sys.argv[1]; expected=json.loads(sys.argv[2]);\n"
@@ -978,6 +1083,7 @@ def run(arguments):
             report["remoteCleanup"] = remote(plan["cleanupArgv"], 35)
         except Exception as error:
             cleanup_errors.append("Remote cleanup: " + str(error))
+        stage("Cleanup: verify source frame and released input")
         if collector:
             try:
                 after_cleanup = time.monotonic()
@@ -987,7 +1093,7 @@ def run(arguments):
                         current = collector.snapshot()
                         observed = current["publicationObservedMonotonic"]
                         return current if observed is not None and observed > after_cleanup else None
-                    CROSS.wait_for(fresh_source, "post-cleanup source publication", timeout=3)
+                    cleanup_wait(fresh_source, "post-cleanup source publication", timeout=3)
                 final = collector.snapshot()
                 report["finalSource"] = final
                 if started and final["receipt"]:
@@ -1007,6 +1113,7 @@ def run(arguments):
                 collector.close()
             except Exception as error:
                 cleanup_errors.append("Receipt collector cleanup: " + str(error))
+        stage("Cleanup: close disposable source")
         try:
             if evidence and owned.get("source") and owned["source"].poll() is None:
                 require(evidence.readers["native"].end is not None,
@@ -1022,6 +1129,7 @@ def run(arguments):
                 report["sourceFallbackExit"] = stop_owned(owned.get("source"), "source", output, report)
             except Exception as fallback:
                 cleanup_errors.append("Source fallback: " + str(fallback))
+        stage("Cleanup: audit ordinary settings and logs")
         if "ordinaryMacConfigBefore" in report:
             try:
                 report["ordinaryMacConfigAfter"] = {str(path): digest(path) for path in arguments.ordinary_mac_config}
@@ -1047,9 +1155,30 @@ def run(arguments):
         report["localProcessesStopped"] = all(process.poll() is not None for process in owned.values())
         if cleanup_errors or not report["localProcessesStopped"]:
             report["cleanupErrors"], report["status"] = cleanup_errors, "failed"
+        native_log.poll()
+        source_log.poll()
+        for error in cleanup_errors:
+            diagnostics.emit("Cleanup", "failed", error)
+        if not cleanup_errors:
+            diagnostics.emit(phase, "completed", phase)
+        report["diagnostics"] = diagnostics.summary()
         atomic_json(output / "result.json", report)
         emit({"event": "finished", "status": report["status"], "result": str(output / "result.json"),
               "physicalAcceptance": "not-assessed", "failure": report.get("failure")})
+        diagnostics.close()
+        if owned.get("source"):
+            # An independent, read-only report has no recorder, capture hook,
+            # input route, countdown or automatic close. It cannot keep test
+            # input alive. The user dismisses it when they finish reading.
+            try:
+                with (output / "diagnostic-display.log").open("xb") as display_log:
+                    display = subprocess.Popen([str(source_executable), "--physical-report", str(output / "diagnostics.jsonl")],
+                        env=environment, stdin=subprocess.DEVNULL, stdout=display_log, stderr=display_log,
+                        start_new_session=True)
+                report["diagnosticDisplay"] = {"pid": display.pid, "readOnly": True, "dismissal": "user-controlled"}
+            except OSError as error:
+                report["diagnosticDisplayError"] = str(error)
+            atomic_json(output / "result.json", report)
     return 0 if report["status"].startswith("session-recorded") else 1
 
 

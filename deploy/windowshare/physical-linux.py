@@ -95,6 +95,9 @@ def module(name, path):
     return result
 
 
+DIAGNOSTICS = module('physical_diagnostics', HERE / 'physical-diagnostics.py')
+
+
 def pin(path):
     return hashlib.sha256(ssl.PEM_cert_to_DER_cert(path.read_text())).hexdigest()
 
@@ -274,13 +277,32 @@ def session(args):
     stop_id = None
     clock = SessionClock()
     cleanup_errors = []
+    diagnostics = DIAGNOSTICS.Diagnostics(output / 'diagnostics.jsonl', 'Ubuntu session',
+        sink=lambda value: emit({'event': 'diagnostic', 'diagnostic': value}))
+    phase = None
+    def stage(name):
+        nonlocal phase
+        if phase:
+            diagnostics.emit(phase, 'completed', phase)
+        phase = name
+        diagnostics.emit(name, 'started', name)
     def safely_close(label, action):
         try:
-            action()
+            with diagnostics.step('Cleanup: ' + label):
+                action()
         except BaseException as error:
             cleanup_errors.append(f'{label}: {error}')
+    class DiagnosticCleanup(contextlib.ExitStack):
+        def __exit__(self, kind, error, tb):
+            # Capture the initiating failure before teardown can add secondary
+            # relay/IPC errors. A deliberate Stop is not a failed startup.
+            if error is not None and not isinstance(error, StartupStopped):
+                diagnostics.emit(phase or 'Session', 'failed', str(error),
+                                 traceback=''.join(traceback.format_exception(kind, error, tb, limit=8))[-12000:])
+            return super().__exit__(kind, error, tb)
     try:
-        with contextlib.ExitStack() as cleanup:
+        with DiagnosticCleanup() as cleanup:
+            stage('Prepare controller and wait for Mac Start')
             controls = Controls()
             cleanup.callback(controls.close)
             emit({'event': 'prepared', 'controlProtocol': protocol, 'windowId': args.window_id,
@@ -305,7 +327,11 @@ def session(args):
             if start_id is None:
                 report['status'] = 'completed-without-start'
                 report['ownedProcessesStopped'] = True
+                diagnostics.emit(phase, 'completed', 'Cancelled before native startup')
+                report['diagnostics'] = diagnostics.summary()
+                diagnostics.close()
                 return finish_session(output, report, stop_id, core, processes, relays, stopped, cleanup_errors)
+            stage('Prepare private environment and forwarding relays')
             root = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix='df-physical-', dir='/tmp')))
             environment = common.private_environment(root)
             class PhaseProcesses(common.Processes):
@@ -332,15 +358,18 @@ def session(args):
                 relays.append(relay)
                 cleanup.callback(safely_close, 'relay', relay.close)
             if desktop:
-                shell = desktop.DesktopLease(api(), common, desktop_plan, processes, root)
+                stage('Attach provider to the actual Ubuntu desktop')
+                shell = desktop.DesktopLease(api(), common, desktop_plan, processes, root, diagnostics)
                 cleanup.callback(safely_close, 'desktop restoration', shell.close)
                 environment = processes.env
             else:
+                stage('Start isolated compositor')
                 shell = qt.start_shell(processes, root, report)
             if preview:
                 preview.enable(processes, common)
                 common.wait_for(processes, preview_frame.exists, 'first private desktop preview', timeout=10)
             if original:
+                stage('Verify native provider capabilities')
                 observer = common.Provider(processes.env['DBUS_SESSION_BUS_ADDRESS'])
                 try:
                     _, _, capabilities = observer.call('GetCapabilities')
@@ -352,6 +381,7 @@ def session(args):
                         capabilities.get('inputDrainOrderingContract') in qt.SUPPORTED_ORDERING_CONTRACTS,
                         'Production input requires an audited native GNOME preparation/drain build')
                 report['productionPrerequisites'] = capabilities
+            stage('Configure and launch Ubuntu Core and owned viewer')
             configuration = args.run / 'provider.json'
             configuration.write_text(json.dumps({'version': 1, 'viewerExecutable': str(shell.viewer if desktop else args.viewer),
                                                  'connect': '127.0.0.1', 'port': relays[1].port,
@@ -369,6 +399,7 @@ def session(args):
                     '--windowshare-gnome-config=' + str(configuration)]
             report['coreArgv'] = argv
             core = processes.start('core', argv)
+            diagnostics.observe('Core process', {'pid': core.pid})
             report['corePid'] = core.pid
             if desktop:
                 desktop.atomic(args.run / 'core-process.json', desktop.identity(core.pid))
@@ -378,7 +409,8 @@ def session(args):
                 if core.poll() is None:
                     for relay in relays:
                         relay.expected_disconnect.set()
-                    x11.stop_core(core, Path(environment['TMPDIR']), 'physical fixture core')
+                    with diagnostics.step('Stop Ubuntu Core through private IPC'):
+                        x11.stop_core(core, Path(environment['TMPDIR']), 'physical fixture core')
                     stopped = True
             cleanup.callback(safely_close, 'private core IPC stop', stop_core_if_running)
 
@@ -432,8 +464,11 @@ def session(args):
                 markers = ('coreProcessLive', 'compositorProcessLive', 'connectionsLive', 'historicalCoreAuthenticated',
                            'historicalCoreConnected', 'historicalProviderOwnedSession', 'historicalEisConnected',
                            'historicalViewerAuthenticated')
+                diagnostics.observe('Connection readiness', {key: value[key] for key in markers} |
+                                    {'eisDevicesObserved': value['eisDevicesObserved']})
                 return value if all(value[k] for k in markers) and value['eisDevicesObserved'] >= 3 else None
 
+            stage('Wait for authenticated Core, provider and viewer')
             value = common.wait_for(processes, ready, 'actual authenticated core and provider-owned viewer', timeout=35, retry_errors=False)
             report['ready'] = value
             clock.ready()
@@ -443,6 +478,7 @@ def session(args):
                   'syntheticStartupInput': False, **clock.state(), 'state': value, **original_metadata(original),
                   **({'linuxEnvironment': 'user-desktop', 'compositorOwned': False} if desktop else {}),
                   **({'productionPrerequisites': report['productionPrerequisites']} if original else {})})
+            stage('Observe physical session until Stop')
             while True:
                 clock.check()
                 state = status()
@@ -472,7 +508,12 @@ def session(args):
         report['status'] = 'completed-startup-cancelled'
     except BaseException as error:
         report['failure'] = str(error)
+        diagnostics.emit(phase or 'Session', 'failed', str(error), traceback=traceback.format_exc(limit=8)[-12000:])
         (output / 'failure.log').write_text(traceback.format_exc())
+    if report['status'] != 'failed' and phase:
+        diagnostics.emit(phase, 'completed', phase)
+    report['diagnostics'] = diagnostics.summary()
+    diagnostics.close()
     return finish_session(output, report, stop_id, core, processes, relays, stopped, cleanup_errors)
 
 
@@ -591,7 +632,7 @@ def ordinary_snapshot(pids, configs):
 def source_hashes():
     paths = [HERE / name for name in ('physical-linux.py', 'gnome-crossmachine-client.py',
              'gnome-qt-viewer-tests.py', 'gnome-provider-tests.py', 'x11-core-smoke.py',
-             'physical-preview.py', 'physical-preview.js', 'physical-desktop.py')]
+             'physical-preview.py', 'physical-preview.js', 'physical-desktop.py', 'physical-diagnostics.py')]
     paths += [p for p in sorted((HERE / 'gnome-provider').rglob('*')) if p.is_file() and '__pycache__' not in p.parts]
     return {str(p.relative_to(HERE)): sha(p) for p in paths}
 
@@ -792,6 +833,7 @@ def run(args):
             deadline = time.monotonic() + PREPARED_SECONDS + RESOURCE_SECONDS + 20
             prepared = False
             replies = 0
+            diagnostic_replies = 0
             while terminal is None:
                 require(time.monotonic() < deadline, 'Host supervisor exceeded total lifetime')
                 command = controls.next()
@@ -820,6 +862,13 @@ def run(args):
                     continue
                 line, buffer = buffer.split(b'\n', 1)
                 value = json.loads(line)
+                if value.get('event') == 'diagnostic':
+                    diagnostic_replies += 1
+                    require(diagnostic_replies <= 2048 and isinstance(value.get('diagnostic'), dict),
+                            'Invalid/excessive diagnostic replies')
+                    transcript.write(line.decode() + '\n')
+                    emit(value)
+                    continue
                 replies += 1
                 require(replies <= 260 and isinstance(value, dict), 'Invalid/excessive container replies')
                 transcript.write(line.decode() + '\n')

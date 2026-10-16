@@ -15,6 +15,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import math
 import os
 from pathlib import Path
 import plistlib
@@ -170,6 +171,36 @@ def source_identity(receipt, initial=None, holding=False):
         require(receipt.get('controlWindowId') == 0, 'H04 requires the default one-window source')
 
 
+def hidden_source_verified(receipt, initial, native):
+    """A changed frame alone cannot turn the physical Mac into a holding display.
+
+    This is a diagnostic gate for starting the attended test, not native input
+    authority. The Host still performs its independent live admission checks.
+    """
+    if not receipt or not native or native.get('state') != 'completed':
+        return False
+    value = native.get('details', {})
+    if value.get('windowId') != initial['sourceWindowId'] or value.get('sourcePid') != initial['pid']:
+        return False
+    def rect(item):
+        return isinstance(item, dict) and set(item) == {'x', 'y', 'width', 'height'} and all(
+            type(v) in (int, float) and math.isfinite(v) for v in item.values()) and \
+            item['width'] > 0 and item['height'] > 0
+    frame, display, physical = receipt.get('frame'), value.get('holdingBounds'), value.get('physicalBounds')
+    if not rect(frame) or not rect(display) or not isinstance(physical, list) or not physical or \
+            not all(rect(item) for item in physical) or frame != value.get('actualFrame') or frame == initial['frame']:
+        return False
+    if not (display['x'] <= frame['x'] and display['y'] <= frame['y'] and
+            frame['x'] + frame['width'] <= display['x'] + display['width'] and
+            frame['y'] + frame['height'] <= display['y'] + display['height']):
+        return False
+    for other in physical:
+        if (frame['x'] < other['x'] + other['width'] and other['x'] < frame['x'] + frame['width'] and
+                frame['y'] < other['y'] + other['height'] and other['y'] < frame['y'] + frame['height']):
+            return False
+    return receipt.get('controlVisible') is True and receipt.get('controlFrame') == initial.get('controlFrame')
+
+
 def unsigned(value):
     require(isinstance(value, str) and re.fullmatch('0|[1-9][0-9]{0,19}', value) and int(value) < 2**64,
             'Evidence requires a canonical uint64 string')
@@ -194,6 +225,7 @@ class EvidenceReader:
         self.identity = self.header = self.readiness = self.arm = self.end = None
         self.offset = self.rows = self.readiness_count = 0
         self.buffer = b''
+        self.readiness_details = None
 
     def poll(self):
         try:
@@ -250,6 +282,8 @@ class EvidenceReader:
                 owner = evidence_owner(value, self.role) if value['readyCandidate'] else None
                 self.readiness_count += 1
                 self.readiness = (self.readiness_count, self.now(), owner)
+                self.readiness_details = {key: value.get(key) for key in
+                    ('readyCandidate', 'ownerLive', 'captureIdle', 'blockedQueues', 'snapshotAvailable', 'loss', 'failure')}
             elif kind == 'arm':
                 require(self.arm is None and type(value.get('accepted')) is bool, 'Repeated or invalid evidence arm')
                 self.arm = value
@@ -314,6 +348,14 @@ class EvidenceSession:
         require(self.baseline is None and not self.attempted, 'Evidence Start boundary may be recorded only once')
         self.poll()
         self.baseline = {role: reader.readiness_count for role, reader in self.readers.items()}
+
+    def diagnostic_snapshot(self):
+        return {'recordRequested': self.record_identity is not None, 'armRequested': self.attempted,
+                'armed': self.armed, 'stopped': self.stopped,
+                'roles': {role: {'headerSeen': reader.header is not None,
+                                'readiness': reader.readiness_details,
+                                'arm': reader.arm is not None, 'end': reader.end is not None}
+                          for role, reader in self.readers.items()}}
 
     def try_arm(self):
         self.poll()

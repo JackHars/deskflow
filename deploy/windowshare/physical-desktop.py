@@ -222,14 +222,20 @@ os.execve(binary,[binary,*sys.argv[1:],'--quit-after','270'],os.environ)
 
 
 class DesktopLease:
-    def __init__(self, api, common, plan, processes, root):
+    def __init__(self, api, common, plan, processes, root, diagnostics=None):
         self.api, self.common, self.plan = api, common, plan
         self.pid = plan['desktopAtPrepare']['shell']['pid']
         self.closed = False
         self.observer = None
         self.next_check = 0
+        self.diagnostics = diagnostics
+        if diagnostics:
+            diagnostics.emit('Desktop identity', 'started', 'Verify the existing Ubuntu login and compositor')
         before = inspect(api, common, plan['desktopAtPrepare']['sessionId'])
         require(before == plan['desktopAtPrepare'], 'Physical desktop changed since preparation')
+        if diagnostics:
+            diagnostics.emit('Desktop identity', 'completed', 'Using the existing physical desktop',
+                             sessionId=plan['desktopAtPrepare']['sessionId'], compositorPid=self.pid)
         self.before = before
         processes.env.update(before['environment'])
         for key in ('LIBGL_ALWAYS_SOFTWARE', 'GALLIUM_DRIVER', 'GSK_RENDERER', 'GSETTINGS_BACKEND'):
@@ -239,6 +245,8 @@ class DesktopLease:
         atomic(Path(plan['runDirectory']) / 'desktop-lease.json',
                {'token': plan['token'], 'before': before, 'restored': False})
         try:
+            if diagnostics:
+                diagnostics.emit('Provider enable', 'started', 'Enable the temporary provider with rollback recorded')
             store = settings(common)
             require(store.set_strv('disabled-extensions', [u for u in store.get_strv('disabled-extensions') if u != UUID]),
                     'Cannot remove temporary provider disable entry')
@@ -252,6 +260,8 @@ class DesktopLease:
                 require(info.get('state') not in (3, 4), 'GNOME provider failed to enable')
                 return info.get('state') == 1 and self.observer.bus('NameHasOwner', '(s)', (common.SERVICE,)) == (True,)
             common.wait_for(processes, ready, 'provider on the actual Ubuntu desktop', timeout=10)
+            if diagnostics:
+                diagnostics.emit('Provider enable', 'completed', 'Provider enabled and bus owner present')
         except BaseException:
             self.close()
             raise
@@ -270,7 +280,11 @@ class DesktopLease:
             return
         self.closed = True
         try:
+            if self.diagnostics:
+                self.diagnostics.emit('Desktop restore', 'started', 'Restore original extension membership')
             restore(self.api, self.common, self.plan)
+            if self.diagnostics:
+                self.diagnostics.emit('Desktop restore', 'completed', 'Desktop extension membership restored')
         finally:
             if self.observer:
                 self.observer.close()

@@ -4,6 +4,32 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt eighteen and step diagnostics — 2026-10-15
+
+`build/h06-r18-i25moopp/` was launched with fresh permission and failed. The
+holding helper's display failed independent geometry verification; the source
+changed from (400,190,640,448) to (9,50,640,448). The later private-channel loss
+obscured that initial error in the coordinator result. No recorder armed, source
+restoration failed, and H04/H06 remain unaccepted. Mac processes stopped and
+ordinary settings match; Ubuntu owned processes stopped and desktop/settings
+were preserved despite Core/controller exit 1. See `WORK_STATE.md` and the
+unchanged run receipts for the complete failure and cleanup record.
+
+The next attempt must use the rebuilt diagnostic source/Host/helper and fresh
+plans. `diagnostics.jsonl` records every lifecycle stage, readiness transitions,
+native holding verification details and cleanup. An independent read-only report
+retains the first failure until Dismiss; it does not keep test input alive.
+No sleep statements or artificial display delays were added. H06 must verify
+the committed hidden placement before Active; ordinary source movement is not
+accepted as hiding. Display creation now arms recovery before its first possible
+source movement, including failed creation. Obtain fresh permission immediately
+before launch; no physical pass is inferred from automated diagnostics tests.
+
+Unattended checks: 79 Mac coordinator cases, 31 Linux lifecycle cases, 9 desktop
+cases on actual Ubuntu (8 + 1 platform skip on Mac), the report UI offscreen on
+both operating systems, native source rollback, and Mac Server/coordinator/preflight CTests. Evidence:
+`build/physical-diagnostics-fxxw1od6/` and `build/physical-diagnostics-*.log`.
+
 ## Actual-desktop attempt seventeen and display clarification — 2026-10-15
 
 Fresh explicit permission launched `build/h04-r17-0zwgwnaz/` after the verified

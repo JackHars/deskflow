@@ -36,6 +36,12 @@ public:
     m_mutated = true;
     return true;
   }
+  // Display creation can rearrange a source before an explicit AX move. The
+  // attempted display change needs the same write-ahead recovery as placement.
+  bool armMutation(const std::function<bool()> &persist)
+  {
+    return arm(persist) && attemptMutation();
+  }
   bool commit()
   {
     if (!m_durable || m_returning)

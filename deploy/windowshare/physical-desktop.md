@@ -31,6 +31,32 @@ private holding display. Only the separate Mac controls stay visible. If hiding
 cannot be verified, stop and retain the failure; do not describe a visible
 source fallback as seamless acceptance. Stop must restore the original window.
 
+## Persistent diagnostic timeline
+
+Each physical attempt now writes `diagnostics.jsonl` with ordered stage starts,
+completions, failures, UTC timestamps, local elapsed times, process identities,
+readiness changes and cleanup results. Ubuntu forwards its own stage events over
+the existing control connection; its original timestamps remain separate from
+the Mac's clock. The native Host and holding helper add `DESKFLOW_STEP` records
+for capture, first paint, recovery journaling, display creation/verification,
+source placement, commitment and restoration. Helper stderr is retained even
+when its readiness reply succeeds but parent-side verification fails.
+
+No artificial delays or sleep statements are added for visibility. The Mac
+coordinator waits on source-publication notifications with bounded deadline
+checks. After cleanup it opens an independent **Deskflow test results** window.
+That window retains the first recorded failure and complete saved timeline until
+the user clicks **Dismiss**. It has no native input recorder, routing, capture,
+countdown or automatic close. Its read-only process is reported separately from
+the stopped test processes. The files remain after dismissal.
+
+For H06, Active now requires a committed, identified source whose observed frame
+matches the Host's verified holding placement, lies inside its holding display,
+and overlaps none of the physical displays. A frame change on the Mac is not
+hiding evidence. The ordinary runtime authority checks and acceptance review
+still apply. Display creation itself records recovery intent before attempting
+it, because WindowServer can move a source even when display verification fails.
+
 ## One-time preparation
 
 The logged-in user must have an active, unlocked local GNOME 50 Wayland session,

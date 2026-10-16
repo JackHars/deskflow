@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "HoldingDisplay.h"
+#include "LifecycleDiagnostics.h"
 #include "PlatformMarkers.h"
 
 #include <QCoreApplication>
@@ -168,6 +169,7 @@ namespace {
 
 bool fail(QString *error, const QString &message)
 {
+  lifecycleDiagnostic("Holding display", "create", "failed", message);
   if (error) {
     *error = message;
   }
@@ -368,6 +370,10 @@ bool isolated(CGDirectDisplayID holding, CGRect bounds)
 #ifndef DESKFLOW_HOLDING_DISPLAY_HELPER
 void stopOwnedHelper(QProcess &process)
 {
+  const auto pid = process.processId();
+  lifecycleDiagnostic(
+      "Holding display", "helper.stop", "started", "Stop the exact owned holding helper", {{"helperPid", pid}}
+  );
   // QProcess owns a dedicated managed stdin pipe. The child exits on EOF,
   // including if this host crashes; the child never inherits its write end.
   process.closeWriteChannel();
@@ -378,6 +384,10 @@ void stopOwnedHelper(QProcess &process)
       process.waitForFinished(1000);
     }
   }
+  lifecycleDiagnostic(
+      "Holding display", "helper.stop", process.state() == QProcess::NotRunning ? "completed" : "failed",
+      "Holding helper stop returned", {{"helperPid", pid}, {"exitCode", process.exitCode()}}
+  );
 }
 #endif
 
@@ -417,6 +427,10 @@ bool HoldingDisplay::supported(QString *reason)
 
 bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
 {
+  lifecycleDiagnostic(
+      "Holding display", "create", "started", "Create and verify the hidden display",
+      {{"width", qint64(width)}, {"height", qint64(height)}}
+  );
   if (error) {
     error->clear();
   }
@@ -424,9 +438,10 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
     return fail(error, QStringLiteral("Holding-display creation must run on the host's main thread."));
   }
   if (available()) {
-    return width == m_impl->width && height == m_impl->height
-               ? true
-               : fail(error, QStringLiteral("Restore exported windows before changing the holding-display mode."));
+    if (width != m_impl->width || height != m_impl->height)
+      return fail(error, QStringLiteral("Restore exported windows before changing the holding-display mode."));
+    lifecycleDiagnostic("Holding display", "create", "completed", "Existing holding display remains valid");
+    return true;
   }
 #ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
   const bool previousOwner = m_impl->display != nil;
@@ -454,7 +469,9 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
     );
   }
   auto helper = std::make_unique<QProcess>();
-  helper->setProcessChannelMode(QProcess::SeparateChannels);
+  // Retain helper diagnostics in the parent's log even when its readiness
+  // reply is valid but the independent parent-side geometry check fails.
+  helper->setProcessChannelMode(QProcess::ForwardedErrorChannel);
   helper->setInputChannelMode(QProcess::ManagedInputChannel);
   helper->setReadChannel(QProcess::StandardOutput);
 #if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
@@ -496,8 +513,10 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
     return reject(QStringLiteral("The holding-display helper returned invalid readiness data."));
   }
   const auto ready = document.object();
+  lifecycleDiagnostic("Holding display", "helper.reply", "completed", "Holding helper replied", ready);
   if (ready.value(QStringLiteral("state")).toString() != QStringLiteral("ready")) {
-    return reject(QStringLiteral("Holding display unavailable: %1").arg(ready.value(QStringLiteral("error")).toString())
+    return reject(
+        QStringLiteral("Holding display unavailable: %1").arg(ready.value(QStringLiteral("error")).toString())
     );
   }
   const auto displayId = ready.value(QStringLiteral("displayId")).toInteger();
@@ -508,10 +527,34 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
   m_impl->width = width;
   m_impl->height = height;
   m_impl->helper = std::move(helper);
-  if (!available()) {
+  const auto actual = CGDisplayBounds(m_impl->id);
+  lifecycleDiagnostic(
+      "Holding display", "geometry.inspect", "completed", "Independent parent-side display observation",
+      {{"displayId", qint64(m_impl->id)},
+       {"helperRunning", m_impl->helper->state() == QProcess::Running},
+       {"active", bool(CGDisplayIsActive(m_impl->id))},
+       {"mirrored", bool(CGDisplayIsInMirrorSet(m_impl->id))},
+       {"identityMatches", holdingIdentity(m_impl->id)},
+       {"isolated", isolated(m_impl->id, actual)},
+       {"x", actual.origin.x},
+       {"y", actual.origin.y},
+       {"width", actual.size.width},
+       {"height", actual.size.height},
+       {"expectedWidth", qint64(width)},
+       {"expectedHeight", qint64(height)}}
+  );
+  QString verificationFailure;
+  if (!available(&verificationFailure)) {
+    lifecycleDiagnostic("Holding display", "geometry.verify", "failed", verificationFailure);
     shutdown();
-    return fail(error, QStringLiteral("The helper's holding display failed independent geometry verification."));
+    return fail(
+        error, QStringLiteral("The helper's holding display failed independent geometry verification: %1")
+                   .arg(verificationFailure)
+    );
   }
+  lifecycleDiagnostic(
+      "Holding display", "create", "completed", "Hidden display verified", {{"displayId", qint64(m_impl->id)}}
+  );
   return true;
 #else
   @autoreleasepool {
@@ -573,6 +616,9 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
         return fail(error, QStringLiteral("macOS refused the holding-display mode; source windows stay visible."));
       }
       const CGDirectDisplayID id = [display displayID];
+      lifecycleDiagnostic(
+          "Holding display", "helper.settings", "completed", "Applied virtual display mode", {{"displayId", qint64(id)}}
+      );
       if (!id || !CGDisplayIsActive(id) || !holdingIdentity(id)) {
         return fail(
             error,
@@ -606,6 +652,17 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
         );
       }
       const CGRect destination = CGDisplayBounds(id);
+      lifecycleDiagnostic(
+          "Holding display", "helper.geometry", "completed", "Helper-side display observation",
+          {{"displayId", qint64(id)},
+           {"physicalLayoutUnchanged", unchanged(physical, originalMain)},
+           {"active", bool(CGDisplayIsActive(id))},
+           {"mirrored", bool(CGDisplayIsInMirrorSet(id))},
+           {"x", destination.origin.x},
+           {"y", destination.origin.y},
+           {"width", destination.size.width},
+           {"height", destination.size.height}}
+      );
       if (!unchanged(physical, originalMain) || !CGDisplayIsActive(id) || CGDisplayIsInMirrorSet(id) ||
           !asRect(destination).valid() || destination.size.width != width || destination.size.height != height) {
         return fail(
@@ -637,6 +694,10 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
       m_impl->id = id;
       m_impl->width = width;
       m_impl->height = height;
+      lifecycleDiagnostic(
+          "Holding display", "create", "completed", "Helper retained verified hidden display",
+          {{"displayId", qint64(id)}}
+      );
       return true;
     } @catch (NSException *exception) {
       return fail(
@@ -648,20 +709,42 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
 #endif
 }
 
-bool HoldingDisplay::available() const
+bool HoldingDisplay::available(QString *reason) const
 {
+  if (reason)
+    reason->clear();
+  const auto unavailable = [&](const QString &message) {
+    if (reason)
+      *reason = message;
+    return false;
+  };
 #ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
   const bool ownerAvailable = m_impl->display != nil;
 #else
   const bool ownerAvailable = m_impl->helper && m_impl->helper->state() == QProcess::Running;
 #endif
-  if (!ownerAvailable || !m_impl->id || !CGDisplayIsActive(m_impl->id) || CGDisplayIsInMirrorSet(m_impl->id) ||
-      !holdingIdentity(m_impl->id)) {
-    return false;
-  }
+  if (!ownerAvailable)
+    return unavailable("The holding display owner is not running");
+  if (!m_impl->id)
+    return unavailable("The holding display ID is missing");
+  if (!CGDisplayIsActive(m_impl->id))
+    return unavailable("The parent does not observe an active holding display");
+  if (CGDisplayIsInMirrorSet(m_impl->id))
+    return unavailable("The holding display is mirrored");
+  if (!holdingIdentity(m_impl->id))
+    return unavailable("The holding display vendor/product/serial identity changed");
   const CGRect bounds = CGDisplayBounds(m_impl->id);
-  return asRect(bounds).valid() && bounds.size.width == m_impl->width && bounds.size.height == m_impl->height &&
-         isolated(m_impl->id, bounds);
+  if (!asRect(bounds).valid())
+    return unavailable("The holding display bounds are invalid");
+  if (bounds.size.width != m_impl->width || bounds.size.height != m_impl->height)
+    return unavailable(QStringLiteral("The holding display size is %1x%2; expected %3x%4")
+                           .arg(bounds.size.width)
+                           .arg(bounds.size.height)
+                           .arg(m_impl->width)
+                           .arg(m_impl->height));
+  if (!isolated(m_impl->id, bounds))
+    return unavailable("The holding display is not isolated from the physical displays");
+  return true;
 }
 
 std::uint32_t HoldingDisplay::displayId() const

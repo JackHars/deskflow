@@ -4,6 +4,7 @@
  */
 #include "CaptureRate.h"
 #include "HoldingDisplay.h"
+#include "LifecycleDiagnostics.h"
 #include "NativeAssociatedWindow.h"
 #include "NativeCaptureTiming.h"
 #include "NativeHost.h"
@@ -59,6 +60,11 @@ constexpr qint64 maxJournalBytes = 1024 * 1024;
 constexpr qint64 prepareTimeoutMs = 15000;
 constexpr qint64 frameTimeoutMs = 30000;
 constexpr std::uint64_t maxJsonInteger = (1ULL << 53) - 1;
+
+QJsonObject diagnosticRect(Rect frame)
+{
+  return {{"x", frame.x}, {"y", frame.y}, {"width", frame.width}, {"height", frame.height}};
+}
 
 // Experimental targeted pointer delivery needs this private CoreGraphics SPI.
 // It is also used by Apple's WebKit test runner (CoreGraphicsTestSPI.h). The
@@ -1339,6 +1345,7 @@ struct NativeHost::Impl
   }
   void error(QString message)
   {
+    lifecycleDiagnostic("Host", "native.error", "failed", message);
     if (!destroying && q->onError) {
       CallbackScope scope(*this);
       const auto callback = q->onError;
@@ -2555,6 +2562,10 @@ struct NativeHost::Impl
   }
   void exportWindow(std::uint32_t id, unsigned attempt = 0, std::optional<WindowDragBinding> drag = std::nullopt)
   {
+    lifecycleDiagnostic(
+        "Host", "source.identify", "started", "Identify the source before export",
+        {{"windowId", qint64(id)}, {"attempt", qint64(attempt)}}
+    );
     const auto admitted = lifecycle->admission();
     const QPointer<NativeHost> alive(q);
     if (!admitted || destroying)
@@ -2673,6 +2684,10 @@ struct NativeHost::Impl
     e->session.original = *axFrame;
     e->session.journaled = true;
     e->session.prepare(1, *axFrame, *axFrame);
+    lifecycleDiagnostic(
+        "Host", "source.identify", "completed", "Source identity and original frame retained",
+        {{"windowId", qint64(id)}, {"sourcePid", qint64(e->identity.pid)}, {"originalFrame", diagnosticRect(*axFrame)}}
+    );
     if (drag) {
       e->windowDrag = std::make_shared<WindowDragTransaction>();
       if (!e->windowDrag->begin(*drag, e->session.geometry))
@@ -2682,6 +2697,9 @@ struct NativeHost::Impl
   }
   void startCapture(std::unique_ptr<Entry> e, NativeHostLifecycle::Admission admitted)
   {
+    lifecycleDiagnostic(
+        "Host", "capture.start", "started", "Start source window capture", {{"windowId", qint64(e->identity.id)}}
+    );
     const QPointer<NativeHost> alive(q);
     e->started = QDateTime::currentMSecsSinceEpoch();
     e->capture = std::make_shared<Capture>();
@@ -2695,8 +2713,13 @@ struct NativeHost::Impl
       entry->producedGeometry = geometry;
       if (entry->windowDrag && entry->session.phase == Phase::Preparing && !entry->windowDrag->produced(geometry))
         return;
-      if (!entry->session.firstFrame)
+      if (!entry->session.firstFrame) {
         entry->session.frameReady(epoch);
+        lifecycleDiagnostic(
+            "Host", "capture.first-frame", "completed", "First source frame produced",
+            {{"windowId", qint64(entry->identity.id)}, {"geometry", QString::number(geometry)}}
+        );
+      }
       if (q->onFrame) {
         CallbackScope scope(*this);
         q->onFrame(session, epoch, geometry, std::move(bytes));
@@ -2759,6 +2782,10 @@ struct NativeHost::Impl
     [stillOpen->stream startCaptureWithCompletionHandler:^(NSError *failure) {
       if (failure)
         capture->fail("Cannot start window capture: " + string(failure.localizedDescription));
+      lifecycleDiagnostic(
+          "Host", "capture.start", failure ? "failed" : "completed",
+          failure ? string(failure.localizedDescription) : "Window capture started"
+      );
     }];
   }
   void ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
@@ -2773,6 +2800,10 @@ struct NativeHost::Impl
     if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame || !paintedGeometry ||
         paintedGeometry != e->session.geometry || e->producedGeometry != paintedGeometry || e->relocating)
       return;
+    lifecycleDiagnostic(
+        "Host", "viewer.first-paint", "completed", "Viewer acknowledged the source frame",
+        {{"windowId", qint64(e->identity.id)}, {"geometry", QString::number(paintedGeometry)}}
+    );
     if (e->family) {
       const auto native = identity(e->identity.id);
       const auto frame = bounds(e->window);
@@ -2844,6 +2875,7 @@ struct NativeHost::Impl
       return current() && physicalAtExport && outputs && samePhysicalOutputLayout(*physicalAtExport, *outputs);
     };
     const auto failed = [&](QString message, bool all = false) {
+      lifecycleDiagnostic("Host", "source.holding", "failed", message, {{"windowId", qint64(expected.id)}});
       if (!alive)
         return;
       if (auto *item = entry(session, epoch))
@@ -2866,6 +2898,10 @@ struct NativeHost::Impl
       return;
     }
     if (holdingEnabled) {
+      lifecycleDiagnostic(
+          "Host", "source.holding", "started", "Place the source on a verified hidden display",
+          {{"windowId", qint64(expected.id)}, {"beforeFrame", diagnosticRect(before->frame)}}
+      );
       if (!holding.available()) {
         const bool hasHiddenSources =
             std::any_of(entries.begin(), entries.end(), [](const auto &item) { return item.second->moved; });
@@ -2873,6 +2909,16 @@ struct NativeHost::Impl
           failed("Holding display changed while sources were exported; restoring all windows", true);
           return;
         }
+        // WindowServer may reposition the source while creating/removing a
+        // display, even when the helper later fails verification. Latch that
+        // attempted mutation before creation so return cannot discard it as
+        // an untouched capture preparation (physical attempt 18).
+        lifecycleDiagnostic("Host", "holding.recovery", "started", "Persist recovery before changing displays");
+        if (!sourceTransaction->armMutation([&] { return current() && writeJournal() && current(); })) {
+          failed("Cannot persist source recovery before holding-display creation");
+          return;
+        }
+        lifecycleDiagnostic("Host", "holding.recovery", "completed", "Display-change recovery intent is durable");
       }
       QString failure;
       if (holding.available() || holding.create(&failure, 4096, 4096)) {
@@ -2911,6 +2957,18 @@ struct NativeHost::Impl
         }
         e->session.source = result.actual;
         e->moved = true;
+        QJsonArray physicalBounds;
+        if (physicalAtExport)
+          for (const auto &output : *physicalAtExport)
+            physicalBounds.append(diagnosticRect(output.bounds));
+        lifecycleDiagnostic(
+            "Host", "source.hidden", "completed", "Source placement verified on the hidden display",
+            {{"windowId", qint64(expected.id)},
+             {"sourcePid", qint64(expected.pid)},
+             {"actualFrame", diagnosticRect(result.actual)},
+             {"holdingBounds", diagnosticRect(holding.bounds())},
+             {"physicalBounds", physicalBounds}}
+        );
         ++e->session.geometry;
         updateCapture(*e);
       } else {
@@ -2921,6 +2979,7 @@ struct NativeHost::Impl
           return;
         }
         error("Holding display unavailable; source remains visible: " + failure);
+        lifecycleDiagnostic("Host", "source.holding", "failed", failure, {{"windowId", qint64(expected.id)}});
         if (!alive)
           return;
         e = current();
@@ -2958,6 +3017,10 @@ struct NativeHost::Impl
     }
     e->relocating = false;
     e->session.commit(epoch);
+    lifecycleDiagnostic(
+        "Host", "source.commit", "completed", "Source export committed",
+        {{"windowId", qint64(e->identity.id)}, {"hidden", e->moved}}
+    );
     opened(*e);
     if (alive && lifecycle->current(admitted) && entry(session, epoch) && q->onCommitted) {
       CallbackScope scope(*this);
@@ -3518,6 +3581,9 @@ struct NativeHost::Impl
   }
   NativeSourceReturnResult restore(std::uint64_t session, bool raise = true, std::optional<Rect> requested = {})
   {
+    lifecycleDiagnostic(
+        "Host", "source.restore", "started", "Restore source and release input", {{"session", QString::number(session)}}
+    );
     const QPointer<NativeHost> alive(q);
     auto found = entries.find(session);
     if (found == entries.end())
@@ -3578,10 +3644,19 @@ struct NativeHost::Impl
       if (auto *item = current(); item && item->session.phase != Phase::Returning)
         item->session.beginReturn();
     };
-    access.releaseInput = [&] { releases(owner, KeyboardRouteReason::Returned); };
+    access.releaseInput = [&] {
+      lifecycleDiagnostic("Host", "input.release", "started", "Release owned source input");
+      releases(owner, KeyboardRouteReason::Returned);
+      lifecycleDiagnostic("Host", "input.release", "completed", "Source input release returned");
+    };
     access.stopCapture = [capture, stream, delegate] {
+      lifecycleDiagnostic("Host", "capture.stop", "started", "Stop source capture");
       capture->shutdown();
-      [stream stopCaptureWithCompletionHandler:^(NSError *) {
+      [stream stopCaptureWithCompletionHandler:^(NSError *failure) {
+        lifecycleDiagnostic(
+            "Host", "capture.stop", failure ? "failed" : "completed",
+            failure ? string(failure.localizedDescription) : "Capture stop completed"
+        );
         // Keep the stream and its output alive until asynchronous teardown ends.
         (void)stream;
         (void)delegate;
@@ -3632,7 +3707,13 @@ struct NativeHost::Impl
         q->onClosed(owner.session);
       }
     };
-    return returnNativeSource(*transaction, access);
+    const auto result = returnNativeSource(*transaction, access);
+    lifecycleDiagnostic(
+        "Host", "source.restore", result == NativeSourceReturnResult::Closed ? "completed" : "failed",
+        result == NativeSourceReturnResult::Closed ? "Source return completed" : "Source return incomplete",
+        {{"session", QString::number(session)}, {"result", int(result)}}
+    );
+    return result;
   }
   void restoreAll(KeyboardRouteReason reason = KeyboardRouteReason::Returned)
   {

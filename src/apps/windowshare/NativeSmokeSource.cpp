@@ -4,7 +4,9 @@
  */
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
+#include "LifecycleDiagnostics.h"
 #include "PhysicalDesktopPreview.h"
+#include "PhysicalTestReport.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEvent.h>
 #include <CoreGraphics/CGGeometry.h>
@@ -547,8 +549,10 @@ public:
     if (m_directory >= 0)
       close(m_directory);
   }
-  void requestStop()
+  void requestStop(const QString &reason = "Stop clicked")
   {
+    if (!m_ended)
+      lifecycleDiagnostic("Test controls", "manual.stop", "completed", reason);
     if (m_request != "stop") {
       m_request = "stop";
       ++m_requestSequence;
@@ -567,7 +571,7 @@ public:
     // premature source loss cannot count as a passing physical test.
     if (stopWasRequested && coordinatorLost())
       return true;
-    requestStop();
+    requestStop("The source or control window was closed");
     return false;
   }
   bool activeForEvidence() const
@@ -601,7 +605,7 @@ private:
     }
     if (!m_valid) {
       if (m_request == "start") {
-        requestStop();
+        requestStop("The coordinator heartbeat became missing or stale");
         return;
       }
       m_state = "preparing";
@@ -610,7 +614,7 @@ private:
       m_state = "stopped";
     } else if (status->state == "active") {
       if (m_request != "start") {
-        requestStop();
+        requestStop("Active status arrived without a local Start request");
         return;
       }
       const auto proposed = now + status->remainingSeconds * 1000;
@@ -618,7 +622,7 @@ private:
       m_state = "active";
     } else if (m_deadline) {
       // Once active, a coordinator rollback cannot silently rearm the test.
-      requestStop();
+      requestStop("The coordinator attempted to roll back an active session");
       return;
     } else {
       m_state = m_request == "start" ? QStringLiteral("preparing") : status->state;
@@ -630,13 +634,21 @@ private:
     const auto deadline = m_state == "active" ? m_deadline : m_state == "ready" ? m_readyDeadline : 0;
     m_remainingSeconds = deadline ? int(std::max<qint64>(0, deadline - now + 999) / 1000) : 0;
     if (deadline && !m_remainingSeconds) {
-      requestStop();
+      requestStop("The fixed Ready or Active deadline expired");
       return;
     }
     update();
   }
   void update()
   {
+    if (m_state != m_loggedState || m_request != m_loggedRequest) {
+      lifecycleDiagnostic(
+          "Test controls", "manual.state", "completed", "Visible test controls changed state",
+          {{"state", m_state}, {"request", m_request}, {"statusValid", m_valid}}
+      );
+      m_loggedState = m_state;
+      m_loggedRequest = m_request;
+    }
     if (m_state == "active") {
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
       if (m_recordInput && m_sessionSeconds == 120)
@@ -709,6 +721,7 @@ private:
   QByteArray m_name;
   struct stat m_lastFile{};
   QString m_state = "preparing", m_request = "none";
+  QString m_loggedState, m_loggedRequest;
   qint64 m_changedAt = 0, m_deadline = 0, m_readyDeadline = 0;
   int m_requestSequence = 0, m_remainingSeconds = 0;
   bool m_seenFile = false, m_heartbeat = false, m_valid = false, m_ended = false;
@@ -783,6 +796,12 @@ int main(int argc, char **argv)
 {
   QApplication app(argc, argv);
   const auto arguments = app.arguments();
+  if (arguments.size() == 3 && arguments.at(1) == "--physical-report") {
+    PhysicalTestReport report(arguments.at(2));
+    report.show();
+    // Return before constructing a source, input recorder or native filter.
+    return app.exec();
+  }
   if (arguments.size() == 4 && arguments.at(1) == "--desktop-preview") {
     PhysicalDesktopPreview preview(arguments.at(2), arguments.at(3));
     // Independent observer process: no recorder or native event hooks.

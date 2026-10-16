@@ -369,6 +369,119 @@ class DriverTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Unrelated"):
                 driver.command("status")
 
+    def test_remote_diagnostics_preserve_protocol_order_and_actual_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = module.DIAGNOSTICS.Diagnostics(Path(directory) / 'trace', 'test')
+            row = dict(schema='deskflow-physical-diagnostic-v1', step='Provider', state='failed',
+                       message='Provider never acquired its bus', elapsedMs=999999999)
+            with self.driver([{'event': 'diagnostic', 'diagnostic': row},
+                              {'event': 'failed', 'failure': 'Provider startup failed', 'id': None}]) as driver:
+                driver.diagnostics = trace
+                with self.assertRaisesRegex(RuntimeError, 'Ubuntu test failed: Provider startup failed'):
+                    driver.event('prepared')
+                self.assertFalse(driver.prepared_seen)
+                self.assertEqual(driver.pending, {})
+                self.assertEqual(trace.first_failure['details']['remote']['elapsedMs'], 999999999)
+                self.assertEqual(trace.first_failure['message'], 'Provider never acquired its bus')
+            trace.close()
+
+    def test_diagnostics_cannot_substitute_a_start_or_stop_reply(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace = module.DIAGNOSTICS.Diagnostics(Path(directory) / 'trace', 'test')
+            row = dict(schema='deskflow-physical-diagnostic-v1', step='ready', state='completed', message='ready')
+            with self.driver([{'event': 'diagnostic', 'diagnostic': row}, {'event': 'stopped', 'id': 1}]) as driver:
+                driver.diagnostics = trace
+                self.assertEqual(driver.command('stop')['id'], 1)
+                self.assertEqual(driver.rows, 1)
+                self.assertEqual(driver.diagnostic_rows, 1)
+            trace.close()
+
+
+class DiagnosticTests(unittest.TestCase):
+    def test_first_failure_survives_cleanup_and_each_stage_is_flushed_before_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'diagnostics.jsonl'
+            now = [1000000000]
+            trace = module.DIAGNOSTICS.Diagnostics(path, 'test', now=lambda: now[0])
+            with self.assertRaisesRegex(RuntimeError, 'geometry rejected'):
+                with trace.step('Create display'):
+                    self.assertEqual(json.loads(path.read_text())['state'], 'started')
+                    now[0] += 5000000
+                    raise RuntimeError('geometry rejected')
+            first = trace.first_failure
+            with trace.step('Cleanup'):
+                pass
+            trace.emit('Companion', 'failed', 'later disconnect')
+            trace.close()
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual([r['sequence'] for r in rows], list(range(1, len(rows) + 1)))
+            self.assertEqual(first['details']['durationMs'], 5)
+            self.assertEqual(trace.summary()['firstFailure'], first)
+            self.assertEqual(trace.last_completed['step'], 'Cleanup')
+            self.assertIn('RuntimeError: geometry rejected', first['details']['traceback'])
+
+    def test_closed_console_does_not_interrupt_cleanup_or_discard_disk_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sink = Mock(side_effect=BrokenPipeError('closed console'))
+            trace = module.DIAGNOSTICS.Diagnostics(Path(directory) / 'trace', 'test', sink=sink)
+            with trace.step('Cleanup'):
+                ran = True
+            self.assertTrue(ran)
+            self.assertEqual(trace.last_completed['step'], 'Cleanup')
+            self.assertIn('closed console', trace.error)
+            trace.close()
+            self.assertEqual(len((Path(directory) / 'trace').read_text().splitlines()), 2)
+
+    def test_partial_native_lines_are_joined_and_input_payloads_are_not_copied(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+            log = root / 'native.log'
+            observer = module.DIAGNOSTICS.LogObserver(log, trace)
+            row = dict(component='Holding display', step='geometry', state='failed', message='wrong dimensions')
+            text = 'DESKFLOW_STEP ' + json.dumps(row) + '\n'
+            log.write_text('DEBUG: recv key down secret-test-text\n' + text[:30])
+            observer.poll()
+            self.assertIsNone(trace.first_failure)
+            with log.open('a') as stream:
+                stream.write(text[30:])
+            observer.poll()
+            self.assertEqual(trace.first_failure['message'], 'wrong dimensions')
+            observer.poll()
+            self.assertEqual(trace.sequence, 1)
+            trace.close()
+            self.assertNotIn('secret-test-text', (root / 'trace').read_text())
+
+    def test_event_wait_observes_readiness_and_deadline_without_sleep(self):
+        now = [0]
+        wake = Mock()
+        wake.wait.side_effect = lambda interval: now.__setitem__(0, now[0] + interval)
+        predicate = Mock(side_effect=[False, 'ready'])
+        with patch.object(module.time, 'sleep', side_effect=AssertionError('sleep is forbidden')):
+            result = module.DIAGNOSTICS.wait_until(predicate, 'ready', 1, wake, now=lambda: now[0])
+            self.assertEqual(result, 'ready')
+            with self.assertRaisesRegex(RuntimeError, 'Timed out waiting for stopped'):
+                module.DIAGNOSTICS.wait_until(lambda: False, 'stopped', 0.1, wake, now=lambda: now[0])
+
+    def test_hidden_gate_rejects_attempt_18_movement_and_unbound_or_overlapping_geometry(self):
+        frame = dict(x=400, y=190, width=640, height=448)
+        control = dict(x=480, y=280, width=480, height=268)
+        initial = dict(sourceWindowId=11, pid=22, frame=frame, controlFrame=control)
+        actual = dict(x=1440, y=190, width=640, height=448)
+        receipt = dict(frame=actual, controlFrame=control, controlVisible=True)
+        details = dict(windowId=11, sourcePid=22, actualFrame=actual,
+                       holdingBounds=dict(x=1440, y=0, width=4096, height=4096),
+                       physicalBounds=[dict(x=0, y=0, width=1440, height=900)])
+        native = dict(state='completed', details=details)
+        verify = module.original_support().hidden_source_verified
+        self.assertTrue(verify(receipt, initial, native))
+        self.assertFalse(verify({**receipt, 'frame': {**frame, 'x': 9, 'y': 50}}, initial, None))
+        for changed in ({'windowId': 12}, {'sourcePid': 23}, {'physicalBounds': []},
+                        {'physicalBounds': [dict(x=0, y=0, width=4500, height=1760)]},
+                        {'holdingBounds': {**details['holdingBounds'], 'width': float('nan')}}):
+            self.assertFalse(verify(receipt, initial, {**native, 'details': {**details, **changed}}))
+        self.assertFalse(verify({**receipt, 'controlVisible': False}, initial, native))
+
 
 class ProductionPlans(unittest.TestCase):
     def setUp(self):
