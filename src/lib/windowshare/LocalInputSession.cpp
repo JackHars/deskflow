@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalInputSession.h"
+#include "LifecycleDiagnostics.h"
 #include "LocalInputCodeAdmission.h"
 #ifdef __APPLE__
 #include "platform/OriginalInputCaptureSource_mac.h"
@@ -226,6 +227,14 @@ void LocalInputCoreSession::drainCapturedInput()
       m_channel->sendWindowPointer({});
   };
   if (!epoch.live()) {
+    const auto retained = source->completedInput()->epoch();
+    if (!retained.live() && !m_captureFailureLogged) {
+      m_captureFailureLogged = true;
+      lifecycleDiagnostic(
+          "Core input", "capture.continuity", "failed", "Original capture epoch was revoked",
+          {{"epoch", QString::number(retained.id())}, {"reason", int(retained.reason())}}
+      );
+    }
     m_windowDragEdgeJoin.revoke();
     // Source::epoch() is also empty before producer startup. The conduit owns
     // the underlying epoch and can distinguish that state from continuity loss.
@@ -272,6 +281,14 @@ void LocalInputCoreSession::drainCapturedInput()
       break;
     m_windowDragEdgeJoin.capture(*captured);
     if (!m_captureBarrier->observe(captured->input)) {
+      m_captureFailureLogged = true;
+      lifecycleDiagnostic(
+          "Core input", "capture.continuity", "failed", "Physical transition consistency check failed",
+          {{"epoch", QString::number(captured->input.record.epoch)},
+           {"sequence", QString::number(captured->input.record.sequence)},
+           {"payloadKind", int(captured->input.record.payload.index())},
+           {"reason", int(captured->input.epoch.reason())}}
+      );
       m_windowDragEdgeJoin.revoke();
       // Keep the native observer alive for a later raw emergency.
       m_captureBarrier.reset();
@@ -289,8 +306,17 @@ void LocalInputCoreSession::drainCapturedInput()
     // A stalled Server revokes only this bounded copy conduit; capture draining
     // and the independent sticky emergency path continue unchanged.
     const auto completed = source->completedInput();
-    if (completed->bound())
-      completed->publish(*captured);
+    if (completed->bound() && !completed->publish(*captured) && !m_captureFailureLogged) {
+      m_captureFailureLogged = true;
+      lifecycleDiagnostic(
+          "Core input", "capture.delivery", "failed", "Completed capture inbox rejected publication",
+          {{"epoch", QString::number(captured->input.record.epoch)},
+           {"sequence", QString::number(captured->input.record.sequence)},
+           {"epochLive", completed->epoch().live()},
+           {"reason", int(completed->epoch().reason())},
+           {"routesLive", source->routes()->live()}}
+      );
+    }
     const auto callback = onCapturedInput;
     const auto lifetime = m_callbackLifetime;
     if (callback)

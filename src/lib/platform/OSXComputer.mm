@@ -736,6 +736,7 @@ void OSXComputer::enable()
   });
 
   if (m_isPrimary) {
+    m_hotKeyCapture = {};
     // FIXME -- start watching jump zones
 
     // kCGEventTapOptionDefault = 0x00000000 (Missing in 10.4, so specified literally)
@@ -1179,7 +1180,7 @@ void OSXComputer::displayReconfigurationCallback(
   }
 }
 
-bool OSXComputer::onKey(CGEventRef event)
+bool OSXComputer::onKey(CGEventRef event, bool &consumeShortcut)
 {
   CGEventType eventKind = CGEventGetType(event);
 
@@ -1226,21 +1227,20 @@ bool OSXComputer::onKey(CGEventRef event)
   // check for hot key
   HotKeyToIDMap::const_iterator i =
       m_hotKeyToIDMap.find(HotKeyItem(virtualKey, m_keyState->mapModifiersToCarbon(macMask) & 0xff00u));
-  if (i != m_hotKeyToIDMap.end()) {
-    uint32_t id = i->second;
-
-    // determine event type
-    EventTypes type;
-    if (eventKind == kCGEventKeyDown) {
-      type = EventTypes::PrimaryComputerHotkeyDown;
-    } else if (eventKind == kCGEventKeyUp) {
-      type = EventTypes::PrimaryComputerHotkeyUp;
-    } else {
-      return false;
-    }
-
-    m_events->addEvent(Event(type, getEventTarget(), HotKeyInfo::alloc(id)));
-
+  const auto shortcut = m_hotKeyCapture.observe(
+      virtualKey, eventKind == kCGEventKeyDown, CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat) == 1,
+      i == m_hotKeyToIDMap.end() ? 0 : i->second
+  );
+  consumeShortcut = shortcut.consumed;
+  if (shortcut.consumed) {
+    // The HID tap owns this press/repeat/up cycle even before the queued
+    // screen-switch event reaches Server. No repeat reaches the source app.
+    // Pair the release with its retained shortcut even if modifiers released first.
+    if (shortcut.hotkey && m_hotKeys.contains(shortcut.hotkey))
+      m_events->addEvent(Event(
+          shortcut.down ? EventTypes::PrimaryComputerHotkeyDown : EventTypes::PrimaryComputerHotkeyUp, getEventTarget(),
+          HotKeyInfo::alloc(shortcut.hotkey)
+      ));
     return true;
   }
 
@@ -1879,9 +1879,13 @@ CGEventRef OSXComputer::handleCGInputEvent(CGEventTapProxy proxy, CGEventType ty
     break;
   case kCGEventKeyDown:
   case kCGEventKeyUp:
-  case kCGEventFlagsChanged:
-    computer->onKey(event);
+  case kCGEventFlagsChanged: {
+    bool consumeShortcut = false;
+    computer->onKey(event, consumeShortcut);
+    if (consumeShortcut)
+      return nullptr;
     break;
+  }
   case kCGEventTapDisabledByTimeout:
   case kCGEventTapDisabledByUserInput:
     computer->m_eventTapDisabled.store(type, std::memory_order_release);

@@ -9,14 +9,16 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 ## Current completion checklist — 2026-10-15
 
 The P1–P8 implementation is integrated, with the supported-capability limits
-documented below. The product is **not physically accepted**. Latest attempted
-hidden-source test 23 verified the display, then failed immediate AX frame
-readback before Active. The source was restored. The asynchronous placement
-follow-up and its verification are recorded at the top of `TESTING.md`;
-another physical run requires fresh permission.
-Latest verified hosted runtime `60b074160` passes all six jobs in
-[run 38839385272](https://github.com/JackHars/deskflow/actions/runs/38839385272).
-That hosted result precedes the placement follow-up.
+below. The product is **not physically accepted**. Attempt 24 verified the
+hidden source placement and reached Active, but original-input readiness never
+armed; capture revoked and a heartbeat failure stopped the run. Frame restoration
+passed, while a leaked switching-key repeat left the fixture ledger nonneutral.
+The heartbeat race and shortcut follow-up, automated results and remaining
+input diagnostics are recorded at the top of `TESTING.md`.
+Latest hosted placement runtime `1f489fce0` passes all six jobs in
+[run 38841354672](https://github.com/JackHars/deskflow/actions/runs/38841354672).
+That hosted result precedes these follow-up fixes. Fresh permission is required
+immediately before the next physical launch; attempt 24's approval is consumed.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.

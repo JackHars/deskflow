@@ -4,6 +4,7 @@
  */
 #include "OriginalInputCoordinator.h"
 #include "InputEvidence.h"
+#include "LifecycleDiagnostics.h"
 #include <QPointer>
 #include <QThread>
 #include <algorithm>
@@ -115,8 +116,10 @@ public:
   ) override
   {
     std::unique_lock lock(m_state->mutex);
-    if (m_state->closed || !m_state->available || !m_state->policy.windowSharePeer(selected.ticket().fingerprint()))
+    if (m_state->closed || !m_state->available || !m_state->policy.windowSharePeer(selected.ticket().fingerprint())) {
+      diagnose(0, "Code admission or peer policy is unavailable", captured, route);
       return existingOwner || m_state->owner || m_cutoff ? Result::revoked() : Result::refused();
+    }
     while (!m_state->operations.empty() && m_state->operations.front()->phase == Shared::Phase::Sent)
       inputEvidenceApply(InputEvidenceQueue::CoordinatorOperations, m_state.get(), 0, 1, [&] {
         m_state->operations.pop_front();
@@ -127,14 +130,17 @@ public:
         route.recipient != selected.recipient() || route.server != selected.serverIncarnation() ||
         route.ticket.incarnation() != selected.ticket().incarnation() ||
         route.ticket.fingerprint() != selected.ticket().fingerprint() ||
-        m_state->operations.size() >= Shared::capacity || m_state->nextTicket == UINT64_MAX)
+        m_state->operations.size() >= Shared::capacity || m_state->nextTicket == UINT64_MAX) {
+      diagnose(1, "Capture, selection, route or reservation boundary is invalid", captured, route);
       return Result::revoked();
+    }
     auto owner = m_state->owner;
     const auto *key = std::get_if<OriginalInputKey>(&captured.input.record.payload);
     const auto *button = std::get_if<OriginalInputButton>(&captured.input.record.payload);
     const bool acquisition =
         (key && key->transition == OriginalKeyTransition::Down && !key->repeat) || (button && button->down);
     if ((!owner || (!existingOwner && acquisition)) && !captured.transition.permitsAcquisition(captured.input)) {
+      diagnose(2, "The control has no observed release followed by a fresh press", captured, route);
       if (owner) {
         m_state->revoke();
         return Result::revoked();
@@ -162,6 +168,7 @@ public:
     }
     if (existingOwner && existingOwner != owner->id)
       return Result::revoked();
+    diagnose(3, "Original input preparation was requested", captured, route);
     m_preparing = std::make_shared<Shared::Operation>(Shared::Operation{
         ++m_state->nextTicket,
         captured,
@@ -567,6 +574,33 @@ public:
   }
 
 private:
+  // First occurrence of each preparation boundary, on the Core thread only.
+  // Keep diagnostics bounded and outside native capture; no event text/data.
+  void diagnose(
+      unsigned stage, const char *message, const OriginalInputCaptured &captured,
+      const OriginalInputRouteDecision &route
+  )
+  {
+    const auto bit = 1u << stage;
+    if (!inputEvidence() || (m_diagnosticStages & bit))
+      return;
+    m_diagnosticStages |= bit;
+    lifecycleDiagnostic(
+        "Core input", "input.preparation", "observed", message,
+        {{"stage", int(stage)},
+         {"available", m_state->available},
+         {"closed", m_state->closed},
+         {"captureLive", captured.input.live()},
+         {"epoch", QString::number(captured.input.record.epoch)},
+         {"sequence", QString::number(captured.input.record.sequence)},
+         {"parts", int(captured.translation.parts)},
+         {"uncertain", captured.translation.uncertain},
+         {"pointKnown", route.pointKnown},
+         {"routeKind", int(route.kind)},
+         {"acquisitionObserved", captured.transition.permitsAcquisition(captured.input)}}
+    );
+  }
+  unsigned m_diagnosticStages = 0;
   Result prepareFocus(const std::shared_ptr<Shared::Operation> &operation)
   {
     const auto ticket = operation->ticket;

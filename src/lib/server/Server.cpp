@@ -2207,8 +2207,14 @@ void Server::flushOriginalBeforeSelection()
 
 void Server::cancelOriginalDispatch(const char *reason) noexcept
 {
-  if (!m_originalDispatchTerminal)
+  if (!m_originalDispatchTerminal) {
     LOG_WARN("original input dispatch stopped: %s", reason);
+    if (m_originalInputCaptured)
+      LOG_WARN(
+          "original input stop context: captureLive=%d routesLive=%d epochReason=%d", m_originalInputCaptured->live(),
+          m_originalInputRoutes && m_originalInputRoutes->live(), int(m_originalInputCaptured->epoch().reason())
+      );
+  }
   deskflow::windowshare::inputEvidenceInvalidate(deskflow::windowshare::InputEvidenceLoss::PipelineRevoked);
   m_originalDispatchTerminal = true;
   const auto owners = m_originalOwners;

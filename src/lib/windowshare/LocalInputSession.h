@@ -60,6 +60,7 @@ private:
   // Terminal even if the underlying epoch was already revoked by overflow or
   // discontinuity. Capture-timer shutdown never enters stop()'s bounded wait.
   bool m_captureEmergencyHandled = false;
+  bool m_captureFailureLogged = false;
   bool m_pointerNotificationsStopped = false;
   std::shared_ptr<OriginalInputCaptureSource> m_captureSource;
   std::unique_ptr<OriginalInputNeutralBarrier> m_captureBarrier;

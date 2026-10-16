@@ -7,6 +7,7 @@
  */
 
 #pragma once
+#include "HotKeyCapture.h"
 
 #include "deskflow/PlatformComputer.h"
 #include "platform/OSXClipboard.h"
@@ -134,7 +135,7 @@ private:
 
   void constructMouseButtonEventMap();
 
-  bool onKey(CGEventRef event);
+  bool onKey(CGEventRef event, bool &consumeShortcut);
 
   void onMediaKey(CGEventRef event);
 
@@ -306,6 +307,7 @@ private:
   uint32_t m_activeModifierHotKey;
   KeyModifierMask m_activeModifierHotKeyMask;
   HotKeyToIDMap m_hotKeyToIDMap;
+  HotKeyCapture m_hotKeyCapture;
 
   // global hotkey operating mode
   static bool s_testedForGHOM;

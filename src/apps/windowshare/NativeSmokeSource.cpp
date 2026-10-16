@@ -5,6 +5,7 @@
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
 #include "LifecycleDiagnostics.h"
+#include "ManualStatus.h"
 #include "PhysicalDesktopPreview.h"
 #include "PhysicalTestReport.h"
 #include <CoreFoundation/CoreFoundation.h>
@@ -126,58 +127,6 @@ OwnedWindowObservation observeOwnedWindow(long number)
   }
   CFRelease(windows);
   return result;
-}
-
-bool sameStatusFile(const struct stat &a, const struct stat &b)
-{
-  return a.st_dev == b.st_dev && a.st_ino == b.st_ino && a.st_size == b.st_size &&
-         a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
-         a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec;
-}
-
-struct ManualStatus
-{
-  QString state;
-  int remainingSeconds = 0;
-  struct stat file{};
-};
-constexpr int manualStartSeconds = 300;
-
-std::optional<ManualStatus> readManualStatus(int directory, const QByteArray &name, int sessionSeconds)
-{
-  if (directory < 0)
-    return std::nullopt;
-  const int descriptor = openat(directory, name.constData(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-  if (descriptor < 0)
-    return std::nullopt;
-  QFile file;
-  if (!file.open(descriptor, QIODevice::ReadOnly, QFileDevice::AutoCloseHandle)) {
-    close(descriptor);
-    return std::nullopt;
-  }
-  struct stat before{}, after{};
-  if (fstat(descriptor, &before) != 0 || !S_ISREG(before.st_mode) || before.st_uid != getuid() ||
-      before.st_nlink != 1 || (before.st_mode & 0077) || before.st_size <= 0 || before.st_size > 512)
-    return std::nullopt;
-  const auto bytes = file.read(513);
-  if (bytes.size() != before.st_size || fstat(descriptor, &after) != 0 || !sameStatusFile(before, after))
-    return std::nullopt;
-  QJsonParseError error;
-  const auto document = QJsonDocument::fromJson(bytes, &error);
-  // All three allowed keys/values are simple scalars without colons. Counting
-  // member separators also rejects duplicate keys which QJsonObject collapses.
-  if (error.error != QJsonParseError::NoError || !document.isObject() || bytes.count(':') != 3)
-    return std::nullopt;
-  const auto value = document.object();
-  const auto state = value.value("state").toString();
-  const auto seconds = value.value("remainingSeconds");
-  if (value.size() != 3 || !value.value("version").isDouble() || value.value("version").toDouble() != 1 ||
-      !seconds.isDouble() || seconds.toDouble() != seconds.toInt(-1) || seconds.toInt(-1) < 0 ||
-      seconds.toInt() > (state == "ready" ? manualStartSeconds : sessionSeconds) ||
-      (state != "preparing" && state != "ready" && state != "active" && state != "stopped") ||
-      (state == "active" ? seconds.toInt() == 0 : state != "ready" && seconds.toInt() != 0))
-    return std::nullopt;
-  return ManualStatus{state, seconds.toInt(), after};
 }
 
 class AcceptanceWindow final : public QWidget
@@ -413,6 +362,11 @@ private:
     // show animation. Latch only the requested Qt frame, not that transient.
     if (m_originalFrame.isEmpty() && settled)
       m_originalFrame = frame;
+    QJsonArray heldKeyCodes;
+    auto sortedKeys = m_keys.values();
+    std::sort(sortedKeys.begin(), sortedKeys.end());
+    for (auto key : sortedKeys)
+      heldKeyCodes.append(key);
     QJsonObject metadata{
         {"keyDown", m_keyDown},
         {"keyUp", m_keyUp},
@@ -420,6 +374,7 @@ private:
         {"mouseUp", m_mouseUp},
         {"scroll", m_scroll},
         {"heldKeys", m_keys.size()},
+        {"heldKeyCodes", heldKeyCodes},
         {"heldButtons", m_buttons.size()},
         {"pid", qint64(getpid())},
         {"windowId", frame.isEmpty() ? 0 : qint64(ownId)},
@@ -575,7 +530,7 @@ public:
     layout.addLayout(buttons);
     connect(m_start, &QPushButton::clicked, this, [this] {
       poll();
-      if (m_valid && m_state == "ready" && m_request == "none" && !m_ended) {
+      if (m_valid && m_readAccepted && m_state == "ready" && m_request == "none" && !m_ended) {
         m_request = "start";
         ++m_requestSequence;
         m_state = "preparing";
@@ -627,30 +582,43 @@ public:
 private:
   bool coordinatorLost() const
   {
-    return !m_valid && m_clock.elapsed() - m_changedAt >= 15000;
+    return !m_valid && m_clock.elapsed() - m_heartbeat.changedAt() >= 15000;
   }
   void poll()
   {
-    const auto status = readManualStatus(m_directory, m_name, m_sessionSeconds);
+    const auto started = m_clock.elapsed();
+    const auto read = readManualStatus(m_directory, m_name, m_sessionSeconds);
     const auto now = m_clock.elapsed();
-    if (status) {
-      if (m_seenFile && !sameStatusFile(m_lastFile, status->file)) {
-        m_heartbeat = true;
-        m_changedAt = now;
-      }
-      m_lastFile = status->file;
-      m_seenFile = true;
+    m_readAccepted = read.kind == ManualStatusRead::Kind::Accepted;
+    const bool wasValid = m_valid;
+    m_valid = m_heartbeat.observe(read, now);
+    if (!m_readAccepted || m_valid != wasValid || !m_lastReadAccepted || now - m_lastPoll > 1000) {
+      lifecycleDiagnostic(
+          "Test controls", "manual.heartbeat", m_valid ? "completed" : "pending",
+          !m_readAccepted ? read.reason
+          : m_valid       ? "Fresh coordinator heartbeat"
+                          : "Waiting for a fresh publication",
+          {{"statusValid", m_valid},
+           {"readAccepted", m_readAccepted},
+           {"concurrentReplacement", read.kind == ManualStatusRead::Kind::Replaced},
+           {"systemError", read.systemError},
+           {"heartbeatAgeMs", now - m_heartbeat.changedAt()},
+           {"readDurationMs", now - started},
+           {"pollGapMs", now - m_lastPoll}}
+      );
     }
-    // Require an actual fresh publication after our first observation. Merely
-    // rereading an unchanged old ready file never enables Start or renews it.
-    m_valid = status && m_heartbeat && now - m_changedAt < 2000;
+    m_lastReadAccepted = m_readAccepted;
+    m_lastPoll = now;
+    const auto &status = m_heartbeat.last();
     if (m_ended) {
       update();
       return;
     }
     if (!m_valid) {
       if (m_request == "start") {
-        requestStop("The coordinator heartbeat became missing or stale");
+        requestStop(QStringLiteral("Coordinator heartbeat lost: %1; last change %2 ms ago")
+                        .arg(read.reason)
+                        .arg(now - m_heartbeat.changedAt()));
         return;
       }
       m_state = "preparing";
@@ -741,7 +709,7 @@ private:
       );
       m_instructions->setText("Please wait for Active before using the shortcut. You can click Stop at any time.");
     }
-    m_start->setEnabled(m_valid && m_state == "ready" && m_request == "none" && !m_ended);
+    m_start->setEnabled(m_valid && m_readAccepted && m_state == "ready" && m_request == "none" && !m_ended);
     m_stop->setEnabled(!m_ended);
     m_field.setReadOnly(m_state != "active");
     m_recorder.setManualMetadata(
@@ -764,12 +732,12 @@ private:
   QTimer m_timer;
   int m_directory = -1;
   QByteArray m_name;
-  struct stat m_lastFile{};
+  ManualStatusHeartbeat m_heartbeat;
   QString m_state = "preparing", m_request = "none";
   QString m_loggedState, m_loggedRequest;
-  qint64 m_changedAt = 0, m_deadline = 0, m_readyDeadline = 0;
+  qint64 m_lastPoll = 0, m_deadline = 0, m_readyDeadline = 0;
   int m_requestSequence = 0, m_remainingSeconds = 0;
-  bool m_seenFile = false, m_heartbeat = false, m_valid = false, m_ended = false;
+  bool m_readAccepted = false, m_lastReadAccepted = true, m_valid = false, m_ended = false;
 };
 
 class EvidenceControls final : public QObject

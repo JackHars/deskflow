@@ -4,6 +4,74 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt twenty-four: placement passed; input acceptance remains open — 2026-10-15
+
+Permission `call_caf1c5af5eb74a32b699f02f82a6e588` was consumed by
+`build/h06-r24-vtm4s8z9/`, using runtime `1f489fce0`. Start was recorded at
+02:49:44 UTC October 16 (October 15 locally). The Host verified source placement
+at (1440,188,640,448), outside the physical Mac display, and committed export.
+Active began at 02:50:03.424; typing, button and scroll receipts followed.
+The native placement change therefore passed its previously failing physical step.
+
+This run still **failed**: original dispatch revoked at 02:51:11.575, then the
+controls reported a missing/stale coordinator heartbeat at 02:51:13.879, roughly
+70 seconds into the 120-second session. Return reached the source and requested
+Record, but Core/Host never reported a ready original-input owner; recording was
+never armed. Legacy receipts do not prove original-field delivery. The logs do
+not yet distinguish the input-revocation cause, nor the exact heartbeat read
+failure. Do not mark H04/H06 accepted.
+
+Cleanup returned the source to (400,188,640,448), stopped the owned processes,
+and preserved ordinary settings on both machines; Ubuntu's provider is inactive.
+The final fixture ledger nevertheless contains one held key: Right arrow
+(Qt 16777236/native 124). The full receipt collector shows an untagged repeat
+from the switching chord reaching the Mac source with no matching local up.
+Other observed typed keys released. This is not a neutral-input acceptance;
+no ledger was cleared to hide the unmatched event. Mac SSH exit 255 remains
+recorded. Ubuntu result archive SHA-256:
+`bf0f660517b7fb3e17729ba54aab8549d1c690f86ca3ebfd22f595350267e469`.
+
+Follow-up implementation:
+
+- The status reader distinguishes a verified concurrent atomic replacement
+  from malformed, missing, insecure or in-place-mutated data. A replaced inode
+  can preserve only the last validated state's existing two-second lease;
+  it cannot renew the heartbeat, consume new state or authorize Start.
+  Invalid publications still fail immediately. Ready/Active deadlines are unchanged.
+- Deterministic tests replace the actual file after open and after read. They
+  reproduce the old metadata race without sleeps and check fixed expiry, initial
+  freshness, duplicate JSON keys, permissions, links, deletion and mutation.
+  The race is demonstrated in isolation, not retrospectively proven as this
+  run's precise read failure. New logs report reason, errno, heartbeat age,
+  read duration and poll gap.
+- Mac shortcut handling now consumes a registered physical key cycle in the
+  tap before the asynchronous screen switch completes. Repeats cannot leak to
+  the source or retrigger the shortcut; release stays consumed after modifiers
+  change. Ordinary held keys are not converted into shortcuts mid-press, and
+  an orphan shortcut repeat cannot fabricate another shortcut action.
+- Capture continuity/inbox failure and the first preparation decisions now
+  print bounded diagnostics outside the native tap. Fixture receipts include
+  held Qt key codes. These additions diagnose the still-unresolved owner/
+  revocation problem; they do not assert it is fixed.
+
+Evidence: `build/manual-heartbeat-ihbxq4t7/`. Mac runtime/fixture builds pass;
+manual-status, shortcut, companion and evidence suites pass 4/4 (12.86s), and
+Server/coordinator suites pass 2/2 (5.98s). Python coordinator checks pass 84/84.
+Both new portable regressions pass scoped ASan/UBSan on Mac and actual jack's
+isolated Ubuntu image. Qt/system libraries are outside sanitizer coverage.
+Linux builds the changed library and passes status/shortcut/preflight/evidence.
+The initial companion test failed without container init; a focused reproduction
+confirmed an already-exited child retained as zombie Z under PID 1. The unchanged
+suite passes with `--init` (5.71s). Initial failure and reproduction are retained;
+no production cleanup assertion or timeout was weakened.
+
+All six hosted jobs for placement runtime `1f489fce0` now pass in
+[run 38841354672](https://github.com/JackHars/deskflow/actions/runs/38841354672).
+This hosted pass precedes the current fixes. No new physical run has launched;
+fresh permission is required immediately before the next one.
+The new Apple-issued package audit passes (77 exact-library records, no errors).
+ZIP SHA-256: `696cd0ed5c644b2e98602aeaf9cf67bd82395197f9ea25d70f222ab7b355bc7a`.
+
 ## H06 attempt twenty-three: accepted writes, unavailable native readback — 2026-10-15
 
 Approved run `build/h06-r23-uk2ivwf9/` used runtime `4854f84a9`. The hidden
@@ -49,13 +117,13 @@ Signed package audit: PASS, 77 exact-library records, no errors. ZIP SHA-256
 Hosted source bundle `38841354603`: all 1179 tracked files, modes and Git blob/
 commit identities independently verified. Source archive SHA-256
 `27557b5898702bad6d2a74e8dd3c9e4a589c739ac0be5154bce679b7e7480a00`.
-Foundation run `38841354672` is still in progress, not yet an all-green result.
+Foundation run `38841354672` subsequently passed all six jobs; see attempt 24 above.
 
 Attempt 24 is prepared at `build/h06-r24-vtm4s8z9/`; frozen plan validation,
 Mac permission/conflict checks and packaged admission pass (11.489s, hooks off).
 Jack's actual local Wayland session 2 is active, provider disabled. Holding and
 separate controls are configured; there is no Mac desktop preview/results popup.
-Fresh physical launch permission is pending. Do not reuse attempt 23's approval.
+Attempt 24 subsequently launched and failed as recorded above. Its permission is consumed; do not relaunch this plan.
 The acceptance checklist remains open in `CHATGPT_HANDOFF.md`.
 
 ## Roadmap follow-up: deadline-order regression — 2026-10-15
