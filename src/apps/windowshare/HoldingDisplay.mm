@@ -251,7 +251,6 @@ bool holdingIdentity(CGDirectDisplayID display)
   );
 }
 
-#ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
 struct DisplaySnapshot
 {
   CGDirectDisplayID id = kCGNullDirectDisplay;
@@ -281,6 +280,21 @@ bool snapshot(std::vector<DisplaySnapshot> &displays, QString *error)
   return true;
 }
 
+Rect requestedHoldingBounds(const std::vector<DisplaySnapshot> &displays, unsigned width, unsigned height)
+{
+  if (displays.empty())
+    return {};
+  const DisplaySnapshot *rightmost = &displays.front();
+  for (const auto &display : displays)
+    if (CGRectGetMaxX(display.bounds) > CGRectGetMaxX(rightmost->bounds))
+      rightmost = &display;
+  return {
+      std::ceil(CGRectGetMaxX(rightmost->bounds)), std::floor(CGRectGetMinY(rightmost->bounds)), double(width),
+      double(height)
+  };
+}
+
+#ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
 bool unchanged(const std::vector<DisplaySnapshot> &displays, CGDirectDisplayID originalMain)
 {
   if (CGMainDisplayID() != originalMain) {
@@ -356,6 +370,7 @@ struct HoldingDisplay::Impl : QObject
   std::vector<std::function<void(bool, QString)>> completions;
   QByteArray response;
   bool notifications = false, replied = false;
+  Rect requestedBounds;
   static void displayChanged(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context)
   {
     auto *self = static_cast<Impl *>(context);
@@ -472,17 +487,11 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
         return false;
       }
       const CGDirectDisplayID originalMain = CGMainDisplayID();
-      const DisplaySnapshot *rightmost = &physical.front();
-      for (const auto &display : physical) {
-        if (CGRectGetMaxX(display.bounds) > CGRectGetMaxX(rightmost->bounds)) {
-          rightmost = &display;
-        }
-      }
       // Quartz removes gaps between displays. Request an adjacent location and
       // validate the actual result rather than claiming off-desktop placement.
-      const double x = std::ceil(CGRectGetMaxX(rightmost->bounds));
-      const double y = std::floor(CGRectGetMinY(rightmost->bounds));
-      if (!asRect(CGRectMake(x, y, width, height)).valid()) {
+      const auto requested = requestedHoldingBounds(physical, width, height);
+      const double x = requested.x, y = requested.y;
+      if (!requested.valid()) {
         return fail(error, QStringLiteral("No valid holding-display location is available."));
       }
 
@@ -658,6 +667,17 @@ void HoldingDisplay::createAsync(std::function<void(bool, QString)> completion, 
     rejected("The owned holding-display helper is missing or has unsafe permissions");
     return;
   }
+  std::vector<DisplaySnapshot> physical;
+  QString geometryError;
+  if (!snapshot(physical, &geometryError)) {
+    rejected(geometryError);
+    return;
+  }
+  m_impl->requestedBounds = requestedHoldingBounds(physical, width, height);
+  if (!m_impl->requestedBounds.valid()) {
+    rejected("Cannot determine the requested holding-display position");
+    return;
+  }
   lifecycleDiagnostic(
       "Holding display", "create", "started", "Create hidden display without blocking native events",
       {{"width", qint64(width)}, {"height", qint64(height)}}
@@ -812,6 +832,18 @@ std::optional<HoldingResizeDisplay> HoldingDisplay::verifiedSnapshot(QString *re
                            .arg(bounds.size.height)
                            .arg(m_impl->width)
                            .arg(m_impl->height));
+#ifndef DESKFLOW_HOLDING_DISPLAY_HELPER
+  // WindowServer can briefly report the right size at a transitional origin
+  // (observed on macOS: y=-1 before the requested y=0). Keep native display
+  // notifications armed until the requested placement is actually visible.
+  // An active, isolated display alone is not proof that configuration finished.
+  if (bounds.origin.x != m_impl->requestedBounds.x || bounds.origin.y != m_impl->requestedBounds.y)
+    return unavailable(QStringLiteral("Holding display origin is (%1,%2); waiting for requested (%3,%4)")
+                           .arg(bounds.origin.x)
+                           .arg(bounds.origin.y)
+                           .arg(m_impl->requestedBounds.x)
+                           .arg(m_impl->requestedBounds.y));
+#endif
   if (!isolated(m_impl->id, bounds))
     return unavailable("The holding display is not isolated from the physical displays");
   return HoldingResizeDisplay{m_impl->id, asRect(bounds)};
