@@ -570,6 +570,8 @@ def run(arguments):
     production = getattr(arguments, "production_original_input", False)
     holding = getattr(arguments, "holding_display", False)
     pipeline = getattr(arguments, "pipeline_check", False)
+    synthetic_replay = getattr(arguments, "pipeline_synthetic_input", False)
+    require(not synthetic_replay or pipeline, "Synthetic input replay requires the explicit unattended pipeline mode")
     require(not pipeline or (production and holding and mac.get("linuxEnvironment") == "user-desktop" and
                              mac.get("recordingProfile", "h04") == "h04"),
             "Pipeline checks require the production holding route on the actual Ubuntu desktop")
@@ -583,9 +585,10 @@ def run(arguments):
     output = arguments.output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"version": 1, "status": "failed", "physicalAcceptance": "not-assessed",
-              "syntheticInputSent": False, "holdingDisplayTested": False,
+              "syntheticInputSent": bool(synthetic_replay), "holdingDisplayTested": False,
               "twoPhysicalMonitorsTested": False, "planSha256": digest(arguments.linux_plan),
               "macPlanSha256": digest(arguments.mac_plan)}
+    report["pipelineSyntheticInputDeclared"] = bool(synthetic_replay)
     report["pipelineCheck"] = pipeline
     if pipeline:
         report["pipelineActiveSeconds"] = 30
@@ -1026,7 +1029,8 @@ def run(arguments):
             require(report.get("sourceRelocationObserved") is True, "Holding was configured but source relocation was not observed")
             report["holdingLifecycleObserved"] = True
         require(not collector.snapshot()["gaps"], "Input receipt history has gaps")
-        report["status"] = "pipeline-verified-no-physical-input" if pipeline else \
+        report["status"] = ("pipeline-observed-with-synthetic-input" if synthetic_replay else
+                            "pipeline-verified-no-physical-input") if pipeline else \
                            "session-recorded-awaiting-human-and-receipt-review"
     except Cancelled as error:
         report["status"], report["failure"] = "cancelled", str(error)
@@ -1197,7 +1201,7 @@ def run(arguments):
               "physicalAcceptance": "not-assessed", "failure": report.get("failure")})
         diagnostics.close()
     return 0 if report["status"].startswith("session-recorded") or \
-        report["status"] == "pipeline-verified-no-physical-input" else 1
+        report["status"] in ("pipeline-verified-no-physical-input", "pipeline-observed-with-synthetic-input") else 1
 
 
 def main():
@@ -1218,6 +1222,8 @@ def main():
                         help="Production H06 only: require an explicit holding plan and separate persistent local controls")
     parser.add_argument("--pipeline-check", action="store_true",
                         help="Explicit unattended Start, 30-second sharing and restore check; no physical-input pass")
+    parser.add_argument("--pipeline-synthetic-input", action="store_true",
+                        help="Declare external automated input during --pipeline-check; never a physical input pass")
     arguments = parser.parse_args()
     require(sys.platform == "darwin" or arguments.validate_only, "This coordinator must run on the Mac")
     if arguments.validate_only:

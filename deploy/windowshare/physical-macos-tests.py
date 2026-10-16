@@ -930,6 +930,30 @@ class ProductionPlans(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Legacy physical mode'):
             module.validate_plans(legacy, linux, self.base)
 
+    def test_synthetic_replay_is_explicit_unattended_and_never_physical_evidence(self):
+        mac = {**self.mac, 'holdingDisplayEnabled': True, 'separateControls': True,
+               'linuxEnvironment': 'user-desktop'}
+        args = SimpleNamespace(mac_plan=self.base / 'replay-mac.json',
+                               linux_plan=self.base / 'replay-linux.json',
+                               production_original_input=True, holding_display=True,
+                               pipeline_check=False, pipeline_synthetic_input=True,
+                               source=None, validate_only=True, output=self.base / 'replay-review')
+        module.atomic_json(args.mac_plan, mac)
+        module.atomic_json(args.linux_plan, self.linux)
+        with self.assertRaisesRegex(RuntimeError, 'explicit unattended pipeline'):
+            module.run(args)
+        args.pipeline_check = True
+        with patch.object(module, 'validate_plans', return_value={key: {'path': str(value), 'sha256': self.mac['frozenArtifacts'][key]} for key, value in self.paths.items()}), \
+                patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Unexpected process')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.run(args), 0)
+        report = module.read_json(args.output / 'result.json')
+        self.assertTrue(report['pipelineSyntheticInputDeclared'])
+        self.assertTrue(report['syntheticInputSent'])
+        self.assertFalse(report['nativeProcessesStarted'])
+        self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+        self.assertIn('--automated-start', report['prospectiveSourceArgv'])
+
     def test_same_pid_with_new_birth_is_not_the_owned_companion(self):
         inspector = object.__new__(self.support.ProcessInspector)
         identity = {'pid': 42, 'parent': 41, 'birthMicroseconds': 100001, 'executable': '/frozen/host'}
