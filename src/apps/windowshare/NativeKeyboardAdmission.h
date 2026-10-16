@@ -35,7 +35,14 @@ public:
       const KeyboardRouteBinding &binding, const std::optional<KeyboardRouteBinding> &current, bool ledgerEmpty
   ) const
   {
-    return m_gate == binding && !m_invalidated && current == binding && ledgerEmpty;
+    return fenced(binding, ledgerEmpty) && current == binding;
+  }
+
+  // Local queue boundary only. This does not observe native focus/geometry and
+  // must never replace the fresh candidate required for input authorization.
+  bool fenced(const KeyboardRouteBinding &binding, bool ledgerEmpty) const
+  {
+    return m_gate == binding && !m_invalidated && ledgerEmpty;
   }
 
   bool blocksKeys() const

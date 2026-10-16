@@ -1687,11 +1687,6 @@ struct NativeHost::Impl
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (!active || active.processIdentifier != e->identity.pid)
       return std::nullopt;
-    CF<AXUIElementRef> app(AXUIElementCreateApplication(e->identity.pid));
-    if (!app)
-      return std::nullopt;
-    AXUIElementSetMessagingTimeout(app.get(), 0.25f);
-    CF<CFTypeRef> actualFocus(attribute(app.get(), kAXFocusedWindowAttribute));
     CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
     const auto actualBounds = bounds(e->window);
     if (!focusMatches(*e) || (!e->family && !minimized) || (minimized && !CFEqual(minimized.get(), kCFBooleanFalse)) ||
@@ -2298,6 +2293,11 @@ struct NativeHost::Impl
         qtInputEmpty()
     );
   }
+  bool keyboardRouteFenced(const KeyboardRouteBinding &binding) const
+  {
+    return QThread::currentThread() == q->thread() && !destroying && !callbackDepth && lifecycle->admission() &&
+           keyboardAdmission.fenced(binding, qtInputEmpty());
+  }
   bool originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
   {
     const auto admitted = lifecycle->admission();
@@ -2332,7 +2332,9 @@ struct NativeHost::Impl
     if (originalInput.binding())
       return originalInputCurrent(binding, captureEpoch);
     QPointer<NativeHost> alive(q);
-    if (!keyboardRouteQuiesced(binding) || !alive)
+    // Staging the retained target grants no input. The full native check below
+    // validates it before success; repeating that AX walk here stalls cutover.
+    if (!keyboardRouteFenced(binding) || !alive)
       return false;
     const auto *e = entry(binding.owner.session, binding.owner.epoch);
     if (!e || !e->window || !eventSource || !targetedPointerAvailable() || !lifecycle->current(admitted))
@@ -4822,6 +4824,10 @@ bool NativeHost::quiesceKeyboard(const KeyboardRouteBinding &binding)
 bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const
 {
   return m_impl->keyboardRouteQuiesced(binding);
+}
+bool NativeHost::keyboardRouteFenced(const KeyboardRouteBinding &binding) const
+{
+  return m_impl->keyboardRouteFenced(binding);
 }
 bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &binding)
 {

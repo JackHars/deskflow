@@ -111,6 +111,10 @@ bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &) const
 {
   return false;
 }
+bool NativeHost::keyboardRouteFenced(const KeyboardRouteBinding &) const
+{
+  return false;
+}
 bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &)
 {
   return false;

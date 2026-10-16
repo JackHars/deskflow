@@ -87,6 +87,8 @@ public:
   ) const;
   bool quiesceKeyboard(const KeyboardRouteBinding &binding);
   bool keyboardRouteQuiesced(const KeyboardRouteBinding &binding) const;
+  // Exact local fence and empty legacy ledger only; no native authority query.
+  bool keyboardRouteFenced(const KeyboardRouteBinding &binding) const;
   // Revoke original authority first. Only the exact outstanding binding can
   // reopen network keyboard admission, including after invalidation/return.
   bool resumeKeyboard(const KeyboardRouteBinding &binding);

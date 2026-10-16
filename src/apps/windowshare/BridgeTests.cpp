@@ -52,6 +52,8 @@ struct NativeHost::Impl
 {
   std::optional<KeyboardRouteBinding> focus;
   NativeKeyboardAdmission keyboard;
+  std::optional<KeyboardRouteBinding> originalBinding;
+  std::uint64_t originalEpoch = 0;
   unsigned captureRate = defaultCaptureRate;
 };
 NativeHost::NativeHost(QString, QObject *parent) : QObject(parent), m_impl(std::make_unique<Impl>())
@@ -210,6 +212,35 @@ bool NativeHost::keyboardRouteQuiesced(const KeyboardRouteBinding &binding) cons
       nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty()
   );
 }
+bool NativeHost::keyboardRouteFenced(const KeyboardRouteBinding &binding) const
+{
+  return m_impl->keyboard.fenced(binding, nativeHeldKeys.isEmpty() && nativeHeldButtons.isEmpty());
+}
+bool NativeHost::establishOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t epoch)
+{
+  if (!epoch || binding.scope != ForwardingScope::All || !keyboardRouteFenced(binding))
+    return false;
+  m_impl->originalBinding = binding;
+  m_impl->originalEpoch = epoch;
+  return originalInputCurrent(binding, epoch);
+}
+bool NativeHost::originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t epoch) const
+{
+  return m_impl->originalBinding == binding && m_impl->originalEpoch == epoch && keyboardRouteQuiesced(binding);
+}
+bool NativeHost::deliverOriginalInput(
+    const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &
+)
+{
+  return originalInputCurrent(binding, record.epoch);
+}
+void NativeHost::revokeOriginalInput(const KeyboardRouteBinding &binding)
+{
+  if (m_impl->originalBinding == binding) {
+    m_impl->originalBinding.reset();
+    m_impl->originalEpoch = 0;
+  }
+}
 bool NativeHost::resumeKeyboard(const KeyboardRouteBinding &binding)
 {
   if (nativeResumeObserver)
@@ -360,6 +391,10 @@ struct BridgeTestAccess
   static qint64 keyboardDeadline(const Bridge &bridge)
   {
     return bridge.m_keyboardRoute->deadline.deadlineNSecs();
+  }
+  static void expireKeyboardDeadline(Bridge &bridge)
+  {
+    bridge.m_keyboardRoute->deadline = QDeadlineTimer(0);
   }
   static void observedNativeFocus(Bridge &bridge, KeyboardRouteBinding binding)
   {
@@ -1303,7 +1338,8 @@ struct KeyboardFixture
       : host(true, hostIdentity, parseFingerprint(viewerIdentity.fingerprint()), QString{}, 0, 0, false, clipboard),
         viewer(false, viewerIdentity, parseFingerprint(hostIdentity.fingerprint()), QString{}, 0, 0, false, clipboard)
   {
-    host.revokeOriginalKeyboard = [this](const auto &, auto reason) {
+    host.revokeOriginalKeyboard = [this](const auto &binding, auto reason) {
+      host.releaseNativeOriginalInput(binding);
       ++revokes;
       reasons.push_back(reason);
       original = false;
@@ -2167,6 +2203,66 @@ void keyboardActivation(const Identity &hostIdentity, const Identity &viewerIden
   }
 }
 
+void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerIdentity)
+{
+  const auto prepare = [](KeyboardFixture &fixture) {
+    const auto binding = fixture.host.reserveOriginalInput(91, 2);
+    check(binding && fixture.host.startOriginalKeyboard(*binding), "Native input fixture did not start");
+    check(waitUntil([&] { return fixture.grants == 1; }), "Native input fixture did not quiesce");
+    return *binding;
+  };
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = prepare(fixture);
+    unsigned queries = 0;
+    nativeCandidateObserver = [&] { ++queries; };
+    check(fixture.host.originalInputBoundary(binding), "Exact neutral All boundary was missing");
+    check(queries == 0, "Local ledger query repeated native focus validation");
+    nativeHeldButtons.insert(0);
+    check(!fixture.host.originalInputBoundary(binding), "Boundary ignored an outstanding legacy button");
+    nativeHeldButtons.clear();
+    auto wrong = binding;
+    ++wrong.geometry;
+    check(!fixture.host.originalInputBoundary(wrong), "Boundary accepted another geometry revision");
+    check(fixture.host.activateOriginalKeyboard(binding, 72), "Native endpoint failed to commit");
+    check(queries == 1, "Native establishment repeated its own fresh authority query");
+    queries = 0;
+    check(fixture.host.nativeOriginalInputCurrent(binding, 72), "Native endpoint was not current");
+    check(queries == 1, "Bridge repeated NativeHost's focus and geometry validation");
+    check(!fixture.host.nativeOriginalInputCurrent(binding, 73), "Native endpoint accepted a different capture");
+    check(!fixture.host.originalInputBoundary(binding), "Active owner retained preparation admission");
+    nativeCandidateObserver = {};
+    ++wrong.focusRequest;
+    BridgeTestAccess::observedNativeFocus(fixture.host, wrong);
+    check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Fresh native authority check was lost");
+  }
+  for (const bool expired : {false, true}) {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = prepare(fixture);
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      if (expired)
+        BridgeTestAccess::expireKeyboardDeadline(fixture.host);
+      else
+        BridgeTestAccess::channel(fixture.host)->close("Disconnect inside native establishment", CloseCause::Network);
+    };
+    check(!fixture.host.activateOriginalKeyboard(binding, 72), "Native commit ignored expiry or disconnect");
+    check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Failed native commit retained an endpoint");
+    check(fixture.revokes == 1, "Failed native commit did not revoke its exact reservation");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = prepare(fixture);
+    check(fixture.host.activateOriginalKeyboard(binding, 72), "Native query fixture did not commit");
+    nativeCandidateObserver = [&] {
+      nativeCandidateObserver = {};
+      BridgeTestAccess::channel(fixture.host)->close("Disconnect inside native current query", CloseCause::Network);
+    };
+    check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Native query ignored reentrant connection loss");
+    check(fixture.revokes == 1, "Reentrant native query did not revoke ownership");
+  }
+}
+
 void keyboardCancellation(const Identity &hostIdentity, const Identity &viewerIdentity)
 {
   // Cancellation and Original Ready can cross on the two independent streams.
@@ -2828,6 +2924,7 @@ int main(int argc, char **argv)
     keyboardReservationInvalidation(hostIdentity, viewerIdentity);
     keyboardReservationDeadlineAndReentrancy(hostIdentity, viewerIdentity);
     keyboardActivation(hostIdentity, viewerIdentity);
+    nativeInputActivation(hostIdentity, viewerIdentity);
     keyboardCancellation(hostIdentity, viewerIdentity);
     keyboardInvalidation(hostIdentity, viewerIdentity);
     keyboardReentrancyAndDeadlines(hostIdentity, viewerIdentity);

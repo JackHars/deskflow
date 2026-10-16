@@ -931,19 +931,25 @@ public:
     }
     return std::nullopt;
   }
-  bool establishNativeOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch)
-  {
-    return m_native && originalKeyboardActive(binding) && m_native->establishOriginalInput(binding, captureEpoch);
-  }
   bool nativeOriginalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
   {
-    return m_native && originalKeyboardActive(binding) && m_native->originalInputCurrent(binding, captureEpoch);
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Active))
+      return false;
+    const QPointer<const Bridge> alive(this);
+    // NativeHost already checks the exact fence, ledger, focus and geometry.
+    // Keep the bridge's connection/phase checks on both sides of native work.
+    const bool current = m_native->originalInputCurrent(binding, captureEpoch);
+    return alive && current && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
   bool deliverNativeOriginalInput(
       const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
   )
   {
-    return m_native && originalKeyboardActive(binding) && m_native->deliverOriginalInput(binding, record, point);
+    if (!keyboardAttemptCurrent(binding, KeyboardPhase::Active))
+      return false;
+    const QPointer<Bridge> alive(this);
+    const bool delivered = m_native->deliverOriginalInput(binding, record, point);
+    return alive && delivered && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
   void releaseNativeOriginalInput(const KeyboardRouteBinding &binding)
   {
@@ -1003,12 +1009,22 @@ public:
     }
     return alive && neutral && keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced);
   }
+  bool originalInputBoundary(const KeyboardRouteBinding &binding) const
+  {
+    if (binding.scope != ForwardingScope::All || !keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced))
+      return false;
+    const QPointer<const Bridge> alive(this);
+    const bool fenced = m_native->keyboardRouteFenced(binding);
+    return alive && fenced && keyboardAttemptCurrent(binding, KeyboardPhase::Quiesced);
+  }
   // The local preflight calls this only after its other admission checks and
   // before acknowledging Commit. Network acknowledgments cannot perform this
   // transition. A setup reservation is bounded; active ownership is instead
   // retained only while that controller revalidates its live providers.
-  bool activateOriginalKeyboard(KeyboardRouteBinding binding)
+  bool activateOriginalKeyboard(KeyboardRouteBinding binding, std::uint64_t captureEpoch = 0)
   {
+    if (captureEpoch && binding.scope != ForwardingScope::All)
+      return false;
     if (!m_keyboardRoute || m_keyboardRoute->binding != binding || m_keyboardRoute->phase != KeyboardPhase::Quiesced)
       return false;
     if (m_keyboardRoute->deadline.hasExpired()) {
@@ -1024,7 +1040,10 @@ public:
     m_keyboardRoute->phase = KeyboardPhase::Activating;
     bool quiesced = false;
     try {
-      quiesced = m_native->keyboardRouteQuiesced(binding);
+      // Establishing native original input includes its own fresh validation.
+      // Perform it while activation is guarded, under the same deadline.
+      quiesced = captureEpoch ? m_native->establishOriginalInput(binding, captureEpoch)
+                              : m_native->keyboardRouteQuiesced(binding);
     } catch (...) {
     }
     if (!alive || !m_keyboardRoute || m_keyboardRoute->binding != binding ||
@@ -2834,7 +2853,7 @@ int main(int argc, char **argv)
       // proves its own old delivered owners are released under the exact All
       // gate; neither endpoint pretends this is a global physical snapshot.
       checks.acquisitionBoundary = [&](const LocalInputLease &lease) {
-        return lease.scope == ForwardingScope::All && bridge.originalKeyboardQuiesced(inputBinding(lease));
+        return bridge.originalInputBoundary(inputBinding(lease));
       };
       checks.release = [&](const LocalInputLease &lease, LocalInputRevocation) {
         retiringInput = lease;
@@ -2849,11 +2868,11 @@ int main(int argc, char **argv)
                                                                                  : std::nullopt;
       };
       host.startQuiescence = [&](const auto &binding) { return bridge.startOriginalKeyboard(binding); };
-      host.isQuiesced = [&](const auto &binding) { return bridge.originalKeyboardQuiesced(binding); };
+      host.isQuiesced = [&](const auto &binding) { return bridge.originalInputBoundary(binding); };
       host.activate = [&](const auto &binding) {
         const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;
-        return lease && inputBinding(*lease) == binding && bridge.activateOriginalKeyboard(binding) &&
-               bridge.establishNativeOriginalInput(binding, lease->captureEpoch);
+        return lease && inputBinding(*lease) == binding &&
+               bridge.activateOriginalKeyboard(binding, lease->captureEpoch);
       };
       host.isActive = [&](const auto &binding) {
         const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;

@@ -603,6 +603,7 @@ void fullInputAdmission()
   NativeKeyboardAdmission gate;
   InputLedger ledger;
   check(!gate.blocksKeys() && !gate.blocksPointers(), "full-input fixture starts with both paths admitted");
+  check(!gate.fenced(binding, true), "An empty ledger alone cannot invent a local input fence");
   auto invalid = binding;
   invalid.scope = static_cast<ForwardingScope>(123);
   check(!gate.quiesce(invalid, invalid, true), "unknown scope cannot fence native forwarding");
@@ -625,6 +626,7 @@ void fullInputAdmission()
   check(gate.blocksKeys() && gate.blocksPointers(), "full-input fence blocks keyboard and pointer forwarding");
   check(gate.quiesce(binding, binding, true), "repeated exact full-input acknowledgement is idempotent");
   check(gate.quiesced(binding, binding, true), "full-input quiescence retains all current facts");
+  check(gate.fenced(binding, true) && !gate.fenced(binding, false), "Local boundary requires an empty exact ledger");
   check(!gate.quiesced(binding, binding, false), "full-input quiescence must remain neutral at every query");
   check(!gate.quiesced(binding, std::nullopt, true), "missing native candidate cannot retain admissible quiescence");
   check(gate.blocksKeys() && gate.blocksPointers(), "loss of candidate or neutrality never reopens either path");
@@ -644,6 +646,7 @@ void fullInputAdmission()
     changed.push_back(other);
   }
   for (const auto &mismatch : changed) {
+    check(!gate.fenced(mismatch, true), "Local boundary accepted a stale or different-scope binding");
     check(!gate.quiesced(binding, mismatch, true), "every current binding field participates in full-input admission");
     check(!gate.quiesced(mismatch, binding, true), "every queried binding field participates in full-input admission");
     check(!gate.quiesce(mismatch, mismatch, true), "a live full-input gate cannot be replaced or downgraded");
@@ -653,6 +656,7 @@ void fullInputAdmission()
   check(!gate.invalidate(deskflow::windowshare::Owner{99, 12}), "an unrelated source cannot invalidate this gate");
   check(gate.quiesced(binding, binding, true), "unrelated invalidation preserves exact full-input readiness");
   check(gate.invalidate(binding.owner) == binding, "invalidation returns the complete original scope and binding");
+  check(!gate.fenced(binding, true), "Invalidation left a usable local boundary");
   check(
       !gate.quiesced(binding, binding, true) && gate.blocksKeys() && gate.blocksPointers(),
       "invalidated full-input tombstone keeps both forwarding paths fenced"
