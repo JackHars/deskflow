@@ -1042,8 +1042,11 @@ void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()
   server.switchComputer(f.firstClient, 100, 100, false);
   f.clear();
   f.dispatcher->asynchronous = true;
+  OriginalInputRouteJoin history(f.stream.epoch(), f.routes);
+  const auto capturedAt = Server::OriginalClock::now();
   IPlatformComputer::KeyInfo key{'a', 0, 30, 1, ""};
   const auto down = f.capture(OriginalInputKey{});
+  QVERIFY(history.capture(down, capturedAt));
   QVERIFY(f.inbox->publish(down));
   QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &key, down));
   QCOMPARE(server.m_originalPending.size(), std::size_t(1));
@@ -1053,12 +1056,14 @@ void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()
   raw.repeat = true;
   raw.transition = OriginalKeyTransition::Repeat;
   const auto repeat = f.capture(raw);
+  QVERIFY(history.capture(repeat, capturedAt));
   QVERIFY(f.inbox->publish(repeat));
   QVERIFY(f.dispatch(EventTypes::KeyStateKeyRepeat, &key, repeat));
   raw.kind = OriginalKeyKind::Up;
   raw.transition = OriginalKeyTransition::Up;
   raw.repeat = false;
   const auto up = f.capture(raw);
+  QVERIFY(history.capture(up, capturedAt));
   QVERIFY(f.inbox->publish(up));
   QVERIFY(f.dispatch(EventTypes::KeyStateKeyUp, &key, up));
   QCOMPARE(server.m_originalPending.size(), std::size_t(3));
@@ -1073,10 +1078,13 @@ void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()
   f.dispatcher->waiting = false;
   f.dispatcher->asynchronous = false;
   // All captures arrived before their 100 ms deadline. Waiting behind the
-  // first native preparation must not turn the later two into capture losses.
-  server.drainOriginalInput(
-      Server::OriginalClock::now() + Server::originalDispatchTimeout + std::chrono::milliseconds(1)
-  );
+  // first native preparation must not turn the later two into capture losses,
+  // nor revoke the shared route through its independent historical join.
+  // The old 250 ms join expired while the 500 ms preparation was still valid.
+  const auto completedAt = deadline - std::chrono::milliseconds(50);
+  QVERIFY(!history.pop(completedAt));
+  QVERIFY(history.live());
+  server.drainOriginalInput(completedAt);
   QVERIFY(!server.m_originalDispatchTerminal);
   QVERIFY(server.m_originalPending.empty());
   QCOMPARE(f.dispatcher->committed.size(), std::size_t(3));
@@ -1086,6 +1094,10 @@ void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()
     QVERIFY(decision);
     QCOMPARE(decision->stamp.sequence, sequence);
     QCOMPARE(decision->outcome, OriginalInputRouteOutcome::Original);
+    QVERIFY(history.decision(*decision, completedAt));
+    const auto observed = history.pop(completedAt);
+    QVERIFY(observed && observed->live());
+    QCOMPARE(observed->route.outcome, OriginalInputRouteOutcome::Original);
     QCOMPARE(f.dispatcher->committed.at(sequence - 1).captured.input.record.sequence, sequence);
   }
   QVERIFY(!f.routes->pop());

@@ -262,7 +262,13 @@ public:
     Exhausted
   };
   using Clock = std::chrono::steady_clock;
-  static constexpr auto timeout = std::chrono::milliseconds(250);
+  // This is the bounded lifetime of historical correlation, never a delivery
+  // lease. A Server decision may legitimately wait for 500 ms preparation
+  // after its completed capture arrives. A shorter history timeout would
+  // revoke that same route before the actual handoff deadline. Keep two
+  // seconds of bounded history, matching the experimental Core residence
+  // budget; Server capture/preparation and native point deadlines stay separate.
+  static constexpr auto timeout = std::chrono::seconds(2);
   static constexpr std::size_t capacity = OriginalInputStream::capacity;
   OriginalInputRouteJoin(OriginalInputEpoch epoch, std::shared_ptr<OriginalInputRoutes> routes);
   bool capture(OriginalInputCaptured captured, Clock::time_point now = Clock::now()) noexcept;

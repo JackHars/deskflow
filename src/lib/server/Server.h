@@ -508,6 +508,10 @@ private:
   // Native preparation has a separate, explicit budget. The 100 ms capture
   // deadline remains unchanged; a timely capture can wait behind preparation.
   static constexpr auto originalPreparationTimeout = std::chrono::milliseconds(500);
+  static_assert(
+      deskflow::windowshare::OriginalInputRouteJoin::timeout > originalDispatchTimeout + originalPreparationTimeout,
+      "Historical route correlation must outlive the permitted capture/preparation interval"
+  );
   bool deferOriginalInput(PendingOperation operation, InputRoutes::Recipients recipients);
   void drainOriginalInput(OriginalClock::time_point now = OriginalClock::now());
   // False retains this exact operation at the queue head until preparation is

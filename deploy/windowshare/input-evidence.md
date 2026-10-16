@@ -99,6 +99,28 @@ WindowServer ID/PID. Legacy one-window mode remains the default.
 
 ## Collection sequence
 
+The historical capture/route join has a two-second bounded observation lifetime.
+It must outlive the Server's separate 100ms capture-arrival and 500ms preparation
+budgets. This history is not a delivery lease; native mapped points still expire
+within 250ms and cannot be renewed by a later diagnostic observation.
+
+Before recording, readiness failures carry a nested `preparation` object:
+`snapshotAvailable`, `ownerLive`, `captureIdle` and `blockedQueues`. The manual
+coordinator retains those fields in its saved diagnostics and reports whether
+it is waiting for a Record request, a new/fresh publication, an eligible owner
+or matching Core/Host ownership. Missing fields in older logs stay unknown.
+These observations do not grant an arm or prove application delivery.
+
+Evidence-enabled Core logs `dispatch.eligibility` once per first eligibility
+boundary, before a reservation can be requested. The Session reports
+`capture.continuity`, `capture.delivery` and `capture.route-join` failures outside
+the event tap. Inbox failures distinguish server binding, invalid captures,
+capture ordering, capacity and epoch loss. Join failures distinguish capture or
+decision ordering, undeclared parts, bounded slots, deadlines and revoked
+dependencies. Cleanup preserves the recorded first failure. These lifecycle
+lines contain no key codes, typed text or clipboard contents; raw evidence
+retains its separate explicit collection policy above.
+
 1. Obtain fresh physical readiness for the explicitly selected disposable
    source. Start the existing production harness. Inspect the exact Core-owned
    Host bootstrap, source PID/window and actual Viewer connection. Do not infer
