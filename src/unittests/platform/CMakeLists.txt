@@ -11,6 +11,14 @@ if (WIN32)
   )
 elseif(APPLE)
   create_test(
+    NAME OSXMainThreadTests
+    DEPENDS app
+    LIBS platform base arch
+    SOURCE OSXMainThreadTests.cpp
+    WORKING_DIRECTORY "${CMAKE_BINARY_DIR}/src/lib/platform"
+  )
+  set_tests_properties(OSXMainThreadTests PROPERTIES TIMEOUT 15)
+  create_test(
     NAME OSXClipboardTests
     DEPENDS platform
     LIBS base arch
