@@ -17,6 +17,7 @@
 #include "NativeSourceTransaction.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
+#include "NativeWindowState_mac.h"
 #include "WindowFamily.h"
 #include "platform/OriginalInput_mac.h"
 
@@ -1687,10 +1688,10 @@ struct NativeHost::Impl
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (!active || active.processIdentifier != e->identity.pid)
       return std::nullopt;
-    CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
-    const auto actualBounds = bounds(e->window);
-    if (!focusMatches(*e) || (!e->family && !minimized) || (minimized && !CFEqual(minimized.get(), kCFBooleanFalse)) ||
-        !actualBounds || !sameGeometry(*actualBounds, e->session.source) || (e->moved && !holding.available()))
+    const auto state = readNativeWindowState(e->window);
+    if (!focusMatches(*e) || !state || (!e->family && !state->minimized.has_value()) ||
+        state->minimized.value_or(false) || !sameGeometry(state->frame, e->session.source) ||
+        (e->moved && !holding.available()))
       return std::nullopt;
     return lifecycle->current(admitted) ? std::optional(binding) : std::nullopt;
   }

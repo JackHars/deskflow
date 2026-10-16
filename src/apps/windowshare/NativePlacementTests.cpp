@@ -6,10 +6,12 @@
 #include "NativePlacementVerification.h"
 #if defined(__APPLE__)
 #include "NativePlacementNotifications_mac.h"
+#include "NativeWindowState_mac.h"
 #endif
 
 #include <QCoreApplication>
 #include <QEvent>
+#include <QScopeGuard>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -250,6 +252,60 @@ void preparationStops()
 }
 
 #if defined(__APPLE__)
+void batchedWindowState()
+{
+  auto window = AXUIElementCreateSystemWide();
+  const CGPoint point{120, 240};
+  const CGSize dimensions{640, 480};
+  const CGSize empty{0, 480};
+  const AXError unsupported = kAXErrorAttributeUnsupported, unavailable = kAXErrorCannotComplete;
+  auto position = AXValueCreate(kAXValueTypeCGPoint, &point);
+  auto size = AXValueCreate(kAXValueTypeCGSize, &dimensions);
+  auto invalidSize = AXValueCreate(kAXValueTypeCGSize, &empty);
+  auto absent = AXValueCreate(kAXValueTypeAXError, &unsupported);
+  auto failed = AXValueCreate(kAXValueTypeAXError, &unavailable);
+  const auto cleanup = qScopeGuard([&] {
+    for (const auto value : {position, size, invalidSize, absent, failed})
+      CFRelease(value);
+    CFRelease(window);
+  });
+  unsigned calls = 0;
+  const auto observe = [&](CFTypeRef p, CFTypeRef s, CFTypeRef m, AXError status = kAXErrorSuccess, int count = 3) {
+    return readNativeWindowState(window, [&](AXUIElementRef target, CFArrayRef names, auto options, CFArrayRef *out) {
+      ++calls;
+      check(target == window && !options && CFArrayGetCount(names) == 3, "incorrect native batch request");
+      check(
+          CFEqual(CFArrayGetValueAtIndex(names, 0), kAXPositionAttribute) &&
+              CFEqual(CFArrayGetValueAtIndex(names, 1), kAXSizeAttribute) &&
+              CFEqual(CFArrayGetValueAtIndex(names, 2), kAXMinimizedAttribute),
+          "native batch omitted a required field"
+      );
+      const void *values[] = {p, s, m};
+      *out = CFArrayCreate(nullptr, values, count, &kCFTypeArrayCallBacks);
+      return status;
+    });
+  };
+  const auto current = observe(position, size, kCFBooleanFalse);
+  check(
+      current && current->frame.x == 120 && current->frame.y == 240 && current->frame.width == 640 &&
+          current->frame.height == 480 && current->minimized == false && calls == 1,
+      "one batch did not retain all native window fields"
+  );
+  check(observe(position, size, kCFBooleanTrue)->minimized == true, "minimized state was lost");
+  for (const auto missing : {static_cast<CFTypeRef>(absent), static_cast<CFTypeRef>(kCFNull)}) {
+    const auto associated = observe(position, size, missing);
+    check(associated && !associated->minimized.has_value(), "absent optional attribute became an observed false");
+  }
+  check(!observe(position, size, failed), "failed minimized observation was accepted");
+  check(!observe(position, size, CFSTR("false")), "malformed minimized value was accepted");
+  check(!observe(kCFNull, size, kCFBooleanFalse), "missing position was accepted");
+  check(!observe(position, failed, kCFBooleanFalse), "failed size observation was accepted");
+  check(!observe(size, position, kCFBooleanFalse), "incorrect AX value types were accepted");
+  check(!observe(position, invalidSize, kCFBooleanFalse), "empty window was accepted");
+  check(!observe(position, size, kCFBooleanFalse, kAXErrorCannotComplete), "failed batch was accepted");
+  check(!observe(position, size, kCFBooleanFalse, kAXErrorSuccess, 2), "truncated batch was accepted");
+}
+
 void unavailableNotifications()
 {
   // Reproduce attempt 26: observer creation succeeds, but registering AXMoved
@@ -479,7 +535,8 @@ int main(int argc, char **argv)
              std::pair{"asynchronous-window-reads", &asynchronousWindowReads}
 #if defined(__APPLE__)
              ,
-             std::pair{"unavailable-notifications", &unavailableNotifications}
+             std::pair{"unavailable-notifications", &unavailableNotifications},
+             std::pair{"batched-native-window-state", &batchedWindowState}
 #endif
          }) {
       std::fprintf(stderr, "START: %s\n", name);
