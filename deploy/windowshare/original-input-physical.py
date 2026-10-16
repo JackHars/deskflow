@@ -150,12 +150,37 @@ def validate_admission_probe(value):
     return value
 
 
-def source_identity(receipt, initial=None, holding=False, *, controls_ready=True):
-    """Observe owned identities; pre-Start presentation never grants input authority.
+def valid_frame(value):
+    return isinstance(value, dict) and set(value) == {'x', 'y', 'width', 'height'} and all(
+        type(item) in (int, float) and math.isfinite(item) for item in value.values()) and \
+        value['width'] > 0 and value['height'] > 0
 
-    Before Start, a show animation can change geometry after an initially exact
-    frame. Keep checking identities while waiting for presentation readiness;
-    once starting the session, require visible stationary controls throughout.
+
+def local_controls_visible(receipt, *, settled=False):
+    """Observe the owned controls independently of their original position.
+
+    During a titlebar drag, WindowServer and Qt can sample different positions.
+    The fixture's aggregate controlVisible includes geometrySettled, so it is
+    only suitable for the initial Start gate. Live visibility comes from the
+    native/Qt observations of the exact control window, not frame equality.
+    This diagnostic never grants native input authority.
+    """
+    frame, observed = receipt.get('controlFrame'), receipt.get('controlObservation')
+    if not valid_frame(frame) or not isinstance(observed, dict) or \
+            not all(observed.get(key) is True for key in ('onScreen', 'qtVisible', 'nativeVisible')) or \
+            observed.get('miniaturized') is not False:
+        return False
+    return not settled or (receipt.get('controlVisible') is True and observed.get('geometrySettled') is True and
+                           frame == observed.get('qtFrame'))
+
+
+def source_identity(receipt, initial=None, holding=False, *, controls_ready=True):
+    """Observe owned identities; presentation checks never grant input authority.
+
+    Before Start, wait for presentation readiness while checking identities.
+    Once starting the session, keep the separate controls visible but allow
+    ordinary movement. Restoration verifies identities independently of where
+    the local controls are displayed.
     """
     source = receipt.get('sourceWindowId')
     require(type(source) is int and 0 < source < 2**32 and source == receipt.get('windowId'),
@@ -164,17 +189,12 @@ def source_identity(receipt, initial=None, holding=False, *, controls_ready=True
         require(source == initial['sourceWindowId'], 'Disposable source window identity changed')
     if holding:
         control = receipt.get('controlWindowId')
-        frame = receipt.get('controlFrame')
         require(type(control) is int and 0 < control < 2**32 and control != source,
                 'Holding requires a distinct local control window')
         if initial:
             require(control == initial['controlWindowId'], 'The local control window changed identity')
         if controls_ready:
-            require(receipt.get('controlVisible') is True and isinstance(frame, dict) and frame and
-                    frame == receipt.get('controlOriginalFrame'),
-                    'Holding requires visible, stationary local controls')
-            if initial:
-                require(frame == initial['controlFrame'], 'The local control window moved')
+            require(local_controls_visible(receipt), 'Holding requires visible local controls')
     else:
         require(receipt.get('controlWindowId') == 0, 'H04 requires the default one-window source')
 
@@ -184,8 +204,7 @@ def source_ready_for_start(receipt, holding=False):
     if not receipt or receipt.get('ready') is not True or receipt.get('sourceVisible') is not True or \
             not receipt.get('frame') or receipt['frame'] != receipt.get('originalFrame'):
         return False
-    if holding and (receipt.get('controlVisible') is not True or not receipt.get('controlFrame') or
-                    receipt['controlFrame'] != receipt.get('controlOriginalFrame')):
+    if holding and not local_controls_visible(receipt, settled=True):
         return False
     return True
 
@@ -201,13 +220,9 @@ def hidden_source_verified(receipt, initial, native):
     value = native.get('details', {})
     if value.get('windowId') != initial['sourceWindowId'] or value.get('sourcePid') != initial['pid']:
         return False
-    def rect(item):
-        return isinstance(item, dict) and set(item) == {'x', 'y', 'width', 'height'} and all(
-            type(v) in (int, float) and math.isfinite(v) for v in item.values()) and \
-            item['width'] > 0 and item['height'] > 0
     frame, display, physical = receipt.get('frame'), value.get('holdingBounds'), value.get('physicalBounds')
-    if not rect(frame) or not rect(display) or not isinstance(physical, list) or not physical or \
-            not all(rect(item) for item in physical) or frame != value.get('actualFrame') or frame == initial['frame']:
+    if not valid_frame(frame) or not valid_frame(display) or not isinstance(physical, list) or not physical or \
+            not all(valid_frame(item) for item in physical) or frame != value.get('actualFrame') or frame == initial['frame']:
         return False
     if not (display['x'] <= frame['x'] and display['y'] <= frame['y'] and
             frame['x'] + frame['width'] <= display['x'] + display['width'] and
@@ -217,7 +232,8 @@ def hidden_source_verified(receipt, initial, native):
         if (frame['x'] < other['x'] + other['width'] and other['x'] < frame['x'] + frame['width'] and
                 frame['y'] < other['y'] + other['height'] and other['y'] < frame['y'] + frame['height']):
             return False
-    return receipt.get('controlVisible') is True and receipt.get('controlFrame') == initial.get('controlFrame')
+    return type(receipt.get('controlWindowId')) is int and \
+        receipt['controlWindowId'] == initial.get('controlWindowId') and local_controls_visible(receipt)
 
 
 def unsigned(value):

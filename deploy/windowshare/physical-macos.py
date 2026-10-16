@@ -1100,7 +1100,10 @@ def run(arguments):
                 if started and final["receipt"]:
                     data = final["receipt"]
                     if production:
-                        original.source_identity(data, report["initialReceipt"], holding)
+                        # Restore the exported source and input. The separate
+                        # local controls may have moved or been minimized;
+                        # their presentation is not a source restoration error.
+                        original.source_identity(data, report["initialReceipt"], holding, controls_ready=False)
                     require(not final["gaps"], "Source receipt history has gaps")
                     require(data["heldKeys"] == 0 and data["heldButtons"] == 0 and
                             data["frame"] == report["initialReceipt"]["frame"],
