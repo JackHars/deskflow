@@ -58,6 +58,16 @@ No physical display or
 session was created by these checks. H04/H06 remain unaccepted; ask again
 immediately before another physical launch.
 
+Fresh preparation is `build/h06-r22-w5lwq1qf/` (pointer
+`build/h06-r22-current.txt`), frozen source commit `7453a4c77`, using the final
+signed startup package. Plan validation, Mac permissions/conflict checks and
+packaged admission pass; the latter took 10.95s with native input hooks disabled
+and its companion stopped. Actual jack session 2 is active/local/Wayland with
+the temporary provider disabled. The plan uses holding, separate Mac controls,
+no desktop preview and no results popup. Preparation opened no physical window.
+There is no launch-permission receipt or session directory yet; obtain fresh
+permission immediately before executing its prepared launch once.
+
 ## Attempt twenty: holding placement rejected; log-only diagnostics — 2026-10-15
 
 Permission `call_7330e3b7ef1e4099bc00281b601d2ed6` was consumed by
