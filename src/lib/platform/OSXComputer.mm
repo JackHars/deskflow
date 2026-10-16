@@ -1236,11 +1236,13 @@ bool OSXComputer::onKey(CGEventRef event, bool &consumeShortcut)
     // The HID tap owns this press/repeat/up cycle even before the queued
     // screen-switch event reaches Server. No repeat reaches the source app.
     // Pair the release with its retained shortcut even if modifiers released first.
-    if (shortcut.hotkey && m_hotKeys.contains(shortcut.hotkey))
+    if (shortcut.hotkey && m_hotKeys.contains(shortcut.hotkey)) {
+      LOG_DEBUG("captured routing shortcut id=%u down=%d via HID tap", shortcut.hotkey, shortcut.down);
       m_events->addEvent(Event(
           shortcut.down ? EventTypes::PrimaryComputerHotkeyDown : EventTypes::PrimaryComputerHotkeyUp, getEventTarget(),
           HotKeyInfo::alloc(shortcut.hotkey)
       ));
+    }
     return true;
   }
 
@@ -1321,6 +1323,7 @@ bool OSXComputer::onHotKey(EventRef event) const
     return false;
   }
 
+  LOG_DEBUG("captured routing shortcut id=%u down=%d via Carbon", id, eventKind == kEventHotKeyPressed);
   m_events->addEvent(Event(type, getEventTarget(), HotKeyInfo::alloc(id)));
 
   return true;
