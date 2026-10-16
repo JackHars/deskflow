@@ -1,5 +1,51 @@
 # Seamless Windows work state
 
+## Attempt twenty: holding placement rejected; log-only diagnostics — 2026-10-15
+
+Permission `call_7330e3b7ef1e4099bc00281b601d2ed6` was consumed by
+`build/h06-r20-8g88ufzd/` using source `9e8c45903`. The source and separate
+controls reached Ready with exact frames, and the human Start at 00:56:34.476 UTC
+passed the fresh settled-window gate immediately. The presentation fix therefore
+passed this startup check. The test used jack's actual desktop, without a Mac
+desktop preview. It never reached Active and no input recorder armed.
+
+The holding helper and parent both verified display 4128835 at
+(1440,-1,4096,4096), isolated from unchanged physical outputs. Creation completed
+00:56:57.417 UTC. The first failure was Host `source.holding` at 00:56:58.034:
+`Holding display placement did not verify; restoring source window`. The source
+was observed at (1440,190,640,448); controls stayed (480,280,480,268). The old log
+does not identify which placement predicate failed. Initial native return also
+failed and retained recovery intent; the later private-channel loss is not the
+first error. Do not infer a specific AX/readback cause from this evidence.
+
+Final cleanup restored the original source frame (400,190,640,448), with zero
+held keys/buttons and an empty journal. Source/Core exited 0; Host/helper stopped;
+ordinary Mac settings match. Ubuntu stopped owned processes, restored its desktop
+and preserved ordinary state, but controller exit 1 and the relay's uncoordinated
+TLS disconnect remain failures. The Mac SSH exit 255 and unarmed evidence are
+retained. Collected Ubuntu archive SHA-256:
+`b7b57c22d5de41d9b73969dbd04d977df737ddfa93720761633514f1ed8b1d8b`.
+
+The user did not see the results window and explicitly requested diagnostics for
+the agent, without a popup. Automatic report launch is removed; flushed console
+and JSONL diagnostics remain. The manual report utility is not part of teardown.
+Added native placement/restore traces: each AX read/write begins and returns with
+its error code; verification records requested/observed frames and minimization;
+holding checks name the lost identity, geometry, lifecycle or capture condition.
+The relocation transaction reports its failing stage, distinguishing journaling,
+native move, post-move identity and containment. Existing admission and rollback
+checks remain strict; no sleeps, retries or deadline extensions were added.
+
+Unattended evidence is `build/h06-placement-e2j2nzqs/`. The rebuilt Host/source and
+all 83 coordinator cases pass on Mac (1.69s) and actual jack over SSH (1.00s).
+All four Mac Server/coordinator/preflight/native
+CTests pass (23.86s), and the default holding test passes (0.51s), including
+failure-stage assertions in its pure relocation fixtures. That default test does
+not create a display or move a window. The new signed Core/Host/helper package
+passes exact-library validation (77 records, no errors); binary hashes are in
+`validation-summary.json`. H04/H06 remain physically unaccepted.
+Ask for fresh permission immediately before any next physical launch.
+
 ## Attempt nineteen: pre-Start presentation failure — 2026-10-15
 
 Permission `call_98ec79d8d6f644d687e004f5262445e3` was consumed by
@@ -44,8 +90,8 @@ Both plans validate; permissions/conflict checks pass. The inert packaged
 admission check passes in 11.50s, with its companion stopped. Actual jack
 session 2 is active, local and Wayland, with the provider disabled. The prepared
 launch uses holding/separate controls and no Mac desktop preview. No physical
-window or input session was started by preparation; fresh launch permission is
-still required. Attempt nineteen's consumed approval must not be reused.
+window or input session was started by preparation. Its separately approved,
+consumed attempt twenty is recorded above; neither approval may be reused.
 
 ## Attempt eighteen and persistent diagnostics — 2026-10-15
 
@@ -76,8 +122,9 @@ Ubuntu stage logs, readiness changes, exact process-loss labels, first-failure
 retention and native capture/holding/restore diagnostics. Helper stderr now
 reaches the Host log; failed display verification names its precise predicate.
 The Mac wait loop uses receipt-change notifications with deadline checks, with
-no artificial visibility delays. After teardown a separate read-only report
-stays open until Dismiss. It never constructs a source recorder or input filter.
+no artificial visibility delays. This revision launched a separate read-only
+report after teardown; the user's later log-only request supersedes that behavior
+as recorded above. It never constructed a source recorder or input filter.
 
 H06 now requires the committed Host placement and matching observed source
 frame wholly on the holding display, outside the physical displays, before

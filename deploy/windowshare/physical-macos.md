@@ -100,6 +100,13 @@ alive. Cleanup separately checks a fresh source receipt after host termination,
 ordinary settings, exact owned socket identities, and child exits. A hung host
 gets a bounded stack sample before force termination; the run remains failed.
 
+`diagnostics.jsonl` and the coordinator's flushed output retain timestamped
+stages, the first failure, native errors and cleanup failures. Failures are for
+developer diagnosis; teardown does not open a results popup or require the user
+to read or dismiss one. Native placement logs record each Accessibility call,
+its error code, requested/read-back frames and the rejected transaction step.
+These observations do not change placement checks or add sleep delays.
+
 An exit-zero coordinator result means
 `session-recorded-awaiting-human-and-receipt-review`, with
 `physicalAcceptance:"not-assessed"`. It is not a physical pass. Preserve the

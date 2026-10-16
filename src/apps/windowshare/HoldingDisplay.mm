@@ -70,7 +70,7 @@ relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingR
   using Status = HoldingRelocationResult::Status;
   if (!owner.session || !owner.epoch || !paintedGeometry || !access.window || !access.display || !access.persist ||
       !access.place)
-    return {};
+    return {Status::Refused, {}, "request"};
   const auto sameFrame = [](Rect a, Rect b) {
     return a.x == b.x && a.y == b.y && a.width == b.width && a.height == b.height;
   };
@@ -81,10 +81,10 @@ relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingR
   try {
     const auto before = access.window();
     if (!bound(before))
-      return {};
+      return {Status::Refused, {}, "initial-window"};
     const auto display = access.display();
     if (!display || !display->id || !display->bounds.valid())
-      return {Status::Restore, {}};
+      return {Status::Restore, {}, "display"};
     const auto current = [&]() -> std::optional<HoldingRelocationWindow> {
       const auto observed = access.display();
       const auto window = access.window();
@@ -95,21 +95,23 @@ relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingR
     // The recovery journal must be durable before a source is hidden. A
     // callback may cancel/replace the owner or observe a newer source frame.
     if (!access.persist())
-      return {Status::Restore, {}};
+      return {Status::Restore, {}, "journal"};
     const auto prepared = current();
     if (!prepared || !sameFrame(prepared->frame, before->frame))
-      return {Status::Restore, {}};
+      return {Status::Restore, {}, "before-placement"};
     if (!access.place(fitInside(before->frame, display->bounds)))
-      return {Status::Restore, {}};
+      return {Status::Restore, {}, "native-placement"};
     const auto after = current();
-    if (!after || after->frame.x < display->bounds.x || after->frame.y < display->bounds.y ||
+    if (!after)
+      return {Status::Restore, {}, "after-placement"};
+    if (after->frame.x < display->bounds.x || after->frame.y < display->bounds.y ||
         after->frame.x + after->frame.width > display->bounds.x + display->bounds.width ||
         after->frame.y + after->frame.height > display->bounds.y + display->bounds.height)
-      return {Status::Restore, {}};
+      return {Status::Restore, {}, "containment"};
     return {Status::Applied, after->frame};
   } catch (...) {
     // No callback failure may turn an uncertain partial move into ownership.
-    return {Status::Restore, {}};
+    return {Status::Restore, {}, "callback-exception"};
   }
 }
 

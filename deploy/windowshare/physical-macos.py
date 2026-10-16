@@ -1167,19 +1167,6 @@ def run(arguments):
         emit({"event": "finished", "status": report["status"], "result": str(output / "result.json"),
               "physicalAcceptance": "not-assessed", "failure": report.get("failure")})
         diagnostics.close()
-        if owned.get("source"):
-            # An independent, read-only report has no recorder, capture hook,
-            # input route, countdown or automatic close. It cannot keep test
-            # input alive. The user dismisses it when they finish reading.
-            try:
-                with (output / "diagnostic-display.log").open("xb") as display_log:
-                    display = subprocess.Popen([str(source_executable), "--physical-report", str(output / "diagnostics.jsonl")],
-                        env=environment, stdin=subprocess.DEVNULL, stdout=display_log, stderr=display_log,
-                        start_new_session=True)
-                report["diagnosticDisplay"] = {"pid": display.pid, "readOnly": True, "dismissal": "user-controlled"}
-            except OSError as error:
-                report["diagnosticDisplayError"] = str(error)
-            atomic_json(output / "result.json", report)
     return 0 if report["status"].startswith("session-recorded") else 1
 
 

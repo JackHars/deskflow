@@ -75,7 +75,7 @@ void relocationTransactions()
     const auto result = f.run();
     check(
         result.status == Status::Applied && result.actual.x == 2200 && result.actual.y == -400 &&
-            result.actual.width == 640 && result.actual.height == 480,
+            result.actual.width == 640 && result.actual.height == 480 && std::string_view(result.failureStep).empty(),
         "exact painted source relocates into the owned display with negative coordinates"
     );
     check(f.calls == std::vector<std::string>{"journal", "place"}, "successful relocation has one mutation");
@@ -125,8 +125,10 @@ void relocationTransactions()
   {
     Fixture f;
     f.journal = false;
+    const auto result = f.run();
     check(
-        f.run().status == Status::Restore && f.calls == std::vector<std::string>{"journal"},
+        result.status == Status::Restore && f.calls == std::vector<std::string>{"journal"} &&
+            std::string_view(result.failureStep) == "journal",
         "journal failure preserves visible source without a native move"
     );
   }
@@ -163,8 +165,10 @@ void relocationTransactions()
         break;
       }
     };
+    const auto result = f.run();
     check(
-        f.run().status == Status::Restore && f.calls == std::vector<std::string>{"journal"},
+        result.status == Status::Restore && f.calls == std::vector<std::string>{"journal"} &&
+            std::string_view(result.failureStep) == "before-placement",
         "owner/frame/display loss during journaling stops before any native mutation"
     );
   }
@@ -195,15 +199,21 @@ void relocationTransactions()
         break;
       }
     };
+    const auto result = f.run();
     check(
-        f.run().status == Status::Restore && f.calls.size() == 2,
+        result.status == Status::Restore && f.calls.size() == 2 &&
+            std::string_view(result.failureStep) == (change == 4 || change == 5 ? "containment" : "after-placement"),
         "uncertain partial placement never commits hidden-source ownership"
     );
   }
   {
     Fixture f;
     f.placed = false;
-    check(f.run().status == Status::Restore, "partly applied native placement requires immediate restoration");
+    const auto result = f.run();
+    check(
+        result.status == Status::Restore && std::string_view(result.failureStep) == "native-placement",
+        "partly applied native placement requires immediate restoration with its failing step recorded"
+    );
   }
   {
     Fixture f;
@@ -221,8 +231,10 @@ void relocationTransactions()
       f.afterPlace = fail;
     else
       f.afterJournal = fail;
+    const auto result = f.run();
     check(
-        f.run().status == Status::Restore && f.calls.size() == (afterMutation ? 2u : 1u),
+        result.status == Status::Restore && f.calls.size() == (afterMutation ? 2u : 1u) &&
+            std::string_view(result.failureStep) == "callback-exception",
         "callback exceptions cannot fabricate a completed relocation"
     );
   }

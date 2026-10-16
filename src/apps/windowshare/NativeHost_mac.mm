@@ -392,16 +392,25 @@ private:
   T m_value;
 };
 
-CFTypeRef attribute(AXUIElementRef element, CFStringRef name)
+CFTypeRef attribute(AXUIElementRef element, CFStringRef name, const QString &diagnosticStep = {})
 {
+  if (!diagnosticStep.isEmpty())
+    lifecycleDiagnostic("Host", diagnosticStep, "started", "Read native window attribute");
   CFTypeRef result = nullptr;
-  if (!element || AXUIElementCopyAttributeValue(element, name, &result) != kAXErrorSuccess)
-    return nullptr;
-  return result;
+  const auto status = element ? AXUIElementCopyAttributeValue(element, name, &result) : kAXErrorInvalidUIElement;
+  if (!diagnosticStep.isEmpty())
+    lifecycleDiagnostic(
+        "Host", diagnosticStep, status == kAXErrorSuccess ? "completed" : "observed", "Native attribute read returned",
+        {{"axError", int(status)}, {"present", result != nullptr}}
+    );
+  return status == kAXErrorSuccess ? result : nullptr;
 }
-std::optional<Rect> bounds(AXUIElementRef element)
+std::optional<Rect> bounds(AXUIElementRef element, const QString &diagnosticStep = {})
 {
-  CF<CFTypeRef> position(attribute(element, kAXPositionAttribute)), size(attribute(element, kAXSizeAttribute));
+  CF<CFTypeRef> position(
+      attribute(element, kAXPositionAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".position")
+  ),
+      size(attribute(element, kAXSizeAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".size"));
   if (!position || !size || CFGetTypeID(position.get()) != AXValueGetTypeID() ||
       CFGetTypeID(size.get()) != AXValueGetTypeID())
     return std::nullopt;
@@ -550,33 +559,68 @@ std::optional<Rect> recoverFrame(Rect original)
   // and post-crash journal recovery; never choose the private holding output.
   return recoveryRect(original, physicalDisplays());
 }
-bool setBounds(AXUIElementRef element, Rect desired, const std::function<bool()> &admitted = {})
+bool setBounds(
+    AXUIElementRef element, Rect desired, const std::function<bool()> &admitted = {},
+    const QString &diagnosticStep = "source.place"
+)
 {
-  const auto current = [&] { return !admitted || admitted(); };
-  if (!element || !desired.valid() || !current())
+  lifecycleDiagnostic(
+      "Host", diagnosticStep, "started", "Set native window frame", {{"desiredFrame", diagnosticRect(desired)}}
+  );
+  const auto refused = [&](const QString &reason) {
+    lifecycleDiagnostic("Host", diagnosticStep, "failed", reason, {{"desiredFrame", diagnosticRect(desired)}});
     return false;
+  };
+  const auto current = [&] { return !admitted || admitted(); };
+  if (!element || !desired.valid())
+    return refused("Window element or requested frame is invalid");
+  if (!current())
+    return refused("Placement authority was lost before native changes");
   CGPoint position{desired.x, desired.y};
   CGSize size{desired.width, desired.height};
   CF<AXValueRef> positionValue(AXValueCreate(kAXValueTypeCGPoint, &position));
   CF<AXValueRef> sizeValue(AXValueCreate(kAXValueTypeCGSize, &size));
+  if (!positionValue || !sizeValue)
+    return refused("Cannot construct native frame values");
+  const auto write = [&](CFStringRef name, CFTypeRef value, const QString &operation) {
+    const auto step = diagnosticStep + "." + operation;
+    lifecycleDiagnostic("Host", step, "started", "Write native window attribute");
+    const auto status = AXUIElementSetAttributeValue(element, name, value);
+    // Some apps reject an unchanged size/minimized attribute. Preserve the
+    // existing readback policy; record the error without claiming failure yet.
+    lifecycleDiagnostic("Host", step, "observed", "Native attribute write returned", {{"axError", int(status)}});
+  };
   // Restore visibility before geometry, including after the app minimized itself.
-  AXUIElementSetAttributeValue(element, kAXMinimizedAttribute, kCFBooleanFalse);
+  write(kAXMinimizedAttribute, kCFBooleanFalse, "unminimize");
   // Export relocation retains its lifecycle token through each AX round trip.
   // Recovery deliberately passes no predicate so it can restore while fenced.
   if (!current())
-    return false;
-  AXUIElementSetAttributeValue(element, kAXSizeAttribute, sizeValue.get());
+    return refused("Placement authority was lost after unminimizing");
+  write(kAXSizeAttribute, sizeValue.get(), "resize");
   if (!current())
-    return false;
-  AXUIElementSetAttributeValue(element, kAXPositionAttribute, positionValue.get());
+    return refused("Placement authority was lost after resizing");
+  write(kAXPositionAttribute, positionValue.get(), "move");
   if (!current())
-    return false;
-  auto actual = bounds(element);
-  CF<CFTypeRef> minimized(attribute(element, kAXMinimizedAttribute));
+    return refused("Placement authority was lost after moving");
+  const auto actual = bounds(element, diagnosticStep + ".readback");
+  CF<CFTypeRef> minimized(attribute(element, kAXMinimizedAttribute, diagnosticStep + ".readback.minimized"));
   // Some applications have a minimum size. Reaching a physical display is more
   // important than insisting on an exact size they cannot represent.
-  return current() && (!minimized || !CFEqual(minimized.get(), kCFBooleanTrue)) && actual &&
-         std::abs(actual->x - desired.x) < 5 && std::abs(actual->y - desired.y) < 5;
+  const bool authorized = current();
+  const bool isMinimized = minimized && CFEqual(minimized.get(), kCFBooleanTrue);
+  const bool positionMatches = actual && std::abs(actual->x - desired.x) < 5 && std::abs(actual->y - desired.y) < 5;
+  const bool verified = authorized && !isMinimized && positionMatches;
+  lifecycleDiagnostic(
+      "Host", diagnosticStep, verified ? "completed" : "failed", "Native window frame verification returned",
+      {{"desiredFrame", diagnosticRect(desired)},
+       {"actualFrame", actual ? QJsonValue(diagnosticRect(*actual)) : QJsonValue(QJsonValue::Null)},
+       {"authorityCurrent", authorized},
+       {"minimizedKnown", bool(minimized)},
+       {"minimized", isMinimized},
+       {"positionMatches", positionMatches},
+       {"verified", verified}}
+  );
+  return verified;
 }
 
 // All callbacks return to the QObject thread. Encoded access units are bounded;
@@ -2320,7 +2364,7 @@ struct NativeHost::Impl
       }
       CF<AXUIElementRef> window(matchAX(*current));
       const auto destination = recoverFrame(original);
-      if (!window || !destination || !setBounds(window.get(), *destination)) {
+      if (!window || !destination || !setBounds(window.get(), *destination, {}, "source.recover-place")) {
         recovery.append(value);
         error(QString("Could not restore %1; recovery journal retained").arg(record["title"].toString()));
       } else
@@ -2840,39 +2884,98 @@ struct NativeHost::Impl
     const auto sourceTransaction = e->sourceTransaction;
     bool placementStarted = false;
     e->relocating = true; // A nested/duplicate Ready cannot own the same move.
+    QString firstGuardFailure;
+    const auto guardFailed = [&](const QString &reason) -> Entry * {
+      if (firstGuardFailure.isEmpty()) {
+        firstGuardFailure = reason;
+        lifecycleDiagnostic("Host", "source.holding.guard", "failed", reason, {{"windowId", qint64(expected.id)}});
+      }
+      return nullptr;
+    };
     const auto current = [&]() -> Entry * {
-      if (!alive || !lifecycle->current(admitted))
-        return nullptr;
+      if (!alive)
+        return guardFailed("Native host was destroyed during placement");
+      if (!lifecycle->current(admitted))
+        return guardFailed("Lifecycle admission changed during placement");
       auto *item = entry(session, epoch);
-      return item && item->session.phase == Phase::Preparing && item->relocating && item->visible &&
-                     item->windowDrag == drag && (!drag || drag->committing(drag->binding())) &&
-                     (!drag || !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft)) &&
-                     item->session.geometry == paintedGeometry && item->producedGeometry == paintedGeometry &&
-                     item->capture == capture && item->sourceTransaction == sourceTransaction && !capture->stopped &&
-                     !capture->failurePending && item->identity.id == expected.id &&
-                     item->identity.pid == expected.pid && item->identity.launch == expected.launch &&
-                     CFEqual(item->window, window.get())
-                 ? item
-                 : nullptr;
+      if (!item)
+        return guardFailed("Exact source session no longer exists");
+      if (item->session.phase != Phase::Preparing || !item->relocating || !item->visible)
+        return guardFailed("Source is no longer visible and preparing relocation");
+      if (item->windowDrag != drag || (drag && !drag->committing(drag->binding())))
+        return guardFailed("Window drag ownership changed during placement");
+      if (drag && CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft))
+        return guardFailed("Physical drag button is still held");
+      if (item->session.geometry != paintedGeometry || item->producedGeometry != paintedGeometry)
+        return guardFailed("Painted or produced geometry changed during placement");
+      if (item->capture != capture || item->sourceTransaction != sourceTransaction)
+        return guardFailed("Capture or source transaction was replaced");
+      if (capture->stopped || capture->failurePending)
+        return guardFailed("Capture stopped or has a pending failure");
+      if (item->identity.id != expected.id || item->identity.pid != expected.pid ||
+          item->identity.launch != expected.launch || !CFEqual(item->window, window.get()))
+        return guardFailed("Retained window or process identity changed");
+      return item;
     };
     const auto readWindow = [&]() -> std::optional<HoldingRelocationWindow> {
       if (!current())
         return std::nullopt;
+      lifecycleDiagnostic(
+          "Host", "source.holding.window", "started", "Read source identity and native frame",
+          {{"windowId", qint64(expected.id)}, {"placementStarted", placementStarted}}
+      );
       const auto observed = identity(expected.id);
-      const auto actual = bounds(window.get());
-      CF<CFTypeRef> minimized(attribute(window.get(), kAXMinimizedAttribute));
-      if (!current() || !observed || observed->pid != expected.pid || observed->launch != expected.launch || !actual ||
-          !closeEnough(*actual, observed->frame) || (!placementStarted && !sameGeometry(*actual, paintedSource)) ||
-          (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) || !AXIsProcessTrusted() ||
-          !CGPreflightScreenCaptureAccess())
+      lifecycleDiagnostic(
+          "Host", "source.holding.identity", "observed", "WindowServer identity query returned",
+          {{"windowId", qint64(expected.id)},
+           {"found", bool(observed)},
+           {"frame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)}}
+      );
+      const auto actual = bounds(window.get(), "source.holding.window");
+      CF<CFTypeRef> minimized(attribute(window.get(), kAXMinimizedAttribute, "source.holding.window.minimized"));
+      const QJsonObject details{
+          {"windowId", qint64(expected.id)},
+          {"placementStarted", placementStarted},
+          {"paintedFrame", diagnosticRect(paintedSource)},
+          {"axFrame", actual ? QJsonValue(diagnosticRect(*actual)) : QJsonValue(QJsonValue::Null)},
+          {"windowServerFrame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)},
+          {"minimizedKnown", bool(minimized)},
+          {"minimized", minimized && CFEqual(minimized.get(), kCFBooleanTrue)}
+      };
+      const auto rejected = [&](const QString &reason) -> std::optional<HoldingRelocationWindow> {
+        lifecycleDiagnostic("Host", "source.holding.window", "failed", reason, details);
         return std::nullopt;
+      };
+      if (!current())
+        return rejected("Source authority changed during native reads");
+      if (!observed || observed->pid != expected.pid || observed->launch != expected.launch)
+        return rejected("WindowServer no longer identifies the exact source process");
+      if (!actual)
+        return rejected("Accessibility did not return a valid source frame");
+      if (!closeEnough(*actual, observed->frame))
+        return rejected("Accessibility and WindowServer frames disagree");
+      if (!placementStarted && !sameGeometry(*actual, paintedSource))
+        return rejected("Source frame changed before the explicit placement began");
+      if (minimized && CFEqual(minimized.get(), kCFBooleanTrue))
+        return rejected("Source became minimized");
+      if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess())
+        return rejected("Accessibility or screen capture permission is unavailable");
+      lifecycleDiagnostic("Host", "source.holding.window", "completed", "Source identity and frame verified", details);
       return HoldingRelocationWindow{{session, epoch}, paintedGeometry, paintedGeometry, *actual};
     };
     const auto layoutCurrent = [&] {
       if (!current())
         return false;
+      lifecycleDiagnostic("Host", "source.holding.layout", "started", "Read physical display layout");
       const auto outputs = physicalOutputSnapshot();
-      return current() && physicalAtExport && outputs && samePhysicalOutputLayout(*physicalAtExport, *outputs);
+      const bool verified =
+          current() && physicalAtExport && outputs && samePhysicalOutputLayout(*physicalAtExport, *outputs);
+      lifecycleDiagnostic(
+          "Host", "source.holding.layout", verified ? "completed" : "failed",
+          "Physical display layout verification returned",
+          {{"baselinePresent", bool(physicalAtExport)}, {"snapshotPresent", bool(outputs)}, {"verified", verified}}
+      );
+      return verified;
     };
     const auto failed = [&](QString message, bool all = false) {
       lifecycleDiagnostic("Host", "source.holding", "failed", message, {{"windowId", qint64(expected.id)}});
@@ -2933,25 +3036,41 @@ struct NativeHost::Impl
         HoldingRelocationAccess access;
         access.window = readWindow;
         access.display = [&]() -> std::optional<HoldingResizeDisplay> {
-          if (!layoutCurrent() || !holding.available())
+          if (!layoutCurrent())
             return std::nullopt;
+          QString reason;
+          if (!holding.available(&reason)) {
+            lifecycleDiagnostic("Host", "source.holding.display", "failed", reason);
+            return std::nullopt;
+          }
           return HoldingResizeDisplay{holding.displayId(), holding.bounds()};
         };
         access.persist = [&] {
-          return current() && current()->session.journaled &&
-                 sourceTransaction->arm([&] { return current() && writeJournal() && current(); });
+          lifecycleDiagnostic("Host", "source.holding.journal", "started", "Persist window placement intent");
+          const bool persisted = current() && current()->session.journaled &&
+                                 sourceTransaction->arm([&] { return current() && writeJournal() && current(); });
+          lifecycleDiagnostic(
+              "Host", "source.holding.journal", persisted ? "completed" : "failed", "Placement journal returned"
+          );
+          return persisted;
         };
         access.place = [&](Rect destination) {
           if (!current() || !sourceTransaction->attemptMutation())
             return false;
           placementStarted = true;
-          return setBounds(window.get(), destination, [&] { return current() != nullptr; });
+          return setBounds(window.get(), destination, [&] { return current() != nullptr; }, "source.holding.place");
         };
         const auto result = relocateHoldingWindow({session, epoch}, paintedGeometry, access);
         if (!alive)
           return;
         e = current();
         if (!e || result.status != HoldingRelocationResult::Status::Applied) {
+          lifecycleDiagnostic(
+              "Host", "source.holding.transaction", "failed", "Holding placement transaction did not complete",
+              {{"failureStep", QString::fromLatin1(result.failureStep)},
+               {"status", int(result.status)},
+               {"firstGuardFailure", firstGuardFailure}}
+          );
           failed("Holding display placement did not verify; restoring source window");
           return;
         }
@@ -3673,7 +3792,7 @@ struct NativeHost::Impl
       // Restoration can use retained AX identity only at the same process birth.
       const auto destination = requested ? requested : recoverFrame(original);
       if (!current() || !destination || launchTime(expected.pid) != expected.launch || !current() || !mayPlace() ||
-          !setBounds(window.get(), *destination, mayPlace))
+          !setBounds(window.get(), *destination, mayPlace, "source.restore-place"))
         return false;
       if (requested) {
         const auto actual = bounds(window.get());

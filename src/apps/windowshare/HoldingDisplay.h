@@ -67,6 +67,8 @@ struct HoldingRelocationResult
   };
   Status status = Status::Refused;
   Rect actual;
+  // Diagnostic only; never grants ownership or changes rollback policy.
+  const char *failureStep = "";
 };
 HoldingRelocationResult
 relocateHoldingWindow(Owner owner, std::uint64_t paintedGeometry, const HoldingRelocationAccess &access);

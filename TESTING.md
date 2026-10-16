@@ -4,6 +4,27 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt twenty: placement diagnostics — 2026-10-15
+
+`build/h06-r20-8g88ufzd/` consumed fresh permission and passed Ready/Start with
+settled source and control windows. The holding display was independently
+verified, but source placement failed before Active. The exact failing native
+predicate was not recorded. Initial return failed; final cleanup restored the
+original frame, zero held input and an empty journal. Both machines stopped
+owned processes and preserved ordinary state. Ubuntu relay/controller errors
+and Mac SSH exit 255 remain recorded; H04/H06 did not pass.
+
+The user now wants printed diagnostics for the agent, without a results popup.
+Automatic report launch is removed. Native logs now bracket each placement and
+restore AX operation, retain error codes and frame readbacks, identify failed
+guards and name the relocation transaction stage. No admission checks are
+relaxed and no sleeps are added. Evidence: `build/h06-placement-e2j2nzqs/`.
+All 83 coordinator cases on Mac and actual Ubuntu, four Mac Server/coordinator/preflight/native
+CTests and the default non-mutating holding test pass. Its existing relocation
+fixtures now distinguish pre-move, move, post-move and containment failures.
+Rebuild/freeze fresh artifacts and obtain fresh permission before a physical
+retry; these unattended checks do not establish native placement success.
+
 ## H06 attempt nineteen: opening-window regression — 2026-10-15
 
 `build/h06-r19-209et7ms/` consumed fresh permission and stopped before Start.
@@ -36,8 +57,8 @@ unchanged run receipts for the complete failure and cleanup record.
 
 The next attempt must use the rebuilt diagnostic source/Host/helper and fresh
 plans. `diagnostics.jsonl` records every lifecycle stage, readiness transitions,
-native holding verification details and cleanup. An independent read-only report
-retains the first failure until Dismiss; it does not keep test input alive.
+native holding verification details and cleanup. This revision also launched an
+independent read-only report; the later log-only request above removes that launch.
 No sleep statements or artificial display delays were added. H06 must verify
 the committed hidden placement before Active; ordinary source movement is not
 accepted as hiding. Display creation now arms recovery before its first possible
