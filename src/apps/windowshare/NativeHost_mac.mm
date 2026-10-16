@@ -4380,6 +4380,17 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
+      if (e->holdingPending) {
+        // Display reconfiguration temporarily blocks the source's AX bridge.
+        // This Preparing entry owns no remote input yet. Keep all identity,
+        // permission, capture, topology and deadline checks above, but let the
+        // bounded display transaction finish before its fresh frame read.
+        lifecycleDiagnostic(
+            "Host", "source.holding.watchdog", "pending", "Display setup owns the pending source observation",
+            {{"windowId", qint64(e->identity.id)}}
+        );
+        continue;
+      }
       if (e->relocating && (e->placement || e->windowObservation)) {
         // Keep identity, topology, permission, capture and preparation watchdogs
         // above active. The placement transaction owns transient geometry and
@@ -4396,8 +4407,13 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
-      auto actual = bounds(e->window);
+      AXError frameError = kAXErrorSuccess;
+      auto actual = bounds(e->window, {}, &frameError);
       if (!actual) {
+        lifecycleDiagnostic(
+            "Host", "source.watchdog.frame", "failed", "Native source frame is unavailable outside placement",
+            {{"windowId", qint64(e->identity.id)}, {"axError", int(frameError)}}
+        );
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
         continue;
