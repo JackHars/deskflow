@@ -37,6 +37,16 @@ package is unchanged from attempt nineteen. Native animation suppression and
 H04/H06 physical acceptance still require an attended run. The consumed approval
 does not authorize a retry; ask again immediately before the next physical launch.
 
+Fresh preparation is `build/h06-r20-8g88ufzd/` (pointer
+`build/h06-r20-current.txt`), source commit `9e8c45903`. It freezes the rebuilt
+source with the unchanged signed Core/Host bundle and fresh private identities.
+Both plans validate; permissions/conflict checks pass. The inert packaged
+admission check passes in 11.50s, with its companion stopped. Actual jack
+session 2 is active, local and Wayland, with the provider disabled. The prepared
+launch uses holding/separate controls and no Mac desktop preview. No physical
+window or input session was started by preparation; fresh launch permission is
+still required. Attempt nineteen's consumed approval must not be reused.
+
 ## Attempt eighteen and persistent diagnostics — 2026-10-15
 
 Permission `call_0c4a5ca69ff04dc5a8b0a97591b9851e` was consumed by
