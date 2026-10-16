@@ -60,15 +60,17 @@ void relocationTransactions()
           afterJournal();
         return journal;
       };
-      access.place = [&](WindowRect destination) {
+      access.place = [&](WindowRect destination, std::function<void(bool)> complete) {
         check(calls == std::vector<std::string>{"journal"}, "one durable journal precedes native relocation");
         calls.push_back("place");
         window->frame = destination;
         if (afterPlace)
           afterPlace();
-        return placed;
+        complete(placed);
       };
-      return relocateHoldingWindow(owner, painted, access);
+      HoldingRelocationResult result;
+      relocateHoldingWindow(owner, painted, access, [&](auto observed) { result = observed; });
+      return result;
     }
   };
   {
@@ -239,7 +241,9 @@ void relocationTransactions()
         "callback exceptions cannot fabricate a completed relocation"
     );
   }
-  check(relocateHoldingWindow({71, 2}, 9, {}).status == Status::Refused, "missing relocation operations fail closed");
+  HoldingRelocationResult missing;
+  relocateHoldingWindow({71, 2}, 9, {}, [&](auto result) { missing = result; });
+  check(missing.status == Status::Refused, "missing relocation operations fail closed");
   std::cout << "PASS: isolated first-painted-frame relocation transactions; exact owner/frame, journal and rollback\n";
 }
 

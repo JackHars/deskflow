@@ -11,6 +11,7 @@
 #include "NativeHostLifecycle.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
+#include "NativePlacementVerification.h"
 #include "NativeSourceTransaction.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
@@ -392,7 +393,8 @@ private:
   T m_value;
 };
 
-CFTypeRef attribute(AXUIElementRef element, CFStringRef name, const QString &diagnosticStep = {})
+CFTypeRef
+attribute(AXUIElementRef element, CFStringRef name, const QString &diagnosticStep = {}, AXError *error = nullptr)
 {
   if (!diagnosticStep.isEmpty())
     lifecycleDiagnostic("Host", diagnosticStep, "started", "Read native window attribute");
@@ -403,14 +405,23 @@ CFTypeRef attribute(AXUIElementRef element, CFStringRef name, const QString &dia
         "Host", diagnosticStep, status == kAXErrorSuccess ? "completed" : "observed", "Native attribute read returned",
         {{"axError", int(status)}, {"present", result != nullptr}}
     );
+  if (error)
+    *error = status;
+  if (status != kAXErrorSuccess && result)
+    CFRelease(result);
   return status == kAXErrorSuccess ? result : nullptr;
 }
-std::optional<Rect> bounds(AXUIElementRef element, const QString &diagnosticStep = {})
+std::optional<Rect> bounds(AXUIElementRef element, const QString &diagnosticStep = {}, AXError *error = nullptr)
 {
-  CF<CFTypeRef> position(
-      attribute(element, kAXPositionAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".position")
-  ),
-      size(attribute(element, kAXSizeAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".size"));
+  AXError positionError = kAXErrorSuccess, sizeError = kAXErrorSuccess;
+  CF<CFTypeRef> position(attribute(
+      element, kAXPositionAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".position", &positionError
+  ));
+  CF<CFTypeRef> size(
+      attribute(element, kAXSizeAttribute, diagnosticStep.isEmpty() ? QString{} : diagnosticStep + ".size", &sizeError)
+  );
+  if (error)
+    *error = positionError != kAXErrorSuccess ? positionError : sizeError;
   if (!position || !size || CFGetTypeID(position.get()) != AXValueGetTypeID() ||
       CFGetTypeID(size.get()) != AXValueGetTypeID())
     return std::nullopt;
@@ -559,7 +570,7 @@ std::optional<Rect> recoverFrame(Rect original)
   // and post-crash journal recovery; never choose the private holding output.
   return recoveryRect(original, physicalDisplays());
 }
-bool setBounds(
+bool requestBounds(
     AXUIElementRef element, Rect desired, const std::function<bool()> &admitted = {},
     const QString &diagnosticStep = "source.place"
 )
@@ -602,6 +613,18 @@ bool setBounds(
   write(kAXPositionAttribute, positionValue.get(), "move");
   if (!current())
     return refused("Placement authority was lost after moving");
+  lifecycleDiagnostic("Host", diagnosticStep, "submitted", "Native frame requested; readback remains required");
+  return true;
+}
+
+bool setBounds(
+    AXUIElementRef element, Rect desired, const std::function<bool()> &admitted = {},
+    const QString &diagnosticStep = "source.place"
+)
+{
+  if (!requestBounds(element, desired, admitted, diagnosticStep))
+    return false;
+  const auto current = [&] { return !admitted || admitted(); };
   const auto actual = bounds(element, diagnosticStep + ".readback");
   CF<CFTypeRef> minimized(attribute(element, kAXMinimizedAttribute, diagnosticStep + ".readback.minimized"));
   // Some applications have a minimum size. Reaching a physical display is more
@@ -622,6 +645,153 @@ bool setBounds(
   );
   return verified;
 }
+
+// The source application's AX bridge may be busy just after a move. Observe
+// the retained window before writing, then return to the main event loop. Only
+// a fresh AX + WindowServer agreement can complete the two-second transaction.
+class ObservedPlacement final : public std::enable_shared_from_this<ObservedPlacement>
+{
+public:
+  ObservedPlacement(
+      AXUIElementRef window, WindowIdentity expected, Rect destination, std::function<bool()> current,
+      std::function<void(bool)> completion
+  )
+      : m_window(static_cast<AXUIElementRef>(CFRetain(window))),
+        m_expected(std::move(expected)),
+        m_destination(destination),
+        m_current(std::move(current)),
+        m_verification(
+            [this](QString *reason) { return probe(reason); },
+            [this, completion = std::move(completion)](bool success, QString reason) {
+              lifecycleDiagnostic(
+                  "Host", "source.holding.verify", success ? "completed" : "failed",
+                  success ? "Fresh native frame verified" : reason, {{"windowId", qint64(m_expected.id)}}
+              );
+              completion(success);
+            }
+        )
+  {
+  }
+  ~ObservedPlacement()
+  {
+    cancel();
+  }
+  void cancel()
+  {
+    m_verification.cancel();
+    if (m_observer) {
+      CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
+      m_observer = CF<AXObserverRef>();
+    }
+  }
+  void changed(const QString &trigger)
+  {
+    if (!m_verification.pending())
+      return;
+    lifecycleDiagnostic(
+        "Host", "source.holding.verify.wake", "observed", trigger, {{"windowId", qint64(m_expected.id)}}
+    );
+    m_verification.changed();
+  }
+  void start()
+  {
+    const auto keepAlive = shared_from_this();
+    AXObserverRef raw = nullptr;
+    const auto created = AXObserverCreate(m_expected.pid, notification, &raw);
+    m_observer = CF<AXObserverRef>(raw);
+    lifecycleDiagnostic(
+        "Host", "source.holding.observe", "observed", "Native observer creation returned",
+        {{"axError", int(created)}, {"windowId", qint64(m_expected.id)}}
+    );
+    if (created != kAXErrorSuccess || !m_observer) {
+      m_verification.fail("Cannot observe the exact source window before placement");
+      return;
+    }
+    for (const auto name :
+         {kAXMovedNotification, kAXResizedNotification, kAXWindowMiniaturizedNotification,
+          kAXWindowDeminiaturizedNotification, kAXUIElementDestroyedNotification}) {
+      const auto status = AXObserverAddNotification(m_observer.get(), m_window.get(), name, this);
+      lifecycleDiagnostic(
+          "Host", "source.holding.observe", "observed", "Native notification registration returned",
+          {{"notification", string((__bridge NSString *)name)}, {"axError", int(status)}}
+      );
+      if (status != kAXErrorSuccess && status != kAXErrorNotificationUnsupported) {
+        m_verification.fail("Cannot register source placement notifications");
+        return;
+      }
+    }
+    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
+    if (!requestBounds(m_window.get(), m_destination, [this] { return authorityCurrent(); }, "source.holding.place")) {
+      m_verification.fail("Source placement lost its authority during native writes");
+      return;
+    }
+    m_verification.issued(); // One queued check also covers an unchanged frame.
+  }
+
+private:
+  bool authorityCurrent() const
+  {
+    if (!m_current())
+      return false;
+    const auto native = identity(m_expected.id);
+    return native && native->pid == m_expected.pid && native->launch == m_expected.launch && m_current();
+  }
+  static void notification(AXObserverRef, AXUIElementRef window, CFStringRef name, void *context)
+  {
+    auto *self = static_cast<ObservedPlacement *>(context);
+    if (self && CFEqual(window, self->m_window.get()))
+      self->changed("Exact native window notification: " + string((__bridge NSString *)name));
+  }
+  NativePlacementVerification::Observation probe(QString *reason)
+  {
+    using Observation = NativePlacementVerification::Observation;
+    const auto keepAlive = shared_from_this();
+    const auto result = [&](Observation state, QString message) {
+      *reason = std::move(message);
+      lifecycleDiagnostic(
+          "Host", "source.holding.verify.readback", state == Observation::Invalid ? "failed" : "observed", *reason,
+          {{"windowId", qint64(m_expected.id)}, {"observation", int(state)}}
+      );
+      return state;
+    };
+    if (!authorityCurrent())
+      return result(Observation::Invalid, "Source placement authority was revoked");
+    const auto observed = identity(m_expected.id);
+    if (!observed || observed->pid != m_expected.pid || observed->launch != m_expected.launch)
+      return result(Observation::Invalid, "Exact source process/window identity changed");
+    AXError frameError = kAXErrorSuccess, minimizedError = kAXErrorSuccess;
+    const auto actual = bounds(m_window.get(), "source.holding.verify.frame", &frameError);
+    CF<CFTypeRef> minimized(
+        attribute(m_window.get(), kAXMinimizedAttribute, "source.holding.verify.minimized", &minimizedError)
+    );
+    if (!authorityCurrent())
+      return result(Observation::Invalid, "Source authority changed during native readback");
+    for (const auto error : {frameError, minimizedError})
+      if (error != kAXErrorSuccess && error != kAXErrorCannotComplete)
+        return result(Observation::Invalid, QString("Native source readback failed: %1").arg(error));
+    if (frameError == kAXErrorCannotComplete || minimizedError == kAXErrorCannotComplete)
+      return result(Observation::Pending, "Native source readback is temporarily unavailable");
+    if (!actual || !minimized || CFGetTypeID(minimized.get()) != CFBooleanGetTypeID() ||
+        CFEqual(minimized.get(), kCFBooleanTrue))
+      return result(Observation::Invalid, "Source frame or unminimized state is invalid");
+    lifecycleDiagnostic(
+        "Host", "source.holding.verify.geometry", "observed", "Compare fresh native frames",
+        {{"desiredFrame", diagnosticRect(m_destination)},
+         {"axFrame", diagnosticRect(*actual)},
+         {"windowServerFrame", diagnosticRect(observed->frame)}}
+    );
+    if (!closeEnough(*actual, observed->frame) || std::abs(actual->x - m_destination.x) >= 5 ||
+        std::abs(actual->y - m_destination.y) >= 5)
+      return result(Observation::Pending, "Native source frame has not reached the requested position");
+    return result(Observation::Verified, "Native source position and visible state agree");
+  }
+  CF<AXUIElementRef> m_window;
+  WindowIdentity m_expected;
+  Rect m_destination;
+  std::function<bool()> m_current;
+  CF<AXObserverRef> m_observer;
+  NativePlacementVerification m_verification;
+};
 
 // All callbacks return to the QObject thread. Encoded access units are bounded;
 // overflow discards the dependent GOP and requests a fresh IDR, never an
@@ -1211,6 +1381,7 @@ struct NativeHost::Impl
     std::uint64_t resizeRequest = 0;
     std::uint64_t focusRequest = 0;
     std::uint64_t producedGeometry = 0;
+    std::shared_ptr<ObservedPlacement> placement;
     bool holdingPending = false;
     std::uint64_t holdingPaintedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
@@ -2973,20 +3144,21 @@ struct NativeHost::Impl
     const QPointer<NativeHost> alive(q);
     const auto expected = e->identity;
     const auto paintedSource = e->session.source;
-    CF<AXUIElementRef> window(static_cast<AXUIElementRef>(CFRetain(e->window)));
+    const auto window = std::make_shared<CF<AXUIElementRef>>(static_cast<AXUIElementRef>(CFRetain(e->window)));
     const auto capture = e->capture;
     const auto sourceTransaction = e->sourceTransaction;
-    bool placementStarted = false;
+    const auto placementStarted = std::make_shared<bool>(false);
     e->relocating = true; // A nested/duplicate Ready cannot own the same move.
-    QString firstGuardFailure;
-    const auto guardFailed = [&](const QString &reason) -> Entry * {
-      if (firstGuardFailure.isEmpty()) {
-        firstGuardFailure = reason;
+    const auto firstGuardFailure = std::make_shared<QString>();
+    const auto guardFailed = [firstGuardFailure, expected](const QString &reason) -> Entry * {
+      if (firstGuardFailure->isEmpty()) {
+        *firstGuardFailure = reason;
         lifecycleDiagnostic("Host", "source.holding.guard", "failed", reason, {{"windowId", qint64(expected.id)}});
       }
       return nullptr;
     };
-    const auto current = [&]() -> Entry * {
+    const auto current = [this, alive, admitted, session, epoch, drag, paintedGeometry, capture, sourceTransaction,
+                          expected, window, guardFailed]() -> Entry * {
       if (!alive)
         return guardFailed("Native host was destroyed during placement");
       if (!lifecycle->current(admitted))
@@ -3007,16 +3179,17 @@ struct NativeHost::Impl
       if (capture->stopped || capture->failurePending)
         return guardFailed("Capture stopped or has a pending failure");
       if (item->identity.id != expected.id || item->identity.pid != expected.pid ||
-          item->identity.launch != expected.launch || !CFEqual(item->window, window.get()))
+          item->identity.launch != expected.launch || !CFEqual(item->window, window->get()))
         return guardFailed("Retained window or process identity changed");
       return item;
     };
-    const auto readWindow = [&]() -> std::optional<HoldingRelocationWindow> {
+    const auto readWindow = [current, expected, window, paintedSource, placementStarted, session, epoch,
+                             paintedGeometry]() -> std::optional<HoldingRelocationWindow> {
       if (!current())
         return std::nullopt;
       lifecycleDiagnostic(
           "Host", "source.holding.window", "started", "Read source identity and native frame",
-          {{"windowId", qint64(expected.id)}, {"placementStarted", placementStarted}}
+          {{"windowId", qint64(expected.id)}, {"placementStarted", *placementStarted}}
       );
       const auto observed = identity(expected.id);
       lifecycleDiagnostic(
@@ -3025,11 +3198,11 @@ struct NativeHost::Impl
            {"found", bool(observed)},
            {"frame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)}}
       );
-      const auto actual = bounds(window.get(), "source.holding.window");
-      CF<CFTypeRef> minimized(attribute(window.get(), kAXMinimizedAttribute, "source.holding.window.minimized"));
+      const auto actual = bounds(window->get(), "source.holding.window");
+      CF<CFTypeRef> minimized(attribute(window->get(), kAXMinimizedAttribute, "source.holding.window.minimized"));
       const QJsonObject details{
           {"windowId", qint64(expected.id)},
-          {"placementStarted", placementStarted},
+          {"placementStarted", *placementStarted},
           {"paintedFrame", diagnosticRect(paintedSource)},
           {"axFrame", actual ? QJsonValue(diagnosticRect(*actual)) : QJsonValue(QJsonValue::Null)},
           {"windowServerFrame", observed ? QJsonValue(diagnosticRect(observed->frame)) : QJsonValue(QJsonValue::Null)},
@@ -3048,7 +3221,7 @@ struct NativeHost::Impl
         return rejected("Accessibility did not return a valid source frame");
       if (!closeEnough(*actual, observed->frame))
         return rejected("Accessibility and WindowServer frames disagree");
-      if (!placementStarted && !sameGeometry(*actual, paintedSource))
+      if (!*placementStarted && !sameGeometry(*actual, paintedSource))
         return rejected("Source frame changed before the explicit placement began");
       if (minimized && CFEqual(minimized.get(), kCFBooleanTrue))
         return rejected("Source became minimized");
@@ -3057,7 +3230,7 @@ struct NativeHost::Impl
       lifecycleDiagnostic("Host", "source.holding.window", "completed", "Source identity and frame verified", details);
       return HoldingRelocationWindow{{session, epoch}, paintedGeometry, paintedGeometry, *actual};
     };
-    const auto layoutCurrent = [&] {
+    const auto layoutCurrent = [this, current] {
       if (!current())
         return false;
       lifecycleDiagnostic("Host", "source.holding.layout", "started", "Read physical display layout");
@@ -3071,7 +3244,7 @@ struct NativeHost::Impl
       );
       return verified;
     };
-    const auto failed = [&](QString message, bool all = false) {
+    const auto failed = [this, alive, session, epoch, expected](QString message, bool all = false) {
       lifecycleDiagnostic("Host", "source.holding", "failed", message, {{"windowId", qint64(expected.id)}});
       if (!alive)
         return;
@@ -3084,6 +3257,45 @@ struct NativeHost::Impl
         restoreAll(KeyboardRouteReason::AuthorityLost);
       else if (entry(session, epoch))
         restore(session);
+    };
+    const auto commit = [this, alive, admitted, session, epoch, sourceTransaction, drag, failed] {
+      // The default source-visible fallback never parks a window off-screen.
+      if (!alive)
+        return;
+      auto *e = entry(session, epoch);
+      if (!e || !e->relocating || e->session.phase != Phase::Preparing || !lifecycle->current(admitted))
+        return;
+      // A source-visible committed session can still receive native input and
+      // resize/focus changes. Persist its recovery intent before enabling those
+      // operations, just as for a holding-display mutation.
+      if (e->sourceTransaction != sourceTransaction || !sourceTransaction->arm([&] {
+            const auto *item = entry(session, epoch);
+            return item && item->sourceTransaction == sourceTransaction && writeJournal() && alive;
+          })) {
+        failed("Cannot persist source recovery before committing the export");
+        return;
+      }
+      if (!alive || !lifecycle->current(admitted))
+        return;
+      e = entry(session, epoch);
+      if (!e || e->sourceTransaction != sourceTransaction || e->session.phase != Phase::Preparing || !e->relocating ||
+          !sourceTransaction->commit())
+        return;
+      if (drag && !drag->committed(drag->binding())) {
+        failed("Window drag expired during source relocation; restoring source");
+        return;
+      }
+      e->relocating = false;
+      e->session.commit(epoch);
+      lifecycleDiagnostic(
+          "Host", "source.commit", "completed", "Source export committed",
+          {{"windowId", qint64(e->identity.id)}, {"hidden", e->moved}}
+      );
+      opened(*e);
+      if (alive && lifecycle->current(admitted) && entry(session, epoch) && q->onCommitted) {
+        CallbackScope scope(*this);
+        q->onCommitted(session, epoch);
+      }
     };
     const auto before = readWindow();
     if (!before || !current() || !sameGeometry(before->frame, current()->session.source)) {
@@ -3110,7 +3322,7 @@ struct NativeHost::Impl
         }
         HoldingRelocationAccess access;
         access.window = readWindow;
-        access.display = [&]() -> std::optional<HoldingResizeDisplay> {
+        access.display = [this, layoutCurrent]() -> std::optional<HoldingResizeDisplay> {
           if (!layoutCurrent())
             return std::nullopt;
           QString reason;
@@ -3120,7 +3332,7 @@ struct NativeHost::Impl
           }
           return HoldingResizeDisplay{holding.displayId(), holding.bounds()};
         };
-        access.persist = [&] {
+        access.persist = [this, current, sourceTransaction] {
           lifecycleDiagnostic("Host", "source.holding.journal", "started", "Persist window placement intent");
           const bool persisted = current() && current()->session.journaled &&
                                  sourceTransaction->arm([&] { return current() && writeJournal() && current(); });
@@ -3129,84 +3341,69 @@ struct NativeHost::Impl
           );
           return persisted;
         };
-        access.place = [&](Rect destination) {
-          if (!current() || !sourceTransaction->attemptMutation())
-            return false;
-          placementStarted = true;
-          return setBounds(window.get(), destination, [&] { return current() != nullptr; }, "source.holding.place");
-        };
-        const auto result = relocateHoldingWindow({session, epoch}, paintedGeometry, access);
-        if (!alive)
-          return;
-        e = current();
-        if (!e || result.status != HoldingRelocationResult::Status::Applied) {
-          lifecycleDiagnostic(
-              "Host", "source.holding.transaction", "failed", "Holding placement transaction did not complete",
-              {{"failureStep", QString::fromLatin1(result.failureStep)},
-               {"status", int(result.status)},
-               {"firstGuardFailure", firstGuardFailure}}
+        access.place = [this, current, layoutCurrent, sourceTransaction, placementStarted, window,
+                        expected](Rect destination, std::function<void(bool)> complete) {
+          if (!current() || !sourceTransaction->attemptMutation()) {
+            complete(false);
+            return;
+          }
+          *placementStarted = true;
+          const auto displayId = holding.displayId();
+          const auto displayBounds = holding.bounds();
+          const auto placementCurrent = [this, layoutCurrent, displayId, displayBounds] {
+            return layoutCurrent() && AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() && holding.available() &&
+                   holding.displayId() == displayId && sameGeometry(holding.bounds(), displayBounds);
+          };
+          auto placement = std::make_shared<ObservedPlacement>(
+              window->get(), expected, destination, placementCurrent, std::move(complete)
           );
-          failed("Holding display placement did not verify; restoring source window");
-          return;
-        }
-        e->session.source = result.actual;
-        e->moved = true;
-        QJsonArray physicalBounds;
-        if (physicalAtExport)
-          for (const auto &output : *physicalAtExport)
-            physicalBounds.append(diagnosticRect(output.bounds));
-        lifecycleDiagnostic(
-            "Host", "source.hidden", "completed", "Source placement verified on the hidden display",
-            {{"windowId", qint64(expected.id)},
-             {"sourcePid", qint64(expected.pid)},
-             {"actualFrame", diagnosticRect(result.actual)},
-             {"holdingBounds", diagnosticRect(holding.bounds())},
-             {"physicalBounds", physicalBounds}}
+          current()->placement = placement;
+          placement->start();
+        };
+        relocateHoldingWindow(
+            {session, epoch}, paintedGeometry, std::move(access),
+            [this, alive, current, expected, firstGuardFailure, failed, commit](HoldingRelocationResult result) {
+              if (!alive)
+                return;
+              auto *e = current();
+              if (e)
+                e->placement.reset();
+              if (!e || result.status != HoldingRelocationResult::Status::Applied) {
+                lifecycleDiagnostic(
+                    "Host", "source.holding.transaction", "failed", "Holding placement transaction did not complete",
+                    {{"failureStep", QString::fromLatin1(result.failureStep)},
+                     {"status", int(result.status)},
+                     {"firstGuardFailure", *firstGuardFailure}}
+                );
+                failed("Holding display placement did not verify; restoring source window");
+                return;
+              }
+              e->session.source = result.actual;
+              e->moved = true;
+              QJsonArray physicalBounds;
+              if (physicalAtExport)
+                for (const auto &output : *physicalAtExport)
+                  physicalBounds.append(diagnosticRect(output.bounds));
+              lifecycleDiagnostic(
+                  "Host", "source.hidden", "completed", "Source placement verified on the hidden display",
+                  {{"windowId", qint64(expected.id)},
+                   {"sourcePid", qint64(expected.pid)},
+                   {"actualFrame", diagnosticRect(result.actual)},
+                   {"holdingBounds", diagnosticRect(holding.bounds())},
+                   {"physicalBounds", physicalBounds}}
+              );
+              ++e->session.geometry;
+              updateCapture(*e);
+              commit();
+            }
         );
-        ++e->session.geometry;
-        updateCapture(*e);
+        return;
       } else {
         failed("Holding display changed before placement; restoring source");
         return;
       }
     }
-    // The default source-visible fallback never parks a window off-screen.
-    if (!alive)
-      return;
-    e = entry(session, epoch);
-    if (!e || !e->relocating || e->session.phase != Phase::Preparing || !lifecycle->current(admitted))
-      return;
-    // A source-visible committed session can still receive native input and
-    // resize/focus changes. Persist its recovery intent before enabling those
-    // operations, just as for a holding-display mutation.
-    if (e->sourceTransaction != sourceTransaction || !sourceTransaction->arm([&] {
-          const auto *item = entry(session, epoch);
-          return item && item->sourceTransaction == sourceTransaction && writeJournal() && alive;
-        })) {
-      failed("Cannot persist source recovery before committing the export");
-      return;
-    }
-    if (!alive || !lifecycle->current(admitted))
-      return;
-    e = entry(session, epoch);
-    if (!e || e->sourceTransaction != sourceTransaction || e->session.phase != Phase::Preparing || !e->relocating ||
-        !sourceTransaction->commit())
-      return;
-    if (drag && !drag->committed(drag->binding())) {
-      failed("Window drag expired during source relocation; restoring source");
-      return;
-    }
-    e->relocating = false;
-    e->session.commit(epoch);
-    lifecycleDiagnostic(
-        "Host", "source.commit", "completed", "Source export committed",
-        {{"windowId", qint64(e->identity.id)}, {"hidden", e->moved}}
-    );
-    opened(*e);
-    if (alive && lifecycle->current(admitted) && entry(session, epoch) && q->onCommitted) {
-      CallbackScope scope(*this);
-      q->onCommitted(session, epoch);
-    }
+    commit();
   }
   bool post(
       Entry &e, CGEventRef event, CGEventFlags modifiers, NativeHostLifecycle::Admission admitted, bool cleanup = false
@@ -3780,6 +3977,10 @@ struct NativeHost::Impl
     if (found->second->session.phase != Phase::Returning)
       found->second->session.beginReturn();
     found->second->pendingChild.reset();
+    if (found->second->placement) {
+      found->second->placement->cancel();
+      found->second->placement.reset();
+    }
     std::vector<Owner> children;
     for (const auto &[id, child] : entries)
       if (child->family && child->family->parent == root)
@@ -4005,6 +4206,13 @@ struct NativeHost::Impl
       if (!familyCurrent(*e) || !current || current->pid != e->identity.pid || current->launch != e->identity.launch) {
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
+        continue;
+      }
+      if (e->relocating && e->placement) {
+        // Keep identity, topology, permission, capture and preparation watchdogs
+        // above active. The placement transaction owns transient geometry and
+        // AX timeouts; its queued check cannot erase entries during this loop.
+        e->placement->changed("Host watchdog observed the exact source");
         continue;
       }
       CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));

@@ -1,5 +1,60 @@
 # Seamless Windows work state
 
+## Attempt twenty-three: asynchronous native placement verification — 2026-10-15
+
+The user authorized `call_8924154ad7ed463fac941ea5d438a09b`; that permission
+was consumed by `build/h06-r23-uk2ivwf9/` using runtime `4854f84a9`.
+Start was received at 02:16:10 UTC on October 16 (October 15 locally). Both
+helper and Host independently verified display 4128835 at (1440,-1,4096,4096),
+with the physical output unchanged. The asynchronous display-readiness fix
+therefore passed its previously failing step on the actual machine.
+
+The next operation failed: unminimize, size and position writes all returned
+AX success for destination (1440,188,640,448), but immediate position, size
+and minimized reads each returned -25204 (`kAXErrorCannotComplete`) after
+100ms. No lifecycle guard failed. This is a native readback failure after
+accepted writes, not proof that placement completed. The immediate return
+also encountered transient AX errors; the separate recovery process restored
+(400,188,640,448). The final source receipt shows neutral keys/buttons, ordinary
+Mac configurations match, and local owned processes stopped. Ubuntu confirms
+its owned processes stopped, actual desktop restored and ordinary state
+preserved. Viewer relay errno 104 / unknown buffered tail and Mac SSH exit
+255 are retained; evidence was never armed, so this is not an accepted run.
+Ubuntu result archive SHA-256:
+`ec8e7f0934b28121ac8eca23dde4448585cc4a2827823ee1c90d0b6a1b4dbee4`.
+
+The new implementation observes the retained source AX window before issuing
+placement, then yields to the normal event loop. Native notifications and the
+existing Host watchdog request coalesced fresh reads. A temporarily unavailable
+AX read remains pending for an absolute two-second verification budget; only
+matching AX/WindowServer geometry, known unminimized state and the same exact
+source/display authority permit completion. No native write is retried. Lost
+identity, permissions, layout, capture, owner or deadline fail closed and retain
+the existing recovery transaction. Return cancels queued checks and the native
+observer before restoring. The relocation policy now retains its callbacks
+across the asynchronous step and revalidates owner, epoch, produced/painted
+geometry, display identity/bounds and containment before committing.
+
+`NativePlacementTests.cpp` exercises transient observations, notification
+coalescing, no busy retry, absolute deadlines before/after probes, cancellation,
+destructive callbacks and stale ownership/geometry/display after yielding.
+The existing isolated relocation cases exercise the same refactored policy.
+Evidence is retained in `build/placement-verify-vjmz7mbg/`. The final Mac
+Host/helper/native targets build, and placement/holding/startup/native-recovery
+CTests pass (4/4, 1.22s). Scoped ASan/UBSan passes on Intel Mac/Qt 6.8.3 and actual jack's isolated Ubuntu/Qt 6.10.2 image;
+no desktop or input device is exposed to those tests. Prebuilt Qt/system
+libraries remain outside sanitizer instrumentation. The first Mac compilation
+identified missing CFString bridging and an Apple libc++ function-deduction
+issue in the test runner; both were corrected and the failed logs retained.
+The new portable target is included in hosted sanitizer checks.
+
+All six hosted jobs for the prior diagnostic commit `60b074160` now pass in
+[run 38839385272](https://github.com/JackHars/deskflow/actions/runs/38839385272),
+including the previously timed-out evidence suite. This does not explain the
+earlier timeout or certify the current placement change. No new physical test
+has been launched; another fresh permission is required. H04/H06 and dependent
+hardware acceptance rows remain open.
+
 ## Roadmap follow-up: absolute startup deadlines — 2026-10-15
 
 The user asked to continue and finish the roadmap. The existing per-launch
@@ -51,10 +106,9 @@ do not launch it. Fresh attempt 23 is `build/h06-r23-uk2ivwf9/`, with source
 Validation, Mac permission/conflict checks and packaged admission pass (11.69s,
 native input hooks disabled, companion stopped). Jack's local Wayland session 2
 is active and its temporary provider is disabled. Holding, separate Mac controls,
-no desktop preview and no results popup are selected. No session or launch
-permission receipt exists. Fresh permission has been requested; do not execute
-the prepared launch until the user grants it. The latest actual failure is
-still attempt 21 below; physical H04/H06 remain unaccepted. The full native/OS
+no desktop preview and no results popup are selected. That preparation was subsequently launched with fresh permission and failed
+at AX placement readback, as recorded in attempt 23 above. Do not reuse its
+permission or launch files. Physical H04/H06 remain unaccepted. The full native/OS
 queue audit has unresolved upstream bounds, which cannot be inferred from a
 passing finite test or the application queue limits.
 

@@ -4,6 +4,48 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt twenty-three: accepted writes, unavailable native readback — 2026-10-15
+
+Approved run `build/h06-r23-uk2ivwf9/` used runtime `4854f84a9`. The hidden
+display was independently verified by helper and Host, confirming the previous
+readiness fix at its failed step. The next step accepted all three native frame
+writes, then returned AX -25204 on all three immediate readbacks. It stopped
+before Active or recording. The independent recovery process restored the
+source to (400,188,640,448); held keys/buttons are zero. Both machines report
+owned cleanup and ordinary-state preservation. Ubuntu relay errno 104, unknown
+kernel tail and Mac SSH exit 255 remain recorded. This is a failed physical run.
+Remote logs are collected under that root; archive SHA-256:
+`ec8e7f0934b28121ac8eca23dde4448585cc4a2827823ee1c90d0b6a1b4dbee4`.
+
+The placement follow-up adds native notification observation and queued,
+coalesced readback, bounded by a monotonic two-second verification deadline.
+It performs no sleeps, nested event loops or repeated native writes. Exact
+owner, process birth, painted/produced geometry, permissions, physical layout,
+holding-display identity, capture health and durable recovery remain required.
+Cancellation removes queued observations before source return. Final placement
+must agree in AX and WindowServer and remain contained in the original holding
+display. Unsupported notifications cannot substitute for fresh native reads;
+the existing owner watchdog can request verification within the same deadline.
+
+Evidence root: `build/placement-verify-vjmz7mbg/`.
+
+- Final Mac Host/helper/native build: PASS. Placement, holding, startup and
+  native-recovery CTests: PASS (4/4, 1.22s).
+- New portable `windowshare-native-placement` tests cover asynchronous success,
+  transient readback, notification coalescing, no busy retry, late timers/probes,
+  cancellation/destruction and changed owner/paint/display after yielding.
+- Existing `windowshare-holding` relocation assertions use the same production
+  policy after its asynchronous refactor.
+- Scoped ASan/UBSan passes on Mac and actual jack's isolated Ubuntu image
+  (`native-placement-_zqnef_p/` under the established remote test root).
+  Qt/system libraries are not instrumented. These tests use no display/input.
+- Prior diagnostic commit `60b074160`: all six hosted jobs pass in
+  [run 38839385272](https://github.com/JackHars/deskflow/actions/runs/38839385272).
+  The current placement code still requires its own hosted/physical validation.
+
+No fresh physical launch is authorized. Do not reuse attempt 23's permission.
+The acceptance checklist remains open in `CHATGPT_HANDOFF.md`.
+
 ## Roadmap follow-up: deadline-order regression — 2026-10-15
 
 The asynchronous display startup now uses absolute monotonic deadlines in
@@ -43,14 +85,10 @@ Evidence: `build/roadmap-startup-3noptkp0/`.
   evidence suite passes in 0.64s; workload, assertions and timeout are unchanged.
   Hosted revalidation is required; local success does not explain the timeout.
 
-Physical input and hidden placement were not run. Attempt 22's unused plan is
-superseded by this change. Fresh attempt 23 is `build/h06-r23-uk2ivwf9/`:
-plan validation, permissions, conflicts and packaged private admission pass;
-actual jack session 2 is active. It uses the package above and code `4854f84a9`,
-with holding enabled, separate Mac controls and no preview/results popup.
-Preparation did not open a test window. Fresh launch permission is pending.
-The latest executed attempt remains 21 below. Current completion gates are
-listed at the top of `CHATGPT_HANDOFF.md`.
+Attempt 22's unused plan was superseded. Attempt 23 was then authorized and
+executed using this package, with holding enabled, separate Mac controls and
+no preview/results popup. It verified the display but failed placement readback;
+see the current attempt-23 entry above. No physical acceptance is claimed.
 
 ## H06 attempt twenty-one: native display notification race — 2026-10-15
 

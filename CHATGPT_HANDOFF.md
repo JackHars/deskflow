@@ -10,11 +10,13 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 The P1–P8 implementation is integrated, with the supported-capability limits
 documented below. The product is **not physically accepted**. Latest attempted
-hidden-source test 21 failed before Active; its display-readiness fix is built
-and awaits a separately approved run on the actual Mac and jack desktop.
-Latest verified hosted runtime `7453a4c77` passes all six jobs in
-[run 38836549724](https://github.com/JackHars/deskflow/actions/runs/38836549724).
-The subsequent deadline regression is recorded at the top of `TESTING.md`.
+hidden-source test 23 verified the display, then failed immediate AX frame
+readback before Active. The source was restored. The asynchronous placement
+follow-up and its verification are recorded at the top of `TESTING.md`;
+another physical run requires fresh permission.
+Latest verified hosted runtime `60b074160` passes all six jobs in
+[run 38839385272](https://github.com/JackHars/deskflow/actions/runs/38839385272).
+That hosted result precedes the placement follow-up.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.
