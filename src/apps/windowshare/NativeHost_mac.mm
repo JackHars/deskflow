@@ -3464,8 +3464,16 @@ struct NativeHost::Impl
             const auto observed = holding.verifiedSnapshot(&reason);
             if (!observed)
               return refused(reason);
-            if (observed->id != display->id || !sameGeometry(observed->bounds, display->bounds))
+            if (observed->id != display->id || !sameGeometry(observed->bounds, display->bounds)) {
+              lifecycleDiagnostic(
+                  "Host", "source.holding.display-change", "failed", "Compare retained and current holding display",
+                  {{"expectedId", qint64(display->id)},
+                   {"observedId", qint64(observed->id)},
+                   {"expectedBounds", diagnosticRect(display->bounds)},
+                   {"observedBounds", diagnosticRect(observed->bounds)}}
+              );
               return refused("The verified holding display identity or bounds changed during placement");
+            }
             return current() != nullptr;
           };
           auto placement = std::make_shared<ObservedPlacement>(

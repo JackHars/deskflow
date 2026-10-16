@@ -328,3 +328,20 @@ python3 deploy/windowshare/physical-macos-tests.py
 python3 deploy/windowshare/physical-linux-tests.py
 python3 deploy/windowshare/physical-preview-tests.py
 ```
+# Unattended setup verification
+
+With explicit authorization to run disposable desktop tests, add
+`--pipeline-check` to a freshly prepared production holding-display launch.
+This requires `linuxEnvironment: user-desktop` and the H04 recording profile.
+The source fixture invokes its own guarded Start button after coordinator
+readiness, using `--automated-start`; it does not synthesize a system click.
+The same packaged Core, authenticated companion, Ubuntu desktop, hidden-source
+verification, disconnect and source-restoration path runs for 30 active seconds.
+Stop still cancels the run. Any early stop, placement loss or cleanup error fails.
+
+All three diagnostic recorders must stop cleanly without arming or recording
+input. Success is labeled `pipeline-verified-no-physical-input`, with physical
+acceptance still `not-assessed`. This does not exercise real keyboard/trackpad
+delivery and cannot satisfy H04/H06 physical acceptance. Normal launches still
+require a human Start click and retain their original recording requirements.
+

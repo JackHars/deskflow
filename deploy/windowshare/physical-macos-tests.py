@@ -1005,6 +1005,47 @@ class UnstartedEvidenceTests(unittest.TestCase):
             self.session.finish_unstarted()
 
 
+class PipelineEvidenceTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.session = module.original_support().EvidenceSession(Path(temporary.name) / 'evidence', module.atomic_json)
+        self.session.start_boundary()
+        for pid, role in enumerate(self.session.roles, 102):
+            self.session.bind(role, pid, 7 if role == 'native' else None)
+            reader = self.session.readers[role]
+            rows = [dict(type='header', schema='deskflow-input-evidence-v2', role=role,
+                         runId=self.session.run_id, pid=str(pid), clockId=role + '-clock', queues=[]),
+                    dict(type='end', timeNs='0', sourceEndNs='0', rows='0', state=4, loss=0, drained=True)]
+            with os.fdopen(os.open(reader.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w') as stream:
+                stream.write(''.join(json.dumps(row) + '\n' for row in rows))
+        self.session.stop()
+
+    def test_setup_check_cannot_be_reported_as_physical_recording(self):
+        result = self.session.finish_pipeline()
+        self.assertFalse(result['recordersArmed'])
+        self.assertEqual(result['recordingSeconds'], 0)
+        self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+        self.assertEqual(set(result['recordersEnded']), set(self.session.roles))
+        with self.assertRaisesRegex(RuntimeError, 'not fully armed'):
+            self.session.finish()
+
+    def test_every_recorder_must_be_bound_and_stop_without_loss_or_arming(self):
+        self.session.finish_pipeline()
+        for role in self.session.roles:
+            reader = self.session.readers[role]
+            original = reader.end.copy()
+            for change in ({'loss': 1}, {'drained': False}, {'state': 3}, {'rows': '1'}, {'sourceEndNs': '1'}):
+                with self.subTest(role=role, change=change):
+                    reader.end = original | change
+                    with self.assertRaisesRegex(RuntimeError, 'did not stop cleanly'):
+                        self.session.finish_pipeline()
+            reader.end = original
+        self.session.attempted = True
+        with self.assertRaisesRegex(RuntimeError, 'unarmed recorder'):
+            self.session.finish_pipeline()
+
+
 class EvidenceTests(unittest.TestCase):
     recording_seconds = 30
 

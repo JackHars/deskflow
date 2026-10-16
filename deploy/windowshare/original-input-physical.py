@@ -527,6 +527,21 @@ class EvidenceSession:
                 'physicalAcceptance': 'not-assessed', 'recordingSeconds': 0,
                 'logs': {'native': str(native.path)}}
 
+    def finish_pipeline(self):
+        """A setup/cleanup check is never an original-input measurement."""
+        require(self.stopped and not self.attempted and not self.armed and
+                set(self.pids) == set(self.roles), 'Pipeline cleanup requires every bound, unarmed recorder')
+        self.poll()
+        for reader in self.readers.values():
+            require(reader.header and reader.end and not reader.arm and not reader.buffer and
+                    reader.end.get('state') == 4 and type(reader.end.get('loss')) is int and
+                    reader.end['loss'] == 0 and reader.end.get('drained') is True and
+                    unsigned(reader.end.get('rows')) == 0 and unsigned(reader.end.get('sourceEndNs')) == 0,
+                    'Pipeline recorder did not stop cleanly without a measurement')
+        return {'runId': self.run_id, 'recordersArmed': False, 'recordersEnded': list(self.roles),
+                'physicalAcceptance': 'not-assessed', 'recordingSeconds': 0,
+                'logs': {role: str(reader.path) for role, reader in self.readers.items()}}
+
 
 def stop_core(process, endpoint, inspector, expected, timeout=12):
     """Stop only the retained Mac child through its kernel-identified Qt IPC peer."""

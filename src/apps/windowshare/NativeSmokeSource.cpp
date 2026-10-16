@@ -493,12 +493,14 @@ class ManualAcceptance final : public QObject
 {
 public:
   ManualAcceptance(
-      const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field, bool h11Input, bool recordInput
+      const QString &path, Recorder &recorder, QVBoxLayout &layout, QLineEdit &field, bool h11Input, bool recordInput,
+      bool automatedStart
   )
       : m_recorder(recorder),
         m_field(field),
         m_sessionSeconds(h11Input ? 150 : 120),
-        m_recordInput(recordInput)
+        m_recordInput(recordInput),
+        m_automatedStart(automatedStart)
   {
     const QFileInfo location(path);
     if (location.isAbsolute() && !location.fileName().isEmpty()) {
@@ -710,6 +712,16 @@ private:
       m_instructions->setText("Please wait for Active before using the shortcut. You can click Stop at any time.");
     }
     m_start->setEnabled(m_valid && m_readAccepted && m_state == "ready" && m_request == "none" && !m_ended);
+    if (m_automatedStart && m_state != "stopped")
+      m_instructions->setText(
+          "Automated connection and window-restoration check. No action is needed. Stop cancels it."
+      );
+    if (m_automatedStart && !m_startQueued && m_start->isEnabled()) {
+      m_startQueued = true;
+      // Explicit fixture-only automation uses the same guarded Start handler.
+      // It sends no system input and cannot start before coordinator readiness.
+      QMetaObject::invokeMethod(m_start, &QPushButton::click, Qt::QueuedConnection);
+    }
     m_stop->setEnabled(!m_ended);
     m_field.setReadOnly(m_state != "active");
     m_recorder.setManualMetadata(
@@ -717,6 +729,7 @@ private:
          {"request", m_request},
          {"requestSequence", m_requestSequence},
          {"statusValid", m_valid},
+         {"automatedStart", m_automatedStart},
          {"remainingSeconds", m_remainingSeconds}}
     );
   }
@@ -724,6 +737,8 @@ private:
   QLineEdit &m_field;
   const int m_sessionSeconds;
   const bool m_recordInput;
+  const bool m_automatedStart;
+  bool m_startQueued = false;
   QLabel *m_status = nullptr;
   QLabel *m_instructions = nullptr;
   QPushButton *m_start = nullptr;
@@ -822,7 +837,7 @@ int main(int argc, char **argv)
     return app.exec();
   }
   QString manualPath, evidencePath, recordRequestPath;
-  bool separateControls = false, h11Input = false;
+  bool separateControls = false, h11Input = false, automatedStart = false;
   if (arguments.size() < 3)
     return 2;
   for (int index = 3; index < arguments.size(); ++index) {
@@ -831,6 +846,8 @@ int main(int argc, char **argv)
       separateControls = true;
     else if (option == "--h11-input" && !h11Input)
       h11Input = true;
+    else if (option == "--automated-start" && !automatedStart)
+      automatedStart = true;
     else if (
         (option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
         index + 1 < arguments.size()
@@ -847,6 +864,8 @@ int main(int argc, char **argv)
       return 2;
   }
   const bool manualMode = !manualPath.isEmpty();
+  if (automatedStart && (!manualMode || !separateControls || evidencePath.isEmpty() || h11Input))
+    return 2;
   if ((separateControls || !evidencePath.isEmpty()) && !manualMode)
     return 2;
   if (!recordRequestPath.isEmpty() && evidencePath.isEmpty())
@@ -885,7 +904,7 @@ int main(int argc, char **argv)
   std::unique_ptr<ManualAcceptance> manual;
   if (manualMode) {
     manual = std::make_unique<ManualAcceptance>(
-        manualPath, recorder, *controlsLayout, *field, h11Input, !recordRequestPath.isEmpty()
+        manualPath, recorder, *controlsLayout, *field, h11Input, !recordRequestPath.isEmpty(), automatedStart
     );
     window.onManualClose = [guard = QPointer<ManualAcceptance>(manual.get())] {
       return !guard || guard->requestClose();

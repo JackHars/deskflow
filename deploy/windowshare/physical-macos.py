@@ -562,17 +562,26 @@ def run(arguments):
     mac, plan = read_json(arguments.mac_plan), read_json(arguments.linux_plan)
     production = getattr(arguments, "production_original_input", False)
     holding = getattr(arguments, "holding_display", False)
+    pipeline = getattr(arguments, "pipeline_check", False)
+    require(not pipeline or (production and holding and mac.get("linuxEnvironment") == "user-desktop" and
+                             mac.get("recordingProfile", "h04") == "h04"),
+            "Pipeline checks require the production holding route on the actual Ubuntu desktop")
     artifacts = validate_plans(mac, plan, base, production, arguments.source, holding)
     original = original_support() if production else None
     desktop_preview = production and mac.get("desktopPreview") is True
     recording_seconds, session_seconds = original.recording_times(mac) if production else (0, 120)
     source_profile = ["--h11-input"] if production and mac.get("recordingProfile") == "h11" else []
+    if pipeline:
+        source_profile += ["--automated-start"]
     output = arguments.output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"version": 1, "status": "failed", "physicalAcceptance": "not-assessed",
               "syntheticInputSent": False, "holdingDisplayTested": False,
               "twoPhysicalMonitorsTested": False, "planSha256": digest(arguments.linux_plan),
               "macPlanSha256": digest(arguments.mac_plan)}
+    report["pipelineCheck"] = pipeline
+    if pipeline:
+        report["pipelineActiveSeconds"] = 30
     if production:
         report.update({"version": 2, "routeMode": "production-original-input", "originalInputPolicyConfigured": True,
                        "originalDeliveryVerified": False, "frozenArtifacts": artifacts,
@@ -801,12 +810,14 @@ def run(arguments):
                     report["prepared"].get("macOriginalInputConfigured") is True and
                     report["prepared"].get("windowId") == initial["windowId"],
                     "Linux did not prepare the exact production route and disposable source")
-        stage("Wait for your Start click")
+        stage("Start disposable fixture automatically" if pipeline else "Wait for your Start click")
         publisher.set("ready", START_WAIT_SECONDS)
         emit({"event": "waiting-for-start", "title": title, "routingStarted": False,
               "startWaitSeconds": START_WAIT_SECONDS})
         wait(lambda: collector.snapshot()["receipt"]["manual"]["request"] == "start",
              "the visible Start button", seconds=START_WAIT_SECONDS)
+        require(collector.snapshot()["receipt"]["manual"].get("automatedStart", False) is pipeline,
+                "Fixture Start provenance differs from the selected test mode")
         wait(own_window, "settled windows after Start")
         if production:
             original.source_identity(collector.snapshot()["receipt"], initial, holding)
@@ -926,10 +937,10 @@ def run(arguments):
                 return preview_receiver.visible(value)
             wait(live_preview, "visible live Ubuntu test desktop", 10)
             preview_ready = True
-        stage("Active input: wait for Record and matching readiness")
+        stage("Verify unattended sharing pipeline" if pipeline else "Active input: wait for Record and matching readiness")
         publisher.set("active", session_seconds)
         emit({"event": "active", "secondsRemaining": session_seconds, "title": title})
-        deadline, next_status = time.monotonic() + session_seconds, time.monotonic() + 5
+        deadline, next_status = time.monotonic() + (30 if pipeline else session_seconds), time.monotonic() + 5
         evidence_deadline = evidence_arm_deadline = None
         if evidence:
             emit({"event": "evidence-priming", "runId": evidence.run_id,
@@ -940,7 +951,11 @@ def run(arguments):
             if receipt["manual"]["request"] == "stop":
                 report["sourceRequestedStop"] = True
                 break
-            if evidence and not evidence.stopped:
+            if pipeline:
+                require(original.hidden_source_verified(receipt, initial, native_log.native.get("Host: source.hidden")),
+                        "The hidden source stopped satisfying placement checks during the pipeline run")
+                require(not evidence.record_request.exists(), "Unexpected Record request during unattended setup check")
+            if evidence and not evidence.stopped and not pipeline:
                 if not evidence.attempted:
                     require(time.monotonic() + recording_seconds + 5 < deadline,
                             evidence.arm_wait_failure())
@@ -969,6 +984,8 @@ def run(arguments):
         else:
             report["autoStoppedAtDeadline"] = True
             emit({"event": "session-deadline", "message": "The fixed session time expired"})
+        require(not pipeline or report.get("autoStoppedAtDeadline") is True,
+                "The unattended pipeline check ended before its full observation interval")
         stage("Stop recording and disconnect Ubuntu")
         publisher.set("stopped")
         stop_preview()
@@ -976,7 +993,7 @@ def run(arguments):
             evidence.stop()
             wait(lambda: all(reader.end for reader in evidence.readers.values()),
                  "bounded evidence end before route cleanup", 2, allow_stop=True)
-            report["inputEvidence"] = evidence.finish()
+            report["inputEvidence"] = evidence.finish_pipeline() if pipeline else evidence.finish()
         report["beforeStop"] = collector.snapshot()
         report["linuxStop"] = driver.command("stop", check=False)
         linux_stopped = True
@@ -1002,7 +1019,8 @@ def run(arguments):
             require(report.get("sourceRelocationObserved") is True, "Holding was configured but source relocation was not observed")
             report["holdingLifecycleObserved"] = True
         require(not collector.snapshot()["gaps"], "Input receipt history has gaps")
-        report["status"] = "session-recorded-awaiting-human-and-receipt-review"
+        report["status"] = "pipeline-verified-no-physical-input" if pipeline else \
+                           "session-recorded-awaiting-human-and-receipt-review"
     except Cancelled as error:
         report["status"], report["failure"] = "cancelled", str(error)
         diagnostics.emit(phase or "Session", "observed", str(error))
@@ -1028,7 +1046,8 @@ def run(arguments):
                                         all(reader.end for reader in evidence.readers.values()) if started else
                                         evidence.readers["native"].end)[1],
                                "evidence recorder stop", timeout=2)
-                report["inputEvidence"] = evidence.finish() if started else evidence.finish_unstarted()
+                report["inputEvidence"] = (evidence.finish_pipeline() if pipeline else evidence.finish()) \
+                    if started else evidence.finish_unstarted()
             except Exception as error:
                 cleanup_errors.append("Input evidence: " + str(error))
         if driver and not linux_stopped and owned["linux"].poll() is None:
@@ -1170,7 +1189,8 @@ def run(arguments):
         emit({"event": "finished", "status": report["status"], "result": str(output / "result.json"),
               "physicalAcceptance": "not-assessed", "failure": report.get("failure")})
         diagnostics.close()
-    return 0 if report["status"].startswith("session-recorded") else 1
+    return 0 if report["status"].startswith("session-recorded") or \
+        report["status"] == "pipeline-verified-no-physical-input" else 1
 
 
 def main():
@@ -1189,6 +1209,8 @@ def main():
                         help="Validate plans/frozen artifacts and write a report without apps, SSH or input hooks")
     parser.add_argument("--holding-display", action="store_true",
                         help="Production H06 only: require an explicit holding plan and separate persistent local controls")
+    parser.add_argument("--pipeline-check", action="store_true",
+                        help="Explicit unattended Start, 30-second sharing and restore check; no physical-input pass")
     arguments = parser.parse_args()
     require(sys.platform == "darwin" or arguments.validate_only, "This coordinator must run on the Mac")
     if arguments.validate_only:
