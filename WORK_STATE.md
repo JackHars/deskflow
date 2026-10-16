@@ -46,6 +46,16 @@ passes exact-library validation (77 records, no errors); binary hashes are in
 `validation-summary.json`. H04/H06 remain physically unaccepted.
 Ask for fresh permission immediately before any next physical launch.
 
+Fresh preparation is `build/h06-r21-czr6qf_t/` (pointer
+`build/h06-r21-current.txt`), frozen source commit `c73337c57`. It uses the new
+signed diagnostic bundle, separate Mac controls, actual jack session 2 and no
+Mac desktop preview or results popup. Both plans and permission/conflict checks
+pass. Packaged admission passes in 11.61s with native input hooks disabled and
+its companion stopped. Ubuntu's local Wayland session is active and the temporary
+provider remains disabled. Preparation did not open a physical test window.
+No launch-permission receipt or session directory exists yet; fresh approval is
+required immediately before launch. Do not reuse attempt twenty's permission.
+
 ## Attempt nineteen: pre-Start presentation failure — 2026-10-15
 
 Permission `call_98ec79d8d6f644d687e004f5262445e3` was consumed by
