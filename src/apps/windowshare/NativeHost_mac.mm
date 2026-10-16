@@ -905,6 +905,9 @@ struct Capture final : std::enable_shared_from_this<Capture>
     std::lock_guard lock(mutex);
     if (!receiver || stopped || failurePending.exchange(true))
       return;
+    // Record the first cause before a queued restore can stop the receiver and
+    // suppress its error callback. Never depend on a transient results window.
+    lifecycleDiagnostic("Host", "capture.failure", "failed", message);
     auto self = shared_from_this();
     QMetaObject::invokeMethod(
         receiver,
@@ -1391,9 +1394,10 @@ bool modifier(CGKeyCode code)
 {
   (void)stream;
   if (capture && !capture->stopped)
-    capture->fail(
-        QString("Window capture stopped: %1").arg(deskflow::windowshare::native::string(error.localizedDescription))
-    );
+    capture->fail(QString("Window capture stopped: %1 (%2, %3)")
+                      .arg(deskflow::windowshare::native::string(error.localizedDescription))
+                      .arg(deskflow::windowshare::native::string(error.domain))
+                      .arg(error.code));
 }
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type
 {

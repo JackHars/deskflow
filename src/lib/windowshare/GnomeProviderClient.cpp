@@ -4,6 +4,7 @@
  */
 #include "GnomeProviderClient.h"
 #include "GnomeWindowDragProtocol.h"
+#include "LifecycleDiagnostics.h"
 
 #include <algorithm>
 #include <array>
@@ -420,6 +421,7 @@ struct GnomeProviderClient::Impl
   std::uint64_t nativeInvalidations = 0;
   std::string lastNativeInvalidation;
   std::string windowAssociation;
+  std::optional<std::array<double, 4>> reportedViewerFrame; // Worker-only diagnostic, never input authority.
   bool windowDragSupported = false;
   guint windowDragSignal = 0;
   std::uint64_t lastWindowDragRequest = 0;
@@ -1270,6 +1272,19 @@ struct GnomeProviderClient::Impl
         !g_variant_lookup(values.value, "deliveryReady", "b", &deliveryReady) || deliveryReady ||
         (expected && text("request") != requestText))
       throw ChannelError("GNOME native viewport reply changed its binding");
+    // Observe only this caller's owned viewer. Geometry helps diagnose setup
+    // before the pointer reaches it; it grants no hit, focus or input authority.
+    std::array<double, 4> frame{};
+    if (!expected &&
+        g_variant_lookup(values.value, "frameRect", "(dddd)", &frame[0], &frame[1], &frame[2], &frame[3]) &&
+        std::all_of(frame.begin(), frame.end(), [](double n) { return std::isfinite(n) && std::abs(n) <= 1e7; }) &&
+        frame[2] > 0 && frame[3] > 0 && reportedViewerFrame != frame) {
+      reportedViewerFrame = frame;
+      lifecycleDiagnostic(
+          "GNOME provider", "viewer.frame", "observed", "Owned viewer compositor geometry; observation only",
+          {{"x", frame[0]}, {"y", frame[1]}, {"width", frame[2]}, {"height", frame[3]}}
+      );
+    }
     if (!available) {
       const auto reason = text("reason");
       if (reason == "stale-revision" && expected) {
