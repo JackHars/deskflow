@@ -36,6 +36,19 @@ def control_observation(frame, **changes):
 
 
 class HistoryTests(unittest.TestCase):
+    def test_automated_start_provenance_is_boolean_and_cannot_change(self):
+        for automatic in (False, True):
+            value = receipt()
+            value['manual']['automatedStart'] = automatic
+            history = module.ReceiptHistory()
+            history.merge(value)
+            value['manual']['automatedStart'] = not automatic
+            with self.assertRaisesRegex(RuntimeError, 'provenance changed'):
+                history.merge(value)
+        value['manual']['automatedStart'] = 1
+        with self.assertRaisesRegex(RuntimeError, 'manual controls'):
+            module.ReceiptHistory().merge(value)
+
     def test_ring_retirement_is_distinct_from_missing_input(self):
         history = module.ReceiptHistory()
         self.assertEqual(len(history.merge(receipt(128))), 128)

@@ -191,13 +191,16 @@ class ReceiptHistory:
         self.bytes = 0
         self.manual_sequence = 0
         self.manual_request = "none"
+        self.automated_start = None
 
     def merge(self, data):
         require(not data.get("eventSequenceExhausted") and
                 not data.get("nativeEventSequenceExhausted"), "Receipt sequence exhausted")
         manual = data.get("manual")
         require(isinstance(manual, dict) and
-                set(manual) == {"state", "request", "requestSequence", "statusValid", "remainingSeconds"} and
+                set(manual) - {"automatedStart"} ==
+                {"state", "request", "requestSequence", "statusValid", "remainingSeconds"} and
+                type(manual.get("automatedStart", False)) is bool and
                 manual.get("request") in ("none", "start", "stop") and
                 manual.get("state") in ("preparing", "ready", "active", "stopped") and
                 type(manual.get("statusValid")) is bool and
@@ -205,6 +208,10 @@ class ReceiptHistory:
                 0 <= manual["remainingSeconds"] <=
                 (START_WAIT_SECONDS if manual["state"] == "ready" else self.session_seconds),
                 "Source does not provide manual controls")
+        automatic = manual.get("automatedStart", False)
+        require(self.automated_start is None or self.automated_start is automatic,
+                "Fixture Start provenance changed during the run")
+        self.automated_start = automatic
         sequence = manual.get("requestSequence")
         require(type(sequence) is int and self.manual_sequence <= sequence <= 2,
                 "Manual request sequence reset or exceeded bound")
