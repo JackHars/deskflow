@@ -2,19 +2,22 @@
 
 ## Current implementation — 2026-10-16
 
-P1–P8 code is integrated, but the product is not physically accepted. Latest
-attended attempt 30 stopped before Active during native hidden-source placement;
-a later private-channel heartbeat expiry was also recorded. Source/input and
-both desktops were restored. Mac runtime `d3d15a6d2` yields between native placement
-steps, removes repeated display queries and names the exact failed prerequisite.
-Focused Mac/Ubuntu regressions, scoped Mac sanitizers and package verification
-pass. Ubuntu's native runtime remains unchanged. Physical verification of both
-placement and the earlier input failure remains open; see `TESTING.md`.
+P1–P8 code is integrated, but the product is not physically accepted. After
+attended attempt 31 failed, the user authorized autonomous desktop pipeline
+verification. The new `--pipeline-check` automatically exercises startup,
+window placement, sharing and restoration on actual jack without claiming a
+physical input pass. A later attended input test still needs fresh permission.
 
-The checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs fresh
-permission immediately before launch, uses jack's actual desktop and retains
-printed diagnostics. Attempt 30's permission has been consumed. Attempt 31 is
-prepared with the updated Mac package; it has not been launched.
+The automatic runs reproduced a native Core startup crash, transient display
+geometry/AX failures and a test stop-message exception. Fixes are pushed through
+`e228da3e0`. One complete startup/sharing/restoration cycle passed, while repeats
+exposed a pending-display polling race. That fix (`5c113c700`) passes three
+consecutive fresh actual-desktop cycles, each including 30 seconds of sharing
+and verified source restoration with no cleanup errors. All 100
+coordinator checks pass per machine, together with focused Mac, Ubuntu and
+sanitizer checks. See `TESTING.md` for exact evidence and current limits, and
+`CHATGPT_HANDOFF.md` for the open physical checklist. Retain saved diagnostics;
+no results popup is wanted.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

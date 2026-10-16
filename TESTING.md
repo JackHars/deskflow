@@ -4,6 +4,82 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Autonomous pipeline verification — 2026-10-16
+
+The user explicitly authorized unattended real-computer pipeline testing after
+attended attempt 31 failed immediately. Use `physical-macos.py --pipeline-check`
+with a fresh production plan for jack's actual Ubuntu desktop. The fixture
+invokes its own guarded Start button, observes sharing for 30 seconds, then
+verifies disconnect, source restoration and owned-process cleanup. It never
+arms original-input recording or claims physical acceptance. Ask immediately
+before a later human keyboard/trackpad test. No results popup or new sleeps.
+
+The unattended runs reproduced and isolated these failures:
+
+- `pipeline-run-n43f_473`: Core SIGILL in `TISCreateInputSourceList` on its worker
+  thread. The saved macOS crash report identifies a main-queue assertion.
+  `b3311dceb` marshals Text Input Services operations through the Qt main loop.
+- `pipeline-run-qwwji94d`: the same holding display changed from
+  `(1440,-1,4096,4096)` to `(1440,0,4096,4096)` during placement. `64ac90019`
+  waits for the requested origin before accepting parent-side readiness.
+- `pipeline-run-7c5anwbz`: AX CannotComplete (-25204) during an initial frame
+  read after display creation. `9d570f20b` makes pre-journal, pre-move and final
+  observations asynchronous and bounded. Only transient read errors remain
+  pending. Changed identity, authority, frame or display still rejects; duplicate
+  callbacks cannot reopen a transaction. Native writes are never retried.
+- `pipeline-run-g6cy9z5g`: sharing stayed active for the full 30 seconds, then
+  the coordinator's stop-message payload collided with a diagnostic argument.
+  `d5e2bed3c` makes envelope arguments positional-only, preserving payload fields.
+  Cleanup succeeded even in this failed run.
+
+The corrected candidate passed one complete actual-desktop cycle at
+`build/pipeline-run-bq7cnhdy/`: automatic Start, verified hidden source, 30 seconds
+Active, source restoration before Host termination, Core/source exit 0, stopped
+companions and preserved ordinary settings on both machines. Its status is
+`pipeline-verified-no-physical-input`; original-input acceptance remains
+`not-assessed`. Repeats `pipeline-run-6a_fwb49` and `pipeline-run-3dlbyv53` exposed a second
+race: ordinary polling read AX while holding-display creation was pending and
+returned the source prematurely. `5c113c700` leaves transient frame observation
+to the bounded display transaction while retaining identity, topology,
+permission, capture and preparation-deadline checks. The final candidate passes three consecutive fresh cycles:
+`pipeline-run-zk3l3ege`, `pipeline-run-3b0qzu_a` and `pipeline-run-6ksuq816`.
+Each verifies 30 seconds Active, hidden-source placement, restoration while Host
+is alive, Core/source exit 0, stopped owned processes, unchanged ordinary settings
+and no cleanup errors. Frozen executable hashes match across all three runs.
+All three Ubuntu result archives are hash-verified. This closes unattended
+startup/sharing/return verification for this candidate, not physical input.
+
+Validation is retained in `build/pipeline-verify-fg881kq7/`:
+
+- All 100 coordinator checks pass on Mac and Ubuntu.
+- Mac holding-startup, native-placement and holding suites pass 3/3, including
+  asynchronous callback, stale owner/display and duplicate-completion cases.
+- The updated integrated Ubuntu Core build and both shared placement/startup
+  suites pass. These isolated checks start no desktop or input devices.
+- The native `OSXMainThreadTests` startup regression passes, including actual
+  read-only layout enumeration from a worker, main-thread reentry, return-value
+  ownership and exception propagation. GitHub Actions now includes it in both
+  enabled and disabled Core builds. Both local configurations pass, as does
+  the scoped ASan/UBSan relocation suite (Qt/system libraries are not instrumented).
+  [Hosted run 38971647320](https://github.com/JackHars/deskflow/actions/runs/38971647320)
+  is in progress for `e228da3e0`: both core compiler jobs and transport pass;
+  Mac, Linux and GNOME jobs are still running. The source artifact independently
+  verifies all 1,189 tracked files, Git commit/tree, file types and executable modes.
+- The signed Mac package uses source `e228da3e0` (native fix `5c113c700`) and passes exact-library
+  seal/dependency verification. ZIP SHA-256:
+  `9455e08e2fd13c2f6ef2f70fd508e4b0118363204b37bce9854343bc055f1304`.
+  Actual Ubuntu keeps verified runtime `65dd42362`: changed runtime paths are
+  Mac-only, and shared relocation logic is used only by the Mac implementation
+  and the cross-platform regression tests.
+
+Earlier failure logs, crash report, cleanup reports and hash-verified Ubuntu
+result archives are retained in their respective run directories. Attempt 31
+used `build/h06-r31-a17thl_i/`; its attended permission is consumed. Repeated
+unattended passes do not close H03–H12, original-input delivery, or the remaining
+native/library/OS queue certification gaps. The first main-thread dispatch
+prototype deadlocked and was replaced before the passing tests; do not use a
+blocking GCD dispatch under QCoreApplication.
+
 ## H06 attempt 30: native placement authority failure before Active — 2026-10-16
 
 Permission `call_640f0af3231740d5a354cedc47ba0ef2` was consumed by
@@ -59,7 +135,7 @@ unchanged. The new shared verifier tests were rebuilt on Ubuntu. The previous
 native runtime passes all six hosted jobs in run `38962542803`; that result must
 not be represented as hosted verification of the new Mac runtime.
 
-Attempt 31 is prepared and unlaunched at `build/h06-r31-a17thl_i/`, with fresh
+Historical preparation: attempt 31 was prepared at `build/h06-r31-a17thl_i/`, with fresh
 private identities, Mac runtime `d3d15a6d2` and unchanged Ubuntu runtime
 `65dd42362`. Preflight at 21:00:39 UTC confirms actual jack's unlocked Wayland
 session 2, all Mac permissions and no competing primary. Exact packaged admission

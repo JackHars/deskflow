@@ -9,32 +9,28 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 ## Current completion checklist — 2026-10-16
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Latest attended attempt 30 stopped
-before Active during hidden-source placement: a compound native authority check
-returned false without naming the prerequisite. Core later expired the Host
-heartbeat at 2715ms. The source and both desktops were restored, input was
-neutral and owned processes stopped; recording never armed. See `TESTING.md`.
+The product is **not physically accepted**. Attended attempt 31 failed before
+Active. The user has now authorized autonomous real-desktop pipeline verification;
+use `--pipeline-check` and see the latest `TESTING.md` entry. A later human
+keyboard/trackpad test still requires fresh permission.
 
-Mac runtime `d3d15a6d2` yields between placement registrations and native writes,
-retains the original deadline and adds precise prerequisite/slow-step diagnostics.
-Four focused Mac suites, two shared Ubuntu suites and a scoped Mac sanitizer
-suite pass. Its signed package passes the seal/dependency audit. The coordinator
-movement fix `f5f7179b9` remains in place with 96 checks passing on each machine.
-These checks are not physical acceptance. The earlier input-preparation/scrolling
-failure was not exercised by attempt 30 and still needs verification.
+The automatic runner reproduced a Core startup SIGILL, transient holding
+geometry/AX failures, a stop-message logging exception and a competing polling
+check during display setup. Fixes are pushed through `e228da3e0` (latest native
+fix `5c113c700`). Three consecutive final-candidate actual-desktop cycles pass, with matching
+frozen binaries and no cleanup errors. This verifies setup/visibility/return, not original
+physical keyboard or trackpad delivery. All 100 coordinator checks pass on each
+machine, along with focused Mac/Ubuntu, enabled/disabled Core and scoped sanitizer
+checks. Evidence: `build/pipeline-verify-fg881kq7/`. Actual Ubuntu remains on
+`65dd42362`; changed runtime paths are Mac-only. GitHub Actions includes the new
+startup regression in both configurations; run 38971647320 is in progress.
+Use separate Mac controls and saved logs, with no substitute-desktop preview
+or results popup.
 
-Ubuntu retains verified native runtime `65dd42362`; Linux runtime sources are
-unchanged by this Mac-only/test-only correction. All six hosted jobs in
-[run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
-passed for that earlier runtime. Do not attribute those hosted results to the
-new Mac runtime.
-
-Attempt 30's permission is consumed. Attempt 31 (`build/h06-r31-a17thl_i/`) is
-prepared and unlaunched with the new Mac package and unchanged Ubuntu package.
-Live preflight passes at 21:00:39 UTC; packaged admission passes with native input
-disabled and its companion stopped. No test window opened. Obtain fresh permission
-immediately before launch. Use jack's actual Ubuntu monitor, separate Mac controls,
-hidden source placement and saved diagnostics, with no results popup.
+Before requesting another attended retry, require three fresh successful
+actual-desktop pipeline runs with the same native binaries, fixture and
+coordinator. Rebuild/retest changed executable code before reusing that proof.
+Do not count synthetic or unattended runs as original physical input acceptance.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.
@@ -55,8 +51,8 @@ hidden source placement and saved diagnostics, with no results popup.
   certify these. Keep the gaps explicit in `native-queue-audit.md`.
 
 Execution order: unblock the basic physical transfer first, then run the
-dependent hardware rows. Obtain fresh permission immediately before **each**
-physical launch, as the user requested. No results popup is wanted; retain
+dependent hardware rows. Autonomous disposable setup runs are now authorized;
+obtain fresh permission immediately before a human physical-input test. No results popup is wanted; retain
 printed and saved diagnostics. Repeated automated passes cannot close these rows.
 
 **Local implementation resumed on 2026-10-13.** The production coordinator is
