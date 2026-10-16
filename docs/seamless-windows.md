@@ -3,18 +3,18 @@
 ## Current implementation — 2026-10-16
 
 P1–P8 code is integrated, but the product is not physically accepted. Latest
-attended attempt 29 stopped before Active when the harness falsely rejected
-movement of the separate Mac controls. Coordinator `f5f7179b9` corrects that
-presentation check; all 96 coordinator checks pass on Mac and actual jack.
-Native runtime `65dd42362` passes all six hosted jobs. The earlier preparation
-expiry and Host stall during input still need physical verification. See
-`TESTING.md` for evidence, cleanup limits and the prepared attempt-30 candidate.
+attended attempt 30 stopped before Active during native hidden-source placement;
+a later private-channel heartbeat expiry was also recorded. Source/input and
+both desktops were restored. Mac runtime `d3d15a6d2` yields between native placement
+steps, removes repeated display queries and names the exact failed prerequisite.
+Focused Mac/Ubuntu regressions, scoped Mac sanitizers and package verification
+pass. Ubuntu's native runtime remains unchanged. Physical verification of both
+placement and the earlier input failure remains open; see `TESTING.md`.
 
 The checklist is in `CHATGPT_HANDOFF.md`. Every physical attempt needs fresh
 permission immediately before launch, uses jack's actual desktop and retains
-printed diagnostics. Attempt 29's permission has been consumed. Attempt 30 is
-prepared with the corrected coordinator and unchanged verified native binaries;
-it has not been launched.
+printed diagnostics. Attempt 30's permission has been consumed. Attempt 31 is
+prepared with the updated Mac package; it has not been launched.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

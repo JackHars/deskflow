@@ -4,6 +4,71 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt 30: native placement authority failure before Active — 2026-10-16
+
+Permission `call_640f0af3231740d5a354cedc47ba0ef2` was consumed by
+`build/h06-r30-i4aq8o8x/`, native runtime `65dd42362` and coordinator `f5f7179b9`.
+Start was clicked at 20:48:15.379 UTC. Companion admission and Ubuntu forwarding
+completed, but hidden-source readback failed at 20:48:34.490 with `Source placement
+authority was revoked`. The retained lifecycle guard had no failure reason;
+the old compound native/display predicate did not identify which prerequisite
+failed. Do not infer that a permission was revoked or a source identity changed.
+Active, original-input ownership and recording were never reached; scrolling
+was not exercised.
+
+Observer registrations and native writes ran consecutively on the Host event
+loop. Four registrations and two writes returned AX CannotComplete after about
+100ms each, alongside repeated display/identity queries. Host readiness had a
+2342.66ms gap; Core's largest gap was 701.19ms. At 20:48:34.885 Core independently
+closed the private channel with a 2715ms heartbeat age against its 2500ms budget.
+This was later than the placement failure and is not proof of its cause.
+
+Cleanup verifies the source returned to (400,188,640,448), with zero held keys
+and buttons. Core exited 0 through private IPC, its companion and owned local
+processes stopped, and Ubuntu reports its desktop restored and ordinary settings
+preserved. Only unarmed input evidence remains a cleanup limitation. See
+`failure-summary.json`. Verified Ubuntu archive SHA-256:
+`e0bd0c82d9fe22ed6b79412aad21fdc7032349a856a66e63d5e4ae6db1861825`.
+
+Mac runtime `d3d15a6d2` queues observer creation, each registration and each native
+attribute write separately. The original two-second placement deadline includes
+all preparation; cancellation, expiry, owner destruction or a failed step drops
+remaining writes and prevents readback/commit. Notifications cannot skip steps.
+A single verified holding-display observation supplies its ID and bounds,
+avoiding several repeated full native queries at each guard. Fresh verification
+still runs before/after native work. Exact prerequisite failures and slow native
+steps are printed. No sleeps, deadline extensions or weaker input authority were
+introduced. One blocking native call cannot be preempted by these queued steps.
+The exact physical failure remains open until a successful retest.
+
+Evidence: `build/placement-yield-nrbmlqfl/`. The Mac application/helper build and
+four focused placement/holding/activity suites pass. The shared placement and
+holding-startup suites pass 2/2 in an isolated Ubuntu container; no user desktop
+or input was used. Scoped Mac ASan/UBSan placement checks pass 1/1; Qt/system
+libraries are not instrumented. Regression callbacks model slow native work
+without sleeps and prove independent dispatch, ordering, non-reentrancy, fresh
+readback, absolute expiry, cancellation and destruction behavior. The unchanged
+coordinator retains its 96/96 passing checks on each machine. Initial compile
+errors were corrected before the passing build.
+
+The signed Mac package passes its dependency/seal audit with no errors; ZIP
+SHA-256 `2738d5f3f308d4964f4e507008d126b3e3929643d785ad8ae4950dd053ed9f7e`.
+Ubuntu keeps the previously verified `65dd42362` native package: the changed
+native files are Mac-only or test-only and the Linux runtime sources are
+unchanged. The new shared verifier tests were rebuilt on Ubuntu. The previous
+native runtime passes all six hosted jobs in run `38962542803`; that result must
+not be represented as hosted verification of the new Mac runtime.
+
+Attempt 31 is prepared and unlaunched at `build/h06-r31-a17thl_i/`, with fresh
+private identities, Mac runtime `d3d15a6d2` and unchanged Ubuntu runtime
+`65dd42362`. Preflight at 21:00:39 UTC confirms actual jack's unlocked Wayland
+session 2, all Mac permissions and no competing primary. Exact packaged admission
+passes in 11.706s with native input disabled and its companion stopped. Preparation
+opened no window and enabled no desktop provider. See `source-binding.json`,
+`preparation-summary.json` and `final-preflight.json`. Obtain fresh permission
+immediately before launching this candidate. H03–H12 and native/library/OS queue
+certification remain open.
+
 ## H06 attempt 29: moving local controls aborted preparation — 2026-10-16
 
 Permission `call_8c719a47e7014336b21d23711cee286b` was consumed by
@@ -42,17 +107,9 @@ These checks start no native input or GUI. Native runtime `65dd42362` also passe
 all six jobs in [hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803),
 including the corrected GNOME fixture. These are not physical acceptance passes.
 
-Attempt 30 is prepared and unlaunched at `build/h06-r30-i4aq8o8x/`. It freezes
-coordinator `f5f7179b9` and unchanged native binaries from `65dd42362`, with fresh
-private identities. The full coordinator source hashes match the two-machine
-checks. All frozen Mac artifact hashes match attempt 29, and Ubuntu binaries
-match the verified native package. Live preflight at 20:42:33 UTC confirms jack's
-actual unlocked Wayland session 2, Mac permissions and no competing primary.
-Packaged admission completes in 12.755s with native input disabled and its
-companion stopped. No test window opened or desktop provider was enabled.
-See `preparation-summary.json` and `final-preflight.json`. Obtain fresh permission
-immediately before its physical launch. H03–H12 and the native/library/OS queue
-review remain open.
+Attempt 30 used the corrected coordinator with unchanged tested native packages.
+Its permission is now consumed; see the newer attempt-30 entry for its native
+placement failure, cleanup and next prepared candidate.
 
 ## H06 attempt 28: preparation timeout and Host stall during input — 2026-10-16
 

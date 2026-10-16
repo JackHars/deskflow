@@ -9,32 +9,32 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 ## Current completion checklist — 2026-10-16
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Latest attended attempt 29 stopped
-before Active because the harness rejected an ordinary move of the separate
-Mac controls. The source stayed in place with neutral input; owned processes
-stopped and Ubuntu restored its desktop. The original report retains the
-control-presentation and unarmed-evidence cleanup errors.
+The product is **not physically accepted**. Latest attended attempt 30 stopped
+before Active during hidden-source placement: a compound native authority check
+returned false without naming the prerequisite. Core later expired the Host
+heartbeat at 2715ms. The source and both desktops were restored, input was
+neutral and owned processes stopped; recording never armed. See `TESTING.md`.
 
-Coordinator `f5f7179b9` fixes that restriction while retaining exact identities,
-live visibility, settled Start readiness and hidden-source placement checks.
-Both failure reproductions fail before correction; all 96 coordinator checks
-pass on Mac and actual jack. The earlier attempt-28 preparation expiry/Host stall,
-reported during scrolling, still needs a successful physical retest.
+Mac runtime `d3d15a6d2` yields between placement registrations and native writes,
+retains the original deadline and adds precise prerequisite/slow-step diagnostics.
+Four focused Mac suites, two shared Ubuntu suites and a scoped Mac sanitizer
+suite pass. Its signed package passes the seal/dependency audit. The coordinator
+movement fix `f5f7179b9` remains in place with 96 checks passing on each machine.
+These checks are not physical acceptance. The earlier input-preparation/scrolling
+failure was not exercised by attempt 30 and still needs verification.
 
-Native runtime `65dd42362` coalesces queued reads, bounds private dispatch work
-between callbacks and preserves stage/slow-work/close/accounting diagnostics.
-Local Mac/Ubuntu checks and scoped Mac sanitizers pass. All six jobs in
-[hosted run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
-pass, including the corrected GNOME fixture; its source bundle is independently
-verified. This is not a physical pass. See the newest `TESTING.md` entry.
+Ubuntu retains verified native runtime `65dd42362`; Linux runtime sources are
+unchanged by this Mac-only/test-only correction. All six hosted jobs in
+[run 38962542803](https://github.com/JackHars/deskflow/actions/runs/38962542803)
+passed for that earlier runtime. Do not attribute those hosted results to the
+new Mac runtime.
 
-Attempt 29's permission is consumed. Attempt 30 (`build/h06-r30-i4aq8o8x/`) is
-prepared and unlaunched, using coordinator `f5f7179b9` with unchanged tested
-native binaries from `65dd42362`. Live preflight passes at 20:42:33 UTC; packaged
-admission passes with native input disabled and its companion stopped. No test
-window opened. Obtain fresh permission immediately before launch. Use jack's
-actual Ubuntu monitor, separate Mac controls, hidden source placement and saved
-diagnostics, with no results popup.
+Attempt 30's permission is consumed. Attempt 31 (`build/h06-r31-a17thl_i/`) is
+prepared and unlaunched with the new Mac package and unchanged Ubuntu package.
+Live preflight passes at 21:00:39 UTC; packaged admission passes with native input
+disabled and its companion stopped. No test window opened. Obtain fresh permission
+immediately before launch. Use jack's actual Ubuntu monitor, separate Mac controls,
+hidden source placement and saved diagnostics, with no results popup.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.
