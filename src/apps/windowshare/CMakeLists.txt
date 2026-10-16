@@ -234,6 +234,13 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
       endif()
     endif()
   endif()
+  # Exercise asynchronous Mac display startup policy on every platform without
+  # a helper, display server, native input or wall-clock delays.
+  add_executable(windowshare-holding-startup-tests HoldingDisplayStartupTests.cpp)
+  target_compile_features(windowshare-holding-startup-tests PRIVATE cxx_std_20)
+  target_link_libraries(windowshare-holding-startup-tests PRIVATE Qt6::Core)
+  add_test(NAME windowshare-holding-startup COMMAND windowshare-holding-startup-tests)
+  set_tests_properties(windowshare-holding-startup PROPERTIES TIMEOUT 15)
   add_executable(windowshare-transport-tests TransportTests.cpp)
   target_link_libraries(windowshare-transport-tests PRIVATE windowshare-transport)
   add_test(NAME windowshare-transport COMMAND windowshare-transport-tests)

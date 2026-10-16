@@ -139,8 +139,8 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: |
           cmake -S src/apps/windowshare -B build/private-sanitize -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-          cmake --build build/private-sanitize --target windowshare-preflight-tests windowshare-local-input-tests windowshare-bootstrap-tests windowshare-code-admission-tests windowshare-input-evidence-tests --parallel 2
-          ctest --test-dir build/private-sanitize -R '^windowshare-(preflight|local-input|bootstrap|code-admission|input-evidence)$' --output-on-failure
+          cmake --build build/private-sanitize --target windowshare-preflight-tests windowshare-local-input-tests windowshare-bootstrap-tests windowshare-code-admission-tests windowshare-input-evidence-tests windowshare-holding-startup-tests --parallel 2
+          ctest --test-dir build/private-sanitize -R '^windowshare-(preflight|local-input|bootstrap|code-admission|input-evidence|holding-startup)$' --output-on-failure
   linux-app:
     runs-on: ubuntu-24.04
     container:

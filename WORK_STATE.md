@@ -1,5 +1,43 @@
 # Seamless Windows work state
 
+## Roadmap follow-up: absolute startup deadlines — 2026-10-15
+
+The user asked to continue and finish the roadmap. The existing per-launch
+physical permission requirement remains in force; no physical test was started.
+All six hosted jobs for asynchronous-startup runtime `7453a4c77` pass in
+run `38836549724`. The latest checklist at the top of `CHATGPT_HANDOFF.md`
+now separates integrated P1–P8 code from the remaining native acceptance.
+
+Review found a separate startup deadline gap: queued process/display readiness
+could run before an overdue QTimer and succeed after the declared cutoff. The
+gate now checks a monotonic deadline before process-start renewal, helper
+readiness and parent verification, and again after the native probe. An early
+timer notification rearms only the time remaining; duplicates do not extend it.
+Success, timeout and cancellation still complete at most once. No sleep or
+polling delay was added, and the five/ten-second limits are unchanged.
+
+`windowshare-holding-startup-tests` runs this production gate on both platforms
+without a display, helper or input. It covers late process/reply/display events,
+a native probe crossing the cutoff, the exact boundary, early timer delivery,
+duplicate notifications, cancellation and completion that destroys its gate.
+It is registered in the portable transport CTests and hosted sanitizer job.
+Evidence: `build/roadmap-startup-3noptkp0/`. Mac Host/helper targets build;
+startup/holding/native-recovery CTests pass (3/3, 1.85s). The new suite also
+passes scoped ASan/UBSan on Mac and actual jack's isolated Ubuntu image. Qt and
+system libraries are not sanitizer-instrumented. The initial root-directory
+CTest invocation found no tests and exited 8; the corrected application test
+directory produced the three actual passes. All logs are retained.
+The rebuilt local Apple-issued package under this evidence root's `mac-package`
+passes its exact-library audit (77 records, no errors); Core archive SHA-256 is
+`9cea1103fcd178257edf91d5d9df12c9b361bfd2fc9a17c4d693cad5aaa13dad`.
+
+The previously prepared attempt 22 uses the earlier binary and is superseded;
+do not launch it. Freeze the updated signed package in a fresh preparation and
+ask immediately before the next physical launch. The latest actual failure is
+still attempt 21 below; physical H04/H06 remain unaccepted. The full native/OS
+queue audit has unresolved upstream bounds, which cannot be inferred from a
+passing finite test or the application queue limits.
+
 ## Attempt twenty-one: helper/parent display readiness race — 2026-10-15
 
 Permission `call_db5cd7aaaccc4382b58b1683810ac249` was consumed by

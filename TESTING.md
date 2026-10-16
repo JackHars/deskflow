@@ -4,6 +4,39 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Roadmap follow-up: deadline-order regression — 2026-10-15
+
+The asynchronous display startup now uses absolute monotonic deadlines in
+addition to QTimer wake-ups. A delayed started/reply/display callback cannot
+win merely by running before an overdue timer. Verification must finish before
+the same cutoff; early timer notifications and duplicates do not renew it.
+The new portable suite runs the production gate with a controlled clock, without
+sleep statements, real displays, helpers or input. Destructive completion and
+late events after cancellation are included.
+
+Evidence: `build/roadmap-startup-3noptkp0/`.
+
+- Mac Host/helper builds: PASS.
+- `ctest --test-dir build/mac-default/src/apps/windowshare --no-tests=error
+  --output-on-failure -R '^(windowshare-holding-startup|windowshare-holding|windowshare-native-recovery)$'`:
+  PASS, 3/3 (1.85s). The root build directory has no CTest registration; the
+  earlier command there failed with exit 8 and is retained, not counted as a pass.
+- Scoped startup ASan/UBSan: PASS on Intel Mac/Qt 6.8.3 and jack's isolated
+  Ubuntu/Qt 6.10.2 image. Prebuilt Qt/system libraries are outside instrumentation.
+  Linux evidence is also retained in
+  `/home/jack/src/deskflow-h04-20261015-zgta6i4f/roadmap-startup-qs1w7ixy/`.
+- Hosted runtime `7453a4c77`: all six jobs PASS in
+  [run 38836549724](https://github.com/JackHars/deskflow/actions/runs/38836549724).
+  That run precedes this deadline change and does not certify it.
+- Local Apple-issued `mac-package/DeskflowSeamless-Core-Experimental.zip`:
+  exact-library audit PASS (77 records, no errors), SHA-256
+  `9cea1103fcd178257edf91d5d9df12c9b361bfd2fc9a17c4d693cad5aaa13dad`.
+
+Physical input and hidden placement were not run. Attempt 22's unused plan is
+superseded by this change. The latest executed attempt remains 21 below; freeze
+fresh artifacts and obtain fresh permission before retrying. Current completion
+gates are listed at the top of `CHATGPT_HANDOFF.md`.
+
 ## H06 attempt twenty-one: native display notification race — 2026-10-15
 
 `build/h06-r21-czr6qf_t/` consumed fresh permission and failed before Active.

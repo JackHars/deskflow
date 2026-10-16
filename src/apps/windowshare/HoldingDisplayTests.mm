@@ -280,6 +280,7 @@ void startupNotifications()
   }
   for (const bool canceled : {false, true}) {
     int completions = 0;
+    auto now = HoldingDisplayStartup::Clock::now();
     HoldingDisplayStartup startup(
         [](QString *reason) {
           *reason = "still inactive";
@@ -288,12 +289,14 @@ void startupNotifications()
         [&](bool success, QString reason) {
           ++completions;
           check(!success && reason.contains("still inactive"), "deadline preserves the last independent rejection");
-        }
+        },
+        [&] { return now; }
     );
     startup.started();
     startup.ready();
     if (canceled)
       startup.cancel();
+    now += std::chrono::seconds(10);
     startup.expire();
     startup.changed();
     startup.ready();

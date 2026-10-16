@@ -6,6 +6,39 @@ SPDX-License-Identifier: MIT
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
+## Current completion checklist — 2026-10-15
+
+The P1–P8 implementation is integrated, with the supported-capability limits
+documented below. The product is **not physically accepted**. Latest attempted
+hidden-source test 21 failed before Active; its display-readiness fix is built
+and awaits a separately approved run on the actual Mac and jack desktop.
+Latest verified hosted runtime `7453a4c77` passes all six jobs in
+[run 38836549724](https://github.com/JackHars/deskflow/actions/runs/38836549724).
+The subsequent deadline regression is recorded at the top of `TESTING.md`.
+
+- [x] P1–P3: production input ownership, native drain and connected routing.
+- [x] P4: per-window holding, geometry and journaled return implementation.
+- [x] P5: connected bidirectional ordinary-titlebar drag implementation.
+- [x] P6: supported child-window, menu, clipboard and input policies.
+- [x] P7: recovery monitors, application queue limits and synthetic load tooling.
+- [x] P8: separate packages, source/artifact verification and hosted checks.
+- [ ] H03/H04/H06: complete the basic physical hidden-window/input test without
+  startup failure, missing clicks, duplicate input or incomplete cleanup.
+- [ ] H05/H06: verify real monitor layouts/scales and multiple windows.
+- [ ] H07: verify ordinary dragging in both directions, cancellation and return.
+- [ ] H08/H09: verify supported apps, dialogs, clipboard and input behavior.
+- [ ] H10: verify owned-process failures, disconnect and sleep/wake restoration.
+- [ ] H11: collect actual input/display timing and the native hour workload.
+- [ ] H12: verify installation, upgrade, restart and removal on both machines.
+- [ ] Complete the remaining native/library/OS queue contract review. Several
+  upstream queues have no verified capacity bound; physical tests alone cannot
+  certify these. Keep the gaps explicit in `native-queue-audit.md`.
+
+Execution order: unblock the basic physical transfer first, then run the
+dependent hardware rows. Obtain fresh permission immediately before **each**
+physical launch, as the user requested. No results popup is wanted; retain
+printed and saved diagnostics. Repeated automated passes cannot close these rows.
+
 **Local implementation resumed on 2026-10-13.** The production coordinator is
 now wired from Server through private protocol v9 (including P5 native-drag/return metadata), negotiated Core IPC5,
 EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
@@ -101,11 +134,10 @@ Do not substitute a success-returning stub for a missing platform capability.
 - Branch: **`feature/seamless-windows`**. Continue this branch or a clearly named
   descendant if your cloud workflow requires one. Never modify `master` or
   `main`, force-push, or merge into the default branch for this assignment.
-- Latest verified CI base: **`c748915ccb65c4b169188d3ae2d1ea326a288ff9`**.
-  P6 implementation **`bfb9cb9e80152386f4cb4ca7b5cf3dc0969afb10`** has local
-  Mac/Ubuntu checks; its hosted checks could not run because repository Actions
-  is disabled. Test-tool and documentation commits may be newer; start from
-  the branch tip and use the exact results in `TESTING.md`.
+- Latest verified CI base: **`7453a4c775e8a451637edca0420113c3693cc91d`**.
+  GitHub Actions is enabled and all six jobs pass for that runtime. Later
+  source and documentation commits may be newer; start from the branch tip
+  and use the exact results in `TESTING.md`.
 - Prior implementation: `eda21b39b19004af9f4abfaacb707bb9b380f6f8` adds Server
   ownership before legacy dispatch; `ef5145665` fixes portable core linkage.
 - Original local checkout, useful only to the returning local chat:
@@ -446,9 +478,9 @@ of the same ordinary drag, but must not require a separate user action.
 
 Acceptance: deterministic transaction/fault tests and harness support for H07.
 Do not call ordinary opening/closing of a Viewer "edge-drag support."
-The owned native titlebar eligibility check passes. The latest user request
-is to keep building and test later; H07 is NOT_RUN. Do not launch physical
-fixtures or enable desktop routing without a new user request. Bidirectional
+The owned native titlebar eligibility check passes. The user requires fresh
+permission immediately before each physical launch; H07 is NOT_RUN. Do not
+launch physical fixtures or enable desktop routing without that approval. Bidirectional
 drop coordination is implemented. All six hosted jobs pass at `c748915cc`
 ([run 38645498688](https://github.com/JackHars/deskflow/actions/runs/38645498688)); P5 physical acceptance remains open. See
 `deploy/windowshare/window-drag-preparation.md` for the connected path and tests.

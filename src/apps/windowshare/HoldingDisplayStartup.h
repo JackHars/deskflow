@@ -7,6 +7,7 @@
 #include <QObject>
 #include <QString>
 #include <QTimer>
+#include <chrono>
 #include <functional>
 #include <utility>
 
@@ -18,35 +19,42 @@ namespace deskflow::windowshare {
 class HoldingDisplayStartup final : public QObject
 {
 public:
+  using Clock = std::chrono::steady_clock;
+  using Now = std::function<Clock::time_point()>;
   using Probe = std::function<bool(QString *)>;
   using Completion = std::function<void(bool, QString)>;
-  HoldingDisplayStartup(Probe probe, Completion completion)
+  HoldingDisplayStartup(Probe probe, Completion completion, Now now = Clock::now)
       : m_probe(std::move(probe)),
-        m_completion(std::move(completion))
+        m_completion(std::move(completion)),
+        m_now(std::move(now))
   {
     m_deadline.setSingleShot(true);
+    m_deadline.setTimerType(Qt::PreciseTimer);
     QObject::connect(&m_deadline, &QTimer::timeout, this, [this] { expire(); });
-    m_deadline.start(5000);
+    arm(std::chrono::seconds(5));
   }
   void started()
   {
-    if (!m_done && !m_started) {
+    if (!m_done && !m_started && withinDeadline()) {
       m_started = true;
-      m_deadline.start(10000); // Existing helper deadline includes parent verification.
+      arm(std::chrono::seconds(10)); // Existing helper deadline includes parent verification.
     }
   }
   void ready()
   {
-    if (!m_done && m_started && !m_ready) {
+    if (!m_done && m_started && !m_ready && withinDeadline()) {
       m_ready = true;
       changed();
     }
   }
   void changed()
   {
-    if (m_done || !m_ready)
+    if (m_done || !m_ready || !withinDeadline())
       return;
-    if (m_probe(&m_reason))
+    const bool verified = m_probe(&m_reason);
+    // A native probe can consume the remaining deadline. Notification order
+    // must not grant readiness merely because the timer callback ran later.
+    if (!m_done && withinDeadline() && verified)
       finish(true, {});
   }
   void fail(QString reason)
@@ -55,10 +63,13 @@ public:
   }
   void expire()
   {
-    finish(
-        false,
-        m_ready ? "Holding display verification timed out: " + m_reason : "Holding-display helper readiness timed out"
-    );
+    if (m_done)
+      return;
+    const auto remaining = m_due - m_now();
+    if (remaining > Clock::duration::zero())
+      m_deadline.start(std::chrono::ceil<std::chrono::milliseconds>(remaining));
+    else
+      timedOut();
   }
   void cancel()
   {
@@ -72,6 +83,25 @@ public:
   }
 
 private:
+  void arm(std::chrono::milliseconds duration)
+  {
+    m_due = m_now() + duration;
+    m_deadline.start(duration);
+  }
+  bool withinDeadline()
+  {
+    if (m_now() < m_due)
+      return true;
+    timedOut();
+    return false; // Completion may have destroyed this gate.
+  }
+  void timedOut()
+  {
+    finish(
+        false, !m_ready ? "Holding-display helper readiness timed out"
+                        : "Holding display verification timed out" + (m_reason.isEmpty() ? QString{} : ": " + m_reason)
+    );
+  }
   void finish(bool success, QString reason)
   {
     if (m_done)
@@ -84,6 +114,8 @@ private:
   }
   Probe m_probe;
   Completion m_completion;
+  Now m_now;
+  Clock::time_point m_due;
   QTimer m_deadline;
   QString m_reason;
   bool m_started = false, m_ready = false, m_done = false;
