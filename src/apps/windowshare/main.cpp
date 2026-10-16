@@ -5,6 +5,7 @@
 #include "CaptureRate.h"
 #include "ClipboardText.h"
 #include "KeyboardRouteProtocol.h"
+#include "LifecycleDiagnostics.h"
 #include "LocalInputMapping.h"
 #include "LocalWindowDrag.h"
 #if defined(__APPLE__) && !defined(WINDOWSHARE_BRIDGE_TEST)
@@ -881,8 +882,18 @@ public:
     if (!m_native || !authenticatedPeerObservation() || m_keyboardRoute || m_reservingKeyboard ||
         !revokeOriginalKeyboard || m_keyboardGeneration == 9007199254740991ULL ||
         (scope != ForwardingScope::Keyboard && scope != ForwardingScope::All) ||
-        (scope == ForwardingScope::All && !m_inputCapable))
+        (scope == ForwardingScope::All && !m_inputCapable)) {
+      lifecycleDiagnostic(
+          "Host", "input.reservation", "denied", "Local route cannot reserve this owner",
+          {{"nativeHost", m_native != nullptr},
+           {"authenticated", authenticatedPeerObservation().has_value()},
+           {"routeHeld", m_keyboardRoute.has_value()},
+           {"reserving", m_reservingKeyboard},
+           {"releaseCallback", bool(revokeOriginalKeyboard)},
+           {"fullInputCapable", m_inputCapable}}
+      );
       return std::nullopt;
+    }
     const auto found = m_hostSessions.find(session);
     if (found == m_hostSessions.end() || found->second != epoch)
       return std::nullopt;

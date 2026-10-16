@@ -1671,28 +1671,46 @@ struct NativeHost::Impl
   ) const
   {
     const SlowOperationDiagnostic timing("Host", "native.keyboard-route-candidate");
+    const auto denied = [&](const char *reason, QJsonObject details = {}) -> std::optional<KeyboardRouteBinding> {
+      details.insert("session", QString::number(session));
+      details.insert("epoch", QString::number(epoch));
+      details.insert("routeGeneration", QString::number(generation));
+      lifecycleDiagnostic("Host", "input.native-candidate", "denied", reason, details);
+      return {};
+    };
     const QPointer<NativeHost> alive(q);
     if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild({session, epoch}) || !alive)
-      return {};
+      return denied("Native owner thread or associated-window admission changed");
     const auto admitted = lifecycle->admission();
     const Owner owner{session, epoch};
     const auto *e = entry(session, epoch);
     if (!admitted || destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote ||
         focusOwner != owner || !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
-      return std::nullopt;
+      return denied(
+          "Source, capture, or acknowledged focus lease is not current",
+          {{"admitted", bool(admitted)},
+           {"destroying", destroying},
+           {"callbackDepth", int(callbackDepth)},
+           {"sourcePresent", e != nullptr},
+           {"visible", e && e->visible},
+           {"remote", e && e->session.phase == Phase::Remote},
+           {"focusOwnerMatches", focusOwner == owner},
+           {"focusLeaseValid", focus.permits(owner, focusOwnerRevision)},
+           {"captureLive", e && e->capture && !e->capture->stopped}}
+      );
     const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry,
                                        scope};
     if (!validKeyboardRouteBinding(binding) || !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
         launchTime(e->identity.pid) != e->identity.launch)
-      return std::nullopt;
+      return denied("Native binding, permission, or process lifetime is not current");
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (!active || active.processIdentifier != e->identity.pid)
-      return std::nullopt;
+      return denied("The source application is not foreground");
     const auto state = readNativeWindowState(e->window);
     if (!focusMatches(*e) || !state || (!e->family && !state->minimized.has_value()) ||
         state->minimized.value_or(false) || !sameGeometry(state->frame, e->session.source) ||
         (e->moved && !holding.available()))
-      return std::nullopt;
+      return denied("Native focus, frame, minimized state, or holding display changed");
     if (!lifecycle->current(admitted))
       return std::nullopt;
     if (observedFrame)
