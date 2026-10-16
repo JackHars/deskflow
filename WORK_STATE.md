@@ -55,6 +55,24 @@ earlier timeout or certify the current placement change. No new physical test
 has been launched; another fresh permission is required. H04/H06 and dependent
 hardware acceptance rows remain open.
 
+The placement change is published as `1f489fce0acdb0863e0951f1f07d2be604a97621`.
+Its Apple-issued package passes exact-library verification (77 records, no
+errors); ZIP SHA-256:
+`e18af5dd3668e92086a84e77d7104c1c335d79667ccf36894ade2e0f96905e69`.
+Hosted source bundle `38841354603` independently verifies all 1179 tracked
+files/modes/blob identities and the exact commit. Source archive SHA-256:
+`27557b5898702bad6d2a74e8dd3c9e4a589c739ac0be5154bce679b7e7480a00`.
+Foundation run `38841354672` is in progress; do not treat it as all-green.
+
+Fresh attempt 24 is `build/h06-r24-vtm4s8z9/`, frozen to this runtime/package.
+Plan validation, Mac permissions/no-conflicting-primary and packaged private
+admission pass (11.489s total, native hooks/original input disabled, companion
+stopped). Actual jack's unlocked local Wayland session 2 is active; the provider
+is disabled until launch. Holding and separate Mac controls are configured,
+with no Mac desktop preview or results popup. No test window or native session
+was opened during preparation. Fresh launch permission has been requested;
+keep it pending and do not execute until the user grants it.
+
 ## Roadmap follow-up: absolute startup deadlines — 2026-10-15
 
 The user asked to continue and finish the roadmap. The existing per-launch

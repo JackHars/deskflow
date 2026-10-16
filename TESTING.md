@@ -43,7 +43,19 @@ Evidence root: `build/placement-verify-vjmz7mbg/`.
   [run 38839385272](https://github.com/JackHars/deskflow/actions/runs/38839385272).
   The current placement code still requires its own hosted/physical validation.
 
-No fresh physical launch is authorized. Do not reuse attempt 23's permission.
+Placement runtime: `1f489fce0acdb0863e0951f1f07d2be604a97621`.
+Signed package audit: PASS, 77 exact-library records, no errors. ZIP SHA-256
+`e18af5dd3668e92086a84e77d7104c1c335d79667ccf36894ade2e0f96905e69`.
+Hosted source bundle `38841354603`: all 1179 tracked files, modes and Git blob/
+commit identities independently verified. Source archive SHA-256
+`27557b5898702bad6d2a74e8dd3c9e4a589c739ac0be5154bce679b7e7480a00`.
+Foundation run `38841354672` is still in progress, not yet an all-green result.
+
+Attempt 24 is prepared at `build/h06-r24-vtm4s8z9/`; frozen plan validation,
+Mac permission/conflict checks and packaged admission pass (11.489s, hooks off).
+Jack's actual local Wayland session 2 is active, provider disabled. Holding and
+separate controls are configured; there is no Mac desktop preview/results popup.
+Fresh physical launch permission is pending. Do not reuse attempt 23's approval.
 The acceptance checklist remains open in `CHATGPT_HANDOFF.md`.
 
 ## Roadmap follow-up: deadline-order regression — 2026-10-15
