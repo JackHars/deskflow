@@ -159,6 +159,7 @@ class Relay(unittest.TestCase):
         self.assertFalse([error for error in errors if not already_closed or error.errno != errno.ENOTCONN])
         self.assertEqual(received, [request])
         self.assertEqual(b"".join(chunks), response)
+        self.assertTrue(relay.stats["tcpLowDelay"])
         self.assertEqual(relay.stats["toMacBytes"], len(request))
         self.assertEqual(relay.stats["fromMacBytes"], len(response))
         self.assertLessEqual(relay.stats["maximumQueuedBytes"], 256 * 1024)

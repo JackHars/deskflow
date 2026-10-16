@@ -110,6 +110,11 @@ class UnixRelay:
                     return
                 require(client is not None, "Relay acceptance deadline expired")
                 cleanup.callback(client.close)
+                # This loopback leg carries the same deadline-bound controls
+                # as the application TLS socket; do not add TCP batching here.
+                client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.stats["tcpLowDelay"] = bool(client.getsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY))
+                require(self.stats["tcpLowDelay"], "Relay cannot disable TCP control batching")
                 self.listener.close()  # A reconnect is a new coordinated run.
                 info = self.path.lstat()
                 require((info.st_dev, info.st_ino) == self.identity, "Forward socket changed before connection")
