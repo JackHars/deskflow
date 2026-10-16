@@ -19,6 +19,8 @@ Latest hosted placement runtime `1f489fce0` passes all six jobs in
 [run 38841354672](https://github.com/JackHars/deskflow/actions/runs/38841354672).
 That hosted result precedes these follow-up fixes. Fresh permission is required
 immediately before the next physical launch; attempt 24's approval is consumed.
+Runtime `fe330635c` is prepared as `build/h06-r25-9cri24sx/`; local Mac/Linux
+checks and signed-package admission pass, while its hosted checks are in progress.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.

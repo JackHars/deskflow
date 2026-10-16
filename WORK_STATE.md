@@ -68,6 +68,20 @@ fresh permission is required immediately before the next one.
 The new Apple-issued package audit passes (77 exact-library records, no errors).
 ZIP SHA-256: `696cd0ed5c644b2e98602aeaf9cf67bd82395197f9ea25d70f222ab7b355bc7a`.
 
+The follow-up is published as `fe330635ca1fd4dd64306022c61c123a694efe05`.
+Hosted source bundle `38844510660` independently verifies all 1184 tracked
+files, modes and exact Git blob/commit identities. Source archive SHA-256:
+`e6a5bea160836b77ec96f2a240dd1c92b0a7365577760de6972de5b10cb0a55d`.
+Foundation run `38844510594` is in progress; no all-green claim yet.
+
+Fresh attempt 25 is `build/h06-r25-9cri24sx/`, frozen to this commit and the
+package above. Plan validation, Mac permission/conflict checks and packaged
+admission pass (11.758s, native input hooks disabled, companion stopped).
+Actual jack's unlocked local Wayland session 2 is active; its provider is
+disabled until launch. Holding/separate Mac controls are configured, with no
+Mac desktop preview or results popup. No new window or input session has opened.
+Fresh launch permission is required; do not reuse attempt 24's permission.
+
 ## Attempt twenty-three: asynchronous native placement verification — 2026-10-15
 
 The user authorized `call_8924154ad7ed463fac941ea5d438a09b`; that permission
