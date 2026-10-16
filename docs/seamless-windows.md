@@ -1,13 +1,24 @@
 # Experimental window sharing
 
-## Current implementation — 2026-10-15
+## Current implementation — 2026-10-16
 
-Attended H04 setup exposed a short readiness wait and a fixture-close veto.
-The current follow-up adds an inert packaged code-admission diagnostic before
-the user sees Start, a fixed 30-second exact-library startup allowance, and
-explicit terminal fixture closure after cleanup. Every live input authority
-check remains required. Both attended attempts stopped before Active; see the
-latest `TESTING.md` entry for failures, regressions and the next physical run.
+P1–P8 code is integrated, but the product is not physically accepted. The latest
+attended run verified hidden source placement and reached Active; original-input
+ownership never became ready, then capture/heartbeat failures ended the run.
+Current fixes cover asynchronous placement, atomic heartbeat publication,
+switching-shortcut consumption, a reproduced denied-correlation race and a
+history timeout that expired before valid input preparation could finish.
+Bounded diagnostics identify capture/inbox/join and pre-reservation blockers.
+See the current checklist in `CHATGPT_HANDOFF.md` and exact results in
+`TESTING.md`. Physical testing is deferred while the user is away; obtain fresh
+permission immediately before each launch. Tests use jack's actual Ubuntu
+desktop, separate Mac controls, saved diagnostics and no results popup.
+
+
+Current runtime `26b2bc6a4` passes the scoped Mac and actual-jack Ubuntu checks
+and all six [hosted jobs](https://github.com/JackHars/deskflow/actions/runs/38856650856).
+Matching packages are staged with verified source and binary identities. These
+unattended checks leave the physical readiness failure and acceptance rows open.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed

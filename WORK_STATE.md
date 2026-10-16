@@ -1,5 +1,117 @@
 # Seamless Windows work state
 
+## Unattended input hardening — 2026-10-16
+
+The user is away and deferred physical testing. Prepared attempt 25 remains
+unlaunched; its older frozen build is not the current candidate. Obtain fresh
+permission immediately before any future physical launch. No desktop window,
+input sharing, test input or results popup was started in this continuation.
+
+Runtime `a31d08c0d273c8535a252eb7d2787e823a5fffc6` fixes a reproducible route
+correlation race. An uncertain one-part capture is already ineligible for
+original delivery. If its late Core decision arrived before the Session popped
+the denial, the join incorrectly applied the exact-input deadline and revoked
+the route. The same decision after the pop was accepted only as a denial.
+Both arrival orders now retain the denial, with no delivery authority. This
+first fix preserved the existing exact-input history deadline; the separate
+follow-up below corrects its mismatch with asynchronous preparation. Sequence,
+declared-part and capacity checks remain required. The regression failed
+before the fix and passes afterward without sleeps. This is an isolated reproduction, not
+proof of attempt 24's exact revocation cause.
+
+Diagnostics now retain the first capture-inbox failure (binding, malformed
+capture, ordering, capacity or epoch loss), report the route-join failure, and
+record each first Server eligibility boundary before a coordinator reservation.
+These low-frequency logs run outside the native event tap and contain no key
+codes, text or clipboard contents. The Python coordinator now reads the actual
+nested `preparation` object, preserves failed readiness details, and identifies
+missing/fresh/post-Record readiness and mismatched Core/Host ownership. Older
+logs without preparation details remain unknown; diagnostics cannot authorize
+recording or change physical acceptance.
+
+Follow-up runtime `26b2bc6a46963fa8d1a9db30eac187ed09f5e12b` adds a second
+regression joining the actual Server pending-input path to its historical
+route observer. At 450ms, the Server's 500ms preparation is still valid, but the
+old 250ms history timeout revoked their shared conduit. The test fails before
+the correction. History now has a bounded two-second observation lifetime,
+consistent with the experimental Core residence budget, and a compile-time
+check requires it to outlive capture plus preparation. This is not a delivery
+lease: the 100ms capture-arrival, 500ms preparation and at-most-250ms mapped
+point deadlines are unchanged. Missing history still expires, buffers remain
+bounded, and historical observations cannot grant input authority. The combined
+Server/coordinator/history run passes on Mac (3/3, 5.89s); the changed portable
+route suite passes scoped ASan/UBSan again (0.62s). A fresh isolated build on
+actual jack passes Core compilation and both Server/coordinator suites
+(2/2, 0.22s; native Mac-only cases are explicitly skipped on Linux), the three
+portable sanitizer suites (3/3, 0.24s), and 92 Python checks. Evidence and the
+frozen source archive are in `build/unattended-history-imi65vqc/`.
+
+Validation is retained in `build/unattended-input-2k6lxjf7/`:
+
+- Mac Core and Host builds pass. Server and production coordinator suites pass
+  2/2 (5.56s) after the final Server diagnostics change.
+- Portable original-input, route-join/inbox and press-routing suites pass scoped
+  ASan/UBSan on Mac (3/3, 1.48s) and actual jack's isolated Ubuntu image
+  (3/3, 0.25s). The changed portable sources are identical in both runs.
+  The Ubuntu container used `--init`, no network, no desktop or input-device
+  mounts, and dropped capabilities. Qt/system libraries are not instrumented.
+- Python physical-coordinator regressions pass 92/92 on Mac and Ubuntu.
+- The initial Mac command named a nonexistent aggregate `unittests` target
+  after successfully building Core; the explicit targets above pass. The first
+  remote runner had a placeholder-substitution syntax error before executing
+  tests; the corrected runner passes. Both original logs remain retained.
+
+The previous runtime `fe330635c` now passes all six hosted jobs in
+[run 38844510594](https://github.com/JackHars/deskflow/actions/runs/38844510594).
+Runtime `a31d08c0d` also passes all six jobs in
+[run 38855480046](https://github.com/JackHars/deskflow/actions/runs/38855480046).
+Final runtime `26b2bc6a4` passes all six jobs in
+[run 38856650856](https://github.com/JackHars/deskflow/actions/runs/38856650856):
+both portable compiler/sanitizer jobs, transport, Linux application, Mac
+application and native GNOME integration. The original-input owner/readiness
+issue from attempt 24 still needs diagnosis on the approved physical route. H03–H12 acceptance and
+unverified native/OS queue bounds remain open; automated results do not close
+them.
+
+The new Apple-issued package passes its audit (77 exact-library records, no
+errors). ZIP SHA-256:
+`e3769643434329570a18b7c044f80d0d9d3d56d8128e28b9e0bd4c805d2ca3e4`.
+The package was staged separately; no installation or physical launch occurred.
+Hosted source bundle `38855479671` independently verifies all 1184 tracked
+files/modes/blob identities and the exact commit. Source archive SHA-256:
+`1e08661dd3f593fa07c1f97cb957909d7a8f9ab3f1150f78e9fc846e0c8aed26`.
+
+The final follow-up package also passes the 77-library audit and its private
+code-admission probe (12.257s total, exact admission verified, companion stopped,
+native input hooks/original input disabled). Its ZIP SHA-256 is
+`adc6d9952b749d5172de88e1bc6c6359dfcd1d81e169872dc7fb7ab21f0661b6`.
+It is staged under `build/unattended-history-imi65vqc/mac-package/`; no physical
+launch configuration was activated. Attempt 25 remains deferred and superseded.
+
+The final hosted source bundle `38856650837` independently verifies all
+1184 tracked files/modes/blob identities and the exact commit. Its archive
+SHA-256 is `f3e63f65e9f3f5785155fa1238775892b2401d40bda11a528d841a295bb27eac`.
+
+The matching Ubuntu runtime is also staged without installation. The Viewer
+was freshly built against the same frozen runtime sources and packaged with
+the newly built Core. All 1184 tracked blob identities were compared with
+`26b2bc6a4`; only the five recorded Markdown files differ in the earlier frozen
+snapshot. The 26-member inert package passes verification, both executables
+resolve their libraries on actual jack, and both offscreen `--help` runs exit
+successfully with desktop connection variables removed. Archive SHA-256:
+`a854af1a015858e26b34eab5b452a2011334b5732bb3e4341e8624a21e939323`.
+The package and stage are retained under jack's
+`/home/jack/src/deskflow-h04-20261015-zgta6i4f/unattended-history-imi65vqc/`.
+This verifies staging and loading, not desktop input or install acceptance.
+
+The unexecuted `build/prepare-h06-history.py` helper now selects these exact
+Ubuntu binaries, rejects later runtime-source changes and compares the
+prepared remote binary hashes with the tested package. It retains separate
+Mac controls, actual jack desktop, hidden source placement and no results
+popup. It has only been syntax checked; preparation and physical launch remain
+deferred. Recheck the live desktop/session and permissions when the user returns,
+then obtain fresh launch permission immediately before execution.
+
 ## H06 attempt twenty-four: placement passed; input acceptance remains open — 2026-10-15
 
 Permission `call_caf1c5af5eb74a32b699f02f82a6e588` was consumed by
@@ -72,7 +184,7 @@ The follow-up is published as `fe330635ca1fd4dd64306022c61c123a694efe05`.
 Hosted source bundle `38844510660` independently verifies all 1184 tracked
 files, modes and exact Git blob/commit identities. Source archive SHA-256:
 `e6a5bea160836b77ec96f2a240dd1c92b0a7365577760de6972de5b10cb0a55d`.
-Foundation run `38844510594` is in progress; no all-green claim yet.
+Foundation run `38844510594` subsequently passed all six jobs.
 
 Fresh attempt 25 is `build/h06-r25-9cri24sx/`, frozen to this commit and the
 package above. Plan validation, Mac permission/conflict checks and packaged

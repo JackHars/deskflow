@@ -6,7 +6,7 @@ SPDX-License-Identifier: MIT
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
-## Current completion checklist — 2026-10-15
+## Current completion checklist — 2026-10-16
 
 The P1–P8 implementation is integrated, with the supported-capability limits
 below. The product is **not physically accepted**. Attempt 24 verified the
@@ -15,12 +15,14 @@ armed; capture revoked and a heartbeat failure stopped the run. Frame restoratio
 passed, while a leaked switching-key repeat left the fixture ledger nonneutral.
 The heartbeat race and shortcut follow-up, automated results and remaining
 input diagnostics are recorded at the top of `TESTING.md`.
-Latest hosted placement runtime `1f489fce0` passes all six jobs in
-[run 38841354672](https://github.com/JackHars/deskflow/actions/runs/38841354672).
-That hosted result precedes these follow-up fixes. Fresh permission is required
-immediately before the next physical launch; attempt 24's approval is consumed.
-Runtime `fe330635c` is prepared as `build/h06-r25-9cri24sx/`; local Mac/Linux
-checks and signed-package admission pass, while its hosted checks are in progress.
+Current runtime `26b2bc6a4` adds reproduced route-correlation fixes and precise
+readiness/failure diagnostics. Scoped Mac/Ubuntu tests and all six hosted jobs in
+[run 38856650856](https://github.com/JackHars/deskflow/actions/runs/38856650856)
+pass. Matching Mac and actual-jack Ubuntu packages are staged and verified.
+The user has deferred physical testing while away. Attempt 25 was prepared but
+never launched and retains an older frozen build; do not launch that stale plan.
+See `TESTING.md` for the current builds and unexecuted preparation helper.
+Fresh permission is required immediately before any physical launch.
 
 - [x] P1–P3: production input ownership, native drain and connected routing.
 - [x] P4: per-window holding, geometry and journaled return implementation.
@@ -140,7 +142,7 @@ Do not substitute a success-returning stub for a missing platform capability.
 - Branch: **`feature/seamless-windows`**. Continue this branch or a clearly named
   descendant if your cloud workflow requires one. Never modify `master` or
   `main`, force-push, or merge into the default branch for this assignment.
-- Latest verified CI base: **`7453a4c775e8a451637edca0420113c3693cc91d`**.
+- Latest verified CI base: **`26b2bc6a46963fa8d1a9db30eac187ed09f5e12b`**.
   GitHub Actions is enabled and all six jobs pass for that runtime. Later
   source and documentation commits may be newer; start from the branch tip
   and use the exact results in `TESTING.md`.
