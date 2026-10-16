@@ -4,6 +4,36 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Physical attempt 32: startup passes; original-input handoff expires — 2026-10-16
+
+The user's direct “alright run the tests” request authorized
+`build/physical-r32-bwjv118r/`. Frozen artifacts match all three passing unattended
+runs. The user confirmed the shared source on jack's actual Ubuntu monitor.
+Start at 22:20:41 UTC reached Active at 22:21:04 with verified hidden-source
+placement. Keyboard, clicks and scroll reached the source through setup/legacy
+traffic; this does not prove original-input delivery.
+
+The original-input handoff at 22:21:29.592 reached focus preparation in 110 ms,
+Host quiescence at 272 ms and mapped cutoff at 313 ms. Native preparation began
+at 314 ms, with 185 ms remaining. The absolute 500 ms deadline expired at 502 ms,
+and Core stopped original dispatch. Record was requested at 22:21:56, but neither
+Core nor Host retained matching input ownership. At the 85-second recording
+cutoff the coordinator stopped the session. No recorder armed; H04/H06 remain
+unaccepted. This run did not reproduce the immediate startup crash.
+
+Source restoration, neutral final keys/buttons, Core/source exit 0, owned-process
+cleanup on both machines, Ubuntu desktop restoration and ordinary settings all
+pass. Each unarmed recorder ended drained with loss 0 and zero measurement rows;
+the missing armed measurement is the only recorded cleanup limitation. Ubuntu
+archive SHA-256: `b0fe953d8cf99a27ddc98e128516a954b6502bc6d1072a488a9f04af05c15805`.
+See the private `RESULTS.md`, `failure-summary.json` and retained traces.
+
+Next work is to profile Host prepare/commit validation inside this deadline;
+the existing trace does not identify a single slow native call. Reproduce and
+repair the measured cause before requesting another physical attempt. Preserve
+the deadline and authority checks. This attempt's launch authorization is
+consumed; no second attended test has been launched.
+
 ## Autonomous pipeline verification — 2026-10-16
 
 The user explicitly authorized unattended real-computer pipeline testing after
@@ -62,8 +92,8 @@ Validation is retained in `build/pipeline-verify-fg881kq7/`:
   enabled and disabled Core builds. Both local configurations pass, as does
   the scoped ASan/UBSan relocation suite (Qt/system libraries are not instrumented).
   [Hosted run 38971647320](https://github.com/JackHars/deskflow/actions/runs/38971647320)
-  is in progress for `e228da3e0`: both core compiler jobs and transport pass;
-  Mac, Linux and GNOME jobs are still running. The source artifact independently
+  completed successfully for `e228da3e0`: all six jobs pass, including both
+  core compilers, transport, Mac, Linux and GNOME. The source artifact independently
   verifies all 1,189 tracked files, Git commit/tree, file types and executable modes.
 - The signed Mac package uses source `e228da3e0` (native fix `5c113c700`) and passes exact-library
   seal/dependency verification. ZIP SHA-256:

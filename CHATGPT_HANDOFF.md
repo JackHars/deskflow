@@ -4,6 +4,16 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
+Latest attended result (2026-10-16): `build/physical-r32-bwjv118r/` reached Active
+and the user confirmed the source on actual Ubuntu. Startup/hidden placement and
+cleanup pass; original-input recording does not. The first handoff reached native
+preparation at 314 ms and expired at its fixed 500 ms deadline (observed 502 ms).
+Core then revoked original dispatch; Record could not find matching live owners.
+All three recorders stayed unarmed. Profile Host prepare/commit callbacks before
+another attended retry; do not weaken the cutoff or infer acceptance from legacy
+input. See WORK_STATE.md and the run's private RESULTS.md/failure-summary.json.
+The launch permission for this run was consumed; all owned processes stopped.
+
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 ## Current completion checklist — 2026-10-16
@@ -23,7 +33,7 @@ physical keyboard or trackpad delivery. All 100 coordinator checks pass on each
 machine, along with focused Mac/Ubuntu, enabled/disabled Core and scoped sanitizer
 checks. Evidence: `build/pipeline-verify-fg881kq7/`. Actual Ubuntu remains on
 `65dd42362`; changed runtime paths are Mac-only. GitHub Actions includes the new
-startup regression in both configurations; run 38971647320 is in progress.
+startup regression in both configurations; all six jobs in run 38971647320 pass.
 Use separate Mac controls and saved logs, with no substitute-desktop preview
 or results popup.
 
