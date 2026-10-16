@@ -127,7 +127,7 @@ class LogObserver:
                     value = json.loads(text.split(marker, 1)[1])
                     if not isinstance(value, dict):
                         raise ValueError('Native diagnostic must be an object')
-                    if value.get('state') not in ('started', 'completed', 'failed'):
+                    if value.get('state') not in ('started', 'completed', 'failed', 'observed'):
                         continue
                     name = value['component'] + ': ' + value['step']
                     self.native[name] = value

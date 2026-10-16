@@ -3,11 +3,13 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "HoldingDisplay.h"
+#include "HoldingDisplayStartup.h"
 #include "LifecycleDiagnostics.h"
 #include "PlatformMarkers.h"
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -395,12 +397,44 @@ void stopOwnedHelper(QProcess &process)
 
 } // namespace
 
-struct HoldingDisplay::Impl
+struct HoldingDisplay::Impl : QObject
 {
 #ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
   id<DSHoldingVirtualDisplay> display = nil;
 #else
   std::unique_ptr<QProcess> helper;
+  std::unique_ptr<HoldingDisplayStartup> startup;
+  std::vector<std::function<void(bool, QString)>> completions;
+  QByteArray response;
+  bool notifications = false, replied = false;
+  static void displayChanged(CGDirectDisplayID display, CGDisplayChangeSummaryFlags flags, void *context)
+  {
+    auto *self = static_cast<Impl *>(context);
+    // CoreGraphics says its state is current after the completion callback.
+    // Queue verification so neither completion nor helper teardown reconfigures
+    // displays from inside the native notification itself.
+    if (!(flags & kCGDisplayBeginConfigurationFlag))
+      QMetaObject::invokeMethod(
+          self,
+          [self, display, flags] {
+            if (self->startup && self->startup->pending()) {
+              lifecycleDiagnostic(
+                  "Holding display", "geometry.notification", "observed", "Display change completed",
+                  {{"displayId", qint64(display)}, {"flags", qint64(flags)}}
+              );
+              self->startup->changed();
+            }
+          },
+          Qt::QueuedConnection
+      );
+  }
+  void removeNotifications()
+  {
+    if (notifications) {
+      CGDisplayRemoveReconfigurationCallback(displayChanged, this);
+      notifications = false;
+    }
+  }
 #endif
   CGDirectDisplayID id = kCGNullDirectDisplay;
   unsigned width = 0;
@@ -458,106 +492,25 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
   }
 
 #ifndef DESKFLOW_HOLDING_DISPLAY_HELPER
-  const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/deskflow-holding-display-helper");
-  const QFileInfo executable(path);
-  const auto unsafePermissions = QFileDevice::WriteGroup | QFileDevice::WriteOther;
-  if (!executable.isFile() || !executable.isExecutable() ||
-      (executable.ownerId() != getuid() && executable.ownerId() != 0) ||
-      (executable.permissions() & unsafePermissions)) {
-    return fail(
-        error, QStringLiteral(
-                   "The owned holding-display helper is missing or has unsafe permissions; source windows stay visible."
-               )
-    );
-  }
-  auto helper = std::make_unique<QProcess>();
-  // Retain helper diagnostics in the parent's log even when its readiness
-  // reply is valid but the independent parent-side geometry check fails.
-  helper->setProcessChannelMode(QProcess::ForwardedErrorChannel);
-  helper->setInputChannelMode(QProcess::ManagedInputChannel);
-  helper->setReadChannel(QProcess::StandardOutput);
-#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
-  helper->setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors);
-#endif
-  helper->start(path, {QStringLiteral("--owned-stdio"), QString::number(width), QString::number(height)});
-  const auto reject = [&](const QString &message) {
-    stopOwnedHelper(*helper);
-    return fail(error, message);
-  };
-  if (!helper->waitForStarted(5000)) {
-    return reject(QStringLiteral("Cannot start the owned holding-display helper: %1").arg(helper->errorString()));
-  }
-  QByteArray response;
-  QElapsedTimer timer;
-  timer.start();
-  while (!response.contains('\n') && timer.elapsed() < 10000) {
-    response += helper->read(4097 - response.size());
-    if (response.size() > 4096) {
-      return reject(QStringLiteral("Holding-display helper response exceeded its bound."));
-    }
-    if (response.contains('\n') || helper->state() == QProcess::NotRunning) {
-      break;
-    }
-    const qint64 remaining = 10000 - timer.elapsed();
-    if (remaining <= 0) {
-      break;
-    }
-    helper->waitForReadyRead(static_cast<int>(remaining));
-  }
-  response += helper->read(4097 - response.size());
-  if (response.size() > 4096 || helper->bytesAvailable() > 0 || !response.endsWith('\n') ||
-      response.indexOf('\n') != response.size() - 1) {
-    return reject(QStringLiteral("The holding-display helper did not return a bounded readiness response."));
-  }
-  QJsonParseError parseError;
-  const auto document = QJsonDocument::fromJson(response.left(response.indexOf('\n')), &parseError);
-  if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-    return reject(QStringLiteral("The holding-display helper returned invalid readiness data."));
-  }
-  const auto ready = document.object();
-  lifecycleDiagnostic("Holding display", "helper.reply", "completed", "Holding helper replied", ready);
-  if (ready.value(QStringLiteral("state")).toString() != QStringLiteral("ready")) {
-    return reject(
-        QStringLiteral("Holding display unavailable: %1").arg(ready.value(QStringLiteral("error")).toString())
-    );
-  }
-  const auto displayId = ready.value(QStringLiteral("displayId")).toInteger();
-  if (displayId <= 0 || displayId > UINT32_MAX || helper->state() != QProcess::Running) {
-    return reject(QStringLiteral("The holding-display helper did not retain a valid display."));
-  }
-  m_impl->id = static_cast<CGDirectDisplayID>(displayId);
-  m_impl->width = width;
-  m_impl->height = height;
-  m_impl->helper = std::move(helper);
-  const auto actual = CGDisplayBounds(m_impl->id);
-  lifecycleDiagnostic(
-      "Holding display", "geometry.inspect", "completed", "Independent parent-side display observation",
-      {{"displayId", qint64(m_impl->id)},
-       {"helperRunning", m_impl->helper->state() == QProcess::Running},
-       {"active", bool(CGDisplayIsActive(m_impl->id))},
-       {"mirrored", bool(CGDisplayIsInMirrorSet(m_impl->id))},
-       {"identityMatches", holdingIdentity(m_impl->id)},
-       {"isolated", isolated(m_impl->id, actual)},
-       {"x", actual.origin.x},
-       {"y", actual.origin.y},
-       {"width", actual.size.width},
-       {"height", actual.size.height},
-       {"expectedWidth", qint64(width)},
-       {"expectedHeight", qint64(height)}}
+  // Synchronous adapter for the explicit standalone manual utility. The native
+  // Host calls createAsync and never nests its event loop here.
+  QEventLoop loop;
+  bool done = false, created = false;
+  QString failure;
+  createAsync(
+      [&](bool success, QString reason) {
+        created = success;
+        failure = std::move(reason);
+        done = true;
+        loop.quit();
+      },
+      width, height
   );
-  QString verificationFailure;
-  if (!available(&verificationFailure)) {
-    lifecycleDiagnostic("Holding display", "geometry.verify", "failed", verificationFailure);
-    shutdown();
-    return fail(
-        error, QStringLiteral("The helper's holding display failed independent geometry verification: %1")
-                   .arg(verificationFailure)
-    );
-  }
-  lifecycleDiagnostic(
-      "Holding display", "create", "completed", "Hidden display verified", {{"displayId", qint64(m_impl->id)}}
-  );
-  return true;
+  if (!done)
+    loop.exec();
+  if (error)
+    *error = failure;
+  return created;
 #else
   @autoreleasepool {
     @try {
@@ -711,6 +664,172 @@ bool HoldingDisplay::create(QString *error, unsigned width, unsigned height)
 #endif
 }
 
+void HoldingDisplay::createAsync(std::function<void(bool, QString)> completion, unsigned width, unsigned height)
+{
+#ifdef DESKFLOW_HOLDING_DISPLAY_HELPER
+  QString reason;
+  const bool success = create(&reason, width, height);
+  completion(success, reason);
+#else
+  const auto rejected = [&](const QString &reason) {
+    lifecycleDiagnostic("Holding display", "create", "failed", reason);
+    completion(false, reason);
+  };
+  if (![NSThread isMainThread]) {
+    rejected("Holding-display creation must run on the host's main thread");
+    return;
+  }
+  if (width < 640 || height < 480 || width > 8192 || height > 8192 || width % 2 || height % 2) {
+    rejected("Holding-display dimensions must be even and between 640x480 and 8192x8192");
+    return;
+  }
+  if (m_impl->startup && m_impl->startup->pending()) {
+    if (width != m_impl->width || height != m_impl->height)
+      rejected("A different holding-display mode is already being prepared");
+    else
+      m_impl->completions.push_back(std::move(completion));
+    return;
+  }
+  if (available()) {
+    if (width != m_impl->width || height != m_impl->height)
+      rejected("Restore exported windows before changing the holding-display mode");
+    else
+      completion(true, {});
+    return;
+  }
+  if (m_impl->helper) {
+    rejected("The holding display was lost; restore exported windows before recreating it");
+    return;
+  }
+  const QString path = QCoreApplication::applicationDirPath() + "/deskflow-holding-display-helper";
+  const QFileInfo executable(path);
+  if (!executable.isFile() || !executable.isExecutable() ||
+      (executable.ownerId() != getuid() && executable.ownerId() != 0) ||
+      (executable.permissions() & (QFileDevice::WriteGroup | QFileDevice::WriteOther))) {
+    rejected("The owned holding-display helper is missing or has unsafe permissions");
+    return;
+  }
+  lifecycleDiagnostic(
+      "Holding display", "create", "started", "Create hidden display without blocking native events",
+      {{"width", qint64(width)}, {"height", qint64(height)}}
+  );
+  m_impl->width = width;
+  m_impl->height = height;
+  m_impl->response.clear();
+  m_impl->replied = false;
+  m_impl->completions.push_back(std::move(completion));
+  m_impl->helper = std::make_unique<QProcess>();
+  auto *helper = m_impl->helper.get();
+  helper->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+  helper->setInputChannelMode(QProcess::ManagedInputChannel);
+  helper->setReadChannel(QProcess::StandardOutput);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 6, 0)
+  helper->setUnixProcessParameters(QProcess::UnixProcessFlag::CloseFileDescriptors);
+#endif
+  m_impl->startup = std::make_unique<HoldingDisplayStartup>(
+      [this](QString *reason) {
+        const bool verified = available(reason);
+        const auto actual = CGDisplayBounds(m_impl->id);
+        lifecycleDiagnostic(
+            "Holding display", "geometry.inspect", "observed", "Independent parent-side display observation",
+            {{"displayId", qint64(m_impl->id)},
+             {"active", bool(CGDisplayIsActive(m_impl->id))},
+             {"identityMatches", holdingIdentity(m_impl->id)},
+             {"verified", verified},
+             {"x", actual.origin.x},
+             {"y", actual.origin.y},
+             {"width", actual.size.width},
+             {"height", actual.size.height},
+             {"pendingReason", *reason}}
+        );
+        return verified;
+      },
+      [this](bool success, QString reason) {
+        auto completions = std::move(m_impl->completions);
+        m_impl->removeNotifications();
+        if (!success) {
+          stopOwnedHelper(*m_impl->helper);
+          m_impl->helper.reset();
+          m_impl->id = 0;
+          m_impl->width = m_impl->height = 0;
+        }
+        lifecycleDiagnostic(
+            "Holding display", "create", success ? "completed" : "failed",
+            success ? "Hidden display independently verified" : reason
+        );
+        // A completion may close its Host. All state changes above precede it;
+        // only detached callback values are touched from here onward.
+        for (auto &callback : completions)
+          callback(success, reason);
+      }
+  );
+  auto *startup = m_impl->startup.get();
+  // Queued slots never tear down QProcess from inside one of its own signals.
+  QObject::connect(helper, &QProcess::started, startup, [startup] { startup->started(); }, Qt::QueuedConnection);
+  QObject::connect(
+      helper, &QProcess::errorOccurred, startup,
+      [this](QProcess::ProcessError) {
+        if (m_impl->startup->pending())
+          m_impl->startup->fail("Holding-display helper failed: " + m_impl->helper->errorString());
+      },
+      Qt::QueuedConnection
+  );
+  QObject::connect(
+      helper, &QProcess::finished, startup,
+      [startup](int, QProcess::ExitStatus) {
+        startup->fail("Holding-display helper exited before independent display readiness");
+      },
+      Qt::QueuedConnection
+  );
+  QObject::connect(
+      helper, &QProcess::readyReadStandardOutput, startup,
+      [this] {
+        auto &state = *m_impl;
+        if (!state.startup->pending() || !state.helper->bytesAvailable())
+          return;
+        state.response += state.helper->read(4097 - state.response.size());
+        if (state.response.size() > 4096 || state.helper->bytesAvailable() > 0 || state.replied) {
+          state.startup->fail("Holding-display helper response exceeded its bound");
+          return;
+        }
+        if (!state.response.contains('\n'))
+          return;
+        if (!state.response.endsWith('\n') || state.response.indexOf('\n') != state.response.size() - 1) {
+          state.startup->fail("The holding-display helper returned multiple readiness records");
+          return;
+        }
+        QJsonParseError parseError;
+        const auto document = QJsonDocument::fromJson(state.response.trimmed(), &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+          state.startup->fail("The holding-display helper returned invalid readiness data");
+          return;
+        }
+        const auto ready = document.object();
+        lifecycleDiagnostic("Holding display", "helper.reply", "completed", "Holding helper replied", ready);
+        const auto id = ready.value("displayId").toInteger();
+        if (ready.value("state").toString() != "ready" || id <= 0 || id > UINT32_MAX ||
+            state.helper->state() != QProcess::Running) {
+          state.startup->fail(
+              "Holding display unavailable: " + ready.value("error").toString("Invalid helper identity")
+          );
+          return;
+        }
+        state.id = static_cast<CGDirectDisplayID>(id);
+        state.replied = true;
+        state.startup->ready();
+      },
+      Qt::QueuedConnection
+  );
+  const auto registered = CGDisplayRegisterReconfigurationCallback(Impl::displayChanged, m_impl.get());
+  if (registered != kCGErrorSuccess) {
+    startup->fail(QString("Cannot observe native display readiness (%1)").arg(registered));
+    return;
+  }
+  m_impl->notifications = true;
+  helper->start(path, {"--owned-stdio", QString::number(width), QString::number(height)});
+#endif
+}
+
 bool HoldingDisplay::available(QString *reason) const
 {
   if (reason)
@@ -762,6 +881,10 @@ Rect HoldingDisplay::bounds() const
 void HoldingDisplay::shutdown()
 {
 #ifndef DESKFLOW_HOLDING_DISPLAY_HELPER
+  m_impl->removeNotifications();
+  if (m_impl->startup)
+    m_impl->startup->cancel();
+  m_impl->completions.clear();
   m_impl->id = kCGNullDirectDisplay;
   m_impl->width = 0;
   m_impl->height = 0;

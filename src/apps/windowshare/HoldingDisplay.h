@@ -89,6 +89,10 @@ public:
   // Reports the runtime API schema, not proof that display creation will work.
   static bool supported(QString *reason = nullptr);
   bool create(QString *error = nullptr, unsigned width = 1920, unsigned height = 1080);
+  // Production creation returns to the event loop while helper/display events
+  // arrive. shutdown() cancels pending completions. Same-mode callers join the
+  // same owned creation; each must revalidate its source before continuing.
+  void createAsync(std::function<void(bool, QString)> completion, unsigned width = 1920, unsigned height = 1080);
   bool available(QString *reason = nullptr) const;
   std::uint32_t displayId() const;
   Rect bounds() const;

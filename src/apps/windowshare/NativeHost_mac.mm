@@ -1211,6 +1211,8 @@ struct NativeHost::Impl
     std::uint64_t resizeRequest = 0;
     std::uint64_t focusRequest = 0;
     std::uint64_t producedGeometry = 0;
+    bool holdingPending = false;
+    std::uint64_t holdingPaintedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
     NativeAssociatedReturn associatedReturn;
     std::optional<WindowFamily> family;
@@ -2832,7 +2834,8 @@ struct NativeHost::Impl
       );
     }];
   }
-  void ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry)
+  void
+  ready(std::uint64_t session, std::uint64_t epoch, std::uint64_t paintedGeometry, bool holdingContinuation = false)
   {
     const QPointer<NativeHost> childGuard(q);
     if (handleAssociatedChild({session, epoch}) || !childGuard)
@@ -2844,6 +2847,12 @@ struct NativeHost::Impl
     if (!e || e->session.phase != Phase::Preparing || !e->session.firstFrame || !paintedGeometry ||
         paintedGeometry != e->session.geometry || e->producedGeometry != paintedGeometry || e->relocating)
       return;
+    if (e->holdingPending) {
+      // Preserve the latest real Viewer acknowledgement while display creation
+      // yields to native events. Never manufacture a paint after it completes.
+      e->holdingPaintedGeometry = paintedGeometry;
+      return;
+    }
     lifecycleDiagnostic(
         "Host", "viewer.first-paint", "completed", "Viewer acknowledged the source frame",
         {{"windowId", qint64(e->identity.id)}, {"geometry", QString::number(paintedGeometry)}}
@@ -2873,8 +2882,93 @@ struct NativeHost::Impl
     }
     const auto drag = e->windowDrag;
     if (drag) {
-      if (!drag->painted(paintedGeometry) || !e->dragReleaseFrameObserved || !drag->reserveCommit(drag->binding()))
+      const bool reserved =
+          holdingContinuation
+              ? drag->committing(drag->binding()) && drag->geometry() == paintedGeometry &&
+                    drag->paintedGeometry() == paintedGeometry
+              : drag->painted(paintedGeometry) && e->dragReleaseFrameObserved && drag->reserveCommit(drag->binding());
+      if (!reserved)
         return; // A painted preview cannot end the original native drag.
+    }
+    if (holdingEnabled && !holding.available()) {
+      if (std::any_of(entries.begin(), entries.end(), [](const auto &item) { return item.second->moved; })) {
+        error("Holding display changed while sources were exported; restoring all windows");
+        if (childGuard)
+          restoreAll(KeyboardRouteReason::AuthorityLost);
+        return;
+      }
+      const auto sourceTransaction = e->sourceTransaction;
+      const auto expected = e->identity;
+      const auto observed = identity(expected.id);
+      const auto frame = bounds(e->window, "source.holding.prepare");
+      CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute, "source.holding.prepare.minimized"));
+      const auto outputs = physicalOutputSnapshot();
+      const auto stillPreparing = [&]() -> Entry * {
+        if (!childGuard || !lifecycle->current(admitted))
+          return nullptr;
+        auto *item = entry(session, epoch);
+        return item && item->session.phase == Phase::Preparing && item->sourceTransaction == sourceTransaction &&
+                       item->identity.id == expected.id && item->identity.pid == expected.pid &&
+                       item->identity.launch == expected.launch && item->session.geometry == paintedGeometry &&
+                       item->producedGeometry == paintedGeometry && item->visible && item->windowDrag == drag &&
+                       (!drag || drag->committing(drag->binding())) &&
+                       (!drag || !CGEventSourceButtonState(kCGEventSourceStateHIDSystemState, kCGMouseButtonLeft)) &&
+                       !item->capture->stopped && !item->capture->failurePending
+                   ? item
+                   : nullptr;
+      };
+      e = stillPreparing();
+      if (!e || !observed || observed->pid != expected.pid || observed->launch != expected.launch || !frame ||
+          !sameGeometry(*frame, e->session.source) || !closeEnough(*frame, observed->frame) || !outputs ||
+          !physicalAtExport || !samePhysicalOutputLayout(*physicalAtExport, *outputs) ||
+          (minimized && CFEqual(minimized.get(), kCFBooleanTrue)) || !AXIsProcessTrusted() ||
+          !CGPreflightScreenCaptureAccess()) {
+        error("Source identity, frame or physical layout changed before display creation");
+        if (childGuard && entry(session, epoch))
+          restore(session);
+        return;
+      }
+      lifecycleDiagnostic(
+          "Host", "holding.recovery", "started", "Persist recovery before asynchronous display creation"
+      );
+      if (!sourceTransaction->armMutation([&] { return stillPreparing() && writeJournal() && stillPreparing(); })) {
+        error("Cannot persist source recovery before holding-display creation");
+        if (childGuard && entry(session, epoch))
+          restore(session);
+        return;
+      }
+      lifecycleDiagnostic("Host", "holding.recovery", "completed", "Display-change recovery intent is durable");
+      e = stillPreparing();
+      if (!e)
+        return;
+      e->holdingPending = true;
+      e->holdingPaintedGeometry = paintedGeometry;
+      holding.createAsync(
+          [this, childGuard, admitted, session, epoch, sourceTransaction, expected,
+           drag](bool success, QString reason) {
+            if (!childGuard || destroying || !lifecycle->current(admitted))
+              return;
+            auto *item = entry(session, epoch);
+            if (!item || !item->holdingPending || item->session.phase != Phase::Preparing ||
+                item->sourceTransaction != sourceTransaction || item->windowDrag != drag ||
+                item->identity.id != expected.id || item->identity.pid != expected.pid ||
+                item->identity.launch != expected.launch)
+              return;
+            const auto painted = item->holdingPaintedGeometry;
+            item->holdingPending = false;
+            item->holdingPaintedGeometry = 0;
+            if (!success) {
+              lifecycleDiagnostic("Host", "source.holding", "failed", reason);
+              error("Holding-display setup failed: " + reason);
+              if (childGuard && entry(session, epoch))
+                restore(session);
+              return;
+            }
+            ready(session, epoch, painted, true); // Revalidate owner, actual frame and paint before placement.
+          },
+          4096, 4096
+      );
+      return;
     }
     const QPointer<NativeHost> alive(q);
     const auto expected = e->identity;
@@ -3005,26 +3099,7 @@ struct NativeHost::Impl
           "Host", "source.holding", "started", "Place the source on a verified hidden display",
           {{"windowId", qint64(expected.id)}, {"beforeFrame", diagnosticRect(before->frame)}}
       );
-      if (!holding.available()) {
-        const bool hasHiddenSources =
-            std::any_of(entries.begin(), entries.end(), [](const auto &item) { return item.second->moved; });
-        if (hasHiddenSources) {
-          failed("Holding display changed while sources were exported; restoring all windows", true);
-          return;
-        }
-        // WindowServer may reposition the source while creating/removing a
-        // display, even when the helper later fails verification. Latch that
-        // attempted mutation before creation so return cannot discard it as
-        // an untouched capture preparation (physical attempt 18).
-        lifecycleDiagnostic("Host", "holding.recovery", "started", "Persist recovery before changing displays");
-        if (!sourceTransaction->armMutation([&] { return current() && writeJournal() && current(); })) {
-          failed("Cannot persist source recovery before holding-display creation");
-          return;
-        }
-        lifecycleDiagnostic("Host", "holding.recovery", "completed", "Display-change recovery intent is durable");
-      }
-      QString failure;
-      if (holding.available() || holding.create(&failure, 4096, 4096)) {
+      if (holding.available()) {
         // Creating the virtual holding display can itself rearrange existing
         // physical outputs. Never move a window using a stale source layout.
         if (!alive)
@@ -3091,21 +3166,8 @@ struct NativeHost::Impl
         ++e->session.geometry;
         updateCapture(*e);
       } else {
-        if (!alive)
-          return;
-        if (drag) {
-          failed("Window drag requires verified holding-display placement; preserving source visibility");
-          return;
-        }
-        error("Holding display unavailable; source remains visible: " + failure);
-        lifecycleDiagnostic("Host", "source.holding", "failed", failure, {{"windowId", qint64(expected.id)}});
-        if (!alive)
-          return;
-        e = current();
-        if (!e || !readWindow() || !layoutCurrent()) {
-          failed("Source-visible fallback changed during holding-display creation; restoring source");
-          return;
-        }
+        failed("Holding display changed before placement; restoring source");
+        return;
       }
     }
     // The default source-visible fallback never parks a window off-screen.

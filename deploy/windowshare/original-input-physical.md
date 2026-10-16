@@ -240,6 +240,13 @@ own nonzero native ID, distinct from the source's ID. Its exact WindowServer
 PID/ID, visible state, original frame and Qt/native frame agreement are checked
 throughout. **Only the source window ID is exported.**
 
+Holding startup waits asynchronously for the helper and the parent's verified
+display state. Native display-change notifications drive verification within a
+fixed deadline; a helper reply alone cannot authorize placement. Requested
+holding setup fails and restores on loss/timeout instead of committing a visible
+fallback. Default runs without holding retain their source-visible behavior.
+Stage/error diagnostics are flushed to logs; no results popup is launched.
+
 Start and Stop remain in the local control window; Record remains in the
 exported source. Follow the same steps, then return left to those local
 controls. The run must observe a source-frame relocation and later the exact

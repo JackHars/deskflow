@@ -452,6 +452,21 @@ class DiagnosticTests(unittest.TestCase):
             trace.close()
             self.assertNotIn('secret-test-text', (root / 'trace').read_text())
 
+    def test_native_ax_observations_retain_errors_without_claiming_terminal_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+            log = root / 'native.log'
+            observer = module.DIAGNOSTICS.LogObserver(log, trace)
+            row = dict(component='Host', step='source.holding.window.position', state='observed',
+                       message='Native attribute read returned', details=dict(axError=-25204, present=False))
+            log.write_text('DESKFLOW_STEP ' + json.dumps(row) + '\n')
+            observer.poll()
+            self.assertEqual(observer.native['Host: source.holding.window.position'], row)
+            self.assertIsNone(trace.first_failure)
+            trace.close()
+            self.assertEqual(json.loads((root / 'trace').read_text())['details']['native']['details']['axError'], -25204)
+
     def test_event_wait_observes_readiness_and_deadline_without_sleep(self):
         now = [0]
         wake = Mock()

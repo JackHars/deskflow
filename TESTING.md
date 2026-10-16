@@ -4,6 +4,27 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## H06 attempt twenty-one: native display notification race — 2026-10-15
+
+`build/h06-r21-czr6qf_t/` consumed fresh permission and failed before Active.
+The helper saw its verified 4096x4096 display, while the blocked Host immediately
+read an inactive 1x1 record for the same ID and stopped the helper. Native source
+return and final cleanup succeeded; Ubuntu relay/controller and Mac SSH failures
+remain recorded. The user reports the test closed after Start. No results popup
+was launched and H04/H06 are not accepted.
+
+Production display creation now returns to the event loop and completes only
+after independent parent verification, driven by helper/display notifications.
+Existing deadlines, exact identity/layout checks and write-ahead recovery remain;
+helper loss/cancellation fences late callbacks. No sleeps or busy polling are
+added. Native observed/error-code rows now reach the combined diagnostic log.
+Evidence: `build/h06-startup-ra7c2l2d/`. Mac builds, all 84 coordinator cases on
+both machines, four Mac Server/coordinator/preflight/native CTests, and the default
+non-mutating holding suite pass. The new startup cases reproduce the stale
+parent state and exercise notification completion, cancellation and deadline.
+The pure drag-transaction tests pass. Physical display creation and hidden
+placement still require fresh permission.
+
 ## H06 attempt twenty: placement diagnostics — 2026-10-15
 
 `build/h06-r20-8g88ufzd/` consumed fresh permission and passed Ready/Start with

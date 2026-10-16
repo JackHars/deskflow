@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "HoldingDisplay.h"
+#include "HoldingDisplayStartup.h"
 
 #include <CoreGraphics/CoreGraphics.h>
 #include <QCoreApplication>
@@ -240,6 +241,83 @@ void relocationTransactions()
   }
   check(relocateHoldingWindow({71, 2}, 9, {}).status == Status::Refused, "missing relocation operations fail closed");
   std::cout << "PASS: isolated first-painted-frame relocation transactions; exact owner/frame, journal and rollback\n";
+}
+
+void startupNotifications()
+{
+  using deskflow::windowshare::HoldingDisplayStartup;
+  {
+    bool parentReady = false;
+    int probes = 0, completions = 0;
+    HoldingDisplayStartup startup(
+        [&](QString *reason) {
+          ++probes;
+          *reason = parentReady ? QString{} : "parent still observes inactive 1x1 display";
+          return parentReady;
+        },
+        [&](bool success, QString reason) {
+          ++completions;
+          check(success && reason.isEmpty(), "only independent parent readiness completes startup");
+        }
+    );
+    startup.changed();
+    check(probes == 0, "a notification before helper readiness cannot admit a display");
+    startup.started();
+    startup.ready();
+    check(
+        probes == 1 && completions == 0 && startup.pending(),
+        "attempt 21: helper ready with stale parent state waits instead of tearing down the display"
+    );
+    bool eventProcessed = false;
+    QMetaObject::invokeMethod(&startup, [&] { eventProcessed = true; }, Qt::QueuedConnection);
+    QCoreApplication::processEvents();
+    check(eventProcessed && probes == 1, "waiting permits queued work and does not poll native state");
+    parentReady = true;
+    startup.changed();
+    startup.changed();
+    startup.expire();
+    check(probes == 2 && completions == 1 && !startup.pending(), "notification completes exactly once");
+  }
+  for (const bool canceled : {false, true}) {
+    int completions = 0;
+    HoldingDisplayStartup startup(
+        [](QString *reason) {
+          *reason = "still inactive";
+          return false;
+        },
+        [&](bool success, QString reason) {
+          ++completions;
+          check(!success && reason.contains("still inactive"), "deadline preserves the last independent rejection");
+        }
+    );
+    startup.started();
+    startup.ready();
+    if (canceled)
+      startup.cancel();
+    startup.expire();
+    startup.changed();
+    startup.ready();
+    check(
+        !startup.pending() && completions == (canceled ? 0 : 1),
+        "cancellation and expiry fence late helper/display notifications"
+    );
+  }
+  {
+    int completions = 0;
+    HoldingDisplayStartup startup(
+        [](QString *) { return true; },
+        [&](bool success, QString reason) {
+          ++completions;
+          check(!success && reason == "helper exited", "helper loss wins over later display visibility");
+        }
+    );
+    startup.started();
+    startup.fail("helper exited");
+    startup.ready();
+    startup.changed();
+    check(completions == 1, "helper failure cannot later become readiness");
+  }
+  std::cout << "PASS: event-driven holding startup; stale parent cache, readiness, cancellation and expiry\n";
 }
 
 void resizeTransactions()
@@ -695,6 +773,7 @@ int run(int argc, char **argv)
     return 2;
   }
   try {
+    startupNotifications();
     relocationTransactions();
     resizeTransactions();
     const auto before = displays();

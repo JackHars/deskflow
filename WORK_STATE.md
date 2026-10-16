@@ -1,5 +1,63 @@
 # Seamless Windows work state
 
+## Attempt twenty-one: helper/parent display readiness race — 2026-10-15
+
+Permission `call_db5cd7aaaccc4382b58b1683810ac249` was consumed by
+`build/h06-r21-czr6qf_t/`, frozen source `c73337c57`. The user reports everything
+closed after Start. Start was recorded at 01:19:14 UTC. Setup failed before
+Active or recording, then the coordinator performed teardown.
+
+At 01:19:32.162 UTC helper PID 38564 reported display 4128835 active, 4096x4096
+at (1440,-1), with the physical layout unchanged. In the same millisecond Host
+PID 38525 read that ID as inactive, with wrong identity and 1x1 bounds at (2470,0).
+Its first failure was `The parent does not observe an active holding display`;
+it immediately stopped the helper. AX reads then returned -25204 during removal.
+Native return subsequently succeeded, restoring (400,188,640,448). Final source
+input is neutral and the journal is empty. Mac Core/source exited 0, owned
+processes stopped and ordinary settings match. Ubuntu desktop restoration,
+owned cleanup and ordinary-state preservation pass, but its relay lost TLS
+before coordinated stop and controller exited 1; Mac SSH exit 255 remains.
+Ubuntu archive SHA-256:
+`ee71540c32fb37a20974a14f18000e88c3efc368178204f75cabf55d04cea618`.
+
+The parent blocked its event thread in `waitForStarted`/`waitForReadyRead` and
+immediately treated the helper reply as final parent readiness. Apple's header
+and [callback documentation](https://developer.apple.com/documentation/coregraphics/cgdisplayreconfigurationcallback)
+specify updated display state after reconfiguration callbacks. Qt documents that
+[synchronous process waits](https://doc.qt.io/qt-6.8/qprocess.html#synchronous-process-api)
+suspend the calling thread. This explains the recorded disagreement; the native
+fix still needs a separately approved run.
+
+Production creation is now asynchronous. It subscribes to display-change
+completion before starting the helper, parses its bounded reply through queued
+process signals, and requires the parent's existing exact display checks.
+An initially stale record waits for a notification within the existing readiness
+deadline; no polling, sleep or arbitrary delay is added. Helper loss, timeout or
+shutdown fences late completion. Verification runs outside the native display
+callback, and shutdown unregisters it. Same-mode requests share the owned startup.
+The synchronous adapter is reserved for the explicit standalone utility.
+
+Host durably arms recovery before creation and returns to its normal event loop.
+It retains actual Viewer paint acknowledgements while waiting, then rechecks the
+session, source transaction, process/window identity, physical layout and source
+geometry before placement. Drag reservation still requires the original release,
+retains its deadline, and rechecks its painted geometry on continuation. Requested
+hidden-display setup fails/restores if unavailable; default source-visible mode
+remains available when holding is disabled. Combined logs now retain native
+`observed` rows, including AX errors previously present only in the raw Core log.
+
+Unattended evidence: `build/h06-startup-ra7c2l2d/`. Host/helper/native targets
+build; all 84 coordinator cases pass on Mac (1.78s) and actual jack over SSH
+(1.03s). Four Mac Server/coordinator/preflight/native CTests pass (22.92s).
+The non-mutating holding test passes (0.50s), including the reproduced stale
+parent observation, event-driven readiness, helper loss, cancellation and expiry.
+The pure window-drag transaction suite also passes. The final continuation guard
+was rebuilt and the native suite passed again (0.76s). The final signed package
+is `mac-package-final/` and passes exact-library validation (77 records, no errors).
+No physical display or
+session was created by these checks. H04/H06 remain unaccepted; ask again
+immediately before another physical launch.
+
 ## Attempt twenty: holding placement rejected; log-only diagnostics — 2026-10-15
 
 Permission `call_7330e3b7ef1e4099bc00281b601d2ed6` was consumed by
@@ -53,8 +111,8 @@ Mac desktop preview or results popup. Both plans and permission/conflict checks
 pass. Packaged admission passes in 11.61s with native input hooks disabled and
 its companion stopped. Ubuntu's local Wayland session is active and the temporary
 provider remains disabled. Preparation did not open a physical test window.
-No launch-permission receipt or session directory exists yet; fresh approval is
-required immediately before launch. Do not reuse attempt twenty's permission.
+The separately approved attempt twenty-one and its consumed permission are
+recorded above. Neither attempt's approval may be reused.
 
 ## Attempt nineteen: pre-Start presentation failure — 2026-10-15
 
