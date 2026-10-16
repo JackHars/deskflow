@@ -52,6 +52,16 @@ Linux diagnostics-validation archive SHA-256:
 No new physical test has been
 launched by this work; obtain fresh permission immediately before the next one.
 
+Fresh preparation is `build/h06-r19-209et7ms/` (pointer
+`build/h06-r19-current.txt`), using source commit `28def6f59` and the new signed
+package in `build/physical-diagnostics-fxxw1od6/mac-package/`. Both plans validate,
+Mac permissions/conflict checks pass, and jack's actual unlocked Wayland session
+2 is selected with the provider still disabled. The packaged admission probe
+passes in 12.03s with native hooks off and its companion stopped. Preparation
+opened no physical window or input session. A new launch-permission question is
+pending; `prepared-launch-argv.json` is ready but has not been executed. The
+previous approval belongs only to consumed attempt eighteen.
+
 ## Seamless test placement and handoff diagnosis — 2026-10-15
 
 The user requests the original Mac window hidden while it is used on jack's
