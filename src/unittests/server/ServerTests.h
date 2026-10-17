@@ -19,6 +19,8 @@ private Q_SLOTS:
   void KeyboardBroadcastInfo_alloc_stateAndComputers();
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   void initTestCase();
+  void handshake_bufferedInfo_data();
+  void handshake_bufferedInfo();
   void inputFilter_ownedActionsAndConnectionLifetime();
   void inputFilter_actualQueueObservedBorrowedDispatch();
   void originalCapture_legacyKeyExpansion();

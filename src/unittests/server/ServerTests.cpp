@@ -15,16 +15,20 @@
 #include "base/EventQueue.h"
 #include "deskflow/AppUtil.h"
 #include "deskflow/Computer.h"
+#include "deskflow/PacketStreamFilter.h"
 #include "deskflow/PlatformComputer.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #include "io/IStream.h"
 #include "server/ClientProxy1_1.h"
 #include "server/ClientProxy1_8.h"
+#include "server/ClientProxyUnknown.h"
 #include "server/InputFilter.h"
 #include "server/PrimaryClient.h"
 #include "windowshare/InputEvidence.h"
 
 #include <QTemporaryDir>
+#include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -355,6 +359,11 @@ public:
 class RoutingEventQueue : public MockEventQueue
 {
 public:
+  ~RoutingEventQueue() override
+  {
+    for (const auto &event : queued)
+      Event::deleteData(event);
+  }
   EventQueueTimer *newTimer(double, void *target) override
   {
     timerTarget = target;
@@ -372,7 +381,9 @@ public:
   }
   bool dispatchEvent(const Event &event) override
   {
-    const auto found = handlers.find({event.getType(), event.getTarget()});
+    auto found = handlers.find({event.getType(), event.getTarget()});
+    if (found == handlers.end())
+      found = handlers.find({EventTypes::Unknown, event.getTarget()});
     if (found == handlers.end())
       return false;
     const auto handler = found->second;
@@ -381,8 +392,12 @@ public:
   }
   void addEvent(Event &&event) override
   {
-    // This fixture deliberately drops queued notifications, but still owns
-    // their payloads just like the real event queue. Free on exception too.
+    if (retainQueued && !(event.getFlags() & Event::EventFlags::DeliverImmediately)) {
+      queued.push_back(std::move(event));
+      return;
+    }
+    // Routing tests normally drop queued notifications. Handshake tests retain
+    // them so changing the reader cannot invoke it inside its constructor.
     try {
       if (event.getFlags() & Event::EventFlags::DeliverImmediately)
         dispatchEvent(event);
@@ -392,6 +407,18 @@ public:
     }
     Event::deleteData(event);
   }
+  bool drain()
+  {
+    for (unsigned count = 0; !queued.empty() && count < 64; ++count) {
+      auto event = std::move(queued.front());
+      queued.pop_front();
+      dispatchEvent(event);
+      Event::deleteData(event);
+    }
+    return queued.empty();
+  }
+  bool retainQueued = false;
+  std::deque<Event> queued;
   std::map<std::pair<EventTypes, void *>, EventHandler> handlers;
   void removeHandler(EventTypes type, void *target) override
   {
@@ -631,6 +658,104 @@ void ServerTests::initTestCase()
   Settings::setStateFile(settings.filePath("routing.state"));
   // Core IPC receives notifications but never listens on a socket in these tests.
   new deskflow::core::ipc::CoreIpcServer(this);
+}
+
+void ServerTests::handshake_bufferedInfo_data()
+{
+  QTest::addColumn<int>("minor");
+  QTest::addColumn<int>("infoPrefix");
+  QTest::addColumn<bool>("destroyBeforeDrain");
+  for (int minor : {0, 8}) {
+    for (int prefix : {0, 5, 22}) {
+      const auto name = QByteArray::number(minor) + "-prefix-" + QByteArray::number(prefix);
+      QTest::newRow(name.constData()) << minor << prefix << false;
+    }
+    const auto name = QByteArray::number(minor) + "-destroy-before-buffered-read";
+    QTest::newRow(name.constData()) << minor << 22 << true;
+  }
+}
+
+void ServerTests::handshake_bufferedInfo()
+{
+  QFETCH(int, minor);
+  QFETCH(int, infoPrefix);
+  QFETCH(bool, destroyBeforeDrain);
+  RoutingFixture f;
+  f.events.retainQueued = true;
+  auto capture = std::make_shared<WireCapture>();
+  struct HandshakeStream : RoutingStream
+  {
+    using RoutingStream::RoutingStream;
+    QByteArray incoming;
+    uint32_t read(void *buffer, uint32_t count) override
+    {
+      const auto size = std::min<uint32_t>(count, incoming.size());
+      if (buffer)
+        std::memcpy(buffer, incoming.constData(), size);
+      incoming.remove(0, size);
+      return size;
+    }
+    bool isReady() const override
+    {
+      return !incoming.isEmpty();
+    }
+    uint32_t getSize() const override
+    {
+      return incoming.size();
+    }
+  };
+  auto *stream = new HandshakeStream(capture);
+  auto *packets = new PacketStreamFilter(&f.events, stream);
+  auto unknown = std::make_unique<ClientProxyUnknown>(packets, 30, f.server.get(), &f.events);
+  unsigned successes = 0, failures = 0;
+  f.events.addHandler(EventTypes::ClientProxyUnknownSuccess, unknown.get(), [&](const auto &) { ++successes; });
+  f.events.addHandler(EventTypes::ClientProxyUnknownFailure, unknown.get(), [&](const auto &) { ++failures; });
+  auto frame = [](const QByteArray &message) {
+    QByteArray packet;
+    for (int shift : {24, 16, 8, 0})
+      packet.append(char((message.size() >> shift) & 0xff));
+    return packet + message;
+  };
+  const auto hello =
+      frame("Barrier" + QByteArray::fromHex("0001 00") + char(minor) + QByteArray::fromHex("00000003") + "new");
+  const auto info = frame("DINF" + QByteArray::fromHex("0000 0000 0400 0300 0000 0200 0180"));
+  QCOMPARE(info.size(), 22);
+  stream->incoming = hello + info.first(infoPrefix);
+  // A single readiness edge delivers the greeting and any already-buffered
+  // display information. No second network notification rescues the full case.
+  QVERIFY(f.events.dispatchEvent(Event(EventTypes::StreamInputReady, stream->getEventTarget())));
+  QVERIFY(!unknown->orphanClientProxy());
+  QCOMPARE(successes, 0u);
+  if (destroyBeforeDrain) {
+    QVERIFY(!f.events.queued.empty());
+    unknown.reset();
+    QVERIFY(f.events.drain());
+    QCOMPARE(capture->destructions, 1u);
+    QCOMPARE(successes, 0u);
+    QCOMPARE(failures, 0u);
+    return;
+  }
+  QVERIFY(f.events.drain());
+  if (infoPrefix < info.size()) {
+    QCOMPARE(successes, 0u);
+    stream->incoming = info.sliced(infoPrefix);
+    QVERIFY(f.events.dispatchEvent(Event(EventTypes::StreamInputReady, stream->getEventTarget())));
+    QVERIFY(f.events.drain());
+  }
+  QCOMPARE(successes, 1u);
+  QCOMPARE(failures, 0u);
+  std::unique_ptr<ClientProxy> proxy(unknown->orphanClientProxy());
+  QVERIFY(proxy);
+  QCOMPARE(proxy->getName(), std::string("new"));
+  int32_t x, y, width, height;
+  proxy->getShape(x, y, width, height);
+  QCOMPARE(width, 1024);
+  QCOMPARE(height, 768);
+  QVERIFY(!proxy->getStream()->isReady());
+  unknown.reset();
+  QVERIFY(!capture->destroyed);
+  proxy.reset();
+  QCOMPARE(capture->destructions, 1u);
 }
 
 void ServerTests::originalCapture_legacyKeyExpansion()

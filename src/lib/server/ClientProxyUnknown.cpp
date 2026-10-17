@@ -227,6 +227,16 @@ void ClientProxyUnknown::handleData()
 
     // wait until the proxy signals that it's ready or has disconnected
     addProxyHandlers();
+
+    // The greeting and DINF can arrive in the same socket read. The packet
+    // filter reports readiness only on a transition, so the new reader needs
+    // a queued wakeup for packets left behind by the greeting reader. Queue it
+    // after both the proxy and its readiness handlers are fully installed.
+    auto *stream = m_proxy->getStream();
+    if (stream->isReady()) {
+      LOG_DEBUG("resuming buffered handshake for client \"%s\"", name.c_str());
+      m_events->addEvent(Event(EventTypes::StreamInputReady, stream->getEventTarget()));
+    }
     return;
   } catch (IncompatibleClientException &e) {
     // client is incompatible
