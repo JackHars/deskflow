@@ -298,7 +298,11 @@ public:
       observed["button"] = int(mouse->button());
     }
     appendReceipt(m_observed, m_eventCount, std::move(observed));
-    save();
+    // The 25 ms state timer publishes these counters and the bounded receipt
+    // history. Rewriting/fsyncing the full snapshot here blocks AppKit/AX for
+    // every event (and again when an ignored wheel propagates to a parent).
+    // Native evidence is recorded synchronously above; no evidence row or
+    // source timestamp is delayed, aggregated or discarded by this batching.
     return false;
   }
 
