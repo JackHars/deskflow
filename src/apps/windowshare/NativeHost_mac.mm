@@ -465,7 +465,13 @@ qint64 launchTime(pid_t pid)
   NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
   return app.launchDate ? qRound64(app.launchDate.timeIntervalSince1970 * 1000.0) : 0;
 }
-std::optional<WindowIdentity> identity(CGWindowID id, bool *knownMissing = nullptr)
+enum class IdentityDetail
+{
+  Full,
+  Authority
+};
+std::optional<WindowIdentity>
+identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = IdentityDetail::Full)
 {
   if (knownMissing)
     *knownMissing = false;
@@ -488,9 +494,11 @@ std::optional<WindowIdentity> identity(CGWindowID id, bool *knownMissing = nullp
     return std::nullopt;
   result.frame = rect(frame);
   result.onScreen = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
-  result.title = string(info[(__bridge NSString *)kCGWindowName]);
   result.launch = launchTime(result.pid);
-  result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
+  if (detail == IdentityDetail::Full) {
+    result.title = string(info[(__bridge NSString *)kCGWindowName]);
+    result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
+  }
   return result.frame.valid() && result.launch > 0 ? std::optional(result) : std::nullopt;
 }
 // An exact native window ID is required even when title and geometry collide.
@@ -1845,9 +1853,13 @@ struct NativeHost::Impl
       return WindowFamilyRole::Popover;
     if (CFEqual(role.get(), kAXHelpTagRole))
       return WindowFamilyRole::Tooltip;
+    // Only a Window's subrole can identify a Dialog. Asking every text field,
+    // button and container for an unused subrole adds a second synchronous AX
+    // round trip per node to the fresh attached-surface scan on every input.
+    if (!CFEqual(role.get(), kAXWindowRole))
+      return {};
     CF<CFTypeRef> subrole(attribute(window, kAXSubroleAttribute));
-    if (CFEqual(role.get(), kAXWindowRole) && subrole &&
-        (CFEqual(subrole.get(), kAXDialogSubrole) || CFEqual(subrole.get(), kAXSystemDialogSubrole)))
+    if (subrole && (CFEqual(subrole.get(), kAXDialogSubrole) || CFEqual(subrole.get(), kAXSystemDialogSubrole)))
       return WindowFamilyRole::Dialog;
     return {};
   }
@@ -2413,7 +2425,10 @@ struct NativeHost::Impl
     candidateFinished = identityFinished = std::chrono::steady_clock::now();
     if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
       return false;
-    const auto current = identity(target->identity.id);
+    // Titles and bundle metadata cannot authorize delivery. Avoid the unused
+    // LaunchServices lookup while retaining the exact WindowServer ID, PID,
+    // process birth and bounds reads for each authority check.
+    const auto current = identity(target->identity.id, nullptr, IdentityDetail::Authority);
     identityFinished = std::chrono::steady_clock::now();
     if (!alive)
       return false;
