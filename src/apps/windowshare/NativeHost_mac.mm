@@ -1706,7 +1706,8 @@ struct NativeHost::Impl
     const Owner owner{session, epoch};
     const auto *e = entry(session, epoch);
     if (!admitted || destroying || callbackDepth || !e || !e->visible || e->session.phase != Phase::Remote ||
-        focusOwner != owner || !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped)
+        focusOwner != owner || !focus.permits(owner, focusOwnerRevision) || !e->capture || e->capture->stopped ||
+        e->capture->failurePending)
       return denied(
           "Source, capture, or acknowledged focus lease is not current",
           {{"admitted", bool(admitted)},
@@ -1717,11 +1718,17 @@ struct NativeHost::Impl
            {"remote", e && e->session.phase == Phase::Remote},
            {"focusOwnerMatches", focusOwner == owner},
            {"focusLeaseValid", focus.permits(owner, focusOwnerRevision)},
-           {"captureLive", e && e->capture && !e->capture->stopped}}
+           {"captureLive", e && e->capture && !e->capture->stopped && !e->capture->failurePending}}
       );
     const KeyboardRouteBinding binding{owner, generation, focusOwnerRequest, focusOwnerRevision, e->session.geometry,
                                        scope};
-    if (!validKeyboardRouteBinding(binding) || !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
+    // Screen Recording permission is checked at export and by the 500 ms
+    // capture watchdog. Polling TCC here blocks for tens of milliseconds per
+    // event and expires mapped receipts during trackpad bursts. A stream error
+    // latches failurePending on its callback thread; reject that latch both
+    // before and after native reads without waiting for the queued restore.
+    // Accessibility, process identity, focus and geometry remain fresh reads.
+    if (!validKeyboardRouteBinding(binding) || !AXIsProcessTrusted() ||
         launchTime(e->identity.pid) != e->identity.launch)
       return denied("Native binding, permission, or process lifetime is not current");
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
@@ -1735,7 +1742,7 @@ struct NativeHost::Impl
     if (!focused || !state || (!e->family && !state->minimized.has_value()) || state->minimized.value_or(false) ||
         !sameGeometry(state->frame, e->session.source) || (e->moved && !holding.available()))
       return denied("Native focus, frame, minimized state, or holding display changed");
-    if (!lifecycle->current(admitted))
+    if (!lifecycle->current(admitted) || e->capture->stopped || e->capture->failurePending)
       return std::nullopt;
     if (observedFrame)
       *observedFrame = state->frame;
@@ -2365,7 +2372,8 @@ struct NativeHost::Impl
       return false;
     const auto *e = entry(binding.owner.session, binding.owner.epoch);
     return lifecycle->current(admitted) && originalTarget == target && originalInput.current(binding, captureEpoch) &&
-           current && e && CFEqual(e->window, target->window.get()) && current->pid == target->identity.pid &&
+           current && e && e->capture && !e->capture->stopped && !e->capture->failurePending &&
+           CFEqual(e->window, target->window.get()) && current->pid == target->identity.pid &&
            current->launch == target->identity.launch && sameGeometry(frame, target->frame) &&
            sameGeometry(current->frame, target->frame) && sameGeometry(e->session.source, target->frame);
   }
