@@ -954,6 +954,37 @@ class ProductionPlans(unittest.TestCase):
         self.assertEqual(report['physicalAcceptance'], 'not-assessed')
         self.assertIn('--automated-start', report['prospectiveSourceArgv'])
 
+    def test_recording_check_requires_synthetic_pipeline_and_retains_full_interval(self):
+        mac = {**self.mac, 'holdingDisplayEnabled': True, 'separateControls': True,
+               'linuxEnvironment': 'user-desktop'}
+        args = SimpleNamespace(mac_plan=self.base / 'recording-mac.json',
+                               linux_plan=self.base / 'recording-linux.json',
+                               production_original_input=True, holding_display=True,
+                               pipeline_check=False, pipeline_synthetic_input=False,
+                               pipeline_recording_check=True, source=None, validate_only=True,
+                               output=self.base / 'recording-review')
+        module.atomic_json(args.mac_plan, mac)
+        module.atomic_json(args.linux_plan, self.linux)
+        for pipeline, synthetic in ((False, False), (False, True), (True, False)):
+            args.pipeline_check, args.pipeline_synthetic_input = pipeline, synthetic
+            with self.subTest(pipeline=pipeline, synthetic=synthetic), \
+                    self.assertRaisesRegex(RuntimeError, 'explicitly synthetic unattended pipeline'):
+                module.run(args)
+        args.pipeline_check = args.pipeline_synthetic_input = True
+        with patch.object(module, 'validate_plans', return_value={key: {'path': str(value), 'sha256': self.mac['frozenArtifacts'][key]} for key, value in self.paths.items()}), \
+                patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Unexpected process')), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(module.run(args), 0)
+        report = module.read_json(args.output / 'result.json')
+        self.assertTrue(report['pipelineRecordingCheck'])
+        self.assertTrue(report['pipelineSyntheticInputDeclared'])
+        self.assertTrue(report['syntheticInputSent'])
+        self.assertEqual(report['pipelineActiveSeconds'], report['maximumSessionSeconds'])
+        self.assertEqual(report['pipelineActiveSeconds'], 120)
+        self.assertEqual(report['physicalAcceptance'], 'not-assessed')
+        self.assertFalse(report['nativeProcessesStarted'])
+        self.assertIn('--automated-start', report['prospectiveSourceArgv'])
+
     def test_same_pid_with_new_birth_is_not_the_owned_companion(self):
         inspector = object.__new__(self.support.ProcessInspector)
         identity = {'pid': 42, 'parent': 41, 'birthMicroseconds': 100001, 'executable': '/frozen/host'}

@@ -571,6 +571,9 @@ def run(arguments):
     holding = getattr(arguments, "holding_display", False)
     pipeline = getattr(arguments, "pipeline_check", False)
     synthetic_replay = getattr(arguments, "pipeline_synthetic_input", False)
+    pipeline_recording = getattr(arguments, "pipeline_recording_check", False)
+    require(not pipeline_recording or (pipeline and synthetic_replay),
+            "Recording checks require an explicitly synthetic unattended pipeline")
     require(not synthetic_replay or pipeline, "Synthetic input replay requires the explicit unattended pipeline mode")
     require(not pipeline or (production and holding and mac.get("linuxEnvironment") == "user-desktop" and
                              mac.get("recordingProfile", "h04") == "h04"),
@@ -590,8 +593,9 @@ def run(arguments):
               "macPlanSha256": digest(arguments.mac_plan)}
     report["pipelineSyntheticInputDeclared"] = bool(synthetic_replay)
     report["pipelineCheck"] = pipeline
+    report["pipelineRecordingCheck"] = pipeline_recording
     if pipeline:
-        report["pipelineActiveSeconds"] = 30
+        report["pipelineActiveSeconds"] = session_seconds if pipeline_recording else 30
     if production:
         report.update({"version": 2, "routeMode": "production-original-input", "originalInputPolicyConfigured": True,
                        "originalDeliveryVerified": False, "frozenArtifacts": artifacts,
@@ -950,7 +954,7 @@ def run(arguments):
         stage("Verify unattended sharing pipeline" if pipeline else "Active input: wait for Record and matching readiness")
         publisher.set("active", session_seconds)
         emit({"event": "active", "secondsRemaining": session_seconds, "title": title})
-        deadline, next_status = time.monotonic() + (30 if pipeline else session_seconds), time.monotonic() + 5
+        deadline, next_status = time.monotonic() + (30 if pipeline and not pipeline_recording else session_seconds), time.monotonic() + 5
         evidence_deadline = evidence_arm_deadline = None
         if evidence:
             emit({"event": "evidence-priming", "runId": evidence.run_id,
@@ -964,8 +968,9 @@ def run(arguments):
             if pipeline:
                 require(original.hidden_source_verified(receipt, initial, native_log.native.get("Host: source.hidden")),
                         "The hidden source stopped satisfying placement checks during the pipeline run")
-                require(not evidence.record_request.exists(), "Unexpected Record request during unattended setup check")
-            if evidence and not evidence.stopped and not pipeline:
+                require(pipeline_recording or not evidence.record_request.exists(),
+                        "Unexpected Record request during unattended setup check")
+            if evidence and not evidence.stopped and (not pipeline or pipeline_recording):
                 if not evidence.attempted:
                     require(time.monotonic() + recording_seconds + 5 < deadline,
                             evidence.arm_wait_failure())
@@ -975,7 +980,7 @@ def run(arguments):
                 require(evidence.armed or evidence_arm_deadline is None or time.monotonic() < evidence_arm_deadline,
                         "Not every evidence recorder acknowledged its one-shot arm")
                 if evidence.armed and evidence_deadline is None:
-                    stage("Record physical inputs")
+                    stage("Record declared synthetic inputs" if pipeline_recording else "Record physical inputs")
                     evidence_deadline = min(time.monotonic() + recording_seconds, deadline - 5)
                     emit({"event": "evidence-recording", "seconds": recording_seconds, "runId": evidence.run_id})
                 if evidence_deadline is not None and time.monotonic() >= evidence_deadline:
@@ -1003,7 +1008,7 @@ def run(arguments):
             evidence.stop()
             wait(lambda: all(reader.end for reader in evidence.readers.values()),
                  "bounded evidence end before route cleanup", 2, allow_stop=True)
-            report["inputEvidence"] = evidence.finish_pipeline() if pipeline else evidence.finish()
+            report["inputEvidence"] = evidence.finish_pipeline() if pipeline and not pipeline_recording else evidence.finish()
         report["beforeStop"] = collector.snapshot()
         report["linuxStop"] = driver.command("stop", check=False)
         linux_stopped = True
@@ -1029,7 +1034,8 @@ def run(arguments):
             require(report.get("sourceRelocationObserved") is True, "Holding was configured but source relocation was not observed")
             report["holdingLifecycleObserved"] = True
         require(not collector.snapshot()["gaps"], "Input receipt history has gaps")
-        report["status"] = ("pipeline-observed-with-synthetic-input" if synthetic_replay else
+        report["status"] = "synthetic-recording-lifecycle-verified" if pipeline_recording else \
+                           ("pipeline-observed-with-synthetic-input" if synthetic_replay else
                             "pipeline-verified-no-physical-input") if pipeline else \
                            "session-recorded-awaiting-human-and-receipt-review"
     except Cancelled as error:
@@ -1057,7 +1063,7 @@ def run(arguments):
                                         all(reader.end for reader in evidence.readers.values()) if started else
                                         evidence.readers["native"].end)[1],
                                "evidence recorder stop", timeout=2)
-                report["inputEvidence"] = (evidence.finish_pipeline() if pipeline else evidence.finish()) \
+                report["inputEvidence"] = (evidence.finish_pipeline() if pipeline and not pipeline_recording else evidence.finish()) \
                     if started else evidence.finish_unstarted()
             except Exception as error:
                 cleanup_errors.append("Input evidence: " + str(error))
@@ -1201,7 +1207,8 @@ def run(arguments):
               "physicalAcceptance": "not-assessed", "failure": report.get("failure")})
         diagnostics.close()
     return 0 if report["status"].startswith("session-recorded") or \
-        report["status"] in ("pipeline-verified-no-physical-input", "pipeline-observed-with-synthetic-input") else 1
+        report["status"] in ("pipeline-verified-no-physical-input", "pipeline-observed-with-synthetic-input",
+                             "synthetic-recording-lifecycle-verified") else 1
 
 
 def main():
@@ -1224,6 +1231,8 @@ def main():
                         help="Explicit unattended Start, 30-second sharing and restore check; no physical-input pass")
     parser.add_argument("--pipeline-synthetic-input", action="store_true",
                         help="Declare external automated input during --pipeline-check; never a physical input pass")
+    parser.add_argument("--pipeline-recording-check", action="store_true",
+                        help="Exercise Record and the full session interval with declared synthetic input; never physical acceptance")
     arguments = parser.parse_args()
     require(sys.platform == "darwin" or arguments.validate_only, "This coordinator must run on the Mac")
     if arguments.validate_only:

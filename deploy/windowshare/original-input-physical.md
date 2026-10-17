@@ -345,3 +345,25 @@ acceptance still `not-assessed`. This does not exercise real keyboard/trackpad
 delivery and cannot satisfy H04/H06 physical acceptance. Normal launches still
 require a human Start click and retain their original recording requirements.
 
+If a separate, explicitly authorized automation driver posts test input, also
+declare `--pipeline-synthetic-input`. Its result is labeled
+`pipeline-observed-with-synthetic-input`; the coordinator still leaves every
+recorder unarmed and cannot award physical acceptance. The external driver must
+check its own input receipts and failures separately from the coordinator's
+startup/cleanup result. A declared replay is conservatively marked synthetic
+even if it stops before sending input. Never use this flag for an attended run,
+fabricate native ownership evidence, or interpret legacy setup traffic as a
+successful original-input handoff.
+
+To check the Record lifecycle with that authorized synthetic driver, also add
+`--pipeline-recording-check`. This requires both pipeline flags above, retains
+the full H04 session interval, and allows the fixture's actual Record request.
+All three recorders must acknowledge arm, complete the original recording
+interval, and stop with zero loss and drained queues. Hidden-source placement
+and automatic session-end checks remain required. Success is labeled
+`synthetic-recording-lifecycle-verified`; input delivery failures remain the
+external driver's responsibility and must be reported separately. These logs
+contain synthetic input and cannot close physical acceptance or native-field
+preservation checks. The ordinary 30-second pipeline mode still forbids Record
+and requires every recorder to remain unarmed.
+
