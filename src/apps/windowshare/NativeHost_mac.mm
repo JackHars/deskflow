@@ -1501,7 +1501,7 @@ struct NativeHost::Impl
     CF<AXUIElementRef> window;
     Rect frame;
     std::array<std::int64_t, originalInputButtonCount> buttons{};
-    bool repeatLogged = false;
+    bool repeatLogged = false, deliveryLogged = false;
     OriginalTarget(const KeyboardRouteBinding &binding, const Entry &entry)
         : binding(binding),
           identity(entry.identity),
@@ -2499,6 +2499,18 @@ struct NativeHost::Impl
     // immediately before posting. Repeated AX walks here consume the receipt.
     if (!target || target->binding != binding || !lifecycle->current(admitted))
       return deny("Retained native target is no longer current");
+    const bool firstDelivery = !std::exchange(target->deliveryLogged, true);
+    const auto trace = [&](const char *state) {
+      if (firstDelivery)
+        lifecycleDiagnostic(
+            "Host", "input.native-first-delivery", state, "First original input native delivery",
+            {{"routeGeneration", QString::number(binding.generation)},
+             {"captureSequence", QString::number(record.sequence)},
+             {"payloadKind", int(record.payload.index())},
+             {"receiptRemainingUs", qint64(point.deadlineNs) / 1000 - qint64(localInputMonotonicNs()) / 1000}}
+        );
+    };
+    trace("received");
     const auto prepared = originalInput.prepare(binding, record, point, target->frame.width, target->frame.height);
     if (!prepared)
       return deny("Native input state or mapped receipt refused preparation");
@@ -2536,12 +2548,14 @@ struct NativeHost::Impl
     if (!originalInputCurrent(binding, record.epoch) || !alive || !liveLocalInputMappedPoint(point) ||
         originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
       return deny("Fresh native authority or mapped receipt changed before submission");
+    trace("authorized");
     if (prepared->posts)
       CGEventPostToPid(target->identity.pid, event.get());
     // CGEventPostToPid is a synchronous submission and runs no application/Qt
     // callbacks. Record the submitted press before any further native queries.
     if (!originalInput.submitted(prepared->token))
       return deny("Native submission no longer owns its pending record");
+    trace("submitted");
     if (const auto *key = std::get_if<OriginalInputKey>(&record.payload);
         key && key->transition == OriginalKeyTransition::Repeat && !target->repeatLogged) {
       target->repeatLogged = true;

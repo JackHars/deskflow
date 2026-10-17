@@ -202,14 +202,14 @@ public:
     if ((!owner || (!existingOwner && acquisition)) && !captured.transition.permitsAcquisition(captured.input)) {
       diagnose(2, "The control has no observed release followed by a fresh press", captured, route);
       if (owner) {
-        m_state->revoke();
+        m_state->revoke("Captured acquisition has no fresh press transition");
         return Result::revoked();
       }
       return Result::refused();
     }
     if (owner && (!Shared::live(*owner) || !owner->selected.sameSelection(selected) ||
                   !owner->capture.sameEpoch(captured.input.epoch))) {
-      m_state->revoke();
+      m_state->revoke("Capture epoch or selected recipient changed");
       return Result::revoked();
     }
     if (!owner) {
@@ -1061,7 +1061,7 @@ bool OriginalInputCoordinator::release(const LocalInputLease &lease)
   if (m_shared->owner && (!m_shared->owner->lease || m_shared->owner->lease == lease)) {
     m_shared->owner->lease = lease;
     m_shared->owner->offer = static_cast<const LocalInputOffer &>(lease);
-    m_shared->revoke();
+    m_shared->revoke("Private input preflight released the owner");
   }
   return true; // Local queued output is disabled before the ordered private revoke.
 }
