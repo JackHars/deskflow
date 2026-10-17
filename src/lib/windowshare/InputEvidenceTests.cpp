@@ -39,6 +39,20 @@ struct InputEvidenceTestAccess
   {
     return recorder.unlockCaptureBoundary();
   }
+  static void append(InputEvidenceRecorder &recorder, const InputEvidenceRow &row)
+  {
+    recorder.append(row);
+  }
+  static auto reserveRow(InputEvidenceRecorder &recorder)
+  {
+    return recorder.reserveRow();
+  }
+  static void publishRow(InputEvidenceRecorder &recorder, std::uint64_t ticket, const InputEvidenceRow &row)
+  {
+    auto &slot = recorder.m_rows[ticket % InputEvidenceRecorder::capacity];
+    slot.row = row;
+    slot.ready.store(ticket + 1, std::memory_order_release);
+  }
 };
 } // namespace deskflow::windowshare
 namespace {
@@ -381,6 +395,77 @@ void stickyFailures()
   check(
       full->loss() == InputEvidenceLoss::BufferFull && full->written() == InputEvidenceRecorder::capacity,
       "bounded recorder overwrote or hid loss"
+  );
+}
+void concurrentJournalWriters()
+{
+  // Independent queues legitimately publish at the same time. Exercise their
+  // shared journal without introducing contention on an individual queue.
+  auto recorder = core();
+  constexpr std::size_t producers = 4, perProducer = 1024, rounds = 4;
+  std::uint64_t total = 0;
+  for (std::size_t round = 0; round != rounds; ++round) {
+    std::barrier boundary(static_cast<std::ptrdiff_t>(producers));
+    std::vector<std::thread> writers;
+    for (std::size_t producer = 0; producer != producers; ++producer)
+      writers.emplace_back([&, producer] {
+        for (std::size_t index = 0; index != perProducer; ++index) {
+          InputEvidenceRow row;
+          row.sequence = producer * perProducer + index;
+          row.otherSequence = round;
+          boundary.arrive_and_wait();
+          InputEvidenceTestAccess::append(*recorder, row);
+        }
+      });
+    for (auto &writer : writers)
+      writer.join();
+    total += producers * perProducer;
+    check(
+        recorder->loss() == InputEvidenceLoss::None && recorder->written() == total,
+        "independent concurrent writers lost journal entries"
+    );
+    std::array<bool, producers * perProducer> seen{};
+    std::size_t count = 0;
+    while (const auto row = recorder->pop()) {
+      check(
+          row->sequence < seen.size() && !seen[row->sequence] && row->otherSequence == round,
+          "concurrent journal overwrote, duplicated or reused a stale entry"
+      );
+      seen[row->sequence] = true;
+      ++count;
+    }
+    check(count == seen.size() && recorder->drained(), "concurrent journal did not drain exactly once");
+  }
+}
+void unpublishedJournalReservation()
+{
+  auto recorder = core();
+  const auto ticket = InputEvidenceTestAccess::reserveRow(*recorder);
+  check(ticket && *ticket == 0 && !recorder->drained(), "unpublished writer was absent from the drain boundary");
+  for (std::size_t index = 1; index != InputEvidenceRecorder::capacity; ++index) {
+    InputEvidenceRow row;
+    row.sequence = index;
+    InputEvidenceTestAccess::append(*recorder, row);
+  }
+  check(
+      recorder->loss() == InputEvidenceLoss::None && !recorder->pop(),
+      "journal skipped an unfinished reservation or miscounted capacity"
+  );
+  InputEvidenceTestAccess::append(*recorder, {});
+  check(
+      recorder->loss() == InputEvidenceLoss::BufferFull && recorder->written() == InputEvidenceRecorder::capacity,
+      "unpublished reservation did not retain its capacity credit"
+  );
+  InputEvidenceTestAccess::publishRow(*recorder, *ticket, {});
+  std::size_t count = 0;
+  while (const auto row = recorder->pop()) {
+    check(row->sequence == count, "late publication reordered or overwrote a reserved row");
+    ++count;
+  }
+  check(
+      count == InputEvidenceRecorder::capacity && recorder->drained() &&
+          recorder->loss() == InputEvidenceLoss::BufferFull,
+      "late publication did not drain exactly once or erased the earlier overflow"
   );
 }
 void publicationBoundaries()
@@ -861,6 +946,8 @@ int main(int argc, char **argv)
     runCase("readinessDiagnostics", readinessDiagnostics);
     runCase("concurrentEventPreparation", concurrentEventPreparation);
     runCase("stickyFailures", stickyFailures);
+    runCase("concurrentJournalWriters", concurrentJournalWriters);
+    runCase("unpublishedJournalReservation", unpublishedJournalReservation);
     runCase("publicationBoundaries", publicationBoundaries);
     runCase("unboundedEventMetrics", unboundedEventMetrics);
     runCase("actualPortableQueues", actualPortableQueues);

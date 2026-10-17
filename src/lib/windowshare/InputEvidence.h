@@ -630,11 +630,12 @@ public:
     auto row = slot.row;
     slot.ready.store(0, std::memory_order_release);
     m_read.store(read + 1, std::memory_order_release);
+    m_occupied.fetch_sub(1, std::memory_order_release);
     return row;
   }
   bool drained() const noexcept
   {
-    return m_read.load() == m_written.load();
+    return m_read.load() == m_written.load() && m_occupied.load(std::memory_order_acquire) == 0;
   }
   std::uint64_t written() const noexcept
   {
@@ -715,20 +716,28 @@ private:
     }
     return true;
   }
+  std::optional<std::uint64_t> reserveRow() noexcept
+  {
+    // Independent input and event queues are concurrent producers. Reserve a
+    // capacity credit before taking a unique ticket; a competing writer does
+    // not mean an entry was lost. No retry, allocation or producer wait occurs.
+    // Credits include unpublished reservations and are returned only after pop
+    // copies the row, so a slow writer cannot be overwritten on ring wrap.
+    if (m_occupied.fetch_add(1, std::memory_order_acq_rel) >= capacity) {
+      m_occupied.fetch_sub(1, std::memory_order_release);
+      fail(InputEvidenceLoss::BufferFull, InputEvidenceFailureSite::JournalReserve);
+      return {};
+    }
+    return m_written.fetch_add(1, std::memory_order_acq_rel);
+  }
   void append(const InputEvidenceRow &row) noexcept
   {
-    auto next = m_written.load(std::memory_order_relaxed);
-    if (next - m_read.load(std::memory_order_acquire) >= capacity) {
-      fail(InputEvidenceLoss::BufferFull);
+    const auto next = reserveRow();
+    if (!next)
       return;
-    }
-    if (!m_written.compare_exchange_strong(next, next + 1, std::memory_order_acq_rel)) {
-      fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::JournalReserve);
-      return;
-    }
-    auto &slot = m_rows[next % capacity];
+    auto &slot = m_rows[*next % capacity];
     slot.row = row;
-    slot.ready.store(next + 1, std::memory_order_release);
+    slot.ready.store(*next + 1, std::memory_order_release);
   }
   struct Queue
   {
@@ -748,8 +757,8 @@ private:
   const deskflow::EventInputObserver m_eventObserver;
   std::array<Queue, queueCount> m_queues;
   std::array<Slot, capacity> m_rows;
-  std::atomic<std::uint64_t> m_written{0}, m_read{0}, m_deadline{0}, m_captureEpoch{0}, m_captureGate{0}, m_stop{0},
-      m_sourceEnd{0};
+  std::atomic<std::uint64_t> m_written{0}, m_read{0}, m_occupied{0}, m_deadline{0}, m_captureEpoch{0}, m_captureGate{0},
+      m_stop{0}, m_sourceEnd{0};
   std::atomic<InputEvidenceState> m_state{InputEvidenceState::Waiting};
   std::atomic<std::uint32_t> m_failure{0};
   std::atomic_flag m_ownerBusy = ATOMIC_FLAG_INIT;
@@ -781,7 +790,8 @@ inline void inputEvidenceInitialize(InputEvidenceQueue q, const void *identity, 
 // may legally enter while the producer is finishing its published operation.
 // commit() records the counters before publishing availability or free space;
 // the activity guard stays live until the complete native mutation returns.
-// Counter/journal contention still denies diagnostics and never blocks input.
+// Counter contention or journal overflow still denies diagnostics and never
+// blocks input. Independent queues can reserve journal entries concurrently.
 class InputEvidenceMutation final
 {
 public:

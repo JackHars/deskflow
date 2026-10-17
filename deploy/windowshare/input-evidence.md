@@ -77,7 +77,7 @@ depth without producing cumulative measured counters or rows. A full-operation
 activity guard excludes the empty baseline while any observation is in flight.
 Underflow, capacity failure or boundary overlap still denies the run. Only a
 quiescent empty arm begins the measured counters; during recording, existing
-counter and journal contention remains a terminal diagnostic failure.
+same-counter contention and journal overflow remain terminal diagnostic failures.
 Standalone, probe, identity-init and help/action combinations cannot use the
 private Host evidence option. Evidence paths and role labels never supply code
 admission, peer trust, a native owner or input authority.
@@ -174,7 +174,12 @@ Native SPSC publication commits its counter update before exposing a record
 or free slot to the opposite thread. A separate atomic activity guard spans
 the complete mutation, including publication; it blocks a false empty arm or
 drain boundary without holding the diagnostic counter lock across that handoff.
-Counter/journal contention is still terminal and never delays native input.
+Same-counter contention is still terminal and never delays native input. The
+shared journal accepts independent concurrent writers through a bounded atomic
+capacity reservation and a unique ticket. Reservations include unpublished rows;
+the consumer returns capacity only after copying a row. A delayed writer cannot
+be skipped or overwritten on ring wrap, and a full journal still reports sticky
+loss. Producer reservations use no retries, waits or allocations.
 Failed readiness/terminal rows also retain the first failure's scalar site and
 queue, with no producer-side logging. Loss-free journals keep the v2 format.
 
