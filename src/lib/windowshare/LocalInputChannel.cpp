@@ -804,7 +804,12 @@ bool LocalInputChannel::send(Type type, const QByteArray &payload)
     close("Cannot queue local input frame");
     return false;
   }
-  return !m_closed;
+  // Start the bounded write before another native authority query occupies
+  // this thread. QLocalSocket::flush is nonblocking; remaining bytes still
+  // use the existing queue limit and writable notification. Keep it outside
+  // the enqueue observation: bytesWritten can retire bytes synchronously.
+  (void)m_socket.flush();
+  return alive && !m_closed;
 }
 void LocalInputChannel::observeBufferedInput()
 {
@@ -1296,7 +1301,17 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     if (retired)
       return; // Valid in-flight input retires its capture sequence, never delivers to a new owner.
     if (point) {
-      require(liveLocalInputMappedPoint(*point) && onMappedOriginal, "Original input mapping expired or unavailable");
+      if (!liveLocalInputMappedPoint(*point) || !onMappedOriginal) {
+        lifecycleDiagnostic(
+            "Host private input", "input.mapped-receipt", "denied", "Mapped input could not enter native delivery",
+            {{"routeGeneration", QString::number(lease.routeGeneration)},
+             {"captureSequence", QString::number(record.sequence)},
+             {"deadlineNs", QString::number(point->deadlineNs)},
+             {"observedNs", QString::number(localInputMonotonicNs())},
+             {"handlerAvailable", bool(onMappedOriginal)}}
+        );
+        require(false, "Original input mapping expired or unavailable");
+      }
       notify(this, onMappedOriginal, lease, record, *point);
     } else
       notify(this, onOriginal, lease, record);

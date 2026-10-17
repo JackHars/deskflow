@@ -2981,6 +2981,26 @@ void lossAndLimits()
     );
   }
 }
+void immediateOutputSubmission()
+{
+  Fixture fixture("roundtrip");
+  fixture.activate();
+  // The receiver is another process. Do not pump this event loop or wait for
+  // a write notification: native validation may occupy this thread next.
+  check(fixture.core->sendOriginal(fixtureLease(), fixtureEvent(1)), "Immediate output fixture rejected input");
+  check(
+      LocalInputChannelTestAccess::queued(*fixture.core) == 0,
+      "Private input remained buffered until a later event-loop turn"
+  );
+  check(
+      fixture.core->sendOriginal(fixtureLease(), fixtureEvent(2, OriginalKeyTransition::Up)),
+      "Immediate output fixture rejected the matching release"
+  );
+  check(LocalInputChannelTestAccess::queued(*fixture.core) == 0, "Private release remained buffered");
+  check(until([&] { return fixture.revoked == 1; }), "Immediate output did not reach the authenticated recipient");
+  fixture.core->close();
+  fixture.childExitedCleanly();
+}
 void authenticatedIdentityValues()
 {
   Fixture fixture;
@@ -3131,6 +3151,11 @@ int main(int argc, char **argv)
       QTimer::singleShot(5000, &application, &QCoreApplication::quit);
       return application.exec();
     }
+    if (arguments.size() == 2 && arguments[1] == "--immediate-output") {
+      immediateOutputSubmission();
+      QTextStream(stdout) << "PASS: immediate private output submission\n";
+      return 0;
+    }
     check(arguments.size() == 1, "Unexpected local input test argument");
     QTextStream(stdout) << "RUN: descriptorAndIdentityGuards\n" << Qt::flush;
     descriptorAndIdentityGuards();
@@ -3192,6 +3217,8 @@ int main(int argc, char **argv)
     bufferedInputEvidence();
     QTextStream(stdout) << "RUN: lossAndLimits\n" << Qt::flush;
     lossAndLimits();
+    QTextStream(stdout) << "RUN: immediateOutputSubmission\n" << Qt::flush;
+    immediateOutputSubmission();
     QTextStream(
         stdout
     ) << "PASS: inherited IPC, process/role/incarnation binding, version 4 preflight isolation and framing, "
