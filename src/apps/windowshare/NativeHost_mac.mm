@@ -2221,6 +2221,22 @@ struct NativeHost::Impl
   }
   bool handleLegacyAttachedChild(Owner owner)
   {
+    const auto started = std::chrono::steady_clock::now();
+    auto checkpoint = started;
+    QJsonObject durations;
+    const auto measured = [&](const char *stage) {
+      const auto now = std::chrono::steady_clock::now();
+      durations.insert(stage, qint64(std::chrono::duration_cast<std::chrono::microseconds>(now - checkpoint).count()));
+      checkpoint = now;
+    };
+    const auto timing = qScopeGuard([&] {
+      const auto elapsed =
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - started).count();
+      if (elapsed >= 5000) {
+        durations.insert("elapsedUs", qint64(elapsed));
+        lifecycleDiagnostic("Host", "input.attached-window", "slow", "Attached window check timing", durations);
+      }
+    });
     if (QThread::currentThread() != q->thread())
       return false;
     const auto admitted = lifecycle->admission();
@@ -2245,14 +2261,9 @@ struct NativeHost::Impl
              CFEqual(item->window, retained.get()) && !item->associatedReturn.blocked() &&
              (item->session.phase == Phase::Preparing || item->session.phase == Phase::Remote);
     };
-    if (!AXIsProcessTrusted() || !current())
+    if (!current() || launchTime(parent.process) != parent.birth)
       return false;
-    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
-    if (!current() || !active || active.processIdentifier != parent.process)
-      return false;
-    const auto native = identity(parent.window);
-    if (!current() || !native || native->pid != parent.process || native->launch != parent.birth)
-      return false;
+    measured("lifetimeUs");
     CF<AXUIElementRef> app(AXUIElementCreateApplication(parent.process));
     if (!current() || !app)
       return false;
@@ -2263,15 +2274,18 @@ struct NativeHost::Impl
       return value && CFGetTypeID(value) == AXUIElementGetTypeID() ? static_cast<AXUIElementRef>(value) : nullptr;
     };
     CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
+    measured("focusedElementUs");
     if (!current() || !element(focused.get()))
       return false;
     CF<CFTypeRef> top(attribute(element(focused.get()), kAXTopLevelUIElementAttribute));
+    measured("topLevelUs");
     if (!current())
       return false;
     if (!element(top.get()) || CFEqual(top.get(), retained.get())) {
       // Some apps focus the Sheet/Drawer itself. Its parent shortcut can then
       // name the Window; retain the explicitly typed focused object instead.
       CF<CFTypeRef> focusedRole(attribute(element(focused.get()), kAXRoleAttribute));
+      measured("focusedRoleUs");
       if (!current() || !focusedRole || CFGetTypeID(focusedRole.get()) != CFStringGetTypeID() ||
           (!CFEqual(focusedRole.get(), kAXSheetRole) && !CFEqual(focusedRole.get(), kAXDrawerRole)))
         return false;
@@ -2286,6 +2300,18 @@ struct NativeHost::Impl
                       : CFEqual(role.get(), kAXDrawerRole) ? NativeAssociatedRole::Drawer
                                                            : NativeAssociatedRole::Other;
     if (kind == NativeAssociatedRole::Other)
+      return false;
+    // Merely inspecting an AX element cannot return a window or admit input.
+    // Do the expensive permission/foreground/WindowServer join only after an
+    // actual Sheet/Drawer candidate exists. Both exact identity observations
+    // and the final focus/foreground rechecks still precede the return fence.
+    if (!AXIsProcessTrusted() || !current())
+      return false;
+    const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
+    if (!current() || !active || active.processIdentifier != parent.process)
+      return false;
+    const auto native = identity(parent.window);
+    if (!current() || !native || native->pid != parent.process || native->launch != parent.birth)
       return false;
     // Apple's AXAttributeConstants.h specifies AXWindow as the attached Window
     // parent of a Sheet/Drawer, while AXTopLevelUIElement names that child. A
