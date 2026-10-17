@@ -100,7 +100,12 @@ The current Mac passes five integrated and nine app suites. CI foundation run
 `38999308404` is still in progress; source-bundle run `38999308471` passed.
 Fresh attended preparation/launch helpers are `build/prepare-physical-r33.py`
 and `build/run-physical-r33.py`. The launch guard requires these exact three
-artifact sets plus a new explicit user approval; no approval has been created. H03–H12 physical
+artifact sets plus a new explicit user approval; no approval has been created.
+
+Attended setup `build/physical-r33-gqm9_8ei/` passes preflight on both real
+desktops and exactly matches all three successful artifact sets. No window or
+sharing session was launched. A fresh launch-permission question is pending;
+do not treat the preparation or prior replies as authorization. H03–H12 physical
 acceptance is still open; a fresh attended launch requires user permission.
 
 ## Private input dispatch repair — 2026-10-16
