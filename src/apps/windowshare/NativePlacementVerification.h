@@ -98,6 +98,17 @@ public:
   {
     return !m_done && m_now() < m_due;
   }
+  // Native observations can block. Fence one fresh observation with cheap
+  // lifecycle checks, rather than making the native observer its own fence
+  // and repeating permission/display IPC around every individual read.
+  bool observeAuthority(std::function<bool()> current, std::function<bool()> observe) const
+  {
+    const QPointer<const NativePlacementVerification> alive(this);
+    if (!withinDeadline() || !current() || !alive || !withinDeadline())
+      return false;
+    const bool observed = observe();
+    return alive && observed && current() && alive && withinDeadline();
+  }
 
 private:
   void queuePreparation()

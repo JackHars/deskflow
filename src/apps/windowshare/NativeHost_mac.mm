@@ -657,12 +657,13 @@ class ObservedPlacement final : public std::enable_shared_from_this<ObservedPlac
 public:
   ObservedPlacement(
       AXUIElementRef window, WindowIdentity expected, Rect destination, std::function<bool()> current,
-      std::function<void(bool)> completion
+      std::function<bool()> nativeCurrent, std::function<void(bool)> completion
   )
       : m_window(static_cast<AXUIElementRef>(CFRetain(window))),
         m_expected(std::move(expected)),
         m_destination(destination),
         m_current(std::move(current)),
+        m_nativeCurrent(std::move(nativeCurrent)),
         m_verification(
             [this](QString *reason) { return probe(reason); },
             [this, completion = std::move(completion)](bool success, QString reason) {
@@ -787,27 +788,27 @@ private:
   }
   bool authorityCurrent() const
   {
-    if (!m_verification.withinDeadline()) {
+    const SlowOperationDiagnostic slow("Host", "source.holding.authority");
+    const bool verified = m_verification.observeAuthority(m_current, [this] {
+      const auto native = identity(m_expected.id);
+      if (!native || native->pid != m_expected.pid || native->launch != m_expected.launch) {
+        lifecycleDiagnostic(
+            "Host", "source.holding.authority", "failed", "Exact native source identity is unavailable or changed",
+            {{"windowId", qint64(m_expected.id)},
+             {"expectedPid", m_expected.pid},
+             {"expectedLaunch", m_expected.launch},
+             {"observedPid", native ? QJsonValue(native->pid) : QJsonValue(QJsonValue::Null)},
+             {"observedLaunch", native ? QJsonValue(native->launch) : QJsonValue(QJsonValue::Null)}}
+        );
+        return false;
+      }
+      return m_current() && m_nativeCurrent();
+    });
+    if (!verified && !m_verification.withinDeadline())
       lifecycleDiagnostic(
           "Host", "source.holding.authority", "failed", "Placement was cancelled or its deadline expired"
       );
-      return false;
-    }
-    if (!m_current())
-      return false;
-    const auto native = identity(m_expected.id);
-    if (!native || native->pid != m_expected.pid || native->launch != m_expected.launch) {
-      lifecycleDiagnostic(
-          "Host", "source.holding.authority", "failed", "Exact native source identity is unavailable or changed",
-          {{"windowId", qint64(m_expected.id)},
-           {"expectedPid", m_expected.pid},
-           {"expectedLaunch", m_expected.launch},
-           {"observedPid", native ? QJsonValue(native->pid) : QJsonValue(QJsonValue::Null)},
-           {"observedLaunch", native ? QJsonValue(native->launch) : QJsonValue(QJsonValue::Null)}}
-      );
-      return false;
-    }
-    return m_current() && m_verification.withinDeadline();
+    return verified;
   }
   static void notification(AXObserverRef, AXUIElementRef window, CFStringRef name, void *context)
   {
@@ -862,6 +863,7 @@ private:
   WindowIdentity m_expected;
   Rect m_destination;
   std::function<bool()> m_current;
+  std::function<bool()> m_nativeCurrent;
   CF<AXObserverRef> m_observer;
   NativePlacementVerification m_verification;
 };
@@ -3594,7 +3596,8 @@ struct NativeHost::Impl
             return current() != nullptr;
           };
           auto placement = std::make_shared<ObservedPlacement>(
-              window->get(), expected, destination, placementCurrent, std::move(complete)
+              window->get(), expected, destination, [current] { return current() != nullptr; }, placementCurrent,
+              std::move(complete)
           );
           current()->placement = placement;
           placement->start();

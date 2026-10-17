@@ -116,6 +116,86 @@ void absoluteDeadline()
   check(!f.success && f.completions == 1, "duplicate events and early timers never renew the deadline");
 }
 
+void nativeAuthorityFences()
+{
+  // Model the expensive permission/display snapshot independently of the
+  // in-process token. Each operation gets fresh native checks before and after
+  // its AX call, without recursively charging that snapshot to every fence.
+  Fixture f;
+  bool live = true;
+  int observations = 0;
+  const auto current = [&] { return live; };
+  const auto native = [&] {
+    ++observations;
+    f.now += 45ms;
+    return true;
+  };
+  for (int operation = 0; operation < 9; ++operation) {
+    check(f.gate.observeAuthority(current, native), "fresh native authority before each operation");
+    f.now += 30ms;
+    check(f.gate.observeAuthority(current, native), "fresh native authority after each operation");
+  }
+  check(observations == 18 && f.gate.withinDeadline(), "bounded native checks leave time for placement readback");
+  live = false;
+  check(!f.gate.observeAuthority(current, native) && observations == 18, "revocation prevents another native read");
+  live = true;
+  check(!f.gate.observeAuthority(current, [] { return false; }), "native authority refusal is terminal");
+  check(
+      !f.gate.observeAuthority(
+          current,
+          [&] {
+            live = false;
+            return true;
+          }
+      ),
+      "revocation during native read denies"
+  );
+  live = true;
+  check(
+      !f.gate.observeAuthority(
+          current,
+          [&] {
+            f.now += 2s;
+            return true;
+          }
+      ),
+      "native read cannot extend the deadline"
+  );
+  check(
+      !f.gate.observeAuthority(current, native) && observations == 18, "expired authority does not query native state"
+  );
+  {
+    Fixture cancelled;
+    check(
+        !cancelled.gate.observeAuthority(
+            [] { return true; },
+            [&] {
+              cancelled.gate.cancel();
+              return true;
+            }
+        ),
+        "cancellation during a native read denies"
+    );
+  }
+  for (bool inNative : {false, true}) {
+    auto gate = std::make_unique<Gate>([](QString *) { return Gate::Observation::Verified; }, [](bool, QString) {});
+    check(
+        !gate->observeAuthority(
+            [&] {
+              if (!inNative)
+                gate.reset();
+              return true;
+            },
+            [&] {
+              gate.reset();
+              return true;
+            }
+        ),
+        "destruction during either authority callback is safe and refuses placement"
+    );
+  }
+}
+
 void cancellationAndDestruction()
 {
   {
@@ -529,6 +609,7 @@ int main(int argc, char **argv)
   try {
     for (const auto &[name, test] : {
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
+             std::pair{"native-authority-fences", &nativeAuthorityFences},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
              std::pair{"preparation-yields", &preparationYields}, std::pair{"preparation-stops", &preparationStops},
              std::pair{"ownership-across-yield", &ownershipAcrossYield},
