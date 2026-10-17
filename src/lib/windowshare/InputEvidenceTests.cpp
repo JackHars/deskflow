@@ -62,6 +62,10 @@ struct InputEvidenceTestAccess
     slot.row = row;
     slot.ready.store(ticket + 1, std::memory_order_release);
   }
+  static void eventCounts(InputEvidenceRecorder &recorder, InputEvidenceQueue queue, std::uint64_t counts)
+  {
+    recorder.m_queues[static_cast<std::size_t>(queue)].eventCounts.store(counts);
+  }
 };
 } // namespace deskflow::windowshare
 namespace {
@@ -300,6 +304,126 @@ void concurrentEventPreparation()
   boundary->endQueueActivity(InputEvidenceQueue::EventAllOutstanding);
   check(boundary->loss() == InputEvidenceLoss::Baseline, "racing Event preparation silently recovered");
 }
+void concurrentEventRecording()
+{
+  auto recorder = core();
+  check(recorder->arm(180000000000ULL), "concurrent recording could not arm");
+  const auto &observer = recorder->eventObserver();
+  using Action = deskflow::EventInputObservation;
+  constexpr unsigned workers = 4, rounds = 128;
+  std::barrier phase(workers);
+  std::vector<std::thread> threads;
+  for (unsigned worker = 0; worker != workers; ++worker)
+    threads.emplace_back([&] {
+      for (unsigned round = 0; round != rounds; ++round)
+        for (const auto action :
+             {Action::AllAdmit, Action::Admit, Action::AllDispatch, Action::Dispatch, Action::Return, Action::AllReturn,
+              Action::Retire, Action::AllRetire}) {
+          phase.arrive_and_wait();
+          observer.observe(observer.context, recorder.get(), {5, 1, 1}, action);
+        }
+    });
+  for (auto &thread : threads)
+    thread.join();
+  recorder->stop();
+  recorder->finish();
+  check(recorder->loss() == InputEvidenceLoss::None, "concurrent Event lifetimes lost measured counter updates");
+  std::array<std::uint64_t, InputEvidenceRecorder::queueCount> enqueued{}, retired{}, times{}, rows{};
+  while (const auto row = recorder->pop()) {
+    if (!eventInputEvidenceQueue(row->queue))
+      continue;
+    const auto index = static_cast<std::size_t>(row->queue);
+    check(
+        row->enqueued >= enqueued[index] && row->retired >= retired[index] && row->enqueued >= row->retired &&
+            row->depth == row->enqueued - row->retired && row->time >= times[index],
+        "Event journal reordered counters or changed their observed time"
+    );
+    const auto delta = row->enqueued - enqueued[index] + row->retired - retired[index];
+    check(
+        delta == 1 || rows[index] == 0 || rows[index] == 2 * workers * rounds + 1,
+        "Event journal aggregated or omitted an intermediate mutation"
+    );
+    enqueued[index] = row->enqueued;
+    retired[index] = row->retired;
+    times[index] = row->time;
+    ++rows[index];
+  }
+  for (const auto queue :
+       {InputEvidenceQueue::EventOutstanding, InputEvidenceQueue::EventDispatch,
+        InputEvidenceQueue::EventAllOutstanding, InputEvidenceQueue::EventAllDispatch}) {
+    const auto index = static_cast<std::size_t>(queue);
+    check(
+        enqueued[index] == workers * rounds && retired[index] == workers * rounds &&
+            rows[index] == 2 * workers * rounds + 2,
+        "Event journal lost a lifetime or its exact empty boundaries"
+    );
+  }
+  check(recorder->drained() && recorder->loss() == InputEvidenceLoss::None, "Event journal did not drain cleanly");
+}
+
+void eventJournalPublicationOrder()
+{
+  constexpr auto queue = InputEvidenceQueue::EventAllOutstanding;
+  const auto row = [](std::uint64_t sequence) {
+    return InputEvidenceRow{
+        InputEvidenceKind::EventQueue, queue, sequence * 10, 0, sequence, 0, sequence, 0, sequence, 0, {}
+    };
+  };
+  auto recorder = core();
+  InputEvidenceTestAccess::append(*recorder, row(2));
+  InputEvidenceRow source;
+  source.kind = InputEvidenceKind::Source;
+  source.time = 15;
+  source.sequence = 77;
+  InputEvidenceTestAccess::append(*recorder, source);
+  InputEvidenceTestAccess::append(*recorder, row(1));
+  auto actual = recorder->pop();
+  check(
+      actual && actual->kind == InputEvidenceKind::Source && actual->time == 15 && actual->sequence == 77,
+      "pending Event publication blocked or changed independent source input"
+  );
+  for (std::uint64_t sequence : {1, 2}) {
+    actual = recorder->pop();
+    check(
+        actual && actual->kind == InputEvidenceKind::Queue && actual->enqueued == sequence &&
+            actual->time == sequence * 10,
+        "late journal copy lost counter order or rewrote its captured timestamp"
+    );
+  }
+  check(
+      !recorder->pop() && recorder->drained() && recorder->loss() == InputEvidenceLoss::None,
+      "ordered Event publications did not drain exactly once"
+  );
+
+  auto bounded = core();
+  constexpr auto pendingCapacity = InputEvidenceRecorder::capacity / 4;
+  for (std::uint64_t sequence = 2; sequence <= pendingCapacity + 2; ++sequence)
+    InputEvidenceTestAccess::append(*bounded, row(sequence));
+  check(
+      !bounded->pop() && bounded->loss() == InputEvidenceLoss::Output && !bounded->drained(),
+      "pending Event publications exceeded their fixed bound or invented a missing row"
+  );
+  bounded->stop();
+  std::size_t count = 0;
+  while ((actual = bounded->pop())) {
+    check(
+        actual->enqueued == count + 2 && actual->time == (count + 2) * 10,
+        "failed pending journal overwrote retained diagnostic rows"
+    );
+    ++count;
+  }
+  check(
+      count == pendingCapacity && bounded->drained() && bounded->loss() == InputEvidenceLoss::Output,
+      "terminal gap hid its loss or left cleanup waiting for an impossible row"
+  );
+
+  auto saturated = core();
+  check(saturated->arm(1000000000), "counter saturation fixture did not arm");
+  InputEvidenceTestAccess::eventCounts(*saturated, queue, static_cast<std::uint64_t>(UINT32_MAX) << 32);
+  saturated->eventObserver().observe(saturated.get(), saturated.get(), {}, deskflow::EventInputObservation::AllAdmit);
+  check(saturated->loss() == InputEvidenceLoss::QueueAccounting, "packed Event counter silently wrapped");
+}
+
 void stickyFailures()
 {
   auto epoch = core();
@@ -1086,6 +1210,8 @@ int main(int argc, char **argv)
     runCase("baselinesAndLifecycle", baselinesAndLifecycle);
     runCase("readinessDiagnostics", readinessDiagnostics);
     runCase("concurrentEventPreparation", concurrentEventPreparation);
+    runCase("concurrentEventRecording", concurrentEventRecording);
+    runCase("eventJournalPublicationOrder", eventJournalPublicationOrder);
     runCase("stickyFailures", stickyFailures);
     runCase("concurrentJournalWriters", concurrentJournalWriters);
     runCase("unpublishedJournalReservation", unpublishedJournalReservation);

@@ -88,7 +88,8 @@ enum class InputEvidenceKind : std::uint8_t
   Source,
   Native,
   Queue,
-  Hover
+  Hover,
+  EventQueue // Internal only; pop restores Queue in exact counter-update order.
 };
 inline std::uint64_t inputEvidenceNow() noexcept
 {
@@ -288,6 +289,7 @@ public:
         if (held[i]) {
           auto &q = m_queues[i];
           q.enqueued = q.retired = 0;
+          q.eventCounts.store(0, std::memory_order_relaxed);
           append(
               {InputEvidenceKind::Queue, static_cast<InputEvidenceQueue>(i), m_start, 0, 0, 0, 0, 0, 0, q.capacity, {}}
           );
@@ -357,6 +359,10 @@ public:
       for (std::size_t i = 0; i != queueCount; ++i)
         if (held[i]) {
           auto &q = m_queues[i];
+          const auto counts = q.eventCounts.load(std::memory_order_acquire);
+          const auto added = eventInputEvidenceQueue(static_cast<InputEvidenceQueue>(i)) ? counts >> 32 : q.enqueued;
+          const auto retired =
+              eventInputEvidenceQueue(static_cast<InputEvidenceQueue>(i)) ? counts & UINT32_MAX : q.retired;
           append(
               {InputEvidenceKind::Queue,
                static_cast<InputEvidenceQueue>(i),
@@ -364,8 +370,8 @@ public:
                0,
                0,
                0,
-               q.enqueued,
-               q.retired,
+               added,
+               retired,
                q.depth.load(),
                q.capacity,
                {}}
@@ -623,19 +629,53 @@ public:
   }
   std::optional<InputEvidenceRow> pop() noexcept
   {
-    const auto read = m_read.load(std::memory_order_relaxed);
-    auto &slot = m_rows[read % capacity];
-    if (slot.ready.load(std::memory_order_acquire) != read + 1)
-      return {};
-    auto row = slot.row;
-    slot.ready.store(0, std::memory_order_release);
-    m_read.store(read + 1, std::memory_order_release);
-    m_occupied.fetch_sub(1, std::memory_order_release);
-    return row;
+    // Consumer only. Counter updates can finish their journal copies in a
+    // different order. Retain their original timestamps and exact snapshots;
+    // publish each Event queue in the order of its atomic counter updates.
+    for (std::size_t examined = 0; examined != capacity; ++examined) {
+      if (const auto pending = popPendingEvent())
+        return pending;
+      const auto read = m_read.load(std::memory_order_relaxed);
+      auto &slot = m_rows[read % capacity];
+      if (slot.ready.load(std::memory_order_acquire) != read + 1) {
+        if (m_pendingEvents && (state() == InputEvidenceState::Stopped || state() == InputEvidenceState::Denied) &&
+            read == m_written.load(std::memory_order_acquire) && m_occupied.load(std::memory_order_acquire) == 0) {
+          // A failed producer may leave a counter gap. Preserve the remaining
+          // real rows for diagnosis, but never certify this as complete input.
+          fail(InputEvidenceLoss::Output, InputEvidenceFailureSite::JournalReserve);
+          return popPendingEvent(true);
+        }
+        return {};
+      }
+      auto row = slot.row;
+      slot.ready.store(0, std::memory_order_release);
+      m_read.store(read + 1, std::memory_order_release);
+      m_occupied.fetch_sub(1, std::memory_order_release);
+      if (row.kind != InputEvidenceKind::EventQueue)
+        return row;
+      if (!eventInputEvidenceQueue(row.queue) || !row.sequence || row.sequence != row.enqueued + row.retired) {
+        fail(InputEvidenceLoss::Output, InputEvidenceFailureSite::JournalReserve, row.queue);
+        continue;
+      }
+      const auto queue = static_cast<std::size_t>(row.queue) - firstEventQueue;
+      if (row.sequence == m_nextEvent[queue]) {
+        ++m_nextEvent[queue];
+        row.kind = InputEvidenceKind::Queue;
+        return row;
+      }
+      auto &pending = m_pendingEventRows[queue][row.sequence % eventPendingCapacity];
+      if (row.sequence < m_nextEvent[queue] || pending) {
+        fail(InputEvidenceLoss::Output, InputEvidenceFailureSite::JournalReserve, row.queue);
+        continue;
+      }
+      pending = row;
+      ++m_pendingEvents;
+    }
+    return {};
   }
   bool drained() const noexcept
   {
-    return m_read.load() == m_written.load() && m_occupied.load(std::memory_order_acquire) == 0;
+    return m_read.load() == m_written.load() && m_occupied.load(std::memory_order_acquire) == 0 && !m_pendingEvents;
   }
   std::uint64_t written() const noexcept
   {
@@ -644,6 +684,31 @@ public:
 
 private:
   friend struct InputEvidenceTestAccess;
+  static constexpr std::size_t firstEventQueue = static_cast<std::size_t>(InputEvidenceQueue::EventOutstanding);
+  static constexpr std::size_t eventQueueCount = 4, eventPendingCapacity = capacity / eventQueueCount;
+  std::optional<InputEvidenceRow> popPendingEvent(bool allowGap = false) noexcept
+  {
+    for (std::size_t queue = 0; queue != eventQueueCount; ++queue) {
+      auto *pending = &m_pendingEventRows[queue][m_nextEvent[queue] % eventPendingCapacity];
+      if (!*pending || (*pending)->sequence != m_nextEvent[queue]) {
+        if (!allowGap)
+          continue;
+        pending = nullptr;
+        for (auto &candidate : m_pendingEventRows[queue])
+          if (candidate && (!pending || candidate->sequence < (*pending)->sequence))
+            pending = &candidate;
+        if (!pending)
+          continue;
+      }
+      auto row = **pending;
+      pending->reset();
+      --m_pendingEvents;
+      m_nextEvent[queue] = row.sequence + 1;
+      row.kind = InputEvidenceKind::Queue;
+      return row;
+    }
+    return {};
+  }
   static void
   initializeEventQueue(void *context, const void *queue, std::uint64_t capacity, std::uint64_t dispatch) noexcept
   {
@@ -683,22 +748,61 @@ private:
             : (dispatch ? InputEvidenceQueue::EventDispatch : InputEvidenceQueue::EventOutstanding);
     if (!recorder.beginQueueActivity(counter, queue))
       return;
-    if (recorder.state() == InputEvidenceState::Waiting) {
+    auto &q = recorder.m_queues[static_cast<std::size_t>(counter)];
+    if (q.busy.test(std::memory_order_acquire))
+      recorder.fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueMutation, counter);
+    else {
       // Independent Core workers legitimately admit/retire Events together.
       // Before arm there are no measured cumulative counters or journal rows;
       // retain the exact live depth atomically instead of taking their lock.
       // The activity boundary excludes arm until every update has returned.
-      auto &q = recorder.m_queues[static_cast<std::size_t>(counter)];
-      if (q.busy.test(std::memory_order_acquire))
-        recorder.fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueMutation, counter);
-      else {
-        const auto before =
-            added ? q.depth.fetch_add(1, std::memory_order_acq_rel) : q.depth.fetch_sub(1, std::memory_order_acq_rel);
-        if (added ? before == UINT64_MAX || (q.capacity && before >= q.capacity) : before == 0)
-          recorder.fail(InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::QueueMutation, counter);
+      const auto before =
+          added ? q.depth.fetch_add(1, std::memory_order_acq_rel) : q.depth.fetch_sub(1, std::memory_order_acq_rel);
+      if (added ? before == UINT64_MAX || (q.capacity && before >= q.capacity) : before == 0)
+        recorder.fail(InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::QueueMutation, counter);
+      (void)recorder.recording(); // Preserve the absolute source deadline.
+      if (recorder.state() == InputEvidenceState::Recording || recorder.state() == InputEvidenceState::Draining) {
+        auto previous = q.eventCounts.load(std::memory_order_acquire);
+        bool committed = false;
+        // Each failed CAS means another writer completed an update. This is
+        // bounded progress, never a wait for a suspended lock holder. The
+        // journal/output row limits are far below either 32-bit counter bound.
+        for (unsigned attempt = 0; attempt != 16; ++attempt) {
+          const auto enqueued = previous >> 32, retired = previous & UINT32_MAX;
+          if (enqueued < retired || (added ? enqueued == UINT32_MAX : retired == UINT32_MAX || retired >= enqueued)) {
+            recorder.fail(InputEvidenceLoss::QueueAccounting, InputEvidenceFailureSite::QueueMutation, counter);
+            break;
+          }
+          const auto next = previous + (added ? 1ULL << 32 : 1);
+          // Read time after observing the prior counter value and before CAS.
+          // Successful update order therefore preserves these actual times.
+          const auto at = inputEvidenceNow();
+          if (!q.eventCounts.compare_exchange_strong(previous, next, std::memory_order_acq_rel))
+            continue;
+          const auto nextAdded = next >> 32, nextRetired = next & UINT32_MAX;
+          // Keep actual lifetime accounting after a sticky diagnostic loss,
+          // as other queues do, without resuming payload/journal collection.
+          if (recorder.loss() == InputEvidenceLoss::None)
+            recorder.append(
+                {InputEvidenceKind::EventQueue,
+                 counter,
+                 at,
+                 0,
+                 nextAdded + nextRetired,
+                 0,
+                 nextAdded,
+                 nextRetired,
+                 nextAdded - nextRetired,
+                 q.capacity,
+                 {}}
+            );
+          committed = true;
+          break;
+        }
+        if (!committed)
+          recorder.fail(InputEvidenceLoss::Contention, InputEvidenceFailureSite::QueueMutation, counter);
       }
-    } else if (recorder.beginMutation(counter, queue))
-      recorder.endMutation(counter, added ? 1 : 0, added ? 0 : 1);
+    }
     recorder.endQueueActivity(counter);
   }
   static constexpr std::uint64_t captureBoundary = 1ULL << 63;
@@ -745,6 +849,7 @@ private:
     const void *identity = nullptr;
     std::uint64_t capacity = 0, enqueued = 0, retired = 0;
     std::atomic<std::uint64_t> depth{0};
+    std::atomic<std::uint64_t> eventCounts{0};
     std::atomic<std::uint64_t> activity{0};
     std::atomic<bool> initialized{false};
   };
@@ -757,6 +862,9 @@ private:
   const deskflow::EventInputObserver m_eventObserver;
   std::array<Queue, queueCount> m_queues;
   std::array<Slot, capacity> m_rows;
+  std::array<std::array<std::optional<InputEvidenceRow>, eventPendingCapacity>, eventQueueCount> m_pendingEventRows;
+  std::array<std::uint64_t, eventQueueCount> m_nextEvent{1, 1, 1, 1};
+  std::size_t m_pendingEvents = 0; // Consumer thread only, like pop()/drained().
   std::atomic<std::uint64_t> m_written{0}, m_read{0}, m_occupied{0}, m_deadline{0}, m_captureEpoch{0}, m_captureGate{0},
       m_stop{0}, m_sourceEnd{0};
   std::atomic<InputEvidenceState> m_state{InputEvidenceState::Waiting};

@@ -76,8 +76,10 @@ Before arm, concurrent Core Event observations maintain an exact atomic live
 depth without producing cumulative measured counters or rows. A full-operation
 activity guard excludes the empty baseline while any observation is in flight.
 Underflow, capacity failure or boundary overlap still denies the run. Only a
-quiescent empty arm begins the measured counters; during recording, existing
-same-counter contention and journal overflow remain terminal diagnostic failures.
+quiescent empty arm begins the measured counters. Measured Event lifetimes use
+an atomic pair of cumulative counts with at most 16 compare/exchange attempts;
+each failed attempt observes another completed update. Excess contention,
+counter overflow and journal overflow remain terminal diagnostic failures.
 An arm request also rechecks current local readiness: a background message may
 have queued output since the remote coordinator's readiness sample. The request
 can remain pending for at most two seconds without starting a measurement. It
@@ -180,7 +182,7 @@ Native SPSC publication commits its counter update before exposing a record
 or free slot to the opposite thread. A separate atomic activity guard spans
 the complete mutation, including publication; it blocks a false empty arm or
 drain boundary without holding the diagnostic counter lock across that handoff.
-Same-counter contention is still terminal and never delays native input. The
+Non-Event counter contention is still terminal and never delays native input. The
 shared journal accepts independent concurrent writers through a bounded atomic
 capacity reservation and a unique ticket. Reservations include unpublished rows;
 the consumer returns capacity only after copying a row. A delayed writer cannot
@@ -188,6 +190,15 @@ be skipped or overwritten on ring wrap, and a full journal still reports sticky
 loss. Producer reservations use no retries, waits or allocations.
 Failed readiness/terminal rows also retain the first failure's scalar site and
 queue, with no producer-side logging. Loss-free journals keep the v2 format.
+Event counter updates retain their exact cumulative snapshots and original
+timestamps. Time is sampled after reading the previous counter value and before
+the successful atomic update, so counter order also orders the sampled times.
+The consumer uses preallocated storage for at most 2,048 delayed copies per
+Event queue, publishing them in counter-update order without aggregation or
+timestamp adjustment. A gap or reorder-buffer overflow is a recorded failure;
+it cannot become a complete recording. This storage is separate from the
+8,192-row producer journal. Arm and final drain still require the actual live
+depth and every in-flight observation to be empty. The normalizer is unchanged.
 Cleanup reads terminal rows from every owned recorder even after a valid
 rejection acknowledgement. This lets the native fixture close gracefully;
 acceptance still rejects the failed arm or incomplete recording.
