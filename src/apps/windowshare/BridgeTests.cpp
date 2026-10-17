@@ -2217,18 +2217,22 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
     unsigned queries = 0;
     nativeCandidateObserver = [&] { ++queries; };
     check(fixture.host.originalInputBoundary(binding), "Exact neutral All boundary was missing");
+    check(fixture.host.originalInputRouteReady(binding), "Exact fenced route was not ready for preparation");
     check(!fixture.host.originalInputRouteActive(binding), "Quiescence claimed an active original route");
     check(queries == 0, "Local ledger query repeated native focus validation");
     nativeHeldButtons.insert(0);
     check(!fixture.host.originalInputBoundary(binding), "Boundary ignored an outstanding legacy button");
+    check(!fixture.host.originalInputRouteReady(binding), "Preparation ignored an outstanding legacy button");
     nativeHeldButtons.clear();
     auto wrong = binding;
     ++wrong.geometry;
     check(!fixture.host.originalInputBoundary(wrong), "Boundary accepted another geometry revision");
+    check(!fixture.host.originalInputRouteReady(wrong), "Preparation accepted another geometry revision");
     check(fixture.host.activateOriginalKeyboard(binding, 72), "Native endpoint failed to commit");
     check(queries == 1, "Native establishment repeated its own fresh authority query");
     queries = 0;
     check(fixture.host.originalInputRouteActive(binding), "Committed original route was missing");
+    check(fixture.host.originalInputRouteReady(binding), "Committed route lost local readiness");
     check(!fixture.host.originalInputRouteActive(wrong), "Route state accepted another geometry binding");
     check(queries == 0, "Local route state repeated the separate active authority check");
     check(fixture.host.nativeOriginalInputCurrent(binding, 72), "Native endpoint was not current");
@@ -2239,6 +2243,19 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
     ++wrong.focusRequest;
     BridgeTestAccess::observedNativeFocus(fixture.host, wrong);
     check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Fresh native authority check was lost");
+  }
+  {
+    KeyboardFixture fixture(hostIdentity, viewerIdentity);
+    const auto binding = prepare(fixture);
+    check(fixture.host.originalInputRouteReady(binding), "Preparation fixture was not locally ready");
+    auto changed = binding;
+    ++changed.focusRequest;
+    BridgeTestAccess::observedNativeFocus(fixture.host, changed);
+    // Local preparation is not native authority. A focus change after it must
+    // still reject activation, even before an asynchronous notification arrives.
+    check(!fixture.host.activateOriginalKeyboard(binding, 72), "Local readiness authorized stale native focus");
+    check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Rejected activation retained native authority");
+    check(!fixture.host.originalInputRouteReady(binding), "Rejected activation retained local readiness");
   }
   for (const bool expired : {false, true}) {
     KeyboardFixture fixture(hostIdentity, viewerIdentity);
@@ -2264,6 +2281,7 @@ void nativeInputActivation(const Identity &hostIdentity, const Identity &viewerI
     };
     check(!fixture.host.nativeOriginalInputCurrent(binding, 72), "Native query ignored reentrant connection loss");
     check(!fixture.host.originalInputRouteActive(binding), "Disconnected route remained active");
+    check(!fixture.host.originalInputRouteReady(binding), "Disconnected route remained ready");
     check(fixture.revokes == 1, "Reentrant native query did not revoke ownership");
   }
 }

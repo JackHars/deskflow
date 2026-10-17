@@ -958,6 +958,13 @@ public:
   {
     return binding.scope == ForwardingScope::All && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
+  bool originalInputRouteReady(const KeyboardRouteBinding &binding) const
+  {
+    // Preparation grants no native delivery. Check the exact local route and
+    // drained legacy ledger here; activation and isActive independently read
+    // fresh native focus/geometry before Commit or any input can be accepted.
+    return originalInputRouteActive(binding) || originalInputBoundary(binding);
+  }
   bool deliverNativeOriginalInput(
       const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
   )
@@ -2866,7 +2873,7 @@ int main(int argc, char **argv)
       };
       checks.deliveryReady = [&](const LocalInputLease &lease) {
         const auto binding = inputBinding(lease);
-        return bridge.originalInputRouteActive(binding) || bridge.originalKeyboardQuiesced(binding);
+        return bridge.originalInputRouteReady(binding);
       };
       // Core independently proves the captured fresh transition. The host
       // proves its own old delivered owners are released under the exact All
