@@ -245,6 +245,17 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if (!attempt)
       return;
     const auto old = std::exchange(attempt, std::nullopt);
+    lifecycleDiagnostic(
+        role == LocalInputRole::Host ? "Host preflight" : "Core preflight", "input.preflight", "cancelled",
+        "Input preflight released its attempt",
+        {{"routeGeneration", QString::number(old->offer.routeGeneration)},
+         {"phase", int(old->phase)},
+         {"reason", int(reason)},
+         {"notifyPeer", notify},
+         {"hostActivated", old->hostActivated},
+         {"preparationBudgetRemainingMs",
+          qint64(std::chrono::duration_cast<std::chrono::milliseconds>(old->deadline - Clock::now()).count())}}
+    );
     retired = old->offer;
     retiredLease = old->lease;
     // Reset before any callback; all synchronous/nested authorizers now deny.
@@ -731,8 +742,16 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
              attempt->phase == phase && live() && !cancelling && !pendingAuthorityControl();
     };
     const auto timed = [&](const char *step, const auto &call) {
-      if (check == LocalInputCheck::Deliver)
-        return call();
+      if (check == LocalInputCheck::Deliver) {
+        const bool accepted = call();
+        if (!accepted)
+          lifecycleDiagnostic(
+              role == LocalInputRole::Host ? "Host preflight" : "Core preflight", step, "denied",
+              "Active input admission callback denied delivery",
+              {{"routeGeneration", QString::number(lease.routeGeneration)}}
+          );
+        return accepted;
+      }
       const auto started = Clock::now();
       const QString component = role == LocalInputRole::Host ? "Host preflight" : "Core preflight";
       const QJsonObject identity{

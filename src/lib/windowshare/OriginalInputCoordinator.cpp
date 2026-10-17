@@ -78,9 +78,9 @@ struct OriginalInputCoordinator::Shared
           initialPreparation(!owner->active)
     {
     }
-    void trace(unsigned stage, const char *step, const char *state)
+    void trace(unsigned stage, const char *step, const char *state, bool failure = false)
     {
-      if (!initialPreparation || (diagnosticStages.fetch_or(1u << stage) & (1u << stage)))
+      if ((!initialPreparation && !failure) || (diagnosticStages.fetch_or(1u << stage) & (1u << stage)))
         return;
       const auto now = Clock::now();
       lifecycleDiagnostic(
@@ -122,8 +122,18 @@ struct OriginalInputCoordinator::Shared
     return !owner.revoked && owner.selected.live() && owner.capture.live() &&
            (owner.seal ? owner.seal->live() : !owner.prepared || owner.prepared->live());
   }
-  void revoke()
+  void revoke(const char *reason = "Input authority was revoked")
   {
+    if (owner && !owner->revoked)
+      lifecycleDiagnostic(
+          "Core input", "input.owner", "revoked", reason,
+          {{"owner", QString::number(owner->id)},
+           {"active", owner->active},
+           {"selectedLive", owner->selected.live()},
+           {"captureLive", owner->capture.live()},
+           {"sealLive", owner->seal && owner->seal->live()},
+           {"preparedLive", owner->prepared && owner->prepared->live()}}
+      );
     inputEvidenceInvalidate(InputEvidenceLoss::PipelineRevoked);
     if (owner)
       owner->revoked = true;
@@ -242,7 +252,7 @@ public:
         return Result::revoked(ticket);
       if (m_state->closed || !Shared::live(*operation->owner) || !operation->captured.input.live() ||
           Clock::now() >= operation->deadline || operation->phase == Shared::Phase::Revoked) {
-        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked");
+        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked", true);
         // A Host that declined before reserving any Viewer/native lease can
         // explicitly acknowledge that empty handoff. Preserve ordinary input
         // after that exact completion, rather than dropping every fresh key
@@ -505,7 +515,7 @@ public:
   {
     std::lock_guard lock(m_state->mutex);
     if (m_state->owner && m_state->owner->id == owner)
-      m_state->revoke();
+      m_state->revoke("Core dispatcher released the input owner");
   }
   bool live(std::uint64_t owner) const noexcept override
   {
@@ -1084,7 +1094,7 @@ bool OriginalInputCoordinator::tickOne()
     std::lock_guard lock(m_shared->mutex);
     m_shared->available = available && !m_shared->closed;
     if (m_shared->owner && (!available || m_shared->closed || !Shared::live(*m_shared->owner))) {
-      m_shared->revoke();
+      m_shared->revoke("Private coordinator lost admission or owner lifetime");
       revoke = true;
     }
     while (!m_shared->operations.empty() && m_shared->operations.front()->phase == Shared::Phase::Sent)
@@ -1094,8 +1104,8 @@ bool OriginalInputCoordinator::tickOne()
     if (!m_shared->operations.empty()) {
       operation = m_shared->operations.front();
       if (Clock::now() >= operation->deadline || operation->phase == Shared::Phase::Revoked) {
-        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked");
-        m_shared->revoke();
+        operation->trace(9, "input.handoff", Clock::now() >= operation->deadline ? "expired" : "revoked", true);
+        m_shared->revoke("Private coordinator retired an expired or revoked operation");
         revoke = true;
       }
     }
@@ -1181,7 +1191,7 @@ bool OriginalInputCoordinator::tickOne()
   }
   if (!alive)
     return false;
-  operation->trace(12, "input.delivery", sent ? "sent" : "failed");
+  operation->trace(12, "input.delivery", sent ? "sent" : "failed", !sent);
   std::lock_guard lock(m_shared->mutex);
   operation->phase = sent ? Shared::Phase::Sent : Shared::Phase::Revoked;
   if (!sent)

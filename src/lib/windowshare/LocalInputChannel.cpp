@@ -1355,6 +1355,15 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
 void LocalInputChannel::revoked(LocalInputRevocation reason)
 {
   const auto previous = m_lease;
+  if (previous)
+    lifecycleDiagnostic(
+        m_role == LocalInputRole::Host ? "Host private input" : "Core private input", "input.lease", "revoked",
+        "Private input lease was revoked",
+        {{"routeGeneration", QString::number(previous->routeGeneration)},
+         {"phase", int(m_phase)},
+         {"reason", int(reason)},
+         {"authorizing", m_authorizing}}
+    );
   m_phase = LocalInputPhase::Idle;
   m_lease.reset();
   if (m_authorizing)
