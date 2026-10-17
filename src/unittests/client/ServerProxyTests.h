@@ -44,6 +44,7 @@ private Q_SLOTS:
   void sealedCutoff_refreshesWithoutReopeningLegacy();
   void sealedCutoff_rejectsStaleOverlappingAndInvalidatedMaps();
   void batchedCutoff_delegatesAtomicallyWithoutNewPrefix();
+  void sealedCutoff_pointRetiresDuringRead();
   void batchedCutoff_rejectsOverlapLossAndSubstitution();
   void preparation_ordersFocusPromotionAndLinkedCleanup();
   void preparation_rejectsSubstitutionAndNeverInfersRelease();

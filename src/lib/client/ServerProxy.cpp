@@ -1659,6 +1659,7 @@ void ServerProxy::pollInputCutoff()
   auto state = InputCutoffState::Denied;
   auto backendState = state;
   std::optional<InputCutoffMappedResult> mappedResult;
+  std::optional<InputCutoffBinding> retiredPoint;
   std::vector<InputCutoffMappedResult> batchResults;
   bool sealLive = false;
   if (m_cutoff->backendStarted && !m_cutoff->failed && (seal || InputCutoffClock::now() < m_cutoff->deadline)) {
@@ -1674,17 +1675,32 @@ void ServerProxy::pollInputCutoff()
       if (*alive && state == InputCutoffState::DrainObserved) {
         if (batch.empty()) {
           mappedResult = m_client->mappedInputCutoffResult(binding);
+          if (!mappedResult)
+            retiredPoint = binding;
         } else {
           for (const auto &item : batch) {
             const auto result = m_client->mappedInputCutoffResult(item.binding);
             if (!*alive)
               return;
+            if (!result)
+              retiredPoint = item.binding;
             if (!m_cutoff || m_cutoff->binding != binding || !result || result->binding != item.binding ||
                 result->point != item.point || !validInputCutoffMappedResult(*result) ||
                 (!batchResults.empty() && !sameInputCutoffMappedIdentity(batchResults.front(), *result)))
               break;
             batchResults.push_back(*result);
           }
+        }
+      }
+      // A previously published point may retire between the state query and
+      // the result read. Reobserve that exact point and the independent seal;
+      // this retains only a closed gate, never publishes or renews a mapping.
+      if (*alive && retiredPoint && seal && sealLive &&
+          (prior == InputCutoffState::DrainObserved || prior == InputCutoffState::Sealed)) {
+        const auto observed = m_client->inputCutoffState(*retiredPoint);
+        if (*alive && observed == InputCutoffState::Sealed) {
+          sealLive = m_client->inputCutoffSealLive(*seal);
+          state = sealLive ? InputCutoffState::Sealed : InputCutoffState::Denied;
         }
       }
     } catch (...) {

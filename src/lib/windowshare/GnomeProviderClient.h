@@ -161,6 +161,9 @@ public:
   {
   public:
     bool live() const noexcept;
+    // A retired point cannot authorize delivery, but an independently live
+    // prefix seal still owns the closed backend gate and its held input.
+    InputCutoffState state() const noexcept;
     const ViewportSnapshot &snapshot() const noexcept;
     const InputCutoffBinding &binding() const noexcept;
     const char *orderingLimitation() const noexcept;

@@ -2865,6 +2865,12 @@ bool GnomeProviderClient::InputDrainSegment::live() const noexcept
 {
   return m_viewport.live() && (!m_seal || m_seal->live());
 }
+InputCutoffState GnomeProviderClient::InputDrainSegment::state() const noexcept
+{
+  if (live())
+    return InputCutoffState::DrainObserved;
+  return m_seal && m_seal->live() ? InputCutoffState::Sealed : InputCutoffState::Denied;
+}
 const GnomeProviderClient::ViewportSnapshot &GnomeProviderClient::InputDrainSegment::snapshot() const noexcept
 {
   return m_viewport.snapshot();

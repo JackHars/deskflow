@@ -1769,7 +1769,7 @@ void retainedPrefixMaps(const PrivateBus &bus)
   );
   waitUntil([&] { return !first.segment->live(); }, "Initial stamped point did not expire");
   check(
-      seal.live() && !first.segment->senderOrdering()->live(),
+      seal.live() && !first.segment->senderOrdering()->live() && first.segment->state() == InputCutoffState::Sealed,
       "Historical prefix seal renewed an old point or expired with it"
   );
   auto mapping = inputDrainRequest(11);
@@ -1792,9 +1792,18 @@ void retainedPrefixMaps(const PrivateBus &bus)
   const auto mapped = awaitMap(mappedRequest);
   check(
       mapped.segment && mapped.segment->live() && mapped.segment->seal() && mapped.segment->seal()->live() &&
-          mapped.segment->binding() == mapping.cutoff && mapped.segment->snapshot().routedPoint == mapping.point &&
-          service.drainRequests == 1 && service.qtDrainRequests == 1 && service.qtMapRequests == 1,
+          mapped.segment->state() == InputCutoffState::DrainObserved && mapped.segment->binding() == mapping.cutoff &&
+          mapped.segment->snapshot().routedPoint == mapping.point && service.drainRequests == 1 &&
+          service.qtDrainRequests == 1 && service.qtMapRequests == 1,
       "Fresh exact point repeated the old-prefix drain or lost capture association"
+  );
+  // The Qt snapshot retires independently of the caller's request deadline.
+  // Reproduce its asynchronous invalidation while the prefix remains sealed.
+  service.invalidatePaint();
+  waitUntil([&] { return !mapped.segment->live(); }, "Qt snapshot retirement left a mapped point live");
+  check(
+      mapped.segment->state() == InputCutoffState::Sealed && seal.live() && !mapped.segment->senderOrdering()->live(),
+      "Retiring a Qt point revoked held-input ownership or retained delivery authority"
   );
   const auto repeated = client.requestInputMap(seal, mapping);
   check(repeated, "Repeated capture was not correlated through pending admission");
@@ -1814,7 +1823,8 @@ void retainedPrefixMaps(const PrivateBus &bus)
   );
   check(
       client.cancelInputDrain(firstRequest) && !seal.live() && !mapped.segment->live() &&
-          !mapped.segment->senderOrdering()->live() && client.live(),
+          mapped.segment->state() == InputCutoffState::Denied && !mapped.segment->senderOrdering()->live() &&
+          client.live(),
       "Canceling the original seal did not revoke copied maps while preserving the provider"
   );
   check(!client.requestInputMap(seal, changed), "Canceled prefix seal admitted another map");
@@ -1827,7 +1837,10 @@ void retainedPrefixMaps(const PrivateBus &bus)
   const auto nextSeal = *nextResult.segment->seal();
   service.invalidateSeal();
   waitUntil([&] { return !nextSeal.live(); }, "Exact Qt seal invalidation did not revoke copied historical evidence");
-  check(!nextResult.segment->live(), "Qt prefix revocation left its associated point live");
+  check(
+      !nextResult.segment->live() && nextResult.segment->state() == InputCutoffState::Denied,
+      "Qt prefix revocation left its associated point or backend state live"
+  );
   client.stop();
   waitUntil([&] { return service.callerGone; }, "Retained prefix fixture did not close");
   check(service.failure.empty(), "Retained prefix fixture service failed");

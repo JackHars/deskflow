@@ -489,6 +489,8 @@ public:
     const auto callback = onMappedQuery;
     if (callback)
       callback();
+    if (sealOrigin && (sealFault || deskflow::windowshare::InputCutoffClock::now() >= cutoffDeadline))
+      return std::nullopt;
     return result;
   }
   std::optional<deskflow::windowshare::InputCutoffPoint> cutoffPoint;
@@ -1950,6 +1952,56 @@ void ServerProxyTests::batchedCutoff_delegatesAtomicallyWithoutNewPrefix()
   QCOMPARE(f.platform->cutoffResumes, 1u);
   f.send(wire(kMsgDKeyUp, 'a', 0, 7));
   QCOMPARE(f.client.calls.back().kind, std::string("keyUp"));
+}
+
+void ServerProxyTests::sealedCutoff_pointRetiresDuringRead()
+{
+  for (bool batched : {false, true}) {
+    for (bool published : {false, true}) {
+      for (bool revokeSeal : {false, true}) {
+        InputFixture f;
+        negotiateCutoff(f, true, true, batched);
+        const auto origin = cutoffBinding();
+        f.send(encodeInputCutoffSealedRequest({{origin, 250}, {30, 40}}));
+        f.platform->cutoffProbe.pong(origin.request, InputCutoffClock::now());
+        f.platform->cutoffProbe.finishEventBatch(InputCutoffClock::now());
+        f.platform->mappedResult = mappedCutoffResult(origin, {30, 40});
+        pollCutoff(f);
+        QVERIFY(f.platform->sealValid);
+        auto next = origin;
+        ++next.request;
+        ++next.capture.sequence;
+        const InputCutoffMapRequest map{{{next, 250}, {35, 45}}, origin.request};
+        if (batched) {
+          f.send(encodeInputCutoffBatchRequest({origin.request, {map}}));
+          f.platform->batchResults.push_back(mappedCutoffResult(next, map.mapping.point));
+        } else {
+          f.send(encodeInputCutoffMapRequest(map));
+          f.platform->mappedResult = mappedCutoffResult(next, map.mapping.point);
+        }
+        if (published)
+          pollCutoff(f);
+        f.stream.writes.clear();
+        f.platform->onMappedQuery = [&] {
+          // The earlier Qt snapshot can expire inside the backend read while
+          // ServerProxy's own request deadline still has time remaining.
+          f.platform->cutoffDeadline = InputCutoffClock::now();
+          f.platform->sealFault = revokeSeal;
+        };
+        pollCutoff(f);
+        if (published && !revokeSeal) {
+          QVERIFY(f.stream.writes.empty()); // No renewed point and no owner revocation.
+          QVERIFY(f.platform->sealValid);
+          pollCutoff(f);
+          QVERIFY(f.stream.writes.empty());
+        } else {
+          QCOMPARE(cutoffReceipts(f.stream).back(), (InputCutoffReceipt{next, InputCutoffState::Denied}));
+        }
+        f.send(encodeInputCutoffResume(origin));
+        QCOMPARE(f.platform->cutoffResumes, 1u);
+      }
+    }
+  }
 }
 
 void ServerProxyTests::batchedCutoff_rejectsOverlapLossAndSubstitution()

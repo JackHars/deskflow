@@ -1765,7 +1765,8 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
       const auto index = static_cast<std::size_t>(item - mapped.batch.begin());
       if (windowshare::InputCutoffClock::now() >= item->deadline)
         return windowshare::InputCutoffState::Sealed;
-      if (index >= mapped.batchSegments.size() || !mapped.batchSegments[index].live()) {
+      if (index >= mapped.batchSegments.size() ||
+          mapped.batchSegments[index].state() == windowshare::InputCutoffState::Denied) {
         windowshare::lifecycleDiagnostic(
             "Ubuntu input", "input.batch-point", "denied", "Previously observed native map is no longer live",
             {{"request", QString::number(binding.request)},
@@ -1781,7 +1782,10 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
         cancelGnomeEiPrefixObservation();
         return windowshare::InputCutoffState::Denied;
       }
-      return windowshare::InputCutoffState::DrainObserved;
+      // Qt's snapshot has its own earlier deadline. Its retirement does not
+      // cancel the independently retained prefix or release held controls.
+      // Sealed returns no point; the next event still requires a fresh map.
+      return mapped.batchSegments[index].state();
     }
     if (mapped.refreshing) {
       if (const auto update = m_gnomeProvider->takeInputMapUpdate()) {
@@ -1806,11 +1810,11 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
       }
       return windowshare::InputCutoffState::Sealed;
     }
-    if (!mapped.refreshing && (!mapped.segment || !mapped.segment->live())) {
+    if (!mapped.refreshing && (!mapped.segment || mapped.segment->state() == windowshare::InputCutoffState::Denied)) {
       cancelGnomeEiPrefixObservation();
       return windowshare::InputCutoffState::Denied;
     }
-    return mapped.refreshing ? windowshare::InputCutoffState::Pending : windowshare::InputCutoffState::DrainObserved;
+    return mapped.refreshing ? windowshare::InputCutoffState::Pending : mapped.segment->state();
   }
   if (!m_gnomeCutoffInvalidated &&
       ((m_gnomePreparation && m_gnomePreparation->prefixObserved && m_gnomePreparation->promotion == binding &&
