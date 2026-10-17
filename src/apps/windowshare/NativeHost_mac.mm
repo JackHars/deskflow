@@ -1670,7 +1670,7 @@ struct NativeHost::Impl
   }
   std::optional<KeyboardRouteBinding> keyboardRouteCandidate(
       std::uint64_t session, std::uint64_t epoch, std::uint64_t generation,
-      ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr
+      ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr, bool inspectAssociated = true
   ) const
   {
     const auto started = std::chrono::steady_clock::now();
@@ -1699,7 +1699,8 @@ struct NativeHost::Impl
       return {};
     };
     const QPointer<NativeHost> alive(q);
-    if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild({session, epoch}) || !alive)
+    if (QThread::currentThread() != q->thread() ||
+        (inspectAssociated && q->m_impl->handleAssociatedChild({session, epoch})) || !alive)
       return denied("Native owner thread or associated-window admission changed");
     measured("associatedWindowUs");
     const auto admitted = lifecycle->admission();
@@ -2378,7 +2379,9 @@ struct NativeHost::Impl
     return QThread::currentThread() == q->thread() && !destroying && !callbackDepth && lifecycle->admission() &&
            keyboardAdmission.fenced(binding, qtInputEmpty());
   }
-  bool originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+  bool originalInputCurrent(
+      const KeyboardRouteBinding &binding, std::uint64_t captureEpoch, bool inspectAssociated = false
+  ) const
   {
     const auto started = std::chrono::steady_clock::now();
     auto candidateFinished = started;
@@ -2405,7 +2408,7 @@ struct NativeHost::Impl
     const auto target = originalTarget;
     Rect frame;
     const auto candidate = keyboardRouteCandidate(
-        binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame
+        binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame, inspectAssociated
     );
     candidateFinished = identityFinished = std::chrono::steady_clock::now();
     if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
@@ -2428,7 +2431,7 @@ struct NativeHost::Impl
         !captureEpoch || binding.scope != ForwardingScope::All)
       return false;
     if (originalInput.binding())
-      return originalInputCurrent(binding, captureEpoch);
+      return originalInputCurrent(binding, captureEpoch, true);
     QPointer<NativeHost> alive(q);
     // Staging the retained target grants no input. The full native check below
     // validates it before success; repeating that AX walk here stalls cutover.
@@ -2441,7 +2444,7 @@ struct NativeHost::Impl
     if (!originalInput.establish(binding, captureEpoch))
       return false;
     originalTarget = std::move(target);
-    if (originalInputCurrent(binding, captureEpoch) && lifecycle->current(admitted))
+    if (originalInputCurrent(binding, captureEpoch, true) && lifecycle->current(admitted))
       return true;
     if (alive)
       revokeOriginalInput(binding);
@@ -2597,7 +2600,10 @@ struct NativeHost::Impl
     }
     // Native identity/focus reads may block. The receipt is never renewed by
     // them; recheck it and the pending exact owner immediately before posting.
-    if (!originalInputCurrent(binding, record.epoch) || !alive || !liveLocalInputMappedPoint(point) ||
+    // Inspect new attached surfaces here once per delivery. The preflight
+    // query still verifies focus/geometry and known family fences, but does
+    // not repeat the full AX child-tree search before this final native check.
+    if (!originalInputCurrent(binding, record.epoch, true) || !alive || !liveLocalInputMappedPoint(point) ||
         originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
       return deny("Fresh native authority or mapped receipt changed before submission");
     trace("authorized");
