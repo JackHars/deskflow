@@ -105,6 +105,10 @@ struct OriginalInputCoordinator::Shared
   };
   mutable std::mutex mutex;
   bool closed = false, available = false, dispatcherCreated = false;
+  // Called only under mutex, which stop() also holds before retiring the
+  // QObject context. At most one queued wake crosses to the private thread.
+  std::function<void()> wake;
+  bool wakeQueued = false;
   std::uint64_t nextTicket = 0, nextOwner = 0;
   LocalInputPeerPolicy policy;
   std::shared_ptr<Owner> owner;
@@ -484,6 +488,8 @@ public:
       m_reserved->owner->scrolling =
           scroll->phase != OriginalScrollPhase::Cancelled && scroll->momentum != OriginalMomentumPhase::Ended;
     m_reserved.reset();
+    if (m_state->wake)
+      m_state->wake();
     return true;
   }
   void cancel(const Reservation &reservation) noexcept override
@@ -957,6 +963,25 @@ OriginalInputCoordinator::OriginalInputCoordinator(
     owner->revoked = true;
     owner->hostReleased = true;
   };
+  m_shared->wake = [this] {
+    if (m_shared->wakeQueued)
+      return;
+    m_shared->wakeQueued = true;
+    if (!QMetaObject::invokeMethod(
+            this,
+            [this] {
+              {
+                std::lock_guard lock(m_shared->mutex);
+                m_shared->wakeQueued = false;
+                if (m_shared->closed)
+                  return;
+              }
+              tick();
+            },
+            Qt::QueuedConnection
+        ))
+      m_shared->wakeQueued = false;
+  };
   QObject::connect(&m_timer, &QTimer::timeout, this, [this] { tick(); });
   m_timer.start(4);
 }
@@ -1022,6 +1047,7 @@ void OriginalInputCoordinator::stop()
   {
     std::lock_guard lock(m_shared->mutex);
     m_shared->closed = true;
+    m_shared->wake = {};
     m_shared->available = false;
     m_shared->revoke();
   }
@@ -1043,6 +1069,7 @@ void OriginalInputCoordinator::tick()
 }
 bool OriginalInputCoordinator::tickOne()
 {
+  const SlowOperationDiagnostic timing("Core input", "input.coordinator-service");
   const QPointer<OriginalInputCoordinator> alive(this);
   bool available = false;
   try {

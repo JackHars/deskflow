@@ -42,6 +42,7 @@ public:
   void stop();
 
 private:
+  friend struct OriginalInputCoordinatorTestAccess;
   struct Shared;
   class Dispatcher;
   void tick();

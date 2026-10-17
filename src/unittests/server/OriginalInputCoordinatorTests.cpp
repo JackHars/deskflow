@@ -29,11 +29,19 @@
 #include <map>
 #include <stdexcept>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace deskflow::windowshare {
+struct OriginalInputCoordinatorTestAccess
+{
+  static void stopPolling(OriginalInputCoordinator &coordinator)
+  {
+    coordinator.m_timer.stop();
+  }
+};
 class SelectedPeerTestAccess
 {
 public:
@@ -1022,6 +1030,48 @@ void OriginalInputCoordinatorTests::firstClickWaitsForFocusAndExactHostBeforeDel
     return f.dispatcher->legacyAcquisitionReady(f.selected.recipient());
   }));
   QCOMPARE(f.count("mapped"), 1u);
+  f.finish();
+#endif
+}
+
+void OriginalInputCoordinatorTests::committedInputWakesWithoutPollingTimer_data()
+{
+  QTest::addColumn<int>("invalidate");
+  QTest::newRow("deliver") << 0;
+  QTest::newRow("admission-lost") << 1;
+  QTest::newRow("destroyed") << 2;
+}
+void OriginalInputCoordinatorTests::committedInputWakesWithoutPollingTimer()
+{
+#if !defined(__APPLE__)
+  QSKIP("Positive source admission uses the actual Mac capture adapter");
+#else
+  QFETCH(int, invalidate);
+  Fixture f;
+  Capture source;
+  const auto pending = f.reserve(source.fresh());
+  QCOMPARE(pending.state, State::Pending);
+  f.started(pending.ticket);
+  f.wire.complete(f.wire.result());
+  const auto ready = f.accepted(pending.ticket);
+  OriginalInputCoordinatorTestAccess::stopPolling(*f.coordinator);
+  bool committed = false;
+  std::thread producer([&] { committed = f.dispatcher->commit(*ready.reservation); });
+  producer.join();
+  QVERIFY(committed);
+  QCOMPARE(f.count("mapped"), 0u);
+  if (invalidate == 1)
+    f.admitted = false;
+  else if (invalidate == 2)
+    f.coordinator.reset();
+  if (invalidate) {
+    QVERIFY(until([&] { return f.count("release") == 1; }));
+    QCOMPARE(f.count("mapped"), 0u);
+    QVERIFY(!f.dispatcher->live(ready.reservation->owner));
+  } else {
+    QVERIFY(until([&] { return f.count("mapped") == 1; }));
+    QVERIFY(!f.closed);
+  }
   f.finish();
 #endif
 }

@@ -16,6 +16,8 @@ private Q_SLOTS:
   void emptyHostDeclinePreservesOrdinaryInput();
   void lateTargetAfterCancellationPreservesNextHandoff();
   void firstClickWaitsForFocusAndExactHostBeforeDelivery();
+  void committedInputWakesWithoutPollingTimer_data();
+  void committedInputWakesWithoutPollingTimer();
   void firstClickRejectsHostSubstitution_data();
   void firstClickRejectsHostSubstitution();
   void firstClickCancellationRetainsOneCleanupOwner_data();

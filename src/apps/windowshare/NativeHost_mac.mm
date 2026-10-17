@@ -1670,7 +1670,24 @@ struct NativeHost::Impl
       ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr
   ) const
   {
-    const SlowOperationDiagnostic timing("Host", "native.keyboard-route-candidate");
+    const auto started = std::chrono::steady_clock::now();
+    auto checkpoint = started;
+    QJsonObject durations;
+    const auto measured = [&](const char *stage) {
+      const auto now = std::chrono::steady_clock::now();
+      durations.insert(stage, qint64(std::chrono::duration_cast<std::chrono::microseconds>(now - checkpoint).count()));
+      checkpoint = now;
+    };
+    const auto timing = qScopeGuard([&] {
+      const auto elapsed =
+          std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+      if (elapsed >= 25) {
+        durations.insert("elapsedMs", qint64(elapsed));
+        lifecycleDiagnostic(
+            "Host", "native.keyboard-route-candidate", "slow", "Native authority check timing", durations
+        );
+      }
+    });
     const auto denied = [&](const char *reason, QJsonObject details = {}) -> std::optional<KeyboardRouteBinding> {
       details.insert("session", QString::number(session));
       details.insert("epoch", QString::number(epoch));
@@ -1681,6 +1698,7 @@ struct NativeHost::Impl
     const QPointer<NativeHost> alive(q);
     if (QThread::currentThread() != q->thread() || q->m_impl->handleAssociatedChild({session, epoch}) || !alive)
       return denied("Native owner thread or associated-window admission changed");
+    measured("associatedWindowUs");
     const auto admitted = lifecycle->admission();
     const Owner owner{session, epoch};
     const auto *e = entry(session, epoch);
@@ -1706,10 +1724,13 @@ struct NativeHost::Impl
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (!active || active.processIdentifier != e->identity.pid)
       return denied("The source application is not foreground");
+    measured("identityAndPermissionsUs");
     const auto state = readNativeWindowState(e->window);
-    if (!focusMatches(*e) || !state || (!e->family && !state->minimized.has_value()) ||
-        state->minimized.value_or(false) || !sameGeometry(state->frame, e->session.source) ||
-        (e->moved && !holding.available()))
+    measured("windowStateUs");
+    const bool focused = focusMatches(*e);
+    measured("focusUs");
+    if (!focused || !state || (!e->family && !state->minimized.has_value()) || state->minimized.value_or(false) ||
+        !sameGeometry(state->frame, e->session.source) || (e->moved && !holding.available()))
       return denied("Native focus, frame, minimized state, or holding display changed");
     if (!lifecycle->current(admitted))
       return std::nullopt;
