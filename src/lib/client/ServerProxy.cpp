@@ -24,6 +24,7 @@
 
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputSequence.h"
+#include "windowshare/LifecycleDiagnostics.h"
 #include <QScopeGuard>
 #include <array>
 #include <limits>
@@ -1656,12 +1657,14 @@ void ServerProxy::pollInputCutoff()
   const auto prior = m_cutoff->reported;
   const auto deadline = m_cutoff->deadline;
   auto state = InputCutoffState::Denied;
+  auto backendState = state;
   std::optional<InputCutoffMappedResult> mappedResult;
   std::vector<InputCutoffMappedResult> batchResults;
   bool sealLive = false;
   if (m_cutoff->backendStarted && !m_cutoff->failed && (seal || InputCutoffClock::now() < m_cutoff->deadline)) {
     try {
       state = m_client->inputCutoffState(binding);
+      backendState = state;
       if (*alive && seal)
         sealLive = m_client->inputCutoffSealLive(*seal);
       if (*alive && sealLive && InputCutoffClock::now() >= deadline &&
@@ -1721,6 +1724,19 @@ void ServerProxy::pollInputCutoff()
   }
   if (state == InputCutoffState::Pending || m_cutoff->reported == state)
     return;
+  if (state == InputCutoffState::Denied)
+    lifecycleDiagnostic(
+        "Ubuntu input", "input.cutoff", "denied", "Backend cutoff observation lost input authority",
+        {{"request", QString::number(binding.request)},
+         {"priorState", prior ? int(*prior) : -1},
+         {"backendState", int(backendState)},
+         {"sealLive", sealLive},
+         {"mappedResult", bool(mappedResult)},
+         {"batchExpected", qint64(batch.size())},
+         {"batchObserved", qint64(batchResults.size())},
+         {"pointBudgetRemainingUs",
+          qint64(std::chrono::duration_cast<std::chrono::microseconds>(deadline - InputCutoffClock::now()).count())}}
+    );
   m_cutoff->reported = state;
   if (state == InputCutoffState::DrainObserved && m_preparation && m_preparation->promotion == binding)
     m_preparation->state = InputPreparationState::Sealed;

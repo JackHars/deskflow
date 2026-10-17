@@ -26,6 +26,7 @@
 #endif
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
 #include "deskflow/InputSequence.h"
+#include "windowshare/LifecycleDiagnostics.h"
 #endif
 
 #include <algorithm>
@@ -1765,6 +1766,18 @@ windowshare::InputCutoffState EiComputer::inputCutoffState(const windowshare::In
       if (windowshare::InputCutoffClock::now() >= item->deadline)
         return windowshare::InputCutoffState::Sealed;
       if (index >= mapped.batchSegments.size() || !mapped.batchSegments[index].live()) {
+        windowshare::lifecycleDiagnostic(
+            "Ubuntu input", "input.batch-point", "denied", "Previously observed native map is no longer live",
+            {{"request", QString::number(binding.request)},
+             {"segmentPresent", index < mapped.batchSegments.size()},
+             {"sealLive", mapped.seal->live()},
+             {"pointBudgetRemainingUs", qint64(
+                                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                                item->deadline - windowshare::InputCutoffClock::now()
+                                            )
+                                                .count()
+                                        )}}
+        );
         cancelGnomeEiPrefixObservation();
         return windowshare::InputCutoffState::Denied;
       }
