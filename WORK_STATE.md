@@ -1,5 +1,450 @@
 # Seamless Windows work state
 
+## Rapid scrolling repair — 2026-10-16
+
+Current Mac runtime and source fixture: `fd2db144c3576cf9bcd8df8be9efdf4f48b109bb`.
+Ubuntu binaries remain at `52bddb84b`; all changes since that runtime are Mac-only.
+The coordinator/normalizer files still match their 104/42 checks on both machines
+at `c3b545d78`. No new attended test is authorized.
+
+The slower runs below did not establish trackpad burst reliability. Fresh
+actual-desktop tests reproduced input expiry under rapid scrolling. The fixes:
+
+- Screen Recording preflight measured about 19 ms per call and ran twice per
+  input. It now remains at export and in the existing 500 ms watchdog. Capture
+  failure is checked immediately via its atomic latch before and after native
+  reads. This changes permission polling cadence; it does not promise immediate
+  TCC revocation detection. Accessibility and native identity checks remain.
+- Preflight and final delivery both searched the full AX child tree. New
+  attached surfaces are now inspected once, immediately before native posting.
+  Preflight still checks native focus/geometry and known family fences; initial
+  activation still performs the complete check. Legacy dialog handling also
+  defers expensive joins until a real Sheet/Drawer candidate exists.
+- The disposable test window rewrote and committed its complete status file
+  inside every Qt input callback, including propagated wheel callbacks. The
+  existing 25 ms timer now publishes snapshots; final shutdown still flushes.
+  Native evidence records every event synchronously with unchanged timestamps.
+
+Receipt deadlines, ownership checks, queue bounds and the strict evidence
+normalizer are unchanged. Slow native queries retain stage timing diagnostics.
+The rebuilt signed Mac package passes five integrated and nine application
+suites, including native recovery, original input and sharing activity. The
+unchanged Ubuntu package passed six integrated and seven application suites.
+Validation and package hashes: `build/snapshot-batch-wb5x86vr/`.
+
+Retain the failed/intermediate evidence:
+
+| Run | Scope/result |
+| --- | --- |
+| `recording-replay-abuz9zqt` | At `52bddb84b`, 16 fast scroll events caused mapped input expiry. |
+| `recording-replay-3u2p4axg` | Screen-permission polling repair alone still failed the short burst. |
+| `recording-replay-vzcxe85u` | Diagnostic build passed 16 events and a full recording cycle only. |
+| `recording-replay-328pt6h1` | Profiling run failed; sampler timing is unbounded and its report was not retained. Not throughput acceptance. |
+| `recording-replay-a02u2wwv` | 120-event run failed before native submission. |
+| `recording-replay-m_ip61dj` | Removing duplicate child searches alone still expired input while the fixture wrote status inside input callbacks. |
+
+Before the network adjustment, `recording-replay-esly50p8` passed all 120 fast
+scroll receipts, 158 non-repeat receipts, the full recording/lifecycle checks,
+all 21 queue histories and clean restoration. Its next run,
+`recording-replay-159hs5ts`, failed before the burst while awaiting an Ubuntu
+mapping reply; the existing deadline was not extended. Do not call that pair
+stable or transfer the first run's pass to the second.
+
+Ubuntu's active Wi-Fi connection had power saving enabled. A 30-packet Mac-to-
+Ubuntu measurement averaged 42.727 ms with a 141.055 ms peak. Independent tests
+from each computer to the router stayed below 3 ms. Disabling Ubuntu Wi-Fi power
+saving reduced the same 30-packet measurement to 1.880 ms average / 2.504 ms peak,
+with zero packet loss in both samples. The live device was changed without a
+reconnect, and the existing NetworkManager profile was set to disable power
+saving on future connections. This is a machine configuration change, not an
+automatic policy in Deskflow. Exact prior/new settings and rollback commands
+are retained in `build/wifi-awake-g4tf1rn7/network-setting.json`.
+
+The first run after that change, `recording-replay-tv8md96r`, still expired
+a mapped event during the 120-event burst, with 79 non-repeat receipts observed.
+The repetition loop stopped on that failure. Network latency was not the only
+bottleneck; preserve `build/wifi-awake-g4tf1rn7/` as failed evidence.
+
+Commit `4793a4402` additionally skips unused subrole queries for AX objects that
+are not windows and skips title/bundle metadata during per-event identity checks.
+It retains the full attached-surface scan and exact WindowServer ID/PID/birth/
+bounds observations. Its run `recording-replay-paii593c` passed all 120 scroll
+receipts, the full 30-second recording interval and all 21 queue histories, but
+then failed a native focus query while starting the return shortcut. The
+50 ms focus query timeout remains retained as a failed run, not a full pass.
+`fd2db144c` adds exact focus/geometry/minimized/holding-display rejection details
+without changing authority. Validation/package hashes are in
+`build/return-trace-35bi7wkq/`. All three fresh cycles passed the functional
+non-repeat and complete lifecycle checks with identical native binaries, fixture
+and coordinator. Each completed 120 seconds Active, all three 30-second
+recordings, 120 scroll events at over 120 Hz, 158 checked non-repeat receipts,
+21 valid queue histories, zero evidence loss, source restoration and stopped
+processes. Ordinary Mac configuration was unchanged; no keys/buttons remained
+held. Roots:
+
+- `recording-replay-1ufbt9r3` — 120.309 Hz; strict recorded raw/timestamp join failed.
+- `recording-replay-ny73n6oh` — 121.694 Hz; strict recorded interval join passed.
+- `recording-replay-l4ja6xui` — 121.911 Hz; strict recorded interval join passed.
+
+This is bounded stability evidence, not proof that the earlier intermittent
+focus timeout is impossible. All three full synthetic replays still report
+the known missing repeated-x AppKit receipt and timestamp changes outside
+and/or within the recorded interval. Those checks are not waived. No physical
+acceptance has been obtained.
+
+Current Mac archive SHA-256:
+`e51da724ded4c52aca77f44d4fb1aa4feb37547bc05359ba0e5520aafc4b4a95`.
+Unchanged Ubuntu archive SHA-256:
+`b912992380c7cca9ead85e3abe9d2456125ca9bc915a42e9d806ca732445a435`.
+The current Mac passes five integrated and nine app suites. CI foundation run
+`38999308404` is still in progress; source-bundle run `38999308471` passed.
+Fresh attended preparation/launch helpers are `build/prepare-physical-r33.py`
+and `build/run-physical-r33.py`. The launch guard requires these exact three
+artifact sets plus a new explicit user approval; no approval has been created. H03–H12 physical
+acceptance is still open; a fresh attended launch requires user permission.
+
+## Private input dispatch repair — 2026-10-16
+
+Previous native runtime: `52bddb84ba6dcfac91e44ad146cf1d7c0b4dae0d`.
+Coordinator and normalizer files still match the 104/42 two-machine checks
+bound to `c3b545d78` in `build/event-validation-utnbg_qt/`.
+
+The previous candidate passed the full recording lifecycle in
+`build/recording-replay-8i529fan/`, including all 21 queue histories. Its second
+run, `build/recording-replay-rmirupyh/`, failed during initial input handoff:
+the mapped-point deadline expired in Host after native authority checks. The
+source then returned, causing the coordinator's secondary hidden-placement
+failure. No recording began. Keep this failure and its non-neutral fixture
+snapshot; do not claim three successful runs at that revision.
+
+A deterministic regression reproduces private input bytes remaining in Qt's
+output buffer until a later event-loop turn. `LocalInputChannel::send` now
+performs one nonblocking flush after the enqueue observation has ended. A slow
+native query cannot delay submission of already authorized bytes. Backpressure
+still uses the same bounded queue and writable notification, and no authority
+check, receipt deadline or loss requirement changes. A failed mapped receipt
+also logs its exact capture sequence and original deadline for diagnosis.
+
+The regression fails before the fix and passes afterward. The complete private
+channel suite also passes, including congestion, destructive callbacks and
+expiry. Evidence: `build/private-flush-regression-before.log`,
+`build/private-flush-regression-after.log`, and
+`build/private-flush-local-input-tests.log`. The rebuilt signed Mac package
+passes five integrated and six application suites. Ubuntu passes six integrated
+and seven application suites; its staged package resolves all dependencies.
+
+Three consecutive fresh actual-desktop runs at this revision pass startup,
+38 non-repeat native functional receipts, the complete 120-second Active
+interval, all three 30-second recorder intervals, zero recorded loss, all 21
+queue histories, restoration, process stop, neutral source input and unchanged
+ordinary Mac settings. They use identical native binaries and source fixture:
+`build/recording-replay-7ncfnjoo/`, `build/recording-replay-khwkbvxu/`, and
+`build/recording-replay-tmvstz3r/`. Results and hashes:
+`build/private-flush-sqtt1bm4/recording-desktop-verification.json`.
+
+The Mac archive SHA-256 is
+`f3f6c3a9a572e0f976c74e0cd272f0ed9622c7b690cf09b11ce3fd29e83751be`;
+Ubuntu is `b912992380c7cca9ead85e3abe9d2456125ca9bc915a42e9d806ca732445a435`.
+The synthetic driver still returns nonzero for its missing repeat receipt,
+and full normalization still rejects native timestamp/raw mismatches. These
+three successes cover the named non-repeat recording/lifecycle checks only.
+The separate rapid-scroll check failed; see the repair and retained evidence above.
+
+Held-key AppKit receipts and strict native timestamp matching remain open.
+No physical acceptance row is complete and no attended launch is authorized.
+
+## Measured Event concurrency repair — 2026-10-16
+
+Previous native runtime: `7d50659b638bc0fd50d9c1b43c9bbbda6e8ac0d7`.
+Current harness/postprocessor revision: `c3b545d785f9f646c1af3d34c7d04cae62a5f82d`.
+The second run at the previous runtime (`build/recording-replay-n1guxg6p/`)
+exposed concurrent measured `event-all-outstanding` mutations taking the same
+single-writer diagnostic lock. Input delivery, restoration and neutral cleanup
+completed, but the Core recording had loss=1 and was correctly rejected.
+
+Measured Event counters now use an atomic pair of cumulative counts with a
+fixed 16-attempt bound. Each row retains its exact snapshot and original clock
+sample; preallocated consumer storage orders delayed copies by their counter
+sequence. It never aggregates mutations, changes timestamps or overwrites a
+pending row. Overflow, gaps, excessive contention, invalid boundaries and sticky
+loss remain failures. Failed measurements retain actual lifetime accounting so
+cleanup cannot mistake a live Event for an empty queue.
+
+A concurrent-recording regression fails before the fix and passes afterward.
+Additional cases cover delayed publication, bounded reorder storage, terminal
+gaps, counter saturation and unchanged source rows/timestamps. The real
+EventQueue suite also passes. Evidence: `build/event-counter-regression-before.log`,
+`build/event-counter-regression-after.log`, and `build/event-counter-base-tests.log`.
+
+Signed Mac package verification and five integrated/six application suites pass;
+Ubuntu passes six integrated/seven application suites. Native package evidence:
+`build/event-counter-v8bwiy65/`. All 104 coordinator checks and 42 postprocessor
+checks pass on both machines from `build/event-validation-utnbg_qt/`.
+The postprocessor now strictly validates the collector's optional unready
+preparation diagnostics. It still rejects failed arms, loss, unknown metadata,
+and native raw/timestamp mismatches. Saved journals are never rewritten.
+
+The current repeated desktop checks additionally validate all three journal
+schemas and all 21 queue histories using that strict parser. Results belong in
+`build/event-counter-v8bwiy65/recording-desktop-verification.json`. Native
+repeated-key and exact timestamp acceptance remain open; earlier successful
+runs at other revisions do not establish this candidate's reliability.
+
+## Recorder readiness race and cleanup repair — 2026-10-16
+
+Previous candidate: `05a31025e206470e41a747639e6872731e03757c`.
+The second full-recording run at `41d5ca17b`,
+`build/recording-replay-z0bxhck9/`, rejected Host arm after a background message
+made `private-output` nonempty between published readiness and the local arm
+request. The journal did not lose entries. Source restoration, process stop and
+neutral input succeeded, but terminal-log polling stopped at the rejected Host
+acknowledgement, forcing the native fixture's fallback close.
+
+Runtime now waits for a fresh local readiness check before the unchanged atomic
+arm attempt, within the existing two-second coordinator budget. A pending
+request never records, resets loss or retries a denied arm. Stop and the fixed
+local arm deadline are terminal. New regression cases reproduce the stale
+readiness rejection before the fix and cover output drain, pending cancellation,
+expiry and forbidden late restart after it. Evidence: `build/arm-regression-before.log`
+and `build/arm-regression-after.log`.
+
+Cleanup now reads all owned recorder outputs separately from acceptance checks,
+so a failed arm can still produce a graceful native close. Failed-arm acceptance
+and wrong-process rejection remain strict. All 104 coordinator checks pass on
+Mac and Ubuntu from the exact source archive in `build/arm-coordinator-16915b0s/`.
+The rebuilt and signed Mac package passes four integrated and six application
+suites. Ubuntu passes five integrated and seven application suites. Package
+verification and all dependency checks pass; evidence belongs under
+`build/arm-readiness-icjwz3r_/`. Repeated live recording validation is tracked
+in its `recording-desktop-verification.json`; previous runtime successes do
+not validate this candidate. GitHub checks for `41d5ca17b` are green, while
+the newer `05a31025e` run is separate.
+
+## Recording journal concurrency repair — 2026-10-16
+
+Candidate runtime: `41d5ca17b`. The autonomous full-recording check
+`build/recording-replay-sph3juuv/` at prior runtime `3995411a0` reached the
+actual Ubuntu monitor, delivered Return through the original-input route and
+armed all three recorders. The Core journal then reported loss=1 at
+`journal-reserve`; Host and Native ended cleanly. The coordinator correctly
+rejected that recording and restored the source. Keep this failed evidence.
+
+The shared journal used a one-shot compare/exchange, so two independent valid
+writers racing for an entry caused a lost row despite free space. A four-writer
+regression reproduces that failure before the fix. The journal now reserves a
+bounded capacity credit, then a unique atomic ticket. Credits include unfinished
+writers and return only after the consumer copies a row. There are no retries,
+waits or allocations in the producer. Same-counter contention, buffer overflow,
+unknown ownership, incomplete drain and any actual loss still reject the run.
+
+The regression passes after the fix, including repeated ring wrap and a stalled
+unpublished row at full capacity. Evidence: `build/journal-regression-before.log`
+and `build/journal-regression-after.log`. The signed Mac package passes four integrated and six application suites;
+Ubuntu passes five integrated and seven application suites, including the new
+journal regression. Build/package evidence is retained under
+`build/journal-reservation-usos9_fz/`. The first live run
+`build/recording-replay-g_6i_nbk/` completes the full 120-second active interval,
+38 non-repeat native receipts, all three 30-second recordings with zero loss,
+source restoration and neutral cleanup. Repeated-run verification is recorded
+in that directory's `recording-desktop-verification.json`. The full replay still
+fails synthetic repeat and strict timestamp preservation; physical acceptance
+is not assessed. Coordinator source hashes are unchanged from the 102 Mac and
+Ubuntu checks at `8e3a991c0`.
+
+## Three autonomous input cycles — 2026-10-16
+
+Runtime `3995411a03be3bae964a026d42a186232daea761` now completes three
+consecutive actual-desktop runs: `build/handoff-replay-rbnium3p/`,
+`build/handoff-replay-nvnrns82/`, and `build/handoff-replay-jbtyjcli/`.
+Each reaches Active, verifies 20 non-repeat native receipts (typing, Shift+B,
+click/drag, vertical and horizontal scroll), stays connected for the full
+30-second pipeline interval, restores the source and stops every owned process.
+All finish with zero held keys/buttons and unchanged ordinary Deskflow settings.
+Ubuntu log archives and executable/fixture hashes are retained and verified.
+Summary: `build/first-delivery-owatkikx/desktop-verification.json`.
+
+These are scoped functional passes, not a complete input pass. Every replay
+still exits nonzero on the synthetic repeated-x native receipt. The first run
+preserves all compared timestamps; the next two include macOS timestamp changes.
+H04/H06/H11 and every other physical acceptance row remain open. No failed
+receipt or normalizer expectation has been rewritten.
+
+Coordinator `8e3a991c0` additionally adds an explicitly synthetic Record-lifecycle
+mode. Its 102 coordinator tests pass on both Mac and Ubuntu, bound to exact
+source hashes in `build/recording-pipeline-60d6rcsr/`. Native packages remain at
+`3995411a0`; no runtime source changed. The three runs above used the previous
+coordinator, so they do not validate this new recording branch. GitHub checks
+for the placement/startup candidate `c6cfdcb8c` are green; that CI result does
+not cover the later diagnostic or recording-harness commits.
+
+## First-click replay diagnosis — 2026-10-16
+
+Current diagnostic runtime: `3995411a03be3bae964a026d42a186232daea761`, built
+and packaged on Mac and Ubuntu. Placement/startup patches are unchanged from
+`c6cfdcb8c`; this adds bounded first-native-delivery and precise revocation logs.
+The placement repair reaches Active and completes the 30-second session in
+`build/handoff-replay-2hz_3636/`, with source restoration and neutral cleanup.
+Its replay fails before the first click; it must not count as an input pass.
+
+`build/handoff-replay-lafs5dxe/` identifies the failure: the replay's Shift
+setup cycle already acquires original-input ownership, but its first mouse
+press has no preceding captured button release in this epoch. The coordinator
+correctly revokes that unproven new acquisition. The trace independently shows
+the earlier Shift delivered with 58 ms remaining on its mapped receipt. This
+is separate from the repaired startup failures and the synthetic repeat issue.
+The diagnostic driver now posts an explicitly marked button-up alongside its
+initial key-up controls before switching routes. This is real captured test
+input, not fabricated neutral evidence. The first-use/unknown-control contract
+has not been weakened, and this setup cannot establish first-use physical UX.
+The full native repeat and strict timestamp checks remain open.
+
+Build/test/package evidence: `build/first-delivery-owatkikx/`. Mac coordinator
+checks pass; Ubuntu passes five integrated and six standalone suites. The 101
+Python coordinator checks are unchanged and remain bound by their source hashes.
+
+## Placement guard cost repair — 2026-10-16
+
+Earlier candidate: `c6cfdcb8c501e58c12bb8a8908957c8838887501` on both machines.
+The next autonomous run (`build/handoff-replay-r73oqt21/`) completed the network
+handshake but rolled back before Active: observer setup and native writes
+repeated the full permission/display snapshot inside each authority fence.
+The nine preparation operations consumed the two-second placement budget before
+fresh geometry readback. All five native notification registrations themselves
+succeeded. Source restoration, neutral input and ordinary-settings preservation
+passed; this was not a successful input run.
+
+ObservedPlacement now fences a single fresh native observation with cheap
+in-process lifecycle checks. Every operation still checks native identity,
+permissions and physical/holding display state before and after its AX call.
+No snapshot is reused across an event-loop turn, and the absolute two-second
+deadline and final AX/WindowServer agreement are unchanged. The authority helper
+also handles token loss, native refusal, deadline overrun, cancellation and
+owner destruction; those regressions pass with the placement/startup suites.
+Build/package evidence: `build/placement-authority-hifhvuwx/`.
+
+## Buffered startup handshake repair — 2026-10-16
+
+Earlier candidate: `7212d309c4b8018cb8914e38cc7ea713f0b38f3b` on both machines.
+The repeat run `build/handoff-replay-u_2q6vvf/` exposed another startup race:
+Ubuntu sent hello and initial DINF together; the Mac changed stream readers
+without waking the new reader for the already-buffered DINF. Since the packet
+filter signals only readiness transitions, later bytes could not rescue it.
+The client reached its heartbeat deadline before it was adopted by the server.
+
+ClientProxyUnknown now queues a buffered-read wake after the versioned proxy
+and its readiness handlers are installed, matching the client's existing
+reader-handoff behavior. No connection, input or heartbeat deadline increased.
+A deterministic regression reproduces the failure before the fix and passes
+after it. Eight cases cover protocols 1.0/1.8, combined and split/partial packets,
+and destruction before the queued read. Mac ServerTests, ClientProxyTests and
+OriginalInputCoordinatorTests pass. Ubuntu passes those plus ServerProxyTests
+and EiComputerTests, and five standalone GNOME/local-input/preflight/transport/
+bridge suites. Evidence: `build/handshake-fix-1whkb2_i/` and
+`build/handshake-regression-before.txt`, `build/handshake-regression-after.txt`.
+The unchanged 101 coordinator checks remain bound by exact source hashes to
+their earlier two-machine run. Signed Mac package verification also passes.
+
+The first native replay below is historical input evidence, not proof of this
+candidate's repeated startup reliability. The full synthetic repeat and strict
+native-timestamp checks remain open; no physical acceptance row is closed.
+
+## Input ownership repair and native replay — 2026-10-16
+
+Earlier tested runtime: `2d51ac84c6da3a81aa037046adfb9f263a79c68c` on Mac and Ubuntu.
+The earlier snapshot-retirement failure is fixed by `087d2f8b7`:
+Ubuntu was cancelling its full input prefix when a Qt pointer snapshot expired
+slightly before the request deadline, even though the independent prefix seal
+was still live. The failing run (`build/handoff-replay-5e22n6j1/`) recorded
+`sealLive=true` and 3,613 microseconds remaining at that cancellation.
+A retired point now reports Sealed, with no mapping or ordering authority;
+genuine seal revocation still denies. ServerProxy also handles retirement during
+a mapped-point read only when that exact point was previously published.
+Every subsequent input still requires a fresh map. Neither timeout was extended.
+
+Regression checks cover independent Qt-point retirement, genuine revocation,
+and eight single/batch, published/unpublished, live/revoked read races. Mac
+ServerProxyTests pass. The current diagnostic build additionally passes Mac
+ServerTests and OriginalInputCoordinatorTests; Ubuntu passes three integrated
+suites and five GNOME/local-input/preflight/transport/bridge suites. The 101 Python
+coordinator checks are unchanged and bound to their prior two-machine validation
+by exact source hashes. Build/package evidence: `build/point-retirement-_lz86uog/`
+and `build/repeat-diagnostics-sbvclj2z/`.
+
+`build/handoff-replay-_zwa9xu_/` completes 20 independently observed native
+receipts: initial click/release, A, Shift+B, x press/release, click/drag/release,
+and vertical/horizontal scroll including phase endings. Raw fields, flags,
+Host PID and destination window match. Input ownership survives the idle gap;
+the 30-second actual-desktop session restores the source and finishes with no
+held keys/buttons. This is synthetic functional evidence, not physical acceptance.
+
+**The full replay still fails.** Its first x repeat reaches the source process's
+PID tap but not AppKit's event handler. `build/handoff-replay-28wcl8yh/` traces
+capture, mapping, private send and native submission for that exact repeat.
+Independent disposable AppKit probes reproduce the loss with both direct CG and
+NSEvent construction. The same probe receives repeats when its initial press
+updates the HID state; the intercepted replay explicitly observes HID/combined
+key state false. A process-local accent-menu setting does not fix it. This is
+an observed synthetic-input limitation; real held-key behavior remains unverified.
+No production event flags, test expectations or native receipts were rewritten.
+The diagnostic driver retains the failed repeat result while continuing the
+pointer/scroll checks; its exit remains nonzero.
+
+Exact source-timestamp preservation also remains unaccepted: macOS sometimes
+retimestamps target-PID delivery, as recorded in the earlier checkpoint below.
+Do not close H04/H06/H11 from these synthetic runs. Continue autonomous disposable
+checks; obtain fresh permission immediately before any attended physical test.
+No results popup or sleep-based synchronization is wanted.
+
+## Earlier handoff latency repair — 2026-10-16
+
+Earlier tested runtime: `3b508d52400ceee1d7af20868e58b30e64953a66` on both
+machines. The user authorized autonomous control of disposable test sessions;
+a later attended test still needs fresh permission immediately before launch.
+
+The unattended input replay reproduced the handoff expiry from attempt 32.
+The runtime now disables TCP batching on window-sharing controls; the SSH relay
+also disables batching on its accepted TCP socket. Native preparation uses the
+exact fenced route/empty legacy ledger, with fresh native authority still
+required at activation and delivery. Native delivery avoids redundant AX walks
+around event construction/submission. Committed input now posts one bounded,
+coalesced wake to the private Qt thread instead of relying only on polling.
+Its regressions stop the timer and cover cross-thread commit, lost admission and
+destruction before delivery. The original 500 ms preparation and 250 ms mapping
+limits have not been extended.
+
+`build/handoff-replay-41ufes4d/` reached Ready in 347 ms, queued/sent its first
+original input in the same millisecond, and received that click at the exact
+source window with matching raw effect and flags. Sharing ran for 30 seconds;
+source restoration and neutral input cleanup pass. The strict replay still
+**fails timestamp preservation**. Two separate self-targeted probes reproduce
+macOS replacing a valid earlier CG timestamp at the destination PID tap, for
+both CG and NSEvent-based construction. The event object retains the requested
+timestamp immediately after posting. Probe evidence is retained privately in
+`build/post-timestamp-probe-valid.jsonl` and
+`build/post-timestamp-template-probe.jsonl`. No normalizer expectation was relaxed
+and no native receipt was rewritten. Exact target timestamp preservation is
+unsupported by these observed posting paths on this machine; physical H11
+acceptance remains open.
+
+Further functional replay uses a separately declared `--functional` diagnostic
+profile: fresh native receipt, exact raw fields/flags, owned destination and Host
+PID. It reports timestamp changes separately and cannot establish the strict
+original-input acceptance contract. Do not equate a successful sharing cycle or
+functional replay with physical acceptance. Complete the full functional replay
+and repeat with identical artifacts before another attended attempt.
+
+Validation: Mac coordinator suite passes, including the three new wake cases;
+the preceding route change passes Mac preflight/bridge/secure-transport bridge
+checks. Ubuntu integrated build/coordinator suite and four standalone
+GNOME/preflight/transport/bridge suites pass. All 101 Python coordinator checks
+pass on each machine. Native positive capture tests that skip on Linux remain
+Mac-only. Evidence: `build/handoff-wake-bygcorgd/`,
+`build/handoff-wake-tests.log`, `build/handoff-wake-coordinator-tests.log`, and
+`build/handoff-wake-linux-coordinator-tests.log`. The signed Mac ZIP SHA-256 is
+`1427c2a5056b633ce6dfbd66d51e61d375b11f56eee482e44ff2f71316bed82f`.
+Ubuntu run archive SHA-256:
+`36a3c7ef51f99fb53bea94acf64853fc93b6a15464b3c3edc91473059e9f544f`.
+
 ## Physical attempt 32: startup passes; original-input handoff expires — 2026-10-16
 
 The user's direct “alright run the tests” request authorized

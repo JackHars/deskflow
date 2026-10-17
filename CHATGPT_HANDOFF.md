@@ -4,38 +4,55 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
-Latest attended result (2026-10-16): `build/physical-r32-bwjv118r/` reached Active
-and the user confirmed the source on actual Ubuntu. Startup/hidden placement and
-cleanup pass; original-input recording does not. The first handoff reached native
-preparation at 314 ms and expired at its fixed 500 ms deadline (observed 502 ms).
-Core then revoked original dispatch; Record could not find matching live owners.
-All three recorders stayed unarmed. Profile Host prepare/commit callbacks before
-another attended retry; do not weaken the cutoff or infer acceptance from legacy
-input. See WORK_STATE.md and the run's private RESULTS.md/failure-summary.json.
-The launch permission for this run was consumed; all owned processes stopped.
+Latest autonomous repair (2026-10-16): Mac runtime/source fixture `fd2db144c`,
+unchanged Ubuntu runtime `52bddb84b`, harness/postprocessor `c3b545d78`.
+The latest fixes keep repeated Screen Recording preflight out of the input
+path, search for new attached windows once immediately before native posting,
+and publish the test window's status snapshots on its existing timer instead
+of blocking every input callback. Exact ownership, focus/geometry checks,
+receipt deadlines and raw evidence validation remain. Permission polling
+cadence and failed/intermediate runs are documented in `TESTING.md`.
+
+The signed Mac package passes five integrated and nine application suites.
+The unchanged Ubuntu runtime passed six integrated and seven application
+suites. Coordinator/normalizer files match 104/42 checks on each machine.
+One updated 120-event run passed, then a mapping reply expired in the next.
+Ubuntu Wi-Fi power saving was disabled after an independent latency comparison;
+a later run still exposed Mac query overhead. The current candidate skips
+unused AX subrole and bundle metadata reads and adds precise focus diagnostics.
+All three fresh runs under `build/return-trace-35bi7wkq/` passed 120-event
+scroll bursts above 120 Hz, all 30-second recordings, the complete two-minute
+session, return and cleanup with identical artifacts. Full synthetic repeat
+and timestamp acceptance remains open; one of the three strict recorded joins
+failed. These passes satisfy only the functional/lifecycle retry gate. See `TESTING.md` and
+`WORK_STATE.md` for exact artifacts and current results. Never transfer another
+revision's live-test result to these binaries.
+
+The synthetic repeated-x AppKit receipt and exact timestamp/raw preservation
+still fail acceptance. These are not physical-input passes. The latest attended
+run remains `physical-r32-bwjv118r`; no new attended launch is authorized.
+Autonomous disposable checks are authorized. Obtain fresh user permission
+immediately before any attended keyboard/trackpad test.
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 ## Current completion checklist — 2026-10-16
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Attended attempt 31 failed before
-Active. The user has now authorized autonomous real-desktop pipeline verification;
-use `--pipeline-check` and see the latest `TESTING.md` entry. A later human
-keyboard/trackpad test still requires fresh permission.
+The product is **not physically accepted**. Attended attempt 32 reached the
+actual Ubuntu monitor, but its original-input handoff expired before recording.
+Autonomous testing subsequently fixed transport batching, redundant preparation
+work, delayed private delivery, and the Ubuntu snapshot/ownership confusion.
+The current Mac candidate is `fd2db144c`, with unchanged Ubuntu runtime
+`52bddb84b` and harness/postprocessor `c3b545d78`. The old dispatch-only candidate
+passed three slower runs and then failed rapid scrolling. Retain those failures;
+they do not count toward the new candidate's sustained-scroll proof. Updated
+120-event verification and exact package hashes are tracked at the top of
+`TESTING.md`. Physical acceptance remains open.
 
-The automatic runner reproduced a Core startup SIGILL, transient holding
-geometry/AX failures, a stop-message logging exception and a competing polling
-check during display setup. Fixes are pushed through `e228da3e0` (latest native
-fix `5c113c700`). Three consecutive final-candidate actual-desktop cycles pass, with matching
-frozen binaries and no cleanup errors. This verifies setup/visibility/return, not original
-physical keyboard or trackpad delivery. All 100 coordinator checks pass on each
-machine, along with focused Mac/Ubuntu, enabled/disabled Core and scoped sanitizer
-checks. Evidence: `build/pipeline-verify-fg881kq7/`. Actual Ubuntu remains on
-`65dd42362`; changed runtime paths are Mac-only. GitHub Actions includes the new
-startup regression in both configurations; all six jobs in run 38971647320 pass.
-Use separate Mac controls and saved logs, with no substitute-desktop preview
-or results popup.
+Use `--pipeline-check` for authorized autonomous checks. A human keyboard/trackpad
+test still requires fresh permission. Use separate Mac controls and saved logs,
+with jack's real Ubuntu desktop and no substitute-desktop preview or results popup.
 
 Before requesting another attended retry, require three fresh successful
 actual-desktop pipeline runs with the same native binaries, fixture and

@@ -2,22 +2,34 @@
 
 ## Current implementation — 2026-10-16
 
-P1–P8 code is integrated, but the product is not physically accepted. After
-attended attempt 31 failed, the user authorized autonomous desktop pipeline
-verification. The new `--pipeline-check` automatically exercises startup,
-window placement, sharing and restoration on actual jack without claiming a
-physical input pass. A later attended input test still needs fresh permission.
+P1–P8 code is integrated, but physical acceptance remains open. The user
+authorized autonomous checks on the Mac and jack's actual Ubuntu desktop;
+another attended keyboard/trackpad test requires fresh permission immediately
+before launch.
 
-The automatic runs reproduced a native Core startup crash, transient display
-geometry/AX failures and a test stop-message exception. Fixes are pushed through
-`e228da3e0`. One complete startup/sharing/restoration cycle passed, while repeats
-exposed a pending-display polling race. That fix (`5c113c700`) passes three
-consecutive fresh actual-desktop cycles, each including 30 seconds of sharing
-and verified source restoration with no cleanup errors. All 100
-coordinator checks pass per machine, together with focused Mac, Ubuntu and
-sanitizer checks. See `TESTING.md` for exact evidence and current limits, and
-`CHATGPT_HANDOFF.md` for the open physical checklist. Retain saved diagnostics;
-no results popup is wanted.
+Current Mac runtime/source fixture `fd2db144c` removes repeated Screen Recording
+preflight and duplicate attached-window searches from the input path, while
+retaining the final native ownership/focus/geometry check. The disposable test
+window now publishes status on its existing timer, keeping file commits outside
+input callbacks. Permission polling cadence and retained failed runs are
+explicit in `TESTING.md`; deadlines and the evidence normalizer are unchanged.
+
+The Mac package passes five integrated and nine application suites. Unchanged
+Ubuntu runtime `52bddb84b` has six integrated and seven application suite passes;
+the unchanged coordinator/postprocessor files match 104/42 checks per machine.
+One full 120-event run passed; the next failed waiting for Ubuntu. Disabling
+power saving on Ubuntu’s existing Wi-Fi connection reduced measured idle
+latency from 42.7 ms to 1.9 ms average. Fresh verification with the same binaries
+now has three fresh successful functional/lifecycle runs under
+`build/return-trace-35bi7wkq/`, after removing unused native queries and adding
+precise focus rejection diagnostics. Each sustained a 120-event scroll burst
+above 120 Hz and completed recording, return and the two-minute session.
+These are bounded stability results; the earlier intermittent focus timeout
+is retained, and one strict recorded timestamp/raw join still failed. Synthetic held-key delivery and
+exact native timestamp preservation remain unaccepted. A clean synthetic
+session is not physical acceptance. See `CHATGPT_HANDOFF.md` for open H03–H12
+checks and `TESTING.md` for current results. Diagnostics are saved without a
+results popup.
 
 Runtime `8132c8554` additionally monitors every active Core dispatch independently of
 callback return. Its original two-second admission deadline cannot be renewed
