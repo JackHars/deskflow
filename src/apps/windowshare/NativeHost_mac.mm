@@ -1499,6 +1499,7 @@ struct NativeHost::Impl
     CF<AXUIElementRef> window;
     Rect frame;
     std::array<std::int64_t, originalInputButtonCount> buttons{};
+    bool repeatLogged = false;
     OriginalTarget(const KeyboardRouteBinding &binding, const Entry &entry)
         : binding(binding),
           identity(entry.identity),
@@ -2539,6 +2540,15 @@ struct NativeHost::Impl
     // callbacks. Record the submitted press before any further native queries.
     if (!originalInput.submitted(prepared->token))
       return deny("Native submission no longer owns its pending record");
+    if (const auto *key = std::get_if<OriginalInputKey>(&record.payload);
+        key && key->transition == OriginalKeyTransition::Repeat && !target->repeatLogged) {
+      target->repeatLogged = true;
+      lifecycleDiagnostic(
+          "Host", "input.native-repeat", "submitted", "First repeat submitted for this input owner",
+          {{"routeGeneration", QString::number(binding.generation)},
+           {"captureSequence", QString::number(record.sequence)}}
+      );
+    }
     if (buttonSlot) {
       target->buttons[*buttonSlot] = buttonDown ? number : 0;
       if (buttonDown)

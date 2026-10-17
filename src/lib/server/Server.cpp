@@ -2661,7 +2661,8 @@ bool Server::executeOriginalInput(
                               : pending.route.outcome != OriginalInputRouteOutcome::Dispatched       ? 11
                               : control && (held ? !existingOwner : !down)                           ? 12
                                                                                                      : 13;
-    const auto bit = std::uint32_t{1} << boundary;
+    const bool repeat = key && key->phase == PendingKey::Phase::Repeat;
+    const auto bit = std::uint32_t{1} << (boundary + (repeat ? 16 : 0));
     if (!(m_originalEligibilityLogged & bit)) {
       m_originalEligibilityLogged |= bit;
       constexpr const char *reasons[]{"missing-completed-capture", "capture-not-live",
@@ -2675,6 +2676,7 @@ bool Server::executeOriginalInput(
       lifecycleDiagnostic(
           "Core input", "dispatch.eligibility", "observed", reasons[boundary],
           {{"eligible", eligible},
+           {"repeat", repeat},
            {"epoch", QString::number(pending.route.stamp.epoch)},
            {"sequence", QString::number(pending.route.stamp.sequence)},
            {"part", int(pending.route.stamp.part)},

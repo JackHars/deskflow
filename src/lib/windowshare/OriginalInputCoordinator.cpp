@@ -61,6 +61,7 @@ struct OriginalInputCoordinator::Shared
     std::optional<PreparedInputFocus> prepared;
     bool prepareFocus = false, hostQuiesced = false, emptyDecline = false;
     bool active = false, revoked = false, hostReleased = true, coreReleased = true, scrolling = false;
+    std::atomic<std::uint64_t> diagnosticRepeatTicket{0};
   };
   struct Operation
   {
@@ -80,13 +81,26 @@ struct OriginalInputCoordinator::Shared
     }
     void trace(unsigned stage, const char *step, const char *state, bool failure = false)
     {
-      if ((!initialPreparation && !failure) || (diagnosticStages.fetch_or(1u << stage) & (1u << stage)))
+      const auto *key = std::get_if<OriginalInputKey>(&captured.input.record.payload);
+      const bool repeat = key && key->transition == OriginalKeyTransition::Repeat;
+      if (!initialPreparation && !failure) {
+        if (!repeat)
+          return;
+        std::uint64_t unused = 0;
+        owner->diagnosticRepeatTicket.compare_exchange_strong(unused, ticket);
+        if (owner->diagnosticRepeatTicket.load() != ticket)
+          return;
+      }
+      if (diagnosticStages.fetch_or(1u << stage) & (1u << stage))
         return;
       const auto now = Clock::now();
       lifecycleDiagnostic(
           "Core input", step, state, "Original input handoff progress",
           {{"ticket", QString::number(ticket)},
            {"owner", QString::number(owner->id)},
+           {"captureSequence", QString::number(captured.input.record.sequence)},
+           {"repeat", repeat},
+           {"initialPreparation", initialPreparation},
            {"elapsedMs", qint64(std::chrono::duration_cast<std::chrono::milliseconds>(now - started).count())},
            {"initialBudgetRemainingMs",
             qint64(std::chrono::duration_cast<std::chrono::milliseconds>(diagnosticDeadline - now).count())}}
