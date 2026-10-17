@@ -95,6 +95,43 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(result['identities'][0]['cg_timestamp_ns'], str(2**53+11))
         self.assertEqual(len(result['queues']), len(normalizer.LEGACY_QUEUES)+4)
 
+    def preparation(self):
+        row = {'type': 'readiness', 'timeNs': '1', 'readyCandidate': False, 'loss': 0,
+               'preparation': {'snapshotAvailable': True, 'ownerLive': True, 'captureIdle': True,
+                               'blockedQueues': [{'queue': 'capture', 'uninitialized': False,
+                                                  'mutationBusy': False, 'activityInFlight': False,
+                                                  'nonempty': True}]}}
+        self.fixture.values['core'].insert(1, row)
+        return row
+
+    def test_collector_preparation_metadata_never_grants_acceptance(self):
+        self.preparation()
+        self.assertEqual(len(self.fixture.normalize()['receipts']), 2)
+        self.fixture.row('core', 'arm')['accepted'] = False
+        self.rejected()
+        self.fixture.row('core', 'arm')['accepted'] = True
+        self.fixture.row('native', 'native')['cgTimestampNs'] = '999'
+        self.rejected()
+
+    def test_preparation_metadata_remains_strict_and_bounded(self):
+        for mutation in ('extra', 'flag', 'unknown-queue', 'duplicate-queue', 'no-blocker',
+                         'unavailable', 'ready-with-detail', 'loss'):
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.temporary.name)
+                row = self.preparation()
+                detail = row['preparation']
+                queue = detail['blockedQueues'][0]
+                if mutation == 'extra': detail['trusted'] = True
+                elif mutation == 'flag': detail['ownerLive'] = 1
+                elif mutation == 'unknown-queue': queue['queue'] = 'invented'
+                elif mutation == 'duplicate-queue': detail['blockedQueues'].append(copy.deepcopy(queue))
+                elif mutation == 'no-blocker': queue['nonempty'] = False
+                elif mutation == 'unavailable': detail['snapshotAvailable'] = False
+                elif mutation == 'ready-with-detail':
+                    row.update(readyCandidate=True, owner=['1'] * 11, identity='ab' * 96)
+                elif mutation == 'loss': row['loss'] = 1
+                self.rejected()
+
     def test_output_is_unverified_and_never_claims_h11_or_latency(self):
         journals = self.fixture.journals()
         output = Path(self.temporary.name) / 'normalized'

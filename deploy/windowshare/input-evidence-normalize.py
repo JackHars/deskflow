@@ -171,12 +171,34 @@ class Journal:
             self.header = row
         elif kind == 'readiness':
             require(self.arm is None and type(row.get('readyCandidate')) is bool, 'late/malformed readiness')
-            keys(row, ('type', 'timeNs', 'readyCandidate', 'loss', 'owner', 'identity') if row['readyCandidate'] else
-                 ('type', 'timeNs', 'readyCandidate', 'loss'), 'readiness')
+            fields = ('type', 'timeNs', 'readyCandidate', 'loss')
+            fields += ('owner', 'identity') if row['readyCandidate'] else ('preparation',) if 'preparation' in row else ()
+            keys(row, fields, 'readiness')
             integer(row['timeNs'], 'readiness time')
             require(type(row['loss']) is int and row['loss'] == 0, 'pre-arm evidence continuity was lost')
             if row['readyCandidate']:
                 owner(row)
+            elif 'preparation' in row:
+                # Bounded collector diagnostics explain an unready sample;
+                # they never replace the accepted arm or its owned identity.
+                detail = row['preparation']
+                keys(detail, ('snapshotAvailable', 'ownerLive', 'captureIdle', 'blockedQueues'), 'preparation')
+                require(all(type(detail[name]) is bool for name in ('snapshotAvailable', 'ownerLive', 'captureIdle')),
+                        'preparation flags must be boolean')
+                blocked = detail['blockedQueues']
+                require(type(blocked) is list and len(blocked) <= len(self.header['queues']), 'bad blocked queue inventory')
+                seen = set()
+                for queue in blocked:
+                    flags = ('uninitialized', 'mutationBusy', 'activityInFlight', 'nonempty')
+                    keys(queue, ('queue', *flags), 'blocked queue')
+                    require(type(queue['queue']) is str and queue['queue'] in self.header['queues'] and
+                            queue['queue'] not in seen, 'unknown or repeated blocked queue')
+                    seen.add(queue['queue'])
+                    require(all(type(queue[name]) is bool for name in flags) and any(queue[name] for name in flags),
+                            'blocked queue flags must describe a real blocker')
+                require(detail['snapshotAvailable'] or
+                        (not detail['ownerLive'] and not detail['captureIdle'] and not blocked),
+                        'unavailable preparation snapshot contains observations')
         elif kind == 'arm':
             keys(row, ('type', 'timeNs', 'accepted', 'owner', 'identity'), 'arm')
             require(self.arm is None and type(row['accepted']) is bool, 'duplicate or malformed arm')

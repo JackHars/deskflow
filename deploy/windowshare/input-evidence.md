@@ -190,6 +190,10 @@ be skipped or overwritten on ring wrap, and a full journal still reports sticky
 loss. Producer reservations use no retries, waits or allocations.
 Failed readiness/terminal rows also retain the first failure's scalar site and
 queue, with no producer-side logging. Loss-free journals keep the v2 format.
+The normalizer validates optional unready `preparation` diagnostics using their
+exact fields, boolean types and unique declared queue names. These fields never
+supply arm authority; unknown fields, loss, denied arm and native timestamp/raw
+mismatches remain rejected. Existing journals are read without modification.
 Event counter updates retain their exact cumulative snapshots and original
 timestamps. Time is sampled after reading the previous counter value and before
 the successful atomic update, so counter order also orders the sampled times.
