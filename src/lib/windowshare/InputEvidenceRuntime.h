@@ -39,7 +39,7 @@ private:
   QTimer m_timer;
   QString m_run, m_control;
   std::uint64_t m_duration = 0, m_rows = 0, m_bytes = 0, m_nextReadiness = 0, m_created = 0;
-  std::uint64_t m_preparationTimeout = 0;
+  std::uint64_t m_preparationTimeout = 0, m_armRequestedAt = 0;
   bool m_armSeen = false, m_stopSeen = false, m_endWritten = false, m_closeSeen = false, m_recordRequested = false;
 };
 } // namespace deskflow::windowshare

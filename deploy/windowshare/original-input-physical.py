@@ -367,11 +367,16 @@ class EvidenceSession:
             require(type(source_window) is int and source_window > 0, 'Evidence requires the exact source window')
             self.source_window = str(source_window)
 
-    def poll(self):
+    def poll_outputs(self):
+        """Read owned output for cleanup; this never grants recording acceptance."""
         for role, reader in self.readers.items():
             reader.poll()
             if reader.header and role in self.pids:
                 require(reader.header['pid'] == self.pids[role], 'Evidence process differs from the owned process')
+
+    def poll(self):
+        self.poll_outputs()
+        for role, reader in self.readers.items():
             if reader.arm:
                 require(self.attempted and reader.arm['accepted'] is True, 'Evidence arm was denied or unsolicited')
                 owner = evidence_owner(reader.arm, role)

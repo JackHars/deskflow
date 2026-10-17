@@ -346,17 +346,33 @@ void InputEvidenceRuntime::tick()
           "Unknown or premature evidence command"
       );
       if (action == "arm" && !m_armSeen && !m_stopSeen) {
-        m_armSeen = true;
-        const bool armed = m_recorder->arm(m_duration);
-        const auto owner = m_recorder->ownerForRuntime();
-        write(
-            {{"type", "arm"},
-             {"accepted", armed},
-             {"timeNs", QString::number(m_recorder->start())},
-             {"owner", numbers(owner.values)},
-             {"identity",
-              QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(owner.identity.data()), 96).toHex())}}
-        );
+        const auto requestedNow = inputEvidenceNow();
+        if (!m_armRequestedAt)
+          m_armRequestedAt = requestedNow;
+        const bool expired = requestedNow - m_armRequestedAt >= 2000000000ULL;
+        // Remote readiness is advisory: background output can become nonempty
+        // before this request arrives. Keep the one-shot request pending until
+        // a fresh local baseline is ready, within the existing two-second arm
+        // budget. arm() still atomically verifies that baseline and rejects a
+        // producer racing the actual boundary; no loss or failed arm is reset.
+        if (expired || m_recorder->loss() != InputEvidenceLoss::None ||
+            m_recorder->state() != InputEvidenceState::Waiting || m_recorder->readyOwner()) {
+          m_armSeen = true;
+          if (expired) {
+            m_recorder->fail(InputEvidenceLoss::Deadline);
+            m_recorder->stop();
+          }
+          const bool armed = !expired && m_recorder->arm(m_duration);
+          const auto owner = m_recorder->ownerForRuntime();
+          write(
+              {{"type", "arm"},
+               {"accepted", armed},
+               {"timeNs", QString::number(m_recorder->start())},
+               {"owner", numbers(owner.values)},
+               {"identity",
+                QString::fromLatin1(QByteArray(reinterpret_cast<const char *>(owner.identity.data()), 96).toHex())}}
+          );
+        }
       } else if (action == "stop" && !m_stopSeen) {
         m_stopSeen = true;
         m_recorder->stop();

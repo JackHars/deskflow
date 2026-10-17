@@ -27,6 +27,15 @@ struct InputEvidenceTestAccess
     runtime.m_nextReadiness = 0;
     runtime.tick();
   }
+  static void tick(InputEvidenceRuntime &runtime)
+  {
+    runtime.tick();
+  }
+  static void armWaitElapsed(InputEvidenceRuntime &runtime, std::uint64_t elapsedMs)
+  {
+    runtime.m_armRequestedAt = inputEvidenceNow() - elapsedMs * 1000000;
+    runtime.tick();
+  }
   static std::uint64_t depth(const InputEvidenceRecorder &recorder, InputEvidenceQueue queue)
   {
     return recorder.m_queues[static_cast<std::size_t>(queue)].depth.load();
@@ -808,6 +817,138 @@ void privateConfiguration()
   delete storage;
 }
 
+void armAfterBackgroundOutputDrains()
+{
+  QTemporaryDir directory;
+  check(directory.isValid(), "arm fixture directory failed");
+  const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+  const auto write = [&](const QString &path, const QJsonObject &value) {
+    QFile file(path);
+    check(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "arm fixture write failed");
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    const auto bytes = QJsonDocument(value).toJson();
+    check(file.write(bytes) == bytes.size(), "arm fixture short write");
+  };
+  const auto output = parent + "/evidence.jsonl", control = parent + "/control.json";
+  const auto config = parent + "/config.json";
+  write(
+      config, {{"version", 1},
+               {"role", "host"},
+               {"runId", "pending-arm"},
+               {"durationMs", 1000},
+               {"output", output},
+               {"control", control}}
+  );
+  auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Host);
+  auto *storage = &runtime->recorder();
+  for (const auto queue :
+       {InputEvidenceQueue::PrivateOutput, InputEvidenceQueue::PrivateBufferedInput,
+        InputEvidenceQueue::PrivateIncoming, InputEvidenceQueue::PrivateDispatch})
+    storage->initialize(queue, storage, 256);
+  storage->bindOwner(owner());
+  check(storage->readyOwner().has_value(), "empty Host could not publish readiness");
+  // The remote coordinator sees readiness, then a heartbeat queues output
+  // before this process observes its arm request. No measurement has started.
+  check(storage->beginMutation(InputEvidenceQueue::PrivateOutput, storage), "output mutation failed");
+  storage->endMutation(InputEvidenceQueue::PrivateOutput, 1, 0);
+  write(control, {{"version", 1}, {"runId", "pending-arm"}, {"command", "arm"}});
+  InputEvidenceTestAccess::tick(*runtime);
+  check(
+      storage->state() == InputEvidenceState::Waiting && storage->loss() == InputEvidenceLoss::None &&
+          storage->written() == 0 && storage->start() == 0,
+      "background output turned a pending arm into a failed or premature measurement"
+  );
+  check(storage->beginMutation(InputEvidenceQueue::PrivateOutput, storage), "output retirement failed");
+  storage->endMutation(InputEvidenceQueue::PrivateOutput, 0, 1);
+  InputEvidenceTestAccess::tick(*runtime);
+  check(
+      storage->state() == InputEvidenceState::Recording && storage->loss() == InputEvidenceLoss::None &&
+          storage->start() != 0,
+      "empty live Host did not accept the pending arm"
+  );
+  runtime.reset();
+  inputEvidenceInstalled.store(nullptr);
+  delete storage;
+  QFile file(output);
+  check(file.open(QIODevice::ReadOnly), "arm output missing");
+  std::size_t arms = 0;
+  while (!file.atEnd()) {
+    const auto row = QJsonDocument::fromJson(file.readLine()).object();
+    if (row["type"] == "arm") {
+      ++arms;
+      check(row["accepted"].toBool(), "pending arm wrote a rejected acknowledgement");
+    }
+  }
+  check(arms == 1, "pending arm was acknowledged more than once");
+}
+
+void pendingArmDeadlineAndStop()
+{
+  for (const bool cancel : {false, true}) {
+    QTemporaryDir directory;
+    check(directory.isValid(), "pending arm directory failed");
+    const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+    const auto write = [&](const QString &path, const QJsonObject &value) {
+      QFile file(path);
+      check(file.open(QIODevice::WriteOnly | QIODevice::Truncate), "pending arm write failed");
+      file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      const auto bytes = QJsonDocument(value).toJson();
+      check(file.write(bytes) == bytes.size(), "pending arm short write");
+    };
+    const auto output = parent + "/evidence.jsonl", control = parent + "/control.json";
+    const auto config = parent + "/config.json";
+    write(
+        config, {{"version", 1},
+                 {"role", "native"},
+                 {"runId", "pending-arm"},
+                 {"durationMs", 1000},
+                 {"output", output},
+                 {"control", control}}
+    );
+    auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+    auto *storage = &runtime->recorder();
+    const auto command = [&](const char *action) {
+      write(control, {{"version", 1}, {"runId", "pending-arm"}, {"command", action}});
+      InputEvidenceTestAccess::tick(*runtime);
+    };
+    command("arm"); // No owned native window is ready yet.
+    InputEvidenceTestAccess::armWaitElapsed(*runtime, 1000);
+    check(
+        storage->state() == InputEvidenceState::Waiting && storage->loss() == InputEvidenceLoss::None &&
+            storage->written() == 0,
+        "pending request recorded without an owner or failed before its deadline"
+    );
+    if (cancel)
+      command("stop");
+    else
+      InputEvidenceTestAccess::armWaitElapsed(*runtime, 2100);
+    check(
+        storage->state() == InputEvidenceState::Denied && storage->written() == 0 &&
+            storage->loss() == (cancel ? InputEvidenceLoss::None : InputEvidenceLoss::Deadline),
+        "pending arm ignored Stop, exceeded its budget or invented recording"
+    );
+    storage->bindOwner(owner());
+    command("arm");
+    check(storage->state() == InputEvidenceState::Denied, "late readiness resurrected an ended arm request");
+    runtime.reset();
+    inputEvidenceInstalled.store(nullptr);
+    delete storage;
+    QFile file(output);
+    check(file.open(QIODevice::ReadOnly), "pending arm output missing");
+    std::size_t arms = 0, ends = 0;
+    while (!file.atEnd()) {
+      const auto row = QJsonDocument::fromJson(file.readLine()).object();
+      if (row["type"] == "arm") {
+        ++arms;
+        check(!row["accepted"].toBool(true), "expired arm was accepted");
+      }
+      if (row["type"] == "end")
+        ++ends;
+    }
+    check(arms == (cancel ? 0U : 1U) && ends == 1, "pending request lost or repeated its terminal acknowledgement");
+  }
+}
+
 void explicitNativeClose(QuitGuardApplication &app)
 {
   QTemporaryDir directory;
@@ -954,6 +1095,8 @@ int main(int argc, char **argv)
     runCase("revokeDuringDrain", revokeDuringDrain);
     runCase("nativeFields", nativeFields);
     runCase("privateConfiguration", privateConfiguration);
+    runCase("armAfterBackgroundOutputDrains", armAfterBackgroundOutputDrains);
+    runCase("pendingArmDeadlineAndStop", pendingArmDeadlineAndStop);
     runCase("nativePreparationDeadline", nativePreparationDeadline);
     runCase("explicitNativeClose", [&] { explicitNativeClose(app); });
     std::puts("Bounded input evidence, actual portable queue mutations, native fields and strict opt-in config passed");

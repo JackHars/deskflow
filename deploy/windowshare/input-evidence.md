@@ -78,6 +78,12 @@ activity guard excludes the empty baseline while any observation is in flight.
 Underflow, capacity failure or boundary overlap still denies the run. Only a
 quiescent empty arm begins the measured counters; during recording, existing
 same-counter contention and journal overflow remain terminal diagnostic failures.
+An arm request also rechecks current local readiness: a background message may
+have queued output since the remote coordinator's readiness sample. The request
+can remain pending for at most two seconds without starting a measurement. It
+then uses the unchanged atomic arm boundary, which still denies concurrent
+activity at that boundary. Stop cancels a pending request, and expiry is terminal;
+neither a denied arm nor a recorded loss is retried or cleared.
 Standalone, probe, identity-init and help/action combinations cannot use the
 private Host evidence option. Evidence paths and role labels never supply code
 admission, peer trust, a native owner or input authority.
@@ -182,6 +188,9 @@ be skipped or overwritten on ring wrap, and a full journal still reports sticky
 loss. Producer reservations use no retries, waits or allocations.
 Failed readiness/terminal rows also retain the first failure's scalar site and
 queue, with no producer-side logging. Loss-free journals keep the v2 format.
+Cleanup reads terminal rows from every owned recorder even after a valid
+rejection acknowledgement. This lets the native fixture close gracefully;
+acceptance still rejects the failed arm or incomplete recording.
 
 ## Declared queue inventory
 

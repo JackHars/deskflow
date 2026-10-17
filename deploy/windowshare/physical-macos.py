@@ -1059,7 +1059,7 @@ def run(arguments):
         if evidence:
             try:
                 evidence.stop()
-                cleanup_wait(lambda: (evidence.poll(),
+                cleanup_wait(lambda: (evidence.poll_outputs(),
                                         all(reader.end for reader in evidence.readers.values()) if started else
                                         evidence.readers["native"].end)[1],
                                "evidence recorder stop", timeout=2)

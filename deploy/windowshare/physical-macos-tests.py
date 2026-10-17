@@ -1340,6 +1340,27 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'not fully armed'):
             self.session.finish()
 
+    def test_rejected_arm_still_reads_every_owned_terminal_for_cleanup(self):
+        self.session.start_boundary()
+        self.request()
+        self.ready()
+        self.assertTrue(self.session.try_arm())
+        self.arms('core')
+        self.arms('host', accepted=False)
+        self.arms('native')
+        with self.assertRaisesRegex(RuntimeError, 'denied or unsolicited'):
+            self.session.poll()
+        self.session.stop()
+        self.ends()
+        self.session.poll_outputs()
+        self.assertTrue(all(reader.end for reader in self.session.readers.values()))
+        self.assertEqual(self.session.readers['native'].end['state'], 3)
+        with self.assertRaisesRegex(RuntimeError, 'denied or unsolicited'):
+            self.session.finish()
+        self.session.pids['native'] = '999'
+        with self.assertRaisesRegex(RuntimeError, 'owned process'):
+            self.session.poll_outputs()
+
     def test_wrong_process_or_source_is_not_recording_evidence(self):
         self.session.pids['core'] = '999'
         with self.assertRaisesRegex(RuntimeError, 'owned process'):
