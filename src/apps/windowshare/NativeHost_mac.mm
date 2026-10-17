@@ -1746,11 +1746,22 @@ struct NativeHost::Impl
     measured("identityAndPermissionsUs");
     const auto state = readNativeWindowState(e->window);
     measured("windowStateUs");
-    const bool focused = focusMatches(*e);
+    QJsonObject focusDetails;
+    const bool focused = focusMatches(*e, false, &focusDetails);
     measured("focusUs");
+    const bool holdingCurrent = !e->moved || holding.available();
     if (!focused || !state || (!e->family && !state->minimized.has_value()) || state->minimized.value_or(false) ||
-        !sameGeometry(state->frame, e->session.source) || (e->moved && !holding.available()))
-      return denied("Native focus, frame, minimized state, or holding display changed");
+        !sameGeometry(state->frame, e->session.source) || !holdingCurrent)
+      return denied(
+          "Native focus, frame, minimized state, or holding display changed",
+          {{"focused", focused},
+           {"focus", focusDetails},
+           {"expectedFrame", diagnosticRect(e->session.source)},
+           {"observedFrame", state ? QJsonValue(diagnosticRect(state->frame)) : QJsonValue(QJsonValue::Null)},
+           {"minimizedKnown", state && state->minimized.has_value()},
+           {"minimized", state && state->minimized.value_or(false)},
+           {"holdingCurrent", holdingCurrent}}
+      );
     if (!lifecycle->current(admitted) || e->capture->stopped || e->capture->failurePending)
       return std::nullopt;
     if (observedFrame)
@@ -2033,15 +2044,22 @@ struct NativeHost::Impl
            surfaceRole(child.get()) == family.role && attachedTo(child.get(), retainedParent.get(), expected.pid) &&
            alive;
   }
-  bool focusMatches(const Entry &e, bool cleanup = false) const
+  bool focusMatches(const Entry &e, bool cleanup = false, QJsonObject *diagnostic = nullptr) const
   {
-    if (familyBlocked(e) || !familyCurrent(e, cleanup))
+    const auto denied = [&](const char *reason) {
+      if (diagnostic)
+        diagnostic->insert("reason", reason);
       return false;
+    };
+    if (familyBlocked(e))
+      return denied("attached-family-blocked");
+    if (!familyCurrent(e, cleanup))
+      return denied("attached-family-not-current");
     CF<AXUIElementRef> app(AXUIElementCreateApplication(e.identity.pid));
     AXUIElementSetMessagingTimeout(app.get(), 0.05f);
     CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
     if (!element(focused.get()))
-      return false;
+      return denied("focused-element-unavailable");
     CF<CFTypeRef> top(attribute(element(focused.get()), kAXTopLevelUIElementAttribute));
     if (element(top.get()) && CFEqual(top.get(), e.window)) {
       CGWindowID focusedId = 0;
@@ -2058,7 +2076,7 @@ struct NativeHost::Impl
       if (surfaceRole(element(cursor.get()))) {
         CGWindowID window = 0;
         if (axWindowId(element(cursor.get()), window) != kAXErrorSuccess || window != e.identity.id)
-          return false;
+          return denied("focused-ancestry-has-another-surface");
       }
       CF<CFTypeRef> next(attribute(element(cursor.get()), kAXParentAttribute));
       if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
@@ -2068,9 +2086,11 @@ struct NativeHost::Impl
     // A child must appear in the exact focused UI ancestry. AXFocusedWindow
     // alone can name its parent even while the child consumes AppKit keys.
     if (e.family)
-      return false;
+      return denied("attached-window-not-in-focused-ancestry");
     CF<CFTypeRef> window(attribute(app.get(), kAXFocusedWindowAttribute));
-    return window && CFEqual(window.get(), e.window);
+    if (!window)
+      return denied("focused-window-unavailable");
+    return CFEqual(window.get(), e.window) || denied("focused-window-is-another-window");
   }
   Owner familyRoot(Owner owner) const
   {
