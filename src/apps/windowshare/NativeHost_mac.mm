@@ -1684,7 +1684,7 @@ struct NativeHost::Impl
     const auto timing = qScopeGuard([&] {
       const auto elapsed =
           std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-      if (elapsed >= 25) {
+      if (elapsed >= 5) {
         durations.insert("elapsedMs", qint64(elapsed));
         lifecycleDiagnostic(
             "Host", "native.keyboard-route-candidate", "slow", "Native authority check timing", durations
@@ -2354,6 +2354,22 @@ struct NativeHost::Impl
   }
   bool originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
   {
+    const auto started = std::chrono::steady_clock::now();
+    auto candidateFinished = started;
+    auto identityFinished = started;
+    const auto timing = qScopeGuard([&] {
+      const auto now = std::chrono::steady_clock::now();
+      const auto micros = [](auto duration) {
+        return qint64(std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+      };
+      if (now - started >= std::chrono::milliseconds(5))
+        lifecycleDiagnostic(
+            "Host", "input.native-authority", "slow", "Original input native authority check timing",
+            {{"elapsedUs", micros(now - started)},
+             {"candidateUs", micros(candidateFinished - started)},
+             {"identityUs", micros(identityFinished - candidateFinished)}}
+        );
+    });
     const auto admitted = lifecycle->admission();
     if (!admitted || QThread::currentThread() != q->thread() || destroying || callbackDepth || originalCleanupFailed ||
         binding.scope != ForwardingScope::All || !originalInput.current(binding, captureEpoch) || !originalTarget ||
@@ -2365,9 +2381,11 @@ struct NativeHost::Impl
     const auto candidate = keyboardRouteCandidate(
         binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame
     );
+    candidateFinished = identityFinished = std::chrono::steady_clock::now();
     if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
       return false;
     const auto current = identity(target->identity.id);
+    identityFinished = std::chrono::steady_clock::now();
     if (!alive)
       return false;
     const auto *e = entry(binding.owner.session, binding.owner.epoch);
