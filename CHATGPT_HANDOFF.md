@@ -29,8 +29,12 @@ failed. These passes satisfy only the functional/lifecycle retry gate. See `TEST
 revision's live-test result to these binaries.
 
 The synthetic repeated-x AppKit receipt and exact timestamp/raw preservation
-still fail acceptance. These are not physical-input passes. The latest attended
-run remains `physical-r32-bwjv118r`; no new attended launch is authorized.
+still fail acceptance. These are not physical-input passes. Attempt
+`physical-r33-gqm9_8ei` timed out waiting for Start while the user was away;
+sharing never began and cleanup completed. October 19 preparation
+`physical-r34-rgza46pp` retained one helper-startup timeout followed by two
+passing input-disabled checks with unchanged deadlines. Its fresh launch
+permission is pending; no new attended launch is authorized.
 Autonomous disposable checks are authorized. Obtain fresh user permission
 immediately before any attended keyboard/trackpad test.
 

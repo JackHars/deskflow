@@ -96,17 +96,26 @@ Current Mac archive SHA-256:
 `e51da724ded4c52aca77f44d4fb1aa4feb37547bc05359ba0e5520aafc4b4a95`.
 Unchanged Ubuntu archive SHA-256:
 `b912992380c7cca9ead85e3abe9d2456125ca9bc915a42e9d806ca732445a435`.
-The current Mac passes five integrated and nine app suites. CI foundation run
-`38999308404` is still in progress; source-bundle run `38999308471` passed.
-Fresh attended preparation/launch helpers are `build/prepare-physical-r33.py`
-and `build/run-physical-r33.py`. The launch guard requires these exact three
-artifact sets plus a new explicit user approval; no approval has been created.
+The current Mac passes five integrated and nine app suites. All six jobs in
+CI foundation run `38999308404` passed; source-bundle run `38999308471` passed.
+Fresh attended preparation/launch helpers are `build/prepare-physical-r34.py`
+and `build/run-physical-r34.py`. The launch guard requires these exact three
+artifact sets plus a new explicit user approval.
 
-Attended setup `build/physical-r33-gqm9_8ei/` passes preflight on both real
-desktops and exactly matches all three successful artifact sets. No window or
-sharing session was launched. A fresh launch-permission question is pending;
-do not treat the preparation or prior replies as authorization. H03–H12 physical
-acceptance is still open; a fresh attended launch requires user permission.
+Attended attempt `build/physical-r33-gqm9_8ei/` opened its controls after the
+October 17 approval, then timed out waiting for Start while the user was away.
+It never began sharing. Its processes stopped with no held input and ordinary
+Mac configuration unchanged. That approval is consumed and must not be reused.
+
+On October 19, setup `build/physical-r34-rgza46pp/` caught a private-handshake
+startup timeout before opening any test window. Preserve `code-admission.log`.
+The two unchanged input-disabled retries passed: the second, uninstrumented
+run completed in 12.828 seconds (`code-admission-uninstrumented.log`). A stack
+sample from the first retry has no usable call graph; it does not establish
+the cause. No timeout or trust check was relaxed. Final preflight confirms
+jack's actual desktop is unlocked and no conflicting Mac primary is running.
+A fresh launch-permission question is pending. H03–H12 physical acceptance
+remains open; setup checks and earlier replies are not launch authorization.
 
 ## Private input dispatch repair — 2026-10-16
 
