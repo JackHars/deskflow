@@ -2,6 +2,26 @@
 
 ## Scroll diagnosis in progress — 2026-10-19
 
+The transport-timing candidate `8bea14176` passes 19 selected Mac suites and
+15 selected Ubuntu suites, and its GitHub foundation/source-bundle jobs pass.
+Ubuntu's first application run hit the existing nonblocking viewport-admission
+lock race; the unchanged binaries passed the complete application recheck.
+Both results remain in `build/scroll-map-timing-rz57gcs6/`.
+
+Two actual-desktop replays still fail. `dashboard-replay-3xj_fpoh` has timely
+mapping replies (median 12.3 ms) but a native check spike exhausts a mapped
+receipt. `dashboard-replay-2nu_qd8a` uses a lighter incremental receipt observer
+and instead reaches the capture/route join cutoff: mapping waits intermittently
+include 80–100 ms outside the Ubuntu mapper. These are same-host monotonic
+measurements; they do not establish one-way network latency. All raw failures
+are retained. The receipt-observer cache validates file identity/replacement,
+retains every raw receipt and rejects a changed Host identity.
+
+The next diagnostic records socket-buffer waits of at least 5 ms, independently
+on both sides, to distinguish application scheduling from transport delay.
+It changes no socket scheduling, input deadlines, authority or queue bounds.
+Scrolling remains unresolved; no attended test has launched.
+
 The adaptive-prefix candidate `e28deb425` passes all 19 selected Mac and 15
 Ubuntu suites, but `dashboard-replay-_kqo3i_b` fails at a mapped receipt deadline.
 The preceding 11-record group took 192 ms and correctly reduced the next group

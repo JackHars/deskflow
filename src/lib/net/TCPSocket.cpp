@@ -121,6 +121,17 @@ uint32_t TCPSocket::read(void *buffer, uint32_t n)
   if (uint32_t size = m_inputBuffer.getSize(); n > size) {
     n = size;
   }
+  if (n && m_inputReadyAt) {
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - *m_inputReadyAt)
+            .count();
+    if (elapsed >= 5000)
+      LOG_DEBUG(
+          "socket input waited %lld us for consumer, buffered=%u", static_cast<long long>(elapsed),
+          m_inputBuffer.getSize()
+      );
+    m_inputReadyAt.reset();
+  }
   if (buffer != nullptr && n != 0) {
     memcpy(buffer, m_inputBuffer.peek(n), n);
   }
@@ -154,6 +165,8 @@ void TCPSocket::write(const void *buffer, uint32_t n)
 
     // copy data to the output buffer
     wasEmpty = (m_outputBuffer.getSize() == 0);
+    if (wasEmpty)
+      m_outputQueuedAt = std::chrono::steady_clock::now();
     m_outputBuffer.write(buffer, n);
 
     // there's data to write
@@ -402,11 +415,24 @@ void TCPSocket::sendConnectionFailedEvent(const char *msg)
 
 void TCPSocket::sendEvent(EventTypes type)
 {
+  if (type == EventTypes::StreamInputReady)
+    m_inputReadyAt = std::chrono::steady_clock::now();
   m_events->addEvent(Event(type, getEventTarget()));
 }
 
 void TCPSocket::discardWrittenData(int bytesWrote)
 {
+  if (m_outputQueuedAt) {
+    const auto elapsed =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - *m_outputQueuedAt)
+            .count();
+    if (elapsed >= 5000)
+      LOG_DEBUG(
+          "socket output waited %lld us for write, written=%d buffered=%u", static_cast<long long>(elapsed), bytesWrote,
+          m_outputBuffer.getSize()
+      );
+    m_outputQueuedAt.reset();
+  }
   m_outputBuffer.pop(bytesWrote);
   if (m_outputBuffer.getSize() == 0) {
     sendEvent(EventTypes::StreamOutputFlushed);
@@ -424,12 +450,14 @@ void TCPSocket::onConnected()
 
 void TCPSocket::onInputShutdown()
 {
+  m_inputReadyAt.reset();
   m_inputBuffer.pop(m_inputBuffer.getSize());
   m_readable = false;
 }
 
 void TCPSocket::onOutputShutdown()
 {
+  m_outputQueuedAt.reset();
   m_outputBuffer.pop(m_outputBuffer.getSize());
   m_writable = false;
 

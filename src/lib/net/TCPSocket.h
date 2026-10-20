@@ -14,6 +14,9 @@
 #include "mt/Mutex.h"
 #include "net/IDataSocket.h"
 
+#include <chrono>
+#include <optional>
+
 class Mutex;
 class Thread;
 class ISocketMultiplexerJob;
@@ -147,4 +150,7 @@ private:
   IEventQueue *m_events;
   CondVar<bool> m_flushed;
   SocketMultiplexer *m_socketMultiplexer;
+  // Observations only, protected by m_mutex. These never schedule or expire IO.
+  std::optional<std::chrono::steady_clock::time_point> m_outputQueuedAt;
+  std::optional<std::chrono::steady_clock::time_point> m_inputReadyAt;
 };
