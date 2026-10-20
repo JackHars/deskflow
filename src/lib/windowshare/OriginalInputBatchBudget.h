@@ -9,7 +9,8 @@
 #include <cstddef>
 
 namespace deskflow::windowshare {
-// Scheduling advice for one input owner, never a delivery lease. Keep native work within a short interactive turn, leaving time for mapping,
+// Scheduling advice for one input owner, never a delivery lease. Keep native
+// work within a short interactive turn, leaving time for mapping,
 // transport and scheduling variation. Every event still needs its original
 // live receipt and fresh native authority at submission.
 class OriginalInputBatchBudget
@@ -18,7 +19,10 @@ public:
   // macOS may rewrite a timestamp already 100 ms old when posting to a PID.
   // Spending half the 250 ms receipt on one native batch can therefore lose
   // original timestamps even before the receipt expires. Aim for 50 ms of
-  // observed work; this is scheduling advice, not a new expiry or a guarantee
+  // measured peer handling; queue/acknowledgement latency is fixed overhead,
+  // not per-record native work. Charging that overhead once for every record
+  // can collapse the prefix to one and amplify a scheduling backlog.
+  // This is scheduling advice, not a new expiry or a guarantee
   // about the OS. Fast work may still use the full protocol capacity. Exact
   // ordered peer dispatch and every event's original receipt remain required.
   static constexpr auto targetDispatchTime = std::chrono::milliseconds(50);

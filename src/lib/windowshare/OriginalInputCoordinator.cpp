@@ -1137,19 +1137,27 @@ bool OriginalInputCoordinator::tickOne()
     if (!alive)
       return false;
     if (drained) {
+      const auto cost = m_channel->takeMappedDispatchCost();
+      if (!alive)
+        return false;
       std::lock_guard lock(m_shared->mutex);
       if (m_shared->mappedOwner && m_shared->mappedRecords) {
-        auto &budget = m_shared->mappedOwner->deliveryBudget;
-        const auto previous = budget.limit();
-        const auto elapsed = Clock::now() - m_shared->mappedStarted;
-        budget.observe(m_shared->mappedRecords, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed));
-        if (budget.limit() != previous)
-          lifecycleDiagnostic(
-              "Core input", "input.delivery-budget", "observed", "Adjusted mapped prefix to native dispatch time",
-              {{"records", qint64(m_shared->mappedRecords)},
-               {"elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count())},
-               {"nextMaximumRecords", qint64(budget.limit())}}
-          );
+        if (!cost || cost->records != m_shared->mappedRecords) {
+          m_shared->revoke("Mapped dispatch cost did not match the completed prefix");
+        } else {
+          auto &budget = m_shared->mappedOwner->deliveryBudget;
+          const auto previous = budget.limit();
+          const auto elapsed = Clock::now() - m_shared->mappedStarted;
+          budget.observe(cost->records, cost->work);
+          if (budget.limit() != previous)
+            lifecycleDiagnostic(
+                "Core input", "input.delivery-budget", "observed", "Adjusted mapped prefix to peer handling time",
+                {{"records", qint64(m_shared->mappedRecords)},
+                 {"roundTripUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count())},
+                 {"nativeWorkUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(cost->work).count())},
+                 {"nextMaximumRecords", qint64(budget.limit())}}
+            );
+        }
       }
       m_shared->mappedOwner.reset();
       m_shared->mappedRecords = 0;

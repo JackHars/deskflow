@@ -22,7 +22,7 @@ For H07, prepare a distinct attended session with these actual runtime settings:
 - Mac Core uses `--windowshare-host-config=/absolute/private/host.json` in server
   mode. The v1 Host configuration enables `holdingDisplay:true`, names the
   exact approved WindowShare peer and explicit Core-pin/WindowShare-pin pair.
-  Core starts its sealed companion through the inherited private v9 channel.
+  Core starts its sealed companion through the inherited private v10 channel.
 - Linux Core uses `--windowshare-gnome-config=/absolute/private/gnome.json` in
   client mode. The v1 provider configuration names the actual Viewer executable,
   connection, identity and Mac Host pin. **Omit `exportWindow`**: the ordinary

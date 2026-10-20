@@ -17,7 +17,7 @@ launch a physical fixture or enable routing on the user's desktop.
    Server's configured boundary. `LocalWindowDragCore` requires live capture,
    the exact press, Core TLS continuity, companion code admission and the
    immutable explicit Core-pin → WindowShare-pin policy.
-2. Private protocol **v9** negotiates `localInputWindowDragCapability` (16),
+2. Private protocol **v10** negotiates `localInputWindowDragCapability` (16),
    which requires pointer observation (8). Message **20** is **232 bytes**,
    Core → Host: Begin, Motion, Hold, Cancel, Drop or Finish. Message **21** is
    **240 bytes**, Host → Core: Ready, Committed, Cancelled or Finished plus the
@@ -85,7 +85,7 @@ at most 16 concurrent watches; retiring windows releases capacity. Late events
 cannot revive a retired watch, and late successful Watch replies are cleaned up.
 
 1. Host resolves the exported native Mac ID locally, binds the authenticated
-   WindowShare pin and assigns a monotonic move offer. Private v9 capability
+   WindowShare pin and assigns a monotonic move offer. Private v10 capability
    `localInputWindowMoveCapability` (32, requiring 16) carries message **22**:
    **112 bytes**, Host → Core, Begin/Motion/End/Cancel plus exact session, epoch,
    geometry, native grab/sequence, source frame and point. It is observation

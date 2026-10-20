@@ -917,8 +917,23 @@ void LocalInputChannel::read()
         m_received = sequence;
         if (!m_authenticated)
           bootstrap(type, payload);
-        else
+        else {
+          const auto dispatchStarted = m_dispatchNow();
           receive(type, payload);
+          if (alive && !m_closed && type == Type::MappedOriginal) {
+            const auto work =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(m_dispatchNow() - dispatchStarted).count();
+            require(
+                work >= 0 && m_nativeDispatch.records != UINT64_MAX &&
+                    static_cast<std::uint64_t>(work) <=
+                        std::uint64_t(std::chrono::nanoseconds::max().count()) - m_nativeDispatch.workNs,
+                "Mapped dispatch cost overflow"
+            );
+            m_nativeDispatch.throughFrame = sequence;
+            ++m_nativeDispatch.records;
+            m_nativeDispatch.workNs += static_cast<std::uint64_t>(work);
+          }
+        }
         if (!alive || !fresh())
           return;
         m_lastRead.restart();
@@ -1075,6 +1090,7 @@ bool LocalInputChannel::mappedOutputDrained()
     return true;
   if (!m_drainPing) {
     m_drainMappedWrite = m_lastMappedWrite;
+    m_drainMappedRecords = m_mappedWrites;
     m_drainPing = m_pingsSent + 1;
     lifecycleDiagnostic(
         "Core private input", "input.output-drain", "started", "Wait for the ordered mapped-input dispatch barrier",
@@ -1087,6 +1103,19 @@ bool LocalInputChannel::mappedOutputDrained()
     (void)send(Type::Ping);
   }
   return false;
+}
+std::optional<LocalInputDispatchCost> LocalInputChannel::takeMappedDispatchCost()
+{
+  if (QThread::currentThread() != thread() || !fresh() || m_role != LocalInputRole::Core || !supportsMappedInput() ||
+      m_drainedMappedWrite < m_lastMappedWrite || m_drainDispatch.throughFrame != m_drainedMappedWrite ||
+      m_drainDispatch.records <= m_takenDispatch.records)
+    return std::nullopt;
+  LocalInputDispatchCost result{
+      m_drainDispatch.records - m_takenDispatch.records,
+      std::chrono::nanoseconds(m_drainDispatch.workNs - m_takenDispatch.workNs)
+  };
+  m_takenDispatch = m_drainDispatch;
+  return result;
 }
 bool LocalInputChannel::sendOriginalRecord(
     LocalInputLease lease, OriginalInputRecord record, std::optional<LocalInputMappedPoint> point
@@ -1132,19 +1161,51 @@ bool LocalInputChannel::sendOriginalRecord(
   m_originalTimestamp = record.sourceTimestampNs;
   const auto frame = m_sent + 1;
   const bool sent = send(point ? Type::MappedOriginal : Type::Original, payload);
-  if (alive && sent && point)
+  if (alive && sent && point) {
     m_lastMappedWrite = std::max(m_lastMappedWrite, frame);
+    ++m_mappedWrites; // Bounded by the nonwrapping frame counter.
+  }
   return alive && sent;
 }
 void LocalInputChannel::receive(Type type, const QByteArray &payload)
 {
   if (type == Type::Ping || type == Type::Pong) {
-    require(payload.isEmpty(), "Invalid local input heartbeat");
-    if (type == Type::Ping)
-      send(Type::Pong);
-    else {
+    if (type == Type::Ping) {
+      require(payload.isEmpty(), "Invalid local input heartbeat");
+      Writer reply;
+      if (m_role == LocalInputRole::Host && supportsMappedInput())
+        for (auto value : {m_nativeDispatch.throughFrame, m_nativeDispatch.records, m_nativeDispatch.workNs})
+          reply.number(value, 8);
+      send(Type::Pong, reply.data);
+    } else {
       require(m_pongsReceived < m_pingsSent, "Unsolicited local input heartbeat reply");
       ++m_pongsReceived;
+      if (m_role == LocalInputRole::Core && supportsMappedInput()) {
+        Reader in{payload};
+        const DispatchTotals totals{in.number(8), in.number(8), in.number(8)};
+        in.end();
+        require(
+            totals.throughFrame >= m_peerDispatch.throughFrame && totals.throughFrame <= m_lastMappedWrite &&
+                totals.records >= m_peerDispatch.records && totals.records <= m_mappedWrites &&
+                totals.workNs >= m_peerDispatch.workNs &&
+                totals.workNs <= std::uint64_t(std::chrono::nanoseconds::max().count()) &&
+                ((totals.throughFrame == 0) == (totals.records == 0)) && (totals.records != 0 || totals.workNs == 0) &&
+                ((totals.records == m_peerDispatch.records) == (totals.throughFrame == m_peerDispatch.throughFrame)) &&
+                totals.records - m_peerDispatch.records <= totals.throughFrame - m_peerDispatch.throughFrame &&
+                (totals.records != m_peerDispatch.records ||
+                 (totals.workNs == m_peerDispatch.workNs && totals.throughFrame == m_peerDispatch.throughFrame)),
+            "Invalid mapped dispatch totals"
+        );
+        m_peerDispatch = totals;
+        if (m_drainPing == m_pongsReceived) {
+          require(
+              totals.throughFrame == m_drainMappedWrite && totals.records == m_drainMappedRecords,
+              "Mapped dispatch reply did not cover the exact ordered prefix"
+          );
+          m_drainDispatch = totals;
+        }
+      } else
+        require(payload.isEmpty(), "Invalid local input heartbeat");
     }
     return;
   }

@@ -47,6 +47,24 @@ prefix. Duplicate or overflowing staged decisions revoke diagnostic evidence.
 `LocalInputSession.onRoutedInput` remains a historical observation, never an
 original-input dispatch callback.
 
+The private channel's **v10** mapped-input barrier also reports cumulative
+dispatch measurements: the last handled Core frame, mapped record count and
+nanoseconds spent handling those records. A Host Pong carries these three
+unsigned 64-bit values only when mapped input was negotiated; other heartbeats
+remain empty. Both endpoints must use v10. The Core requires nondecreasing,
+bounded totals and an exact frame/count match for its outstanding barrier.
+Periodic replies cannot complete a later barrier, and each completed cost is
+consumed once.
+
+The coordinator sizes a prefix from the measured peer handling cost, targeting
+50 ms and retaining the existing maximum of 16 records. Time waiting to
+schedule a process or to receive its acknowledgement is logged separately.
+Treating that fixed delay as per-record work can shrink batches to one and
+add a round trip to every event. The measurement changes scheduling only:
+each event still requires its original receipt, fresh native authority and
+ordered delivery. It proves neither AppKit consumption nor physical display.
+The input, preparation and route-correlation deadlines are unchanged.
+
 ## Reservation and press ownership
 
 Only a live, exact, single-part, unambiguous capture can reach the dispatcher.

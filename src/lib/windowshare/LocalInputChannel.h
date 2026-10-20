@@ -112,7 +112,7 @@ enum class LocalInputPhase
   Active
 };
 // Wire capabilities describe code support, never provider readiness/authority.
-// Every v9 endpoint supports keyboard leases; full-input and mapped delivery
+// Every v10 endpoint supports keyboard leases; full-input and mapped delivery
 // are separately negotiated. Mapped delivery additionally requires full input.
 inline constexpr std::uint64_t localInputKeyboardCapability = 1, localInputFullCapability = 2,
                                localInputMappedCapability = 4, localInputWindowPointerCapability = 8,
@@ -131,6 +131,15 @@ struct LocalInputLimits
   std::uint64_t capabilities = localInputKnownCapabilities;
 };
 
+// Scheduling measurements, never input authority or proof of AppKit receipt.
+// Work covers the peer's actual mapped-frame handling, including authorization,
+// but excludes time queued between processes and between dispatch turns.
+struct LocalInputDispatchCost
+{
+  std::uint64_t records = 0;
+  std::chrono::nanoseconds work{};
+};
+
 class LocalInputSocketPair;
 
 // Private launch capability, never a public/named IPC service. Both callers
@@ -145,7 +154,7 @@ class LocalInputChannel final : public QObject
   friend struct LocalInputChannelTestAccess;
 
 public:
-  static constexpr std::uint16_t version = 9;
+  static constexpr std::uint16_t version = 10;
   static constexpr qsizetype headerBytes = 52, maxPayloadBytes = 320, maxQueueBytes = 16 * 1024;
   static constexpr qsizetype offerPayloadBytes = 128, leasePayloadBytes = 192, maxOriginalPayloadBytes = 244;
   static constexpr qsizetype mappedPointBytes = 40, maxMappedOriginalPayloadBytes = 284;
@@ -203,6 +212,9 @@ public:
   // the preceding mapped frames. It grants no delivery authority and never
   // renews a point receipt. Poll on the owner thread before mapping a new batch.
   bool mappedOutputDrained();
+  // Consume cost only after every preceding mapped write has an exact ordered
+  // drain reply. Repeated polls cannot count the same work twice.
+  std::optional<LocalInputDispatchCost> takeMappedDispatchCost();
   // Retired control acknowledgements/revokes cannot affect a newer route.
   // Fully validated in-flight Original frames for retired routes advance
   // capture replay protection and are discarded without native delivery.
@@ -274,6 +286,12 @@ private:
                 m_captureEpoch = 0;
   std::uint64_t m_pingsSent = 0, m_pongsReceived = 0, m_lastMappedWrite = 0, m_drainedMappedWrite = 0;
   std::uint64_t m_drainPing = 0, m_drainMappedWrite = 0;
+  struct DispatchTotals
+  {
+    std::uint64_t throughFrame = 0, records = 0, workNs = 0;
+  };
+  DispatchTotals m_nativeDispatch, m_peerDispatch, m_drainDispatch, m_takenDispatch;
+  std::uint64_t m_mappedWrites = 0, m_drainMappedRecords = 0;
   std::uint64_t m_evidencePendingBytes = 0;  // Accepted bytes not yet reported by bytesWritten.
   std::uint64_t m_evidenceBufferedBytes = 0; // Actual Qt receive buffer, before queued read().
   int m_handshake = 0;

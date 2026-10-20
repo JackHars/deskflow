@@ -45,6 +45,16 @@ struct LocalInputChannelTestAccess
   {
     return channel.m_pingsSent;
   }
+  static void expectMappedReply(LocalInputChannel &channel, bool earlierPong = false)
+  {
+    channel.m_lastMappedWrite = channel.m_drainMappedWrite = 100;
+    channel.m_mappedWrites = channel.m_drainMappedRecords = 2;
+    channel.m_pingsSent = channel.m_drainPing = channel.m_pongsReceived + (earlierPong ? 2 : 1);
+  }
+  static void previousMappedReply(LocalInputChannel &channel)
+  {
+    channel.m_peerDispatch = {50, 1, 5000000};
+  }
   static qint64 buffered(const LocalInputChannel &channel)
   {
     return channel.m_socket.bytesAvailable();
@@ -612,7 +622,7 @@ int rawChild(QCoreApplication &application, int descriptor, const QString &mode)
   else if (mode == "raw-version-seven")
     frame[5] = 7; // Real-release/drop status requires the explicit v8 contract.
   else if (mode == "raw-version-eight")
-    frame[5] = 8; // Native return observations require the explicit v9 contract.
+    frame[5] = 9; // Dispatch measurements require the explicit v10 contract.
   else if (mode == "raw-role")
     frame[7] = 1;
   else if (mode == "raw-incarnation")
@@ -856,7 +866,16 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   std::uint64_t originalEvents = 0;
   int callbackEvents = 0;
   bool retiredDelivered = false;
+  const auto costClock = std::make_shared<std::chrono::steady_clock::time_point>();
+  if (mode == "mapped-cost") {
+    LocalInputChannelTestAccess::dispatchClock(*host, costClock);
+    // Simulate scheduling latency before a socket read, without waiting or
+    // changing any authority clock. It must not become per-record native work.
+    LocalInputChannelTestAccess::observeReadyRead(*host, [costClock] { *costClock += std::chrono::milliseconds(100); });
+  }
   host->authorize = [&, marker = QString(256, 'a')](const LocalInputLease &lease, LocalInputCheck phase) {
+    if (phase == LocalInputCheck::Deliver && mode == "mapped-cost")
+      *costClock += std::chrono::milliseconds(2);
     if (phase == LocalInputCheck::Deliver && mode == "mapped-expire")
       QThread::msleep(50);
     if (phase == LocalInputCheck::Deliver && mode == "nested-capture") {
@@ -940,11 +959,14 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     ++originalEvents;
     const auto records = mixedRecords();
     check(
-        (mode == "mapped" || mode == "mapped-drain") && lease == fixtureLease() && originalEvents <= records.size() &&
+        (mode == "mapped" || mode == "mapped-drain" || mode == "mapped-cost") && lease == fixtureLease() &&
+            originalEvents <= records.size() &&
             originalPayload(lease, record) == originalPayload(lease, records[originalEvents - 1]) && point.x == 17.25 &&
             point.y == 33.5 && point.width == 640 && point.height == 480 && liveLocalInputMappedPoint(point),
         "Mapped private input changed its record, position, geometry or deadline"
     );
+    if (mode == "mapped-cost")
+      *costClock += std::chrono::milliseconds(3);
     if (mode == "mapped-drain" && originalEvents == 1) {
       const auto before = LocalInputChannelTestAccess::received(*host);
       QEventLoop nested;
@@ -1168,7 +1190,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(originalEvents == 0, "Revoked or expired original event reached the receiver");
   if (mode == "mapped-expire" || mode == "mapped-malformed")
     check(originalEvents == 0, "Invalid or expired mapping reached delivery");
-  if (mode == "mapped" || mode == "mapped-drain")
+  if (mode == "mapped" || mode == "mapped-drain" || mode == "mapped-cost")
     check(originalEvents == mixedRecords().size(), "Mapped input did not deliver every input family exactly once");
   if (mode == "retired-original")
     check(retiredDelivered && originalEvents == 1, "Retired input prevented the next owner's valid delivery");
@@ -1203,7 +1225,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
 
 void preflightValues()
 {
-  static_assert(LocalInputChannel::version == 9);
+  static_assert(LocalInputChannel::version == 10);
   static_assert(LocalInputChannel::headerBytes == 52 && LocalInputChannel::maxPayloadBytes == 320);
   static_assert(LocalInputChannel::offerPayloadBytes == 128 && LocalInputChannel::leasePayloadBytes == 192);
   static_assert(LocalInputChannel::maxOriginalPayloadBytes == 244);
@@ -1823,6 +1845,89 @@ void mappedOutputDrain()
   fixture.core->close();
   check(!fixture.core->mappedOutputDrained(), "Closed transport retained a dispatch proof");
   fixture.childExitedCleanly();
+}
+void mappedDispatchCost()
+{
+  Fixture fixture("mapped-cost");
+  check(!fixture.core->takeMappedDispatchCost(), "Unauthenticated channel supplied a scheduling cost");
+  fixture.activate();
+  check(!fixture.core->takeMappedDispatchCost(), "Empty channel supplied a scheduling cost");
+  const auto records = mixedRecords();
+  auto point = LocalInputMappedPoint{17.25, 33.5, 640, 480, localInputMonotonicNs() + 200000000};
+  check(fixture.core->sendMappedOriginal(fixtureLease(), records[0], point), "First cost record failed");
+  check(!fixture.core->mappedOutputDrained(), "First write bypassed ordered native dispatch");
+  check(fixture.core->sendMappedOriginal(fixtureLease(), records[1], point), "Second cost record failed");
+  check(!fixture.core->takeMappedDispatchCost(), "Unacknowledged output supplied a scheduling cost");
+  check(
+      until([&] { return fixture.closed || fixture.core->mappedOutputDrained(); }) && !fixture.closed,
+      "Cost fixture did not complete both ordered barriers"
+  );
+  auto cost = fixture.core->takeMappedDispatchCost();
+  check(
+      cost && cost->records == 2 && cost->work == std::chrono::milliseconds(10),
+      "Cost omitted a callback/authorization or included scheduling time before the read"
+  );
+  check(!fixture.core->takeMappedDispatchCost(), "The same completed native work was counted twice");
+  for (std::size_t index = 2; index < records.size(); ++index) {
+    point.deadlineNs = localInputMonotonicNs() + 200000000;
+    check(fixture.core->sendMappedOriginal(fixtureLease(), records[index], point), "Later cost record failed");
+    check(!fixture.core->takeMappedDispatchCost(), "Earlier work qualified a later unacknowledged write");
+    check(
+        until([&] { return fixture.closed || fixture.core->mappedOutputDrained(); }) && !fixture.closed,
+        "Later cost record did not drain"
+    );
+    cost = fixture.core->takeMappedDispatchCost();
+    check(
+        cost && cost->records == 1 && cost->work == std::chrono::milliseconds(5),
+        "Cost lost its incremental prefix or inherited an earlier scheduling gap"
+    );
+  }
+  fixture.core->close();
+  check(!fixture.core->takeMappedDispatchCost(), "Closed transport retained a scheduling cost");
+  fixture.childExitedCleanly();
+}
+void mappedDispatchCostValidation()
+{
+  const auto payload = [](std::uint64_t frame, std::uint64_t records, std::uint64_t work) {
+    QByteArray result;
+    for (auto value : {frame, records, work})
+      number(result, value, 8);
+    return result;
+  };
+  for (const auto &invalid : {
+           QByteArray{}, payload(100, 2, 10000000).first(23), payload(100, 2, 10000000) + char(0),
+           payload(101, 2, 10000000), payload(100, 3, 10000000), payload(0, 0, 1), payload(100, 2, UINT64_MAX),
+           payload(49, 2, 10000000), payload(100, 2, 4999999), payload(100, 1, 10000000),
+           payload(99, 2, 10000000) // Otherwise valid totals must cover the exact requested frame.
+       }) {
+    Fixture fixture("freeze");
+    fixture.activate();
+    LocalInputChannelTestAccess::freeze(*fixture.core);
+    LocalInputChannelTestAccess::expectMappedReply(*fixture.core);
+    LocalInputChannelTestAccess::previousMappedReply(*fixture.core);
+    LocalInputChannelTestAccess::incoming(*fixture.core, 5, invalid);
+    check(
+        fixture.closed && fixture.revoked == 1 && !fixture.core->takeMappedDispatchCost(),
+        "Malformed, regressing or substituted dispatch totals were accepted"
+    );
+  }
+  Fixture fixture("freeze");
+  fixture.activate();
+  LocalInputChannelTestAccess::freeze(*fixture.core);
+  LocalInputChannelTestAccess::expectMappedReply(*fixture.core, true);
+  LocalInputChannelTestAccess::incoming(*fixture.core, 5, payload(50, 1, 5000000));
+  check(
+      !fixture.closed && !fixture.core->mappedOutputDrained() && !fixture.core->takeMappedDispatchCost(),
+      "An earlier periodic Pong completed the later mapped barrier"
+  );
+  LocalInputChannelTestAccess::incoming(*fixture.core, 5, payload(100, 2, 10000000));
+  check(!fixture.closed && fixture.core->mappedOutputDrained(), "Exact dispatch totals did not complete the barrier");
+  const auto cost = fixture.core->takeMappedDispatchCost();
+  check(
+      cost && cost->records == 2 && cost->work == std::chrono::milliseconds(10) &&
+          !fixture.core->takeMappedDispatchCost(),
+      "Exact dispatch totals were lost or consumed more than once"
+  );
 }
 void preflightRoundtrip()
 {
@@ -3229,6 +3334,10 @@ int main(int argc, char **argv)
     mappedInput();
     QTextStream(stdout) << "RUN: mappedOutputDrain\n" << Qt::flush;
     mappedOutputDrain();
+    QTextStream(stdout) << "RUN: mappedDispatchCost\n" << Qt::flush;
+    mappedDispatchCost();
+    QTextStream(stdout) << "RUN: mappedDispatchCostValidation\n" << Qt::flush;
+    mappedDispatchCostValidation();
     QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;
     preflightRoundtrip();
     QTextStream(stdout) << "RUN: preflightWireLayout\n" << Qt::flush;
