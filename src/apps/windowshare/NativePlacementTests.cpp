@@ -22,6 +22,7 @@
 #include <deque>
 #include <memory>
 #include <stdexcept>
+#include <vector>
 
 using namespace deskflow::windowshare;
 using namespace std::chrono_literals;
@@ -47,6 +48,83 @@ void dispatchUntil(const std::function<bool()> &done)
   while (!done() && !expired)
     QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents);
   check(done(), "native worker did not complete within the fixture deadline");
+}
+void globalNativeInspectionCapacity()
+{
+  using Inspection = AsyncNativeInspection<int>;
+  struct BlockedReads
+  {
+    QSemaphore entered, release, returned;
+  };
+  check(NativeInspectionCapacity::retained() == 0, "inspection capacity was not initially empty");
+  Inspection::Clock::time_point now{};
+  const auto blocked = std::make_shared<BlockedReads>();
+  const auto unblock = qScopeGuard([&] { blocked->release.release(NativeInspectionCapacity::maximum); });
+  unsigned completions = 0;
+  std::vector<std::unique_ptr<Inspection>> owners;
+  for (unsigned i = 0; i < NativeInspectionCapacity::maximum; ++i) {
+    auto owner = std::make_unique<Inspection>([&] { return now; });
+    check(
+        owner->request(
+            [blocked] {
+              blocked->entered.release();
+              blocked->release.acquire();
+              blocked->returned.release();
+              return 7;
+            },
+            [&](auto result) {
+              ++completions;
+              check(!result, "destroyed or expired owner accepted a blocked observation");
+            }
+        ),
+        "inspection capacity refused an available slot"
+    );
+    owners.push_back(std::move(owner));
+  }
+  check(
+      blocked->entered.tryAcquire(NativeInspectionCapacity::maximum, 2000),
+      "admitted inspections did not enter their queries"
+  );
+  owners[0]->cancel();
+  now += Inspection::maximumAge;
+  owners[1]->expire();
+  check(completions == 1, "expiry did not fail its owner exactly once");
+  owners.clear();
+  check(
+      NativeInspectionCapacity::retained() == NativeInspectionCapacity::maximum,
+      "cancel, expiry or owner destruction released a still-running query"
+  );
+  AsyncNativeInspection<QString, 2000> replacement;
+  bool replacementCompleted = false;
+  const auto request = [&] {
+    return replacement.request(
+        [] { return QStringLiteral("fresh"); },
+        [&](auto result) {
+          check(result == QStringLiteral("fresh"), "replacement inspection lost its result");
+          replacementCompleted = true;
+        }
+    );
+  };
+  check(!request() && !replacement.busy(), "a different result type bypassed the process inspection capacity");
+  blocked->release.release(NativeInspectionCapacity::maximum);
+  check(
+      blocked->returned.tryAcquire(NativeInspectionCapacity::maximum, 2000),
+      "cancelled native queries did not return independently"
+  );
+  // No owner event loop has run yet. Finished QThreads still awaiting deferred
+  // destruction must not allow unbounded thread objects/results to accumulate.
+  check(!request(), "finished but retained thread objects lost their capacity permits");
+  dispatchUntil([] {
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    return NativeInspectionCapacity::retained() == 0;
+  });
+  check(completions == 1, "destroyed owners received late inspection completions");
+  check(request(), "retired native queries permanently exhausted inspection capacity");
+  dispatchUntil([&] { return replacementCompleted; });
+  dispatchUntil([] {
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    return NativeInspectionCapacity::retained() == 0;
+  });
 }
 void asynchronousNativeInspection()
 {
@@ -246,8 +324,8 @@ void asynchronousPlacementPreparation()
     Gate::Clock::time_point now{};
     bool failed = false, started = false;
     Gate gate(
-        [](QString *) { return Gate::Observation::Verified; },
-        [&](bool success, QString) { failed = !success; }, [&] { return now; }
+        [](QString *) { return Gate::Observation::Verified; }, [&](bool success, QString) { failed = !success; },
+        [&] { return now; }
     );
     now += 2s;
     gate.prepareAfter([&](auto) { started = true; }, {});
@@ -306,7 +384,9 @@ void asynchronousPlacementPreparation()
     check(completions == (cancelled ? 0 : 1), "registration completion was repeated or revived a cancelled placement");
     check(accepted == (scenario == 0), "failed, late or revoked registration committed placement");
     check(writes == (scenario == 0 ? 1 : 0), "unverified registration allowed a native write");
-    check(checks == (scenario == 0 || scenario == 6 ? 1 : 0), "write did not require fresh authority after registration");
+    check(
+        checks == (scenario == 0 || scenario == 6 ? 1 : 0), "write did not require fresh authority after registration"
+    );
   }
 
   // Reproduce a busy AX notification registration without blocking Qt or
@@ -320,8 +400,8 @@ void asynchronousPlacementPreparation()
   bool environmentComplete = false, inputTurn = false, placed = false;
   int writes = 0;
   Gate gate(
-      [](QString *) { return Gate::Observation::Verified; },
-      [&](bool success, QString) { placed = success; }, [&] { return now; }
+      [](QString *) { return Gate::Observation::Verified; }, [&](bool success, QString) { placed = success; },
+      [&] { return now; }
   );
   gate.prepareAfter(
       [&](Gate::PreparationCompletion complete) {
@@ -1071,6 +1151,7 @@ int main(int argc, char **argv)
   QCoreApplication app(argc, argv);
   try {
     for (const auto &[name, test] : {
+             std::pair{"global-native-inspection-capacity", &globalNativeInspectionCapacity},
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},

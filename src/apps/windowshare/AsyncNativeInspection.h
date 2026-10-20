@@ -6,6 +6,7 @@
 #include <QObject>
 #include <QThread>
 #include <QTimer>
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <memory>
@@ -13,6 +14,54 @@
 #include <utility>
 
 namespace deskflow::windowshare {
+
+// Shared across result types and owner lifetimes in this process. Cancellation
+// cannot cancel native IPC, and deleting/replacing an owner must not bypass
+// admission. Include finished threads awaiting Qt deletion in the bound.
+class NativeInspectionCapacity final
+{
+public:
+  static constexpr unsigned maximum = 64;
+  class Permit final
+  {
+  public:
+    ~Permit()
+    {
+      if (m_claimed)
+        m_retained.fetch_sub(1, std::memory_order_relaxed);
+    }
+    Permit(const Permit &) = delete;
+    Permit &operator=(const Permit &) = delete;
+
+  private:
+    friend class NativeInspectionCapacity;
+    Permit() = default;
+    bool m_claimed = false;
+  };
+  static std::shared_ptr<Permit> acquire()
+  {
+    auto retained = m_retained.load(std::memory_order_relaxed);
+    if (retained >= maximum)
+      return {};
+    // Allocate before claiming a slot: failed control-block allocation must
+    // neither leak the claim nor release it twice through a deleter.
+    auto permit = std::shared_ptr<Permit>(new Permit);
+    while (retained < maximum) {
+      if (m_retained.compare_exchange_weak(retained, retained + 1, std::memory_order_relaxed)) {
+        permit->m_claimed = true;
+        return permit;
+      }
+    }
+    return {};
+  }
+  static unsigned retained()
+  {
+    return m_retained.load(std::memory_order_relaxed);
+  }
+
+private:
+  static inline std::atomic<unsigned> m_retained = 0;
+};
 
 // One read-only native inspection, never an input-authority cache. A stalled
 // system query must not stall native input or create more worker requests.
@@ -35,7 +84,10 @@ public:
   }
   bool request(std::function<Result()> inspect, Completion completion)
   {
-    if (m_running || !inspect || !completion)
+    if (QThread::currentThread() != thread() || m_running || !inspect || !completion)
+      return false;
+    const auto permit = NativeInspectionCapacity::acquire();
+    if (!permit)
       return false;
     auto result = std::make_shared<std::optional<Result>>();
     // The worker captures only its query and result, never this or its owner.
@@ -46,6 +98,9 @@ public:
         // Missing results fail closed on the owner thread.
       }
     });
+    // The thread QObject survives its native query and any cancelled owner.
+    // Keep its permit until Qt has also retired its deferred deletion.
+    QObject::connect(worker, &QObject::destroyed, [permit] { (void)permit; });
     QObject::connect(
         worker, &QThread::finished, this,
         [this, result] {

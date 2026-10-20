@@ -4170,7 +4170,9 @@ struct NativeHost::Impl
                     }
                 );
                 if (!accepted)
-                  finish(Observation::Invalid, "A native window read is already outstanding");
+                  finish(
+                      Observation::Invalid, "Native window read is busy or process inspection capacity is exhausted"
+                  );
               }),
               [current, observed, expected, complete = std::move(complete)](bool success, QString reason) {
                 lifecycleDiagnostic(
@@ -5027,25 +5029,34 @@ struct NativeHost::Impl
       owners.push_back({id, e->session.epoch});
     const auto generation = exportGeneration;
     const bool hasEntries = !owners.empty();
-    environmentInspection.request(
+    const bool accepted = environmentInspection.request(
         [hasEntries] {
           @autoreleasepool {
             const auto started = std::chrono::steady_clock::now();
+            auto layoutFinished = started, accessibilityFinished = started;
             const auto timing = qScopeGuard([&] {
-              const auto elapsed =
-                  std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
-                      .count();
+              const auto finished = std::chrono::steady_clock::now();
+              const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(finished - started).count();
+              const auto micros = [](auto duration) {
+                return qint64(std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+              };
               if (elapsed >= 25)
                 lifecycleDiagnostic(
                     "Host", "native.environment-inspection", "observed",
                     "Read-only display/permission check completed off the input thread",
-                    {{"elapsedMs", qint64(elapsed)}}
+                    {{"elapsedMs", qint64(elapsed)},
+                     {"layoutUs", micros(layoutFinished - started)},
+                     {"accessibilityUs", micros(accessibilityFinished - layoutFinished)},
+                     {"capturePermissionUs", micros(finished - accessibilityFinished)},
+                     {"requestedThreadQos", int(qos_class_self())}}
                 );
             });
             EnvironmentObservation observed;
             if (hasEntries)
               observed.outputs = physicalOutputSnapshot();
+            layoutFinished = accessibilityFinished = std::chrono::steady_clock::now();
             observed.accessibility = AXIsProcessTrusted();
+            accessibilityFinished = std::chrono::steady_clock::now();
             observed.screenCapture = !hasEntries || CGPreflightScreenCaptureAccess();
             return observed;
           }
@@ -5070,6 +5081,12 @@ struct NativeHost::Impl
           pollObserved(*observed);
         }
     );
+    if (!accepted && !entries.empty()) {
+      const QPointer<NativeHost> alive(q);
+      error("Native inspection capacity exhausted; restoring exact source owners");
+      if (alive)
+        restoreAll(KeyboardRouteReason::AuthorityLost);
+    }
   }
   void pollObserved(const EnvironmentObservation &observed)
   {
