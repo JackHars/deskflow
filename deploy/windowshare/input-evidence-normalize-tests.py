@@ -113,6 +113,51 @@ class NormalizeTests(unittest.TestCase):
         self.fixture.row('native', 'native')['cgTimestampNs'] = '999'
         self.rejected()
 
+    def test_terminal_failure_reports_original_cause_without_accepting_drained_journal(self):
+        end = self.fixture.row('core', 'end')
+        end.update(loss=9, failure={'site': 'unspecified', 'queue': None})
+        with self.assertRaisesRegex(normalizer.EvidenceError,
+                                    r'core recorder evidence loss: deadline \(9\); site=unspecified'):
+            self.fixture.normalize()
+        end.update(loss=4, failure={'site': 'private-buffer-read', 'queue': 'private-buffered-input'})
+        with self.assertRaisesRegex(normalizer.EvidenceError,
+                                    r'queue-accounting \(4\); site=private-buffer-read; queue=private-buffered-input'):
+            self.fixture.normalize()
+
+    def test_preparation_failure_reports_original_site_and_queue(self):
+        row = self.preparation()
+        row.update(loss=1, failure={'site': 'queue-initialize', 'queue': 'capture'})
+        with self.assertRaisesRegex(normalizer.EvidenceError,
+                                    r'core recorder evidence loss: contention \(1\); site=queue-initialize; queue=capture'):
+            self.fixture.normalize()
+
+    def test_all_legacy_losses_remain_failures_without_optional_diagnostics(self):
+        for loss in range(1, len(normalizer.LOSS_NAMES)):
+            with self.subTest(loss=loss):
+                self.fixture.row('core', 'end')['loss'] = loss
+                with self.assertRaisesRegex(normalizer.EvidenceError, 'core recorder evidence loss:'):
+                    self.fixture.normalize()
+
+    def test_failure_metadata_is_closed_and_cannot_override_loss(self):
+        for mutation in ('zero', 'boolean', 'unknown-loss', 'negative', 'unknown-site', 'site-type',
+                         'queue-type', 'foreign-queue', 'extra', 'missing', 'not-object'):
+            with self.subTest(mutation=mutation):
+                self.fixture = Fixture(self.temporary.name)
+                end = self.fixture.row('host', 'end')
+                end.update(loss=9, failure={'site': 'unspecified', 'queue': None})
+                if mutation == 'zero': end['loss'] = 0
+                elif mutation == 'boolean': end['loss'] = True
+                elif mutation == 'unknown-loss': end['loss'] = len(normalizer.LOSS_NAMES)
+                elif mutation == 'negative': end['loss'] = -1
+                elif mutation == 'unknown-site': end['failure']['site'] = 'invented'
+                elif mutation == 'site-type': end['failure']['site'] = []
+                elif mutation == 'queue-type': end['failure']['queue'] = []
+                elif mutation == 'foreign-queue': end['failure']['queue'] = 'capture'
+                elif mutation == 'extra': end['failure']['accepted'] = True
+                elif mutation == 'missing': del end['failure']['site']
+                elif mutation == 'not-object': end['failure'] = None
+                self.rejected()
+
     def test_preparation_metadata_remains_strict_and_bounded(self):
         for mutation in ('extra', 'flag', 'unknown-queue', 'duplicate-queue', 'no-blocker',
                          'unavailable', 'ready-with-detail', 'loss'):

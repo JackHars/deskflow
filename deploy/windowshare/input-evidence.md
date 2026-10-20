@@ -4,6 +4,12 @@ SPDX-License-Identifier: MIT
 -->
 # Opt-in original-input evidence collector
 
+Failed readiness samples and terminal rows may include the bounded `failure`
+object (`site` and `queue`). The normalizer validates those fields and reports
+the original loss name, location and queue. It still rejects every nonzero loss,
+including a drained journal that missed its stop deadline. Failure metadata
+cannot override a loss or turn an incomplete recording into a pass.
+
 This collector records actual Mac capture records before the first raw queue,
 mutations of the declared queues below, explicit hover replacements, and actual
 AppKit receipts in the owned NativeSmoke source window. It does not inject input

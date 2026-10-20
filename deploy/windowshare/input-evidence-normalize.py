@@ -34,6 +34,12 @@ TAG = 0x445357494E503031
 MAX_BYTES = 256 * 1024 * 1024
 MAX_ROWS = 1_000_000
 U64 = 2**64 - 1
+LOSS_NAMES = ('none', 'contention', 'buffer-full', 'queue-identity', 'queue-accounting',
+              'baseline', 'owner-changed', 'capture-changed', 'pipeline-revoked',
+              'deadline', 'output', 'malformed')
+FAILURE_SITES = frozenset(('unspecified', 'owner-bind', 'owner-revoke', 'queue-initialize',
+                          'queue-mutation', 'journal-reserve', 'private-output-written',
+                          'private-buffer-observed', 'private-buffer-read'))
 
 
 class EvidenceError(ValueError):
@@ -70,6 +76,22 @@ def digest(value):
 
 def encoded(value):
     return json.dumps(value, separators=(',', ':'), sort_keys=True, allow_nan=False).encode()
+
+
+def require_no_loss(row, queues, role):
+    """Explain a recorder's sticky failure; diagnostics can never grant a pass."""
+    loss = row['loss']
+    require(type(loss) is int and 0 <= loss < len(LOSS_NAMES), 'unknown recorder loss')
+    site, queue = 'unspecified', None
+    if 'failure' in row:
+        require(loss != 0, 'failure diagnostics contradict zero recorder loss')
+        detail = row['failure']
+        keys(detail, ('site', 'queue'), 'failure')
+        site, queue = detail['site'], detail['queue']
+        require(type(site) is str and site in FAILURE_SITES, 'unknown recorder failure site')
+        require(queue is None or (type(queue) is str and queue in queues), 'unknown recorder failure queue')
+    require(loss == 0, f'{role} recorder evidence loss: {LOSS_NAMES[loss]} ({loss}); '
+                      f'site={site}; queue={queue if queue is not None else "unspecified"}')
 
 
 def owner(row):
@@ -173,9 +195,10 @@ class Journal:
             require(self.arm is None and type(row.get('readyCandidate')) is bool, 'late/malformed readiness')
             fields = ('type', 'timeNs', 'readyCandidate', 'loss')
             fields += ('owner', 'identity') if row['readyCandidate'] else ('preparation',) if 'preparation' in row else ()
+            fields += ('failure',) if 'failure' in row else ()
             keys(row, fields, 'readiness')
             integer(row['timeNs'], 'readiness time')
-            require(type(row['loss']) is int and row['loss'] == 0, 'pre-arm evidence continuity was lost')
+            require_no_loss(row, self.header['queues'], role)
             if row['readyCandidate']:
                 owner(row)
             elif 'preparation' in row:
@@ -204,7 +227,9 @@ class Journal:
             require(self.arm is None and type(row['accepted']) is bool, 'duplicate or malformed arm')
             self.arm = row
         elif kind == 'end':
-            keys(row, ('type', 'timeNs', 'sourceEndNs', 'state', 'loss', 'rows', 'drained'), 'end')
+            fields = ('type', 'timeNs', 'sourceEndNs', 'state', 'loss', 'rows', 'drained')
+            keys(row, fields + (('failure',) if 'failure' in row else ()), 'end')
+            require_no_loss(row, self.header['queues'], role)
             self.end = row
         else:
             require(self.arm is not None and self.arm['accepted'] is True, 'payload outside accepted run')
