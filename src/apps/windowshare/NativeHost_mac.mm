@@ -1519,17 +1519,14 @@ struct NativeHost::Impl
     CGWindowID id = 0;
   };
   // Opaque AX lookup hints, not observations or authority. Each input still
-  // reads every candidate's current ID, role, parent and modality, then proves
-  // completeness against fresh public WindowServer inventories. Re-enumerate
-  // when the visible ID set changes; a missing/new/changed surface must fail
-  // the final join even if these references are stale.
+  // reads every candidate's current ID, role, parent and modality. Its final
+  // fresh WindowServer snapshot must account for exactly those classified
+  // siblings and the source. A stale/missing/new surface fails that join and
+  // discards the hints; no previous inventory can authorize another input.
   struct SurfaceReferences
   {
     CF<CFArrayRef> windows;
-    const std::set<std::uint32_t> visibleIds;
-    SurfaceReferences(CFArrayRef values, const std::vector<std::uint32_t> &ids)
-        : windows(static_cast<CFArrayRef>(CFRetain(values))),
-          visibleIds(ids.begin(), ids.end())
+    explicit SurfaceReferences(CFArrayRef values) : windows(static_cast<CFArrayRef>(CFRetain(values)))
     {
     }
   };
@@ -2105,18 +2102,20 @@ struct NativeHost::Impl
     if (!finalInventory && !focusedWithinNativeSource(expected, source, focused))
       return incomplete("Focused native surface has no proven source ancestry");
     measured("focusOwnershipUs");
-    // Public on-screen inventory excludes dormant backing windows. Read it
-    // afresh; retained IDs only select lookup references, never grant input.
+    // Discovery uses a fresh on-screen inventory to exclude dormant backing
+    // windows. Once references exist, freshly classify them without another
+    // preliminary WindowServer round trip. The later full native snapshot is
+    // still mandatory and must exactly match this event's AX classification.
+    const bool reuseReferences = finalInventory && references;
     const auto before = finalInventory ? std::optional<NativeWindowInventory>{} : nativeWindowInventory(expected.pid);
-    const auto visible = finalInventory ? nativeVisibleWindowIds() : std::optional<std::vector<std::uint32_t>>{};
+    const auto visible =
+        finalInventory && !reuseReferences ? nativeVisibleWindowIds() : std::optional<std::vector<std::uint32_t>>{};
     measured("inventoryBeforeUs");
-    if (!alive || (finalInventory ? !visible : !before))
+    if (!alive || (!reuseReferences && (finalInventory ? !visible : !before)))
       return incomplete("Initial native inventory unavailable");
-    const auto &initialIds = finalInventory ? *visible : before->ids;
-    if (std::find(initialIds.begin(), initialIds.end(), expected.id) == initialIds.end())
+    const auto *initialIds = reuseReferences ? nullptr : finalInventory ? &*visible : &before->ids;
+    if (initialIds && std::find(initialIds->begin(), initialIds->end(), expected.id) == initialIds->end())
       return incomplete("Initial native inventory has no source window");
-    const bool reuseReferences = finalInventory && references &&
-                                 references->visibleIds == std::set<std::uint32_t>(visible->begin(), visible->end());
     CF<CFTypeRef> windows(reuseReferences ? CFRetain(references->windows.get()) : attribute(app, kAXWindowsAttribute));
     measured("axWindowsUs");
     durations.insert("referenceLookupReuse", reuseReferences);
@@ -2140,7 +2139,8 @@ struct NativeHost::Impl
       if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
         return incomplete("AX window has no exact native identity");
       idTime += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - idStarted);
-      if (number == expected.id || std::find(initialIds.begin(), initialIds.end(), number) == initialIds.end())
+      if (number == expected.id ||
+          (initialIds && std::find(initialIds->begin(), initialIds->end(), number) == initialIds->end()))
         continue;
       const auto attributesStarted = std::chrono::steady_clock::now();
       AXUIElementSetMessagingTimeout(window, 0.05f);
@@ -2182,10 +2182,11 @@ struct NativeHost::Impl
     classified.push_back(expected.id);
     NativeSurfaceInventoryCheck inspection{expected.id, finalInventory ? classified : before->ids, unrelated, visible};
     if (finalInventory) {
-      // Classification is provisional: final process attribution must account
-      // for every native source-process window, with no global ID change.
-      // Initial IDs alone never grant authority or hide an unknown popup.
-      if (!inspection.finish(expected.id, classified, *visible))
+      // Classification is provisional: the final process snapshot must account
+      // for every native source-process window. During discovery the preliminary
+      // global list must also remain unchanged. Retained references substitute
+      // only for discovery, never for this event's fresh AX/native observations.
+      if (!inspection.finish(expected.id, classified, visible.value_or(std::vector<std::uint32_t>{})))
         return incomplete("Initial native inventory or AX classification is ambiguous");
     } else {
       const auto after = nativeWindowInventory(expected.pid);
@@ -2210,14 +2211,14 @@ struct NativeHost::Impl
       if (reuseReferences) {
         *discovered = references;
       } else {
-        // Dormant backing windows need no per-input lookup. Any change in the
-        // fresh global visible ID set forces rediscovery, and the final native
-        // attribution must still account for every currently visible sibling.
+        // Dormant backing windows need no per-input lookup. A new visible window
+        // will be unclassified in the final snapshot and deny the next event;
+        // stale references cannot silently omit it or authorize another owner.
         CF<CFArrayRef> siblings(
             CFArrayCreate(nullptr, siblingReferences.data(), siblingReferences.size(), &kCFTypeArrayCallBacks)
         );
         if (siblings)
-          *discovered = std::make_shared<SurfaceReferences>(siblings.get(), *visible);
+          *discovered = std::make_shared<SurfaceReferences>(siblings.get());
       }
     }
     return true;

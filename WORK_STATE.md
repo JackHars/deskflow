@@ -2,6 +2,22 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+`cd6a86f6d` passes 19 Mac and 15 Ubuntu suites, but the actual-desktop run
+`dashboard-replay-sf4gu98g` still fails: only 33 of 1,200 burst events arrive
+before a translated-input deadline. Preview rows fall from 27,043 to 639 in
+this shorter recording. Native checks remain the bottleneck: 27 slow authority
+checks consume 409 ms during the first 1.2 seconds, plus 143 ms of polling.
+The source restores and owned processes stop; failed raw records are retained.
+
+The next native change removes preliminary discovery from events that already
+have AX lookup references. It still freshly classifies every sibling's exact
+ID, role, parent and modality, then reads source focus/frame/lifetime and a full
+final WindowServer snapshot. That final snapshot must exactly equal the freshly
+classified siblings plus source; new, retired, replaced, missing or unknown
+windows deny input and discard the lookup references. Discovery still uses its
+two-observation check. No previous native observation grants authority, and no
+deadline, queue capacity, source event or evidence rule changes.
+
 
 `668d515d8` still fails the sustained capture/route join in both
 `dashboard-replay-12sgfc5q` and `dashboard-replay-3gr4kmuq`. The latter records

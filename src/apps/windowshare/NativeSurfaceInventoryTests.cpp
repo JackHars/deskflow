@@ -35,6 +35,13 @@ int main()
     check(!deferred.finish(1, {2}), "source disappearing during later native checks was ignored");
     check(!deferred.finish(1, {1, 2, 2}), "ambiguous final identity snapshot was accepted");
     check(!deferred.finish(1, {}), "missing final inventory accepted an initial observation");
+    // Retained AX objects are lookup hints only. Freshly classifying them is
+    // insufficient until the same event's final process inventory is complete.
+    const NativeSurfaceInventoryCheck freshReferences{1, {1, 2}, {2}};
+    check(freshReferences.finish(1, {2, 1}), "fresh reference classification failed its final native join");
+    check(!freshReferences.finish(1, {1, 3}), "replaced sibling escaped the final native join");
+    check(!freshReferences.finish(1, {1, 2, 3}), "new window absent from retained references was accepted");
+    check(!freshReferences.finish(1, {1}), "retired sibling reference authorized stale input");
     const NativeSurfaceInventoryCheck attributedLater{1, {1, 2}, {2}, std::vector<std::uint32_t>{1, 2, 3}};
     check(attributedLater.finish(1, {2, 1}, {3, 2, 1}), "stable global IDs and exact final attribution were rejected");
     check(!attributedLater.finish(1, {1, 2, 3}, {1, 2, 3}), "unclassified source-process popup was accepted");
