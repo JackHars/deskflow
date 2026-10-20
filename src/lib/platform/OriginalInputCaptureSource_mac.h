@@ -19,6 +19,45 @@ namespace deskflow::windowshare {
 class OriginalInputCaptureSource final
 {
 public:
+  enum class FailureStage : std::uint8_t
+  {
+    OpenCapture,
+    NativeEvent,
+    StreamAdmission,
+    Translation,
+    TranslationCapacity,
+    Checkpoint,
+    ConsumerJoin
+  };
+  struct Failure
+  {
+    FailureStage stage{};
+    OriginalInputCapture::Status nativeStatus = OriginalInputCapture::Status::Ignored;
+    std::uint32_t callbackType = 0, eventType = 0;
+    std::uint64_t sequence = 0, timestampNs = 0, previousTimestampNs = 0, flags = 0;
+    std::int64_t sourcePid = 0, mouseSubtype = 0, scrollPhase = 0, momentumPhase = 0, continuous = 0;
+    std::array<std::int64_t, 3> thirdAxis{};
+    const char *stageName() const noexcept
+    {
+      switch (stage) {
+      case FailureStage::OpenCapture:
+        return "unfinished-previous-capture";
+      case FailureStage::NativeEvent:
+        return "native-event-rejected";
+      case FailureStage::StreamAdmission:
+        return "capture-stream-admission";
+      case FailureStage::Translation:
+        return "translation-mismatch";
+      case FailureStage::TranslationCapacity:
+        return "translation-capacity";
+      case FailureStage::Checkpoint:
+        return "checkpoint";
+      case FailureStage::ConsumerJoin:
+        return "consumer-join";
+      }
+      return "unknown";
+    }
+  };
   OriginalInputCaptureSource();
   ~OriginalInputCaptureSource();
   OriginalInputCaptureSource(const OriginalInputCaptureSource &) = delete;
@@ -69,9 +108,17 @@ public:
   // returned tokens remain revoked even after this object is destroyed.
   OriginalInputEpoch epoch() const noexcept;
   bool emergencyRequested() const noexcept;
+  // One immutable diagnostic, published without allocation or logging in the
+  // event tap. The consumer prints it; it never grants or repairs continuity.
+  std::optional<Failure> failure() const noexcept;
   void stop() noexcept;
 
 private:
+  void recordFailure(
+      FailureStage stage, std::uint64_t sequence, std::uint64_t previousTimestampNs = 0,
+      OriginalInputCapture::Status status = OriginalInputCapture::Status::Ignored,
+      CGEventType callbackType = kCGEventNull, CGEventRef event = nullptr
+  ) noexcept;
   OriginalInputTransitionEvidence classifyTransition(const OriginalInputRecord &) noexcept;
   enum class State : std::uint8_t
   {
@@ -84,10 +131,21 @@ private:
   WindowDragMotionGate m_dragMotion{m_stream.epoch().id()};
   bool m_suppressMotion = false;
   std::atomic<State> m_state{State::Ready};
+  // Empty -> Writing -> Published. Multiple failure sites may race; only the
+  // winning writer touches m_failure, and no writer changes it after release.
+  enum class FailureState : std::uint8_t
+  {
+    Empty,
+    Writing,
+    Published
+  };
+  std::atomic<FailureState> m_failureState{FailureState::Empty};
+  Failure m_failure;
   std::atomic<State> m_annotationState{State::Ready};
   std::array<OriginalPointerAnnotation, OriginalPointerJoin::capacity> m_annotations;
   std::atomic<std::uint64_t> m_annotationsWritten{0}, m_annotationsRead{0};
   std::uint64_t m_sequence = 0;
+  std::uint64_t m_lastTimestamp = 0;
   OriginalInputStamp m_openStamp;
   OriginalInputTransitionEvidence m_openTransition;
   std::optional<OriginalPointerObservation> m_openPointer;

@@ -241,12 +241,36 @@ void LocalInputCoreSession::drainCapturedInput()
   };
   if (!epoch.live()) {
     const auto retained = source->completedInput()->epoch();
-    if (!retained.live() && !m_captureFailureLogged) {
+    const auto failure = source->failure();
+    // Stream admission may revoke immediately before the producer publishes
+    // its diagnostic. A later consumer turn must still print that first cause.
+    if (!retained.live() && (!m_captureFailureLogged || (failure && !m_captureFailureDetailLogged))) {
       m_captureFailureLogged = true;
-      lifecycleDiagnostic(
-          "Core input", "capture.continuity", "failed", "Original capture epoch was revoked",
-          {{"epoch", QString::number(retained.id())}, {"reason", int(retained.reason())}}
-      );
+      QJsonObject details{{"epoch", QString::number(retained.id())}, {"reason", int(retained.reason())}};
+      if (failure) {
+        m_captureFailureDetailLogged = true;
+        details.insert(
+            "captureFailure", QJsonObject{
+                                  {"stage", QString::fromLatin1(failure->stageName())},
+                                  {"nativeStatus", int(failure->nativeStatus)},
+                                  {"callbackType", qint64(failure->callbackType)},
+                                  {"eventType", qint64(failure->eventType)},
+                                  {"sequence", QString::number(failure->sequence)},
+                                  {"timestampNs", QString::number(failure->timestampNs)},
+                                  {"previousTimestampNs", QString::number(failure->previousTimestampNs)},
+                                  {"flags", QString::number(failure->flags)},
+                                  {"sourcePid", qint64(failure->sourcePid)},
+                                  {"mouseSubtype", qint64(failure->mouseSubtype)},
+                                  {"scrollPhase", qint64(failure->scrollPhase)},
+                                  {"momentumPhase", qint64(failure->momentumPhase)},
+                                  {"continuous", qint64(failure->continuous)},
+                                  {"thirdAxisLines", qint64(failure->thirdAxis[0])},
+                                  {"thirdAxisPoints", qint64(failure->thirdAxis[1])},
+                                  {"thirdAxisFixed", qint64(failure->thirdAxis[2])}
+                              }
+        );
+      }
+      lifecycleDiagnostic("Core input", "capture.continuity", "failed", "Original capture epoch was revoked", details);
     }
     m_windowDragEdgeJoin.revoke();
     // Source::epoch() is also empty before producer startup. The conduit owns

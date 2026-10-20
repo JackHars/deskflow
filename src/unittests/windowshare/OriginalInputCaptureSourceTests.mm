@@ -468,6 +468,76 @@ void discontinuitiesAndEmergency()
   );
 }
 
+void retainedFailureDiagnostics()
+{
+  using Stage = OriginalInputCaptureSource::FailureStage;
+  using Status = OriginalInputCapture::Status;
+  EventFixture event;
+  OriginalInputCaptureSource source;
+  check(source.start() && !source.failure(), "fresh source has no manufactured failure");
+  captureCompleted(source, event);
+  CGEventSetTimestamp(event.event, 99);
+  source.capture(kCGEventMouseMoved, event.event);
+  const auto failure = source.failure();
+  check(
+      failure && failure->stage == Stage::StreamAdmission && failure->nativeStatus == Status::Captured &&
+          failure->sequence == 2 && failure->timestampNs == 99 && failure->previousTimestampNs == 100 &&
+          failure->callbackType == kCGEventMouseMoved && failure->eventType == kCGEventMouseMoved,
+      "timestamp discontinuity retains the rejected event and the previous admitted time"
+  );
+  source.capture(kCGEventTapDisabledByTimeout, nullptr);
+  source.stop();
+  check(
+      source.failure()->stage == Stage::StreamAdmission && source.failure()->timestampNs == 99,
+      "later disable and shutdown cannot replace the first failure"
+  );
+  OriginalInputCaptureSource disabled;
+  check(disabled.start(), "disabled diagnostic source starts");
+  disabled.capture(kCGEventTapDisabledByUserInput, nullptr);
+  check(
+      disabled.failure() && disabled.failure()->stage == Stage::NativeEvent &&
+          disabled.failure()->nativeStatus == Status::Discontinuity &&
+          disabled.failure()->callbackType == kCGEventTapDisabledByUserInput && !disabled.failure()->timestampNs,
+      "null tap-disable retains its callback without inventing an event"
+  );
+  OriginalInputCaptureSource malformed;
+  check(malformed.start(), "malformed diagnostic source starts");
+  event.scroll(OriginalScrollPhase::Changed);
+  CGEventSetIntegerValueField(event.event, kCGScrollWheelEventPointDeltaAxis3, 7);
+  malformed.capture(kCGEventScrollWheel, event.event);
+  check(
+      malformed.failure() && malformed.failure()->stage == Stage::NativeEvent &&
+          malformed.failure()->nativeStatus == Status::Malformed && malformed.failure()->thirdAxis[1] == 7 &&
+          malformed.failure()->scrollPhase == kCGScrollPhaseChanged,
+      "rejected native scroll syntax is retained without changing it"
+  );
+  OriginalInputCaptureSource unfinished;
+  check(unfinished.start(), "unfinished diagnostic source starts");
+  event.button(0, true);
+  check(bool(unfinished.beginCapture(kCGEventLeftMouseDown, event.event)), "unfinished press admitted");
+  unfinished.beginCapture(kCGEventLeftMouseDown, event.event);
+  check(
+      unfinished.failure() && unfinished.failure()->stage == Stage::OpenCapture,
+      "missing translation completion is distinct from malformed native input"
+  );
+  OriginalInputCaptureSource translated;
+  check(translated.start(), "translation diagnostic source starts");
+  auto stamp = translated.beginCapture(kCGEventLeftMouseDown, event.event);
+  ++stamp.sequence;
+  translated.completeCapture({stamp, 1, false});
+  check(
+      translated.failure() && translated.failure()->stage == Stage::Translation,
+      "mismatched translation has its own failure site"
+  );
+  // A reader on another thread sees only the complete immutable publication.
+  auto observed = std::async(std::launch::async, [&] { return source.failure(); }).get();
+  check(
+      observed && observed->sequence == failure->sequence && observed->timestampNs == failure->timestampNs &&
+          observed->previousTimestampNs == failure->previousTimestampNs,
+      "cross-thread diagnostic publication retains one consistent failure"
+  );
+}
+
 void emergencyRecognition()
 {
   constexpr auto chord = originalKey::controlFlag | originalKey::optionFlag | originalKey::shiftFlag;
@@ -739,6 +809,7 @@ int main()
     pointerAnnotationLifecycle();
     transitionScrollOwnership();
     discontinuitiesAndEmergency();
+    retainedFailureDiagnostics();
     emergencyRecognition();
     concurrentStartStop();
     concurrentCaptureDrain();

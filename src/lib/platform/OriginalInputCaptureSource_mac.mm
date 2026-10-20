@@ -20,6 +20,45 @@ OriginalInputCaptureSource::~OriginalInputCaptureSource()
   stop();
 }
 
+void OriginalInputCaptureSource::recordFailure(
+    FailureStage stage, std::uint64_t sequence, std::uint64_t previousTimestampNs, OriginalInputCapture::Status status,
+    CGEventType callbackType, CGEventRef event
+) noexcept
+{
+  static_assert(std::atomic<FailureState>::is_always_lock_free);
+  auto expected = FailureState::Empty;
+  if (!m_failureState.compare_exchange_strong(expected, FailureState::Writing, std::memory_order_acq_rel))
+    return;
+  m_failure.stage = stage;
+  m_failure.sequence = sequence;
+  m_failure.previousTimestampNs = previousTimestampNs;
+  m_failure.nativeStatus = status;
+  m_failure.callbackType = callbackType;
+  if (event) {
+    m_failure.eventType = CGEventGetType(event);
+    m_failure.timestampNs = CGEventGetTimestamp(event);
+    m_failure.flags = CGEventGetFlags(event);
+    m_failure.sourcePid = CGEventGetIntegerValueField(event, kCGEventSourceUnixProcessID);
+    m_failure.mouseSubtype = CGEventGetIntegerValueField(event, kCGMouseEventSubtype);
+    m_failure.scrollPhase = CGEventGetIntegerValueField(event, kCGScrollWheelEventScrollPhase);
+    m_failure.momentumPhase = CGEventGetIntegerValueField(event, kCGScrollWheelEventMomentumPhase);
+    m_failure.continuous = CGEventGetIntegerValueField(event, kCGScrollWheelEventIsContinuous);
+    m_failure.thirdAxis = {
+        CGEventGetIntegerValueField(event, kCGScrollWheelEventDeltaAxis3),
+        CGEventGetIntegerValueField(event, kCGScrollWheelEventPointDeltaAxis3),
+        CGEventGetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis3)
+    };
+  }
+  m_failureState.store(FailureState::Published, std::memory_order_release);
+}
+
+std::optional<OriginalInputCaptureSource::Failure> OriginalInputCaptureSource::failure() const noexcept
+{
+  if (m_failureState.load(std::memory_order_acquire) != FailureState::Published)
+    return {};
+  return m_failure;
+}
+
 bool OriginalInputCaptureSource::start() noexcept
 {
   static_assert(std::atomic<State>::is_always_lock_free);
@@ -45,6 +84,10 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
     }
   }
   if (m_openStamp) {
+    recordFailure(
+        FailureStage::OpenCapture, m_openStamp.sequence, m_lastTimestamp, OriginalInputCapture::Status::Ignored, type,
+        event
+    );
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return {};
   }
@@ -68,13 +111,16 @@ OriginalInputStamp OriginalInputCaptureSource::beginCapture(CGEventType type, CG
       m_openTransition = classifyTransition(*result.record);
       m_openPointer = result.pointer;
       ++m_sequence;
+      m_lastTimestamp = result.record->sourceTimestampNs;
       m_capturePosition->store(m_sequence, std::memory_order_release);
       m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
       return m_openStamp;
     }
+    recordFailure(FailureStage::StreamAdmission, m_sequence + 1, m_lastTimestamp, result.status, type, event);
     break;
   case OriginalInputCapture::Status::Malformed:
   case OriginalInputCapture::Status::Discontinuity:
+    recordFailure(FailureStage::NativeEvent, m_sequence + 1, m_lastTimestamp, result.status, type, event);
     break;
   }
   m_stream.revoke(OriginalInputRevocation::Discontinuity);
@@ -147,11 +193,13 @@ void OriginalInputCaptureSource::completeCapture(OriginalInputTranslation transl
   if (!m_stream.epoch().live())
     return;
   if (translation.stamp != m_openStamp || translation.parts > maximumOriginalInputParts) {
+    recordFailure(FailureStage::Translation, translation.stamp.sequence);
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return;
   }
   const auto written = m_completedWritten.load(std::memory_order_relaxed);
   if (written - m_completedRead.load(std::memory_order_acquire) >= m_completed.size()) {
+    recordFailure(FailureStage::TranslationCapacity, translation.stamp.sequence);
     m_stream.revoke(OriginalInputRevocation::Overflow);
     return;
   }
@@ -177,6 +225,7 @@ bool OriginalInputCaptureSource::checkpoint(std::uint64_t timestampNs, std::uint
   if (m_state.load(std::memory_order_acquire) != State::Running || !m_stream.epoch().live())
     return false;
   if (m_openStamp) {
+    recordFailure(FailureStage::Checkpoint, m_openStamp.sequence, m_lastTimestamp);
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return false;
   }
@@ -187,10 +236,13 @@ bool OriginalInputCaptureSource::checkpoint(std::uint64_t timestampNs, std::uint
   const OriginalInputRecord checkpoint{
       m_stream.epoch().id(), m_sequence + 1, timestampNs, flags, OriginalInputBoundary::Checkpoint
   };
-  if (!m_stream.push(checkpoint))
+  if (!m_stream.push(checkpoint)) {
+    recordFailure(FailureStage::Checkpoint, checkpoint.sequence, m_lastTimestamp);
     return false;
+  }
   (void)m_dragMotion.observe(checkpoint);
   ++m_sequence;
+  m_lastTimestamp = timestampNs;
   m_capturePosition->store(m_sequence, std::memory_order_release);
   m_openStamp = {m_stream.epoch().id(), m_sequence, 0};
   completeCapture({m_openStamp, 0, false});
@@ -265,6 +317,7 @@ std::optional<OriginalInputCaptured> OriginalInputCaptureSource::popCaptured() n
   if (!input)
     return {};
   if (translation.stamp != OriginalInputStamp{input->record.epoch, input->record.sequence, 0}) {
+    recordFailure(FailureStage::ConsumerJoin, input->record.sequence);
     m_stream.revoke(OriginalInputRevocation::Discontinuity);
     return {};
   }
