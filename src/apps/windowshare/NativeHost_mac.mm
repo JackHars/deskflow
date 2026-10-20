@@ -1477,6 +1477,7 @@ struct NativeHost::Impl
     std::uint64_t holdingPaintedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
     mutable std::optional<bool> surfaceInventoryLogged;
+    mutable QString surfaceInventoryReasonLogged;
     NativeAssociatedReturn associatedReturn;
     std::optional<WindowFamily> family;
     std::shared_ptr<AttachedSurface> pendingChild;
@@ -1928,9 +1929,45 @@ struct NativeHost::Impl
     // including one that AXFocusedWindow reports as part of its parent.
     CF<CFTypeRef> top(attribute(focused, kAXTopLevelUIElementAttribute));
     CGWindowID focusedId = 0;
-    if (!alive || !top || !CFEqual(top.get(), retained.get()) || axWindowId(focused, focusedId) != kAXErrorSuccess ||
-        focusedId != expected.id)
-      return incomplete("Focused native surface needs an ancestry search");
+    bool focusedWithinSource = alive && top && CFEqual(top.get(), retained.get()) &&
+                               axWindowId(focused, focusedId) == kAXErrorSuccess && focusedId == expected.id;
+    if (!focusedWithinSource && alive) {
+      // Qt controls can expose an exact native ID and AXParent while omitting
+      // AXTopLevelUIElement. Prove the same ownership through fresh ancestry;
+      // never substitute AXFocusedWindow, a matching PID, title or rectangle.
+      CF<CFTypeRef> cursor(CFRetain(focused));
+      const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
+      for (unsigned depth = 0;
+           alive && depth < 24 && element(cursor.get()) && std::chrono::steady_clock::now() < deadline; ++depth) {
+        pid_t pid = 0;
+        if (AXUIElementGetPid(element(cursor.get()), &pid) != kAXErrorSuccess || pid != expected.pid)
+          break;
+        if (CFEqual(cursor.get(), retained.get())) {
+          focusedWithinSource = true;
+          break;
+        }
+        AXUIElementSetMessagingTimeout(element(cursor.get()), 0.05f);
+        const auto observed =
+            readNativeAttributes(element(cursor.get()), std::array{kAXRoleAttribute, kAXParentAttribute});
+        const auto role = observed.get(0);
+        CF<CFTypeRef> subrole(
+            role && CFEqual(role, kAXWindowRole) ? attribute(element(cursor.get()), kAXSubroleAttribute) : nullptr
+        );
+        if (!role)
+          break;
+        if (surfaceRole(role, subrole.get())) {
+          CGWindowID window = 0;
+          if (axWindowId(element(cursor.get()), window) != kAXErrorSuccess || window != expected.id)
+            break;
+        }
+        CF<CFTypeRef> next(observed.copy(1));
+        if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
+          break;
+        cursor = std::move(next);
+      }
+    }
+    if (!alive || !focusedWithinSource)
+      return incomplete("Focused native surface has no proven source ancestry");
     const auto inventory = [&]() -> std::optional<std::vector<std::uint32_t>> {
       CF<CFArrayRef> windows(CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID));
       if (!alive || !windows)
@@ -2008,8 +2045,10 @@ struct NativeHost::Impl
         noIndependentAttachedSurface(expected, retained.get(), app.get(), element(focused.get()), inventoryReason);
     if (alive) {
       const auto *current = entry(owner.session, owner.epoch);
-      if (current && current->surfaceInventoryLogged != completeInventory) {
+      if (current && (current->surfaceInventoryLogged != completeInventory ||
+                      current->surfaceInventoryReasonLogged != inventoryReason)) {
         current->surfaceInventoryLogged = completeInventory;
+        current->surfaceInventoryReasonLogged = inventoryReason;
         lifecycleDiagnostic(
             "Host", "input.surface-inventory", "observed", inventoryReason,
             {{"sourceWindowId", qint64(expected.id)}, {"fullTreeSearchRequired", !completeInventory}}

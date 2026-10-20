@@ -58,6 +58,18 @@ is cached across input events. Fresh source focus/identity/geometry checks and
 mapped deadlines still precede posting. The decision has deterministic
 regressions for missing/new/changed/duplicate windows and stale classifications.
 
+`dashboard-replay-ehnrt637` still failed the burst with `6056f6af3`; the inventory
+shortcut never engaged. An isolated owned Qt fixture inspection in
+`build/owned-ax-inspection-u_19irgc/` established that AXTextField returns an
+exact native window ID and AXParent, but AXTopLevelUIElement is unavailable.
+The next candidate proves ownership through the bounded fresh AX parent chain,
+rejecting another native surface, missing roles, other PIDs and incomplete
+ancestry. It does not substitute AXFocusedWindow. The complete native inventory
+and final focus recheck still apply. Diagnostic changes now log changed reasons
+even when the full-search decision remains false. The previous inventory
+candidate passes 19 Mac suites and the Linux inventory cases; its failed
+desktop run is not a launch gate. The new candidate needs fresh validation.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its
