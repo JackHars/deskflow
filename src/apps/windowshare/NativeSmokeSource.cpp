@@ -254,9 +254,8 @@ public:
       fields[4] = integer(kCGMouseEventDeltaX);
       fields[5] = integer(kCGMouseEventDeltaY);
       fields[6] = integer(kCGMouseEventButtonNumber);
-    } else if (
-        fields[0] == 1 || fields[0] == 2 || fields[0] == 3 || fields[0] == 4 || fields[0] == 25 || fields[0] == 26
-    ) {
+    } else if (fields[0] == 1 || fields[0] == 2 || fields[0] == 3 || fields[0] == 4 || fields[0] == 25 ||
+               fields[0] == 26) {
       fields[6] = integer(kCGMouseEventButtonNumber);
       fields[7] = integer(kCGMouseEventClickState);
     } else if (fields[0] == 22) {
@@ -687,10 +686,11 @@ private:
       m_loggedState = m_state;
       m_loggedRequest = m_request;
     }
+    QString instructions;
     if (m_state == "active") {
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
       if (m_recordInput && m_sessionSeconds == 120)
-        m_instructions->setText(
+        instructions = QString(
             "1. Ctrl+Option+Shift+Right, then release all keys. Look at Ubuntu.\n"
             "2. Practice the four areas on its test board.\n"
             "3. Click Record on Ubuntu, then release all controls.\n"
@@ -698,7 +698,7 @@ private:
             "5. After recording ends, Ctrl+Option+Shift+Left returns here. Release the keys, then click Stop."
         );
       else
-        m_instructions->setText(
+        instructions = QString(
             m_sessionSeconds == 150
                 ? "1. Ctrl+Option+Shift+Right, then release all modifiers.\n"
                   "2. Prime the planned controls, release them, then press Return in the text box.\n"
@@ -713,7 +713,7 @@ private:
         );
     } else if (m_state == "stopped") {
       m_status->setText("Test stopped");
-      m_instructions->setText(
+      instructions = QString(
           m_request == "stop" && coordinatorLost()
               ? "The coordinator is not responding. You can close this window; the test remains incomplete."
               : "Release all keys and buttons. The coordinator will finish cleanup and close this window."
@@ -723,20 +723,23 @@ private:
           m_remainingSeconds ? QStringLiteral("Ready — click Start within %1 seconds").arg(m_remainingSeconds)
                              : QStringLiteral("Ready — click Start when you are ready")
       );
-      m_instructions->setText(
+      instructions = QString(
           QStringLiteral("The %1-second countdown starts only after the connection is ready.").arg(m_sessionSeconds)
       );
     } else {
       m_status->setText(
           m_request == "start" ? "Start requested — preparing the connection" : "Preparing the input test"
       );
-      m_instructions->setText("Please wait for Active before using the shortcut. You can click Stop at any time.");
+      instructions = QString("Please wait for Active before using the shortcut. You can click Stop at any time.");
     }
     m_start->setEnabled(m_valid && m_readAccepted && m_state == "ready" && m_request == "none" && !m_ended);
     if (m_automatedStart && m_state != "stopped")
-      m_instructions->setText(
-          "Automated connection and window-restoration check. No action is needed. Stop cancels it."
-      );
+      instructions =
+          QString("Automated connection and window-restoration check. No action is needed. Stop cancels it.");
+    // Choose the final wording before changing the widget. Toggling between
+    // physical and automated instructions on every heartbeat forced redundant
+    // layout/WindowServer work while the same app was answering input AX queries.
+    m_instructions->setText(instructions);
     if (m_automatedStart && !m_startQueued && m_start->isEnabled()) {
       m_startQueued = true;
       // Explicit fixture-only automation uses the same guarded Start handler.
@@ -924,10 +927,8 @@ int main(int argc, char **argv)
       h11Input = true;
     else if (option == "--automated-start" && !automatedStart)
       automatedStart = true;
-    else if (
-        (option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
-        index + 1 < arguments.size()
-    ) {
+    else if ((option == "--manual-status" || option == "--input-evidence-config" || option == "--record-request") &&
+             index + 1 < arguments.size()) {
       auto &value = option == "--manual-status"    ? manualPath
                     : option == "--record-request" ? recordRequestPath
                                                    : evidencePath;

@@ -10,25 +10,26 @@
 
 namespace deskflow::windowshare {
 // Scheduling advice for one input owner, never a delivery lease. Keep roughly
-// half the existing receipt lifetime for observed native work, leaving the
-// remainder for mapping, transport and scheduling variation. Every event still
+// native work within a short interactive turn, leaving time for mapping,
+// transport and scheduling variation. Every event still
 // needs its original live receipt and fresh native authority at submission.
 class OriginalInputBatchBudget
 {
 public:
-  // Use the existing protocol capacity only when observed dispatch cost fits
-  // half the receipt lifetime. A fixed half-capacity ceiling makes fast native
-  // delivery wait for twice as many network/dispatch round trips. The adaptive
-  // limit still shrinks immediately after slow work; no receipt is renewed and
-  // the next prefix still waits for exact ordered peer dispatch.
+  // macOS may rewrite a timestamp already 100 ms old when posting to a PID.
+  // Spending half the 250 ms receipt on one native batch can therefore lose
+  // original timestamps even before the receipt expires. Aim for 50 ms of
+  // observed work; this is scheduling advice, not a new expiry or a guarantee
+  // about the OS. Fast work may still use the full protocol capacity. Exact
+  // ordered peer dispatch and every event's original receipt remain required.
+  static constexpr auto targetDispatchTime = std::chrono::milliseconds(50);
   static constexpr std::size_t maximumPrefix = inputCutoffMaximumBatch;
   std::size_t limit() const
   {
     if (m_perRecord.count() <= 0)
       return 4;
     return std::clamp<std::size_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(inputCutoffMaximumLifetime / 2) / m_perRecord, 1,
-        maximumPrefix
+        std::chrono::duration_cast<std::chrono::nanoseconds>(targetDispatchTime) / m_perRecord, 1, maximumPrefix
     );
   }
   void observe(std::size_t records, std::chrono::nanoseconds elapsed)

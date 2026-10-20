@@ -588,6 +588,8 @@ class DiagnosticTests(unittest.TestCase):
                  ('Host', 'input.native-delivery', 'submitted', False),
                  ('Host', 'source.holding.window.position', 'observed', False),
                  ('Host', 'input.surface-inventory-timing', 'slow', False),
+                 ('Host', 'capture.failure', 'observed', False),
+                 ('Core input', 'capture.failure', 'failed', False),
                  ('Host', 'capture.route-join', 'failed', False),
                  ('Core input', 'capture.route-join', 'observed', False)]
         for component, step, state, terminal in cases:
@@ -606,6 +608,30 @@ class DiagnosticTests(unittest.TestCase):
                     observer.require_live_input(True)
                 observer.require_live_input(False)
                 trace.close()
+
+    def test_stopped_capture_retains_system_cause_before_restore_or_route_teardown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+            self.addCleanup(trace.close)
+            log = root / 'native.log'
+            observer = module.DIAGNOSTICS.LogObserver(log, trace)
+            first = dict(component='Host', step='capture.failure', state='failed',
+                         message='Window capture stopped: Stream was stopped by the system '
+                                 '(com.apple.ScreenCaptureKit.SCStreamErrorDomain, -3821)', details={})
+            later = dict(component='Core input', step='capture.continuity', state='failed',
+                         message='Capture stopped during cleanup', details={'reason': 5})
+            # Both may arrive in one read after restoration has already started.
+            log.write_text(''.join('DESKFLOW_STEP ' + json.dumps(row) + '\n'
+                                   for row in [first, later]))
+            observer.poll()
+            self.assertEqual(observer.input_failure, first)
+            with self.assertRaisesRegex(RuntimeError, r'Window capture failed at capture.failure:.*-3821'):
+                observer.require_live_input(True)
+            observer.require_live_input(False)
+            observer.poll()
+            self.assertEqual(trace.sequence, 2)
+            self.assertEqual(trace.first_failure['details']['native'], first)
 
     def test_event_wait_observes_readiness_and_deadline_without_sleep(self):
         now = [0]

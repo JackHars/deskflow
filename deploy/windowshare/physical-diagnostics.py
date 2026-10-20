@@ -114,7 +114,7 @@ class LogObserver:
         self.input_failure = None
 
     def require_live_input(self, active):
-        """A revoked input route cannot continue an Active acceptance run.
+        """A revoked input route or stopped stream cannot continue an Active run.
 
         The normal shutdown path still consumes final logs and recorder
         footers. This guard never interrupts that owned cleanup.
@@ -124,7 +124,9 @@ class LogObserver:
             details = value.get('details')
             reason = details.get('reason') if isinstance(details, dict) else None
             suffix = ' (reason=' + str(reason) + ')' if reason is not None else ''
-            raise RuntimeError('Original input route failed at ' + value['step'] +
+            prefix = 'Window capture failed at ' if value['component'] == 'Host' and \
+                value['step'] == 'capture.failure' else 'Original input route failed at '
+            raise RuntimeError(prefix + value['step'] +
                                ': ' + value['message'] + suffix)
 
     def poll(self):
@@ -157,7 +159,9 @@ class LogObserver:
                         value['state'] == 'failed'
                     terminal_delivery = value['component'] == 'Host' and \
                         value['step'] == 'input.native-delivery' and value['state'] == 'denied'
-                    if self.input_failure is None and (terminal_capture or terminal_delivery):
+                    terminal_stream = value['component'] == 'Host' and \
+                        value['step'] == 'capture.failure' and value['state'] == 'failed'
+                    if self.input_failure is None and (terminal_capture or terminal_delivery or terminal_stream):
                         self.input_failure = value
                     self.diagnostics.emit(name, value['state'], value['message'], native=value)
                 except (ValueError, KeyError, TypeError):

@@ -1361,9 +1361,9 @@ void OriginalInputCoordinatorTests::nativeDeliveryBudgetRespondsToDispatchCost()
   OriginalInputBatchBudget budget;
   QCOMPARE(budget.limit(), std::size_t(4));
   budget.observe(16, 80ms);
-  QCOMPARE(budget.limit(), OriginalInputBatchBudget::maximumPrefix);
+  QCOMPARE(budget.limit(), std::size_t(10)); // Do not spend 80 ms behind one mapped prefix.
   budget.observe(4, 80ms);
-  QVERIFY(budget.limit() <= 6); // Reserve at least half the 250 ms lifetime.
+  QCOMPARE(budget.limit(), std::size_t(2)); // Slower native work immediately gets shorter turns.
   const auto reduced = budget.limit();
   budget.observe(0, 1ns);
   budget.observe(inputCutoffMaximumBatch + 1, 1ns);
