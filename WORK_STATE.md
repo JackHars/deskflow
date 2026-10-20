@@ -25,6 +25,16 @@ pipeline validation for this repair belongs in `build/native-query-batch-0d6sche
 The attended test has not launched. Refresh matching package/fixture proofs
 and complete three consecutive pipeline runs before asking to launch it.
 
+The batched-query runtime (`f39544e2d`) passes five integrated and nine app
+suites, but `dashboard-replay-8jhy5_cd` still expires a mapped event during the
+burst; it is not a throughput fix by itself. The next fixture change moves
+atomic diagnostic snapshot writes off the AppKit thread. A bounded worker
+retains only the latest unpublished snapshot and drains it on shutdown. This
+does not coalesce, defer or change the independent input evidence journals.
+Write failures are logged and exposed in snapshot metadata. Deterministic
+blocked-writer, shutdown and failure tests pass on Mac and Ubuntu; the five
+Mac fixture suites pass. Actual-desktop validation is still required.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its

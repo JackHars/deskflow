@@ -4,6 +4,7 @@
  */
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
+#include "LatestSnapshotWriter.h"
 #include "LifecycleDiagnostics.h"
 #include "ManualStatus.h"
 #include "PhysicalDesktopPreview.h"
@@ -152,7 +153,17 @@ protected:
 class Recorder final : public QObject, public QAbstractNativeEventFilter
 {
 public:
-  explicit Recorder(QString path) : m_path(std::move(path))
+  explicit Recorder(QString path)
+      : m_path(std::move(path)),
+        m_snapshotWriter([path = m_path](const std::string &bytes) {
+          QSaveFile file(path);
+          const bool opened = file.open(QIODevice::WriteOnly);
+          const bool written = opened && file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) &&
+                               file.write(bytes.data(), qint64(bytes.size())) == qint64(bytes.size()) && file.commit();
+          if (!written)
+            lifecycleDiagnostic("Test board", "diagnostic.snapshot", "failed", file.errorString());
+          return written;
+        })
   {
     m_clock.start();
     connect(&m_stateTimer, &QTimer::timeout, this, [this] { save(); });
@@ -315,10 +326,6 @@ private:
   void save()
   {
     drainNative();
-    QSaveFile file(m_path);
-    if (!file.open(QIODevice::WriteOnly))
-      return;
-    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     const auto application = nativeApplication();
     const auto keyWindow = nativeMessage<id>(application, "keyWindow");
     const auto mainWindow = nativeMessage<id>(application, "mainWindow");
@@ -412,6 +419,7 @@ private:
              {"miniaturized", controlMiniaturized}
          }},
         {"nativePendingDropped", QString::number(m_nativePendingDropped)},
+        {"diagnosticWriteFailures", int(m_snapshotWriter.failures())},
         {"ready", !m_originalFrame.isEmpty() && settled},
         {"title", m_window ? m_window->windowTitle() : QString()},
         {"originalFrame", m_originalFrame},
@@ -432,8 +440,10 @@ private:
       metadata["manual"] = m_manual;
     if (m_dashboard)
       metadata["inputChecklist"] = m_dashboard->snapshot();
-    file.write(QJsonDocument(metadata).toJson(QJsonDocument::Compact));
-    file.commit();
+    // Atomic diagnostic file commits can stall AppKit's input and AX replies.
+    // Publish an immutable snapshot to a bounded worker. Native evidence still
+    // records every event synchronously; it does not use this coalescing path.
+    m_snapshotWriter.publish(QJsonDocument(metadata).toJson(QJsonDocument::Compact).toStdString());
   }
   struct NativeObserved
   {
@@ -486,6 +496,7 @@ private:
   long m_nativeWindowId = 0;
   bool m_evidenceBound = false;
   QString m_path;
+  LatestSnapshotWriter m_snapshotWriter;
   QPointer<QWidget> m_window, m_controlWindow;
   QPointer<PhysicalInputDashboard> m_dashboard;
   QJsonObject m_originalFrame;
