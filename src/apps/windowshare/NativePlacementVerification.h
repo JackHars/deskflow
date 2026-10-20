@@ -40,6 +40,7 @@ public:
   using Preparation = std::vector<std::function<bool()>>;
   using PreparationCompletion = std::function<void(bool)>;
   using AsyncPreparation = std::function<void(PreparationCompletion)>;
+  using AsyncPreparations = std::vector<AsyncPreparation>;
 
   NativePlacementVerification(Probe probe, Completion completion, Now now = Clock::now)
       : NativePlacementVerification(
@@ -74,6 +75,17 @@ public:
   // must return to this thread before the separately fenced writes can start.
   // Registration shares the original absolute deadline with all later steps.
   void prepareAfter(AsyncPreparation observe, Preparation steps)
+  {
+    AsyncPreparations asynchronous;
+    asynchronous.reserve(steps.size());
+    for (auto &step : steps)
+      asynchronous.emplace_back([step = std::move(step)](PreparationCompletion complete) { complete(step()); });
+    prepareAsyncAfter(std::move(observe), std::move(asynchronous));
+  }
+  // Each action may perform its own read-only native observations off-thread,
+  // then return here for a separately fenced write. At most one action is
+  // outstanding, and duplicate/stale completion cannot advance the sequence.
+  void prepareAsyncAfter(AsyncPreparation observe, AsyncPreparations steps)
   {
     if (m_done || m_issued || m_preparing)
       return;
@@ -165,7 +177,7 @@ private:
   }
   void prepareNext()
   {
-    if (m_done)
+    if (m_done || m_actionReading)
       return;
     if (m_now() >= m_due) {
       expire();
@@ -180,18 +192,22 @@ private:
     // Either callback may destroy/cancel its owner. Keep the current action
     // alive independently, and never run another action in this dispatch turn.
     const auto step = m_preparation[m_preparationIndex++];
-    const bool success = step();
-    if (!alive || m_done)
-      return;
-    if (m_now() >= m_due) {
-      expire();
-      return;
-    }
-    if (!success) {
-      fail("Native placement preparation failed");
-      return;
-    }
-    queuePreparation();
+    m_actionReading = true;
+    const auto serial = ++m_actionSerial;
+    step([alive, serial](bool success) {
+      if (!alive || alive->m_done || !alive->m_actionReading || alive->m_actionSerial != serial)
+        return;
+      alive->m_actionReading = false;
+      if (alive->m_now() >= alive->m_due) {
+        alive->expire();
+        return;
+      }
+      if (!success) {
+        alive->fail("Native placement preparation failed");
+        return;
+      }
+      alive->queuePreparation();
+    });
   }
   void check()
   {
@@ -242,10 +258,10 @@ private:
   Clock::time_point m_due;
   QTimer m_timer;
   QString m_reason;
-  Preparation m_preparation;
+  AsyncPreparations m_preparation;
   std::size_t m_preparationIndex = 0;
-  std::uint64_t m_readSerial = 0;
+  std::uint64_t m_readSerial = 0, m_actionSerial = 0;
   bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false, m_preparationReading = false,
-       m_reading = false, m_recheck = false;
+       m_reading = false, m_recheck = false, m_actionReading = false;
 };
 } // namespace deskflow::windowshare

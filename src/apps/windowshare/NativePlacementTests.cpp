@@ -566,6 +566,115 @@ void asynchronousPlacementPreparation()
   check(writes == 1 && !registration.busy(), "registration did not release its slot or repeated placement");
 }
 
+void asynchronousPlacementActions()
+{
+  for (int scenario = 0; scenario < 7; ++scenario) {
+    Gate::Clock::time_point now{};
+    std::vector<Gate::PreparationCompletion> actions;
+    int completions = 0, probes = 0;
+    bool accepted = false;
+    std::unique_ptr<Gate> gate = std::make_unique<Gate>(
+        [&](QString *) {
+          ++probes;
+          return Gate::Observation::Verified;
+        },
+        [&](bool success, QString) {
+          ++completions;
+          accepted = success;
+        },
+        [&] { return now; }
+    );
+    Gate::AsyncPreparations steps;
+    for (int i = 0; i < 2; ++i)
+      steps.emplace_back([&](auto complete) { actions.push_back(std::move(complete)); });
+    gate->prepareAsyncAfter([](auto complete) { complete(true); }, std::move(steps));
+    dispatch();
+    check(actions.size() == 1 && !probes && !completions, "asynchronous placement action did not retain its turn");
+    gate->changed();
+    gate->issued();
+    dispatch();
+    check(actions.size() == 1 && !probes, "native notification overlapped an unfinished placement action");
+    const auto first = actions.front();
+    if (scenario == 1)
+      gate->cancel();
+    else if (scenario == 2)
+      gate.reset();
+    else if (scenario == 3)
+      now += 2s;
+    else if (scenario == 4) {
+      now += 2s;
+      gate->expire();
+    }
+    first(scenario != 5);
+    first(true);
+    check(actions.size() == 1, "action completion recursively started the next native mutation");
+    if (scenario == 6)
+      gate->cancel();
+    for (int turn = 0; turn < 3; ++turn)
+      dispatch();
+    if (scenario == 0) {
+      check(actions.size() == 2 && !completions && !probes, "valid action did not advance exactly one step");
+      first(false); // A stale callback cannot complete or fail the next step.
+      check(!completions, "old placement action completed its successor");
+      const auto second = actions.back();
+      second(true);
+      second(false);
+      for (int turn = 0; turn < 3; ++turn)
+        dispatch();
+      check(completions == 1 && accepted && probes == 1, "asynchronous placement lost final native verification");
+    } else {
+      const bool cancelled = scenario == 1 || scenario == 2 || scenario == 6;
+      check(actions.size() == 1 && !probes && !accepted, "cancelled or expired native action advanced placement");
+      check(completions == (cancelled ? 0 : 1), "native action repeated or revived its terminal completion");
+    }
+  }
+
+  // An in-flight per-write authority read must let a separate environment
+  // completion run. The action stays pending until its actual read returns.
+  Gate::Clock::time_point now{};
+  AsyncNativeInspection<int> authority([&] { return now; });
+  AsyncNativeInspection<int, 250, Qt::HighEventPriority> environment([&] { return now; });
+  auto entered = std::make_shared<QSemaphore>(), release = std::make_shared<QSemaphore>();
+  const auto unblock = qScopeGuard([&] { release->release(); });
+  bool environmentComplete = false, placed = false;
+  int writes = 0;
+  Gate gate(
+      [](QString *) { return Gate::Observation::Verified; }, [&](bool success, QString) { placed = success; },
+      [&] { return now; }
+  );
+  gate.prepareAsyncAfter(
+      [](auto complete) { complete(true); }, {[&](auto complete) {
+        check(
+            authority.request(
+                [entered, release] {
+                  entered->release();
+                  release->acquire();
+                  return 17;
+                },
+                [&, complete](auto observed) {
+                  check(QThread::currentThread() == gate.thread(), "placement mutation left its owner thread");
+                  if (observed == 17)
+                    ++writes;
+                  complete(observed == 17);
+                }
+            ),
+            "per-write native authority read did not start"
+        );
+      }}
+  );
+  dispatch();
+  check(entered->tryAcquire(1, 2000), "per-write authority worker did not enter");
+  check(
+      environment.request([] { return 23; }, [&](auto observed) { environmentComplete = observed == 23; }),
+      "independent environment observation did not start"
+  );
+  dispatchUntil([&] { return environmentComplete; });
+  check(authority.busy() && writes == 0 && !placed, "placement authority read stalled or skipped the watchdog");
+  release->release();
+  dispatchUntil([&] { return placed; });
+  check(writes == 1 && !authority.busy(), "native action wrote more than once or retained its worker slot");
+}
+
 struct Fixture
 {
   Gate::Clock::time_point now{};
@@ -1286,13 +1395,16 @@ int main(int argc, char **argv)
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"prioritized-native-inspection", &prioritizedNativeInspection},
+             std::pair{"asynchronous-placement-actions", &asynchronousPlacementActions},
              std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},
              std::pair{"asynchronous-placement-preparation", &asynchronousPlacementPreparation},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},
-             std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
+             std::pair{"transient-readback", &transientReadback},
+             std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},
-             std::pair{"preparation-yields", &preparationYields}, std::pair{"preparation-stops", &preparationStops},
+             std::pair{"preparation-yields", &preparationYields},
+             std::pair{"preparation-stops", &preparationStops},
              std::pair{"ownership-across-yield", &ownershipAcrossYield},
              std::pair{"asynchronous-window-reads", &asynchronousWindowReads}
 #if defined(__APPLE__)

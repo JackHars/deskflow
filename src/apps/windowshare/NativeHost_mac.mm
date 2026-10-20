@@ -751,7 +751,9 @@ public:
         m_current(std::move(current)),
         m_nativeCurrent(std::move(nativeCurrent)),
         m_verification(
-            [this](QString *reason) { return probe(reason); },
+            NativePlacementVerification::AsyncProbe(
+                [this](NativePlacementVerification::ObservationCompletion complete) { probe(std::move(complete)); }
+            ),
             [this, completion = std::move(completion)](bool success, QString reason) {
               lifecycleDiagnostic(
                   "Host", "source.holding.verify", success ? "completed" : "failed",
@@ -770,6 +772,8 @@ public:
   {
     m_verification.cancel();
     m_registrationRead.cancel();
+    m_authorityRead.cancel();
+    m_frameRead.cancel();
     if (m_registration) {
       CFRunLoopRemoveSource(
           CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_registration->observer.get()), kCFRunLoopCommonModes
@@ -788,11 +792,11 @@ public:
   }
   void start()
   {
-    NativePlacementVerification::Preparation steps;
-    steps.emplace_back([this] { return placeAttribute(kAXMinimizedAttribute, "unminimize"); });
-    steps.emplace_back([this] { return placeAttribute(kAXSizeAttribute, "resize"); });
-    steps.emplace_back([this] { return placeAttribute(kAXPositionAttribute, "move"); });
-    m_verification.prepareAfter(
+    NativePlacementVerification::AsyncPreparations steps;
+    steps.emplace_back([this](auto complete) { placeAttribute(kAXMinimizedAttribute, "unminimize", complete); });
+    steps.emplace_back([this](auto complete) { placeAttribute(kAXSizeAttribute, "resize", complete); });
+    steps.emplace_back([this](auto complete) { placeAttribute(kAXPositionAttribute, "move", complete); });
+    m_verification.prepareAsyncAfter(
         [this](NativePlacementVerification::PreparationCompletion complete) {
           const auto keepAlive = shared_from_this();
           if (!m_current() || !m_verification.withinDeadline()) {
@@ -860,61 +864,118 @@ public:
   }
 
 private:
-  bool placeAttribute(CFStringRef name, const QString &operation)
+  using PreparationCompletion = NativePlacementVerification::PreparationCompletion;
+  using Observation = NativePlacementVerification::Observation;
+  struct FrameObservation
+  {
+    Observation state = Observation::Invalid;
+    QString reason;
+  };
+  void observeAuthority(QString stage, PreparationCompletion complete)
   {
     const auto keepAlive = shared_from_this();
-    const auto step = "source.holding.place." + operation;
-    const SlowOperationDiagnostic slow("Host", "source.holding.place.attribute");
-    if (!authorityCurrent())
-      return false;
-    CGPoint position{m_destination.x, m_destination.y};
-    CGSize size{m_destination.width, m_destination.height};
-    CF<AXValueRef> value(
-        name == kAXPositionAttribute ? AXValueCreate(kAXValueTypeCGPoint, &position)
-        : name == kAXSizeAttribute   ? AXValueCreate(kAXValueTypeCGSize, &size)
-                                     : nullptr
-    );
-    CFTypeRef nativeValue = name == kAXMinimizedAttribute ? static_cast<CFTypeRef>(kCFBooleanFalse) : value.get();
-    if (!nativeValue) {
-      m_verification.fail("Cannot construct native placement attribute");
-      return false;
+    if (!m_verification.withinDeadline() || !m_current()) {
+      complete(false);
+      return;
     }
-    lifecycleDiagnostic("Host", step, "started", "Write native window attribute");
-    const auto status = AXUIElementSetAttributeValue(m_window.get(), name, nativeValue);
-    lifecycleDiagnostic("Host", step, "observed", "Native attribute write returned", {{"axError", int(status)}});
-    // As for recovery writes, an unsupported unchanged attribute is decided by
-    // the final fresh readback. Never retry the write or extend the deadline.
-    if (!authorityCurrent())
-      return false;
-    if (name == kAXPositionAttribute)
-      lifecycleDiagnostic(
-          "Host", "source.holding.place", "submitted", "Native frame requested; readback remains required"
-      );
-    return true;
+    // No Host/Entry pointer crosses into this read. Each mutation gets its own
+    // before/after observation; results are never reused by another operation.
+    // The existing 250 ms inspection and two-second transaction cutoffs both
+    // apply before the owner thread may continue.
+    lifecycleDiagnostic(
+        "Host", "source.holding.authority", "started", "Read fresh placement identity and permissions",
+        {{"stage", stage}, {"windowId", qint64(m_expected.id)}}
+    );
+    const bool accepted = m_authorityRead.request(
+        [expected = m_expected, stage] {
+          @autoreleasepool {
+            const SlowOperationDiagnostic slow("Host", "source.holding.authority");
+            const auto native = identity(expected.id);
+            const bool accessibility = AXIsProcessTrusted();
+            const bool capture = CGPreflightScreenCaptureAccess();
+            const bool verified =
+                native && native->pid == expected.pid && native->launch == expected.launch && accessibility && capture;
+            lifecycleDiagnostic(
+                "Host", "source.holding.authority", verified ? "observed" : "failed",
+                "Fresh source identity and permissions read off the owner thread",
+                {{"stage", stage},
+                 {"windowId", qint64(expected.id)},
+                 {"expectedPid", expected.pid},
+                 {"expectedLaunch", expected.launch},
+                 {"observedPid", native ? QJsonValue(native->pid) : QJsonValue(QJsonValue::Null)},
+                 {"observedLaunch", native ? QJsonValue(native->launch) : QJsonValue(QJsonValue::Null)},
+                 {"accessibility", accessibility},
+                 {"screenCapture", capture}}
+            );
+            return verified;
+          }
+        },
+        [weak = weak_from_this(), stage, complete](std::optional<bool> observed) {
+          const auto self = weak.lock();
+          if (!self)
+            return;
+          const bool verified = self->m_verification.observeAuthority(self->m_current, [&] {
+            return observed.value_or(false) && self->m_nativeCurrent();
+          });
+          lifecycleDiagnostic(
+              "Host", "source.holding.authority", verified ? "completed" : "failed",
+              verified ? "Fresh placement observation joined the current owner and display"
+                       : "Placement observation expired, was refused, or lost its current owner/display",
+              {{"stage", stage}, {"windowId", qint64(self->m_expected.id)}}
+          );
+          complete(verified);
+        }
+    );
+    if (!accepted)
+      complete(false);
   }
-  bool authorityCurrent() const
+  void placeAttribute(CFStringRef name, const QString &operation, PreparationCompletion complete)
   {
-    const SlowOperationDiagnostic slow("Host", "source.holding.authority");
-    const bool verified = m_verification.observeAuthority(m_current, [this] {
-      const auto native = identity(m_expected.id);
-      if (!native || native->pid != m_expected.pid || native->launch != m_expected.launch) {
-        lifecycleDiagnostic(
-            "Host", "source.holding.authority", "failed", "Exact native source identity is unavailable or changed",
-            {{"windowId", qint64(m_expected.id)},
-             {"expectedPid", m_expected.pid},
-             {"expectedLaunch", m_expected.launch},
-             {"observedPid", native ? QJsonValue(native->pid) : QJsonValue(QJsonValue::Null)},
-             {"observedLaunch", native ? QJsonValue(native->launch) : QJsonValue(QJsonValue::Null)}}
-        );
-        return false;
+    observeAuthority(operation + ".before", [weak = weak_from_this(), name, operation, complete](bool authorized) {
+      const auto self = weak.lock();
+      if (!self)
+        return;
+      if (!authorized || !self->m_verification.withinDeadline() || !self->m_current()) {
+        complete(false);
+        return;
       }
-      return m_current() && m_nativeCurrent();
-    });
-    if (!verified && !m_verification.withinDeadline())
-      lifecycleDiagnostic(
-          "Host", "source.holding.authority", "failed", "Placement was cancelled or its deadline expired"
+      // Only the owner thread writes. Recheck the process incarnation after
+      // the worker result, immediately before using the retained AX object.
+      if (launchTime(self->m_expected.pid) != self->m_expected.launch) {
+        complete(false);
+        return;
+      }
+      const auto step = "source.holding.place." + operation;
+      const SlowOperationDiagnostic slow("Host", "source.holding.place.attribute");
+      CGPoint position{self->m_destination.x, self->m_destination.y};
+      CGSize size{self->m_destination.width, self->m_destination.height};
+      CF<AXValueRef> value(
+          name == kAXPositionAttribute ? AXValueCreate(kAXValueTypeCGPoint, &position)
+          : name == kAXSizeAttribute   ? AXValueCreate(kAXValueTypeCGSize, &size)
+                                       : nullptr
       );
-    return verified;
+      CFTypeRef nativeValue = name == kAXMinimizedAttribute ? static_cast<CFTypeRef>(kCFBooleanFalse) : value.get();
+      if (!nativeValue) {
+        complete(false);
+        return;
+      }
+      if (!self->m_verification.withinDeadline() || !self->m_current()) {
+        complete(false);
+        return;
+      }
+      lifecycleDiagnostic("Host", step, "started", "Write native window attribute");
+      const auto status = AXUIElementSetAttributeValue(self->m_window.get(), name, nativeValue);
+      lifecycleDiagnostic("Host", step, "observed", "Native attribute write returned", {{"axError", int(status)}});
+      // A write is never retried and is not proof of placement. Yield while
+      // freshly checking its exact identity, permissions and display again.
+      self->observeAuthority(operation + ".after", [name, complete](bool current) {
+        if (current && name == kAXPositionAttribute)
+          lifecycleDiagnostic(
+              "Host", "source.holding.place", "submitted", "Native frame requested; readback remains required"
+          );
+        complete(current);
+      });
+    });
   }
   static void notification(AXObserverRef, AXUIElementRef window, CFStringRef name, void *context)
   {
@@ -924,48 +985,76 @@ private:
     if (const auto self = registration->owner.lock())
       self->changed("Exact native window notification: " + string((__bridge NSString *)name));
   }
-  NativePlacementVerification::Observation probe(QString *reason)
+  void probe(NativePlacementVerification::ObservationCompletion complete)
   {
-    using Observation = NativePlacementVerification::Observation;
-    const auto keepAlive = shared_from_this();
-    const auto result = [&](Observation state, QString message) {
-      *reason = std::move(message);
-      lifecycleDiagnostic(
-          "Host", "source.holding.verify.readback", state == Observation::Invalid ? "failed" : "observed", *reason,
-          {{"windowId", qint64(m_expected.id)}, {"observation", int(state)}}
+    observeAuthority("readback.before", [weak = weak_from_this(), complete](bool authorized) {
+      const auto self = weak.lock();
+      if (!self)
+        return;
+      if (!authorized) {
+        complete(Observation::Invalid, "Source placement authority was revoked");
+        return;
+      }
+      const auto retained =
+          std::make_shared<CF<AXUIElementRef>>(static_cast<AXUIElementRef>(CFRetain(self->m_window.get())));
+      const bool accepted = self->m_frameRead.request(
+          [retained, expected = self->m_expected, destination = self->m_destination] {
+            @autoreleasepool {
+              const auto observed = identity(expected.id);
+              if (!observed || observed->pid != expected.pid || observed->launch != expected.launch)
+                return FrameObservation{Observation::Invalid, "Exact source process/window identity changed"};
+              AXError frameError = kAXErrorSuccess, minimizedError = kAXErrorSuccess;
+              const auto actual = bounds(retained->get(), "source.holding.verify.frame", &frameError);
+              CF<CFTypeRef> minimized(
+                  attribute(retained->get(), kAXMinimizedAttribute, "source.holding.verify.minimized", &minimizedError)
+              );
+              for (const auto error : {frameError, minimizedError})
+                if (error != kAXErrorSuccess && error != kAXErrorCannotComplete)
+                  return FrameObservation{
+                      Observation::Invalid, QString("Native source readback failed: %1").arg(error)
+                  };
+              if (frameError == kAXErrorCannotComplete || minimizedError == kAXErrorCannotComplete)
+                return FrameObservation{Observation::Pending, "Native source readback is temporarily unavailable"};
+              if (!actual || !minimized || CFGetTypeID(minimized.get()) != CFBooleanGetTypeID() ||
+                  CFEqual(minimized.get(), kCFBooleanTrue))
+                return FrameObservation{Observation::Invalid, "Source frame or unminimized state is invalid"};
+              lifecycleDiagnostic(
+                  "Host", "source.holding.verify.geometry", "observed", "Compare fresh native frames",
+                  {{"desiredFrame", diagnosticRect(destination)},
+                   {"axFrame", diagnosticRect(*actual)},
+                   {"windowServerFrame", diagnosticRect(observed->frame)}}
+              );
+              if (!closeEnough(*actual, observed->frame) || std::abs(actual->x - destination.x) >= 5 ||
+                  std::abs(actual->y - destination.y) >= 5)
+                return FrameObservation{
+                    Observation::Pending, "Native source frame has not reached the requested position"
+                };
+              return FrameObservation{Observation::Verified, "Native source position and visible state agree"};
+            }
+          },
+          [weak, complete](std::optional<FrameObservation> observed) {
+            const auto self = weak.lock();
+            if (!self)
+              return;
+            self->observeAuthority(
+                "readback.after", [expected = self->m_expected, observed, complete](bool authorized) {
+                  const auto result =
+                      observed && authorized
+                          ? *observed
+                          : FrameObservation{Observation::Invalid, "Source authority changed or readback expired"};
+                  lifecycleDiagnostic(
+                      "Host", "source.holding.verify.readback",
+                      result.state == Observation::Invalid ? "failed" : "observed", result.reason,
+                      {{"windowId", qint64(expected.id)}, {"observation", int(result.state)}}
+                  );
+                  complete(result.state, result.reason);
+                }
+            );
+          }
       );
-      return state;
-    };
-    if (!authorityCurrent())
-      return result(Observation::Invalid, "Source placement authority was revoked");
-    const auto observed = identity(m_expected.id);
-    if (!observed || observed->pid != m_expected.pid || observed->launch != m_expected.launch)
-      return result(Observation::Invalid, "Exact source process/window identity changed");
-    AXError frameError = kAXErrorSuccess, minimizedError = kAXErrorSuccess;
-    const auto actual = bounds(m_window.get(), "source.holding.verify.frame", &frameError);
-    CF<CFTypeRef> minimized(
-        attribute(m_window.get(), kAXMinimizedAttribute, "source.holding.verify.minimized", &minimizedError)
-    );
-    if (!authorityCurrent())
-      return result(Observation::Invalid, "Source authority changed during native readback");
-    for (const auto error : {frameError, minimizedError})
-      if (error != kAXErrorSuccess && error != kAXErrorCannotComplete)
-        return result(Observation::Invalid, QString("Native source readback failed: %1").arg(error));
-    if (frameError == kAXErrorCannotComplete || minimizedError == kAXErrorCannotComplete)
-      return result(Observation::Pending, "Native source readback is temporarily unavailable");
-    if (!actual || !minimized || CFGetTypeID(minimized.get()) != CFBooleanGetTypeID() ||
-        CFEqual(minimized.get(), kCFBooleanTrue))
-      return result(Observation::Invalid, "Source frame or unminimized state is invalid");
-    lifecycleDiagnostic(
-        "Host", "source.holding.verify.geometry", "observed", "Compare fresh native frames",
-        {{"desiredFrame", diagnosticRect(m_destination)},
-         {"axFrame", diagnosticRect(*actual)},
-         {"windowServerFrame", diagnosticRect(observed->frame)}}
-    );
-    if (!closeEnough(*actual, observed->frame) || std::abs(actual->x - m_destination.x) >= 5 ||
-        std::abs(actual->y - m_destination.y) >= 5)
-      return result(Observation::Pending, "Native source frame has not reached the requested position");
-    return result(Observation::Verified, "Native source position and visible state agree");
+      if (!accepted)
+        complete(Observation::Invalid, "Native placement readback capacity is unavailable");
+    });
   }
   CF<AXUIElementRef> m_window;
   WindowIdentity m_expected;
@@ -986,6 +1075,8 @@ private:
   };
   std::shared_ptr<Registration> m_registration;
   AsyncNativeInspection<std::shared_ptr<Registration>, 2000> m_registrationRead;
+  AsyncNativeInspection<bool> m_authorityRead;
+  AsyncNativeInspection<FrameObservation, 2000> m_frameRead;
   NativePlacementVerification m_verification;
 };
 
@@ -4231,10 +4322,9 @@ struct NativeHost::Impl
             };
             if (!layoutCurrent())
               return refused("Source authority or physical layout changed during placement");
-            if (!AXIsProcessTrusted())
-              return refused("Accessibility permission was lost during placement");
-            if (!CGPreflightScreenCaptureAccess())
-              return refused("Screen capture permission was lost during placement");
+            // The just-completed placement worker observed both permissions
+            // and exact source identity. Keep owner/layout/holding checks here;
+            // repeating TCC IPC on this thread would block its watchdog again.
             if (!current())
               return false;
             QString reason;
