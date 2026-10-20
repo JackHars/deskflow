@@ -143,6 +143,103 @@ void asynchronousNativeInspection()
   dispatchUntil([&] { return !inspection; });
   check(failed, "native exception did not fail closed or completion could not destroy its owner");
 }
+void asynchronousPlacementObservation()
+{
+  for (int scenario = 0; scenario < 6; ++scenario) {
+    Gate::Clock::time_point now{};
+    std::vector<Gate::ObservationCompletion> reads;
+    int completions = 0;
+    bool accepted = false;
+    std::unique_ptr<Gate> gate;
+    gate = std::make_unique<Gate>(
+        Gate::AsyncProbe([&](auto complete) { reads.push_back(std::move(complete)); }),
+        [&](bool success, QString) {
+          ++completions;
+          accepted = success;
+          if (scenario == 5)
+            gate.reset();
+        },
+        [&] { return now; }
+    );
+    gate->issued();
+    dispatch();
+    check(reads.size() == 1 && !completions, "asynchronous placement did not retain one outstanding read");
+    gate->changed();
+    gate->changed();
+    dispatch();
+    check(reads.size() == 1, "native notifications started overlapping placement reads");
+    if (scenario == 0) {
+      const auto first = reads[0];
+      first(Gate::Observation::Pending, "AX temporarily unavailable");
+      dispatch();
+      check(reads.size() == 2 && !completions, "notifications during the read lost their single follow-up");
+      first(Gate::Observation::Verified, "duplicate old completion");
+      check(!completions, "an old read completed a newer placement observation");
+      reads[1](Gate::Observation::Verified, "fresh exact window");
+      check(completions == 1 && accepted, "fresh asynchronous placement was rejected");
+    } else {
+      if (scenario == 1) {
+        now += 2s;
+        gate->expire();
+      } else if (scenario == 2) {
+        gate->cancel();
+      } else if (scenario == 3) {
+        gate.reset();
+      } else if (scenario == 4) {
+        now += 2s; // Queued completion must enforce expiry without the timer.
+      }
+      const auto complete = reads[0];
+      complete(Gate::Observation::Verified, "native read returned");
+      complete(Gate::Observation::Verified, "duplicate completion");
+      check(
+          completions == (scenario == 2 || scenario == 3 ? 0 : 1) && accepted == (scenario == 5),
+          "late/cancelled asynchronous read revived placement or repeated completion"
+      );
+    }
+  }
+
+  // A blocked WindowServer/AX read must not delay an unrelated 250 ms
+  // environment inspection. Placement retains its original two-second gate.
+  using Read = AsyncNativeInspection<int, 2000>;
+  Gate::Clock::time_point now{};
+  Read reader([&] { return now; });
+  AsyncNativeInspection<int> environment([&] { return now; });
+  auto entered = std::make_shared<QSemaphore>(), release = std::make_shared<QSemaphore>();
+  const auto unblock = qScopeGuard([&] { release->release(); });
+  bool placementComplete = false, environmentComplete = false, inputTurn = false;
+  Gate gate(
+      Gate::AsyncProbe([&](auto complete) {
+        check(
+            reader.request(
+                [entered, release] {
+                  entered->release();
+                  release->acquire();
+                  return 7;
+                },
+                [complete](auto result) {
+                  complete(result == 7 ? Gate::Observation::Verified : Gate::Observation::Invalid, "fresh read");
+                }
+            ),
+            "placement worker failed to start"
+        );
+      }),
+      [&](bool success, QString) { placementComplete = success; }, [&] { return now; }
+  );
+  gate.issued();
+  dispatch();
+  check(entered->tryAcquire(1, 2000), "placement did not enter its native read");
+  check(
+      environment.request([] { return 11; }, [&](auto result) { environmentComplete = result == 11; }),
+      "environment inspection did not start"
+  );
+  QMetaObject::invokeMethod(&gate, [&] { inputTurn = true; }, Qt::QueuedConnection);
+  dispatchUntil([&] { return environmentComplete && inputTurn; });
+  check(!placementComplete && reader.busy(), "blocked placement monopolized the owner thread");
+  now += 400ms;
+  release->release();
+  dispatchUntil([&] { return placementComplete; });
+  check(!reader.busy(), "completed native placement retained its worker slot");
+}
 struct Fixture
 {
   Gate::Clock::time_point now{};
@@ -860,6 +957,7 @@ int main(int argc, char **argv)
     for (const auto &[name, test] : {
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
+             std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},

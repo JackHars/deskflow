@@ -10,6 +10,7 @@
 #include <QString>
 #include <QTimer>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <utility>
 #include <vector>
@@ -32,10 +33,24 @@ public:
   using Clock = std::chrono::steady_clock;
   using Now = std::function<Clock::time_point()>;
   using Probe = std::function<Observation(QString *)>;
+  using ObservationCompletion = std::function<void(Observation, QString)>;
+  // Native reads may finish later, but completion must return to this thread.
+  using AsyncProbe = std::function<void(ObservationCompletion)>;
   using Completion = std::function<void(bool, QString)>;
   using Preparation = std::vector<std::function<bool()>>;
 
   NativePlacementVerification(Probe probe, Completion completion, Now now = Clock::now)
+      : NativePlacementVerification(
+            AsyncProbe([probe = std::move(probe)](ObservationCompletion complete) {
+              QString reason;
+              const auto observed = probe(&reason);
+              complete(observed, std::move(reason));
+            }),
+            std::move(completion), std::move(now)
+        )
+  {
+  }
+  NativePlacementVerification(AsyncProbe probe, Completion completion, Now now = Clock::now)
       : m_probe(std::move(probe)),
         m_completion(std::move(completion)),
         m_now(std::move(now)),
@@ -67,6 +82,10 @@ public:
   {
     if (m_done || !m_issued || m_scheduled)
       return;
+    if (m_reading) {
+      m_recheck = true;
+      return;
+    }
     m_scheduled = true;
     QMetaObject::invokeMethod(this, [this] { check(); }, Qt::QueuedConnection);
   }
@@ -148,27 +167,35 @@ private:
   void check()
   {
     m_scheduled = false;
-    if (m_done)
+    if (m_done || m_reading)
       return;
     if (m_now() >= m_due) {
       expire();
       return;
     }
     const QPointer<NativePlacementVerification> alive(this);
-    // A probe may revoke or destroy its owner. Keep the callable and output
-    // alive independently of this object throughout that callback.
+    // A native read owns one slot until its callback returns. Notifications
+    // during it request only one fresh follow-up; they never overlap reads or
+    // reset the transaction's original deadline.
     const auto probe = m_probe;
-    QString reason;
-    const auto result = probe(&reason);
-    if (!alive || m_done)
-      return;
-    m_reason = std::move(reason);
-    if (m_now() >= m_due) {
-      expire();
-      return;
-    }
-    if (result != Observation::Pending)
-      finish(result == Observation::Verified, m_reason);
+    m_reading = true;
+    const auto serial = ++m_readSerial;
+    probe([alive, serial](Observation result, QString reason) {
+      if (!alive || alive->m_done || !alive->m_reading || alive->m_readSerial != serial)
+        return;
+      alive->m_reading = false;
+      alive->m_reason = std::move(reason);
+      if (alive->m_now() >= alive->m_due) {
+        alive->expire();
+        return;
+      }
+      if (result != Observation::Pending) {
+        alive->finish(result == Observation::Verified, alive->m_reason);
+        return;
+      }
+      if (std::exchange(alive->m_recheck, false))
+        alive->changed();
+    });
   }
   void finish(bool success, QString reason)
   {
@@ -176,11 +203,11 @@ private:
       return;
     m_done = true;
     m_timer.stop();
-    auto completion = std::move(m_completion);
+    auto completion = std::exchange(m_completion, {});
     if (completion)
       completion(success, std::move(reason)); // May destroy this gate.
   }
-  Probe m_probe;
+  AsyncProbe m_probe;
   Completion m_completion;
   Now m_now;
   Clock::time_point m_due;
@@ -188,6 +215,7 @@ private:
   QString m_reason;
   Preparation m_preparation;
   std::size_t m_preparationIndex = 0;
-  bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false;
+  std::uint64_t m_readSerial = 0;
+  bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false, m_reading = false, m_recheck = false;
 };
 } // namespace deskflow::windowshare

@@ -17,12 +17,16 @@ namespace deskflow::windowshare {
 // One read-only native inspection, never an input-authority cache. A stalled
 // system query must not stall native input or create more worker requests.
 // Completion runs on the owner thread and expires at the original deadline.
-template <class Result> class AsyncNativeInspection final : public QObject
+template <class Result, int MaximumAgeMs = 250> class AsyncNativeInspection final : public QObject
 {
 public:
   using Clock = std::chrono::steady_clock;
   using Completion = std::function<void(std::optional<Result>)>;
-  static constexpr auto maximumAge = std::chrono::milliseconds(250);
+  // The default remains the native input/environment limit. Placement uses
+  // its existing two-second transaction deadline, independently enforced by
+  // NativePlacementVerification; it never grants an input receipt.
+  static_assert(MaximumAgeMs > 0 && MaximumAgeMs <= 2000);
+  static constexpr auto maximumAge = std::chrono::milliseconds(MaximumAgeMs);
   explicit AsyncNativeInspection(std::function<Clock::time_point()> now = Clock::now) : m_now(std::move(now))
   {
     m_timer.setSingleShot(true);

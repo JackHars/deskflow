@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QThread>
 #include <chrono>
 #include <cstdio>
 
@@ -54,7 +55,10 @@ public:
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_started).count();
     if (elapsed >= 25)
       lifecycleDiagnostic(
-          m_component, m_step, "slow", "Synchronous operation delayed event-loop work", {{"elapsedMs", qint64(elapsed)}}
+          m_component, m_step, "slow", "Operation exceeded the diagnostic duration threshold",
+          {{"elapsedMs", qint64(elapsed)},
+           {"applicationThread",
+            QCoreApplication::instance() && QThread::currentThread() == QCoreApplication::instance()->thread()}}
       );
   }
   SlowOperationDiagnostic(const SlowOperationDiagnostic &) = delete;

@@ -1,5 +1,46 @@
 # Seamless Windows work state
 
+## Scroll diagnosis — asynchronous placement observation — 2026-10-20
+
+`0fbcc6e2c` passes 20 Mac and 16 Ubuntu suites; the coordinator and normalizer
+checks also pass on both machines. `dashboard-replay-4gn4hxtf` completes all
+120 seconds Active, all three 30-second recordings, the 21 queue journals,
+normal restoration and owned cleanup. All 1,200 original records reach Core
+and the exact target process unchanged at about 119 Hz. Same-Mac process delay
+is median 51.2 ms, p95 162.5 ms and maximum 210.6 ms. One collector turn still
+measures 26 ms; the slicing bound limits work per turn, not OS scheduling or
+filesystem latency. AppKit combines three pairs (123–124, 199–200, 1161–1162),
+so strict window receipt acceptance remains failed. No physical acceptance is
+claimed.
+
+The disposable local AppKit diagnostic in `build/scroll-appkit-baseline-ghl38vit/`
+posts the same scroll fields only to its own window, with no Deskflow or network
+path. Its final v4 runs exit normally: 1,200 sends at 120 Hz yield 730 AppKit
+receipts; replaying the measured arrival cadence yields 659. Both preserve the
+exact aggregate point and fixed-point movement. Line-delta transformations and
+combined receipts still fail the exact comparison. These observations establish
+an independent AppKit boundary limitation, not a waiver or a repaired journal.
+The failed v1–v3 setup/termination attempts are retained separately and do not
+count as successful probe runs.
+
+The same-artifact repeat `dashboard-replay-9kz0dc43` fails before Active. A fresh
+window identity read takes 336 ms and prevents delivery of the environment
+watchdog response before its 250 ms deadline. The source restores and owned
+processes stop. The setup observation now uses one background native read,
+retaining only immutable expected identity and a retained window reference.
+Completion returns to the Host thread and rechecks exact lifecycle, session,
+process birth, frame, paint and permissions before continuing. Placement keeps
+its existing two-second absolute verification deadline; the input/environment
+250 ms limit is unchanged. Cancellation never starts another read while the
+old native call remains outstanding.
+
+The focused Mac placement suite passes with regressions for a blocked read
+alongside a responsive environment/input turn, no overlap, one follow-up for
+concurrent notifications, duplicate/stale callbacks, exact expiry, cancellation
+and destruction. Slow-operation logs now identify whether the operation ran on
+the application thread. Matching full builds and actual-desktop checks remain
+pending; scrolling and the roadmap are not accepted as complete.
+
 ## Scroll diagnosis — cooperative evidence serialization — 2026-10-20
 
 `84e602975` passes 20 Mac and 16 Ubuntu suites, but scrolling remains unaccepted.
