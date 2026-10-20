@@ -116,9 +116,9 @@ also require Host death before accepting the observed return. The helper
 and Viewer cases may restore while Host is alive. The wrapper does not move the source
 itself or repair the coordinator's evidence.
 
-The Viewer case may retain the expected TLS disconnect, Core exit 1 and a
-failed session-controller receipt. The diagnostic accepts that specific fault
-only with its verified remote process death and separate complete audits of
+An induced owned-process fault may retain the expected TLS disconnect, Ubuntu
+Core exit 1 and a failed session-controller receipt. The diagnostic accepts
+that specific failure only with observed target death and separate complete audits of
 desktop restoration, owned-process cleanup and unchanged ordinary settings.
 Unknown shutdown errors, an incomplete cleanup audit or an unstructured pipe
 failure still prevent a recovery observation. The session itself remains failed.

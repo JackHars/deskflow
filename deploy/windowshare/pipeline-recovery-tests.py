@@ -138,7 +138,7 @@ class RecoveryTests(unittest.TestCase):
         self.assertFalse(module.assess({**report, "remoteFaultUnverified": True}, self.pipeline))
         self.assertFalse(module.assess({**self.report, "fault": "arbitrary-pid"}, self.pipeline))
 
-    def test_viewer_disconnect_retains_failed_session_and_requires_separate_cleanup(self):
+    def test_owned_fault_disconnect_retains_failed_session_and_requires_separate_cleanup(self):
         report = {**self.report, "fault": "viewer-kill", "linuxPlanSha256": "plan",
                   "remoteFault": {"fault": "viewer-kill", "planSha256": "plan", "targetExited": True}}
         failed = {"event": "failed", "lifecycleCompleted": False, "linuxEnvironment": "user-desktop",
@@ -170,7 +170,11 @@ class RecoveryTests(unittest.TestCase):
         reset_exit["cleanupErrors"] = ["Linux stop: Ubuntu test failed: " + reset_failed["failure"] +
                                       "; cleanup=[]; sessionCleanup=" + str(reset_failed["sessionCleanupErrors"])]
         self.assertTrue(module.assess(report, reset_exit))
-        self.assertFalse(module.assess(self.report, pipeline))  # Not an exception for other faults.
+        for local_fault in ("host-kill", "holding-helper-kill", "core-kill"):
+            local_pipeline = {**pipeline, "coreExit": -signal.SIGKILL if local_fault == "core-kill" else 0}
+            self.assertTrue(module.assess({**self.report, "fault": local_fault}, local_pipeline))
+        self.assertFalse(module.assess({**self.report, "fault": "unverified-disconnect"}, pipeline))
+        self.assertFalse(module.assess({**report, "faultSubmitted": False}, pipeline))
         self.assertFalse(module.assess(report, {**pipeline, "cleanupLinuxFailure": None}))
         for changes in ({"coreExit": -11}, {"event": "stopped"}, {"lifecycleCompleted": True},
                         {"failure": "Unrelated crash"}, {"cleanupErrors": ["Desktop restore failed"]},
