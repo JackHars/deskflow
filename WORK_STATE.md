@@ -79,6 +79,23 @@ ID/PID/frame/visibility data; raw input evidence, per-input native authority,
 queue limits and all deadlines remain unchanged. This targets test-induced
 WindowServer and storage contention, not permission to accept stale input.
 
+`4fa8f8e20` passes the 19 Mac and 15 Ubuntu suites. Its 360-event replay
+`dashboard-replay-l65t8biv` completes all 411 functional receipts, the full
+recording/session and clean restoration/cleanup. However, observed receipt lag
+reaches 1.89 seconds. The burst spends 2.66 seconds dispatching 90 small groups
+and another 2.17 seconds between them; this is not yet an adequate scroll fix.
+
+The next coordinator change requests the ordered dispatch barrier immediately
+after output and sizes each later prefix from the same owner's measured service
+cost. It starts at four, stays within the existing 16-record protocol limit,
+and budgets half the unchanged 250 ms receipt lifetime for measured work.
+Slow samples reduce the size immediately; faster samples recover it gradually.
+The timing is scheduling advice only. Every input still needs its unchanged
+receipt, exact owner, ordered preceding dispatch and fresh native validation.
+A new owner starts without an inherited estimate. Invalid timing samples cannot
+increase the limit. Mixed-input tests continue to verify exact source order and
+no omitted or duplicated records across changing prefixes.
+
 ## Dashboard launch checks — 2026-10-19
 
 The `331dd44bc` candidate passes 19 Mac suites and the Linux inventory cases.

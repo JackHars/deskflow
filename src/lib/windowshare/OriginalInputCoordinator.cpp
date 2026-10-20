@@ -5,6 +5,7 @@
 #include "OriginalInputCoordinator.h"
 #include "InputEvidence.h"
 #include "LifecycleDiagnostics.h"
+#include "OriginalInputBatchBudget.h"
 #include <QPointer>
 #include <QThread>
 #include <algorithm>
@@ -16,13 +17,6 @@
 
 namespace deskflow::windowshare {
 namespace {
-// A mapped receipt has 250 ms to reach native delivery. Mapping the protocol's
-// entire 16-record preview at once starts every receipt's clock before the
-// preceding native AX checks have run. Keep a smaller delivery prefix in
-// flight, then require the ordered dispatch barrier before mapping the rest.
-// This changes scheduling only: no record, deadline or queue bound changes.
-constexpr std::size_t nativeDeliveryBatch = 4;
-static_assert(nativeDeliveryBatch <= inputCutoffMaximumBatch);
 KeyboardRouteBinding forwarding(const LocalInputLease &lease)
 {
   return {{lease.session, lease.epoch}, lease.keyboardRouteGeneration, lease.focusRequest,
@@ -69,6 +63,7 @@ struct OriginalInputCoordinator::Shared
     bool prepareFocus = false, hostQuiesced = false, emptyDecline = false;
     bool active = false, revoked = false, hostReleased = true, coreReleased = true, scrolling = false;
     std::atomic<std::uint64_t> diagnosticRepeatTicket{0};
+    OriginalInputBatchBudget deliveryBudget;
   };
   struct Operation
   {
@@ -131,6 +126,9 @@ struct OriginalInputCoordinator::Shared
   std::function<void()> wake;
   bool wakeQueued = false;
   bool mappedOutputDrained = true, mappedDrainRequested = false;
+  std::shared_ptr<Owner> mappedOwner;
+  Clock::time_point mappedStarted{};
+  std::size_t mappedRecords = 0;
   std::uint64_t nextTicket = 0, nextOwner = 0;
   LocalInputPeerPolicy policy;
   std::shared_ptr<Owner> owner;
@@ -369,6 +367,7 @@ public:
         return Result::revoked(ticket);
       }
       if (m_batch.empty()) {
+        std::size_t deliveryLimit = 4;
         // A new batch revokes the preceding point receipts. Wait for their
         // ordered peer dispatch, not merely a successful local socket write.
         // Otherwise fresh 250 ms receipts can sit behind native AX work in
@@ -387,6 +386,7 @@ public:
               m_state->wake();
             return Result::pending(ticket);
           }
+          deliveryLimit = operation->owner->deliveryBudget.limit();
         }
         const auto maximumDeadline = Clock::now() + inputCutoffMaximumLifetime;
         std::vector<InputCutoffMapItem> items{
@@ -399,7 +399,7 @@ public:
           return item.route.stamp == operation->route.stamp;
         });
         if (first != m_preview.end()) {
-          for (auto next = std::next(first); next != m_preview.end() && items.size() < nativeDeliveryBatch; ++next) {
+          for (auto next = std::next(first); next != m_preview.end() && items.size() < deliveryLimit; ++next) {
             if (!next->captured.input.live() || !next->selected.sameSelection(selected) ||
                 !next->captured.input.epoch.sameEpoch(operation->captured.input.epoch) ||
                 next->deadline <= Clock::now())
@@ -1128,6 +1128,21 @@ bool OriginalInputCoordinator::tickOne()
       return false;
     if (drained) {
       std::lock_guard lock(m_shared->mutex);
+      if (m_shared->mappedOwner && m_shared->mappedRecords) {
+        auto &budget = m_shared->mappedOwner->deliveryBudget;
+        const auto previous = budget.limit();
+        const auto elapsed = Clock::now() - m_shared->mappedStarted;
+        budget.observe(m_shared->mappedRecords, std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed));
+        if (budget.limit() != previous)
+          lifecycleDiagnostic(
+              "Core input", "input.delivery-budget", "observed", "Adjusted mapped prefix to native dispatch time",
+              {{"records", qint64(m_shared->mappedRecords)},
+               {"elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count())},
+               {"nextMaximumRecords", qint64(budget.limit())}}
+          );
+      }
+      m_shared->mappedOwner.reset();
+      m_shared->mappedRecords = 0;
       m_shared->mappedOutputDrained = true;
       m_shared->mappedDrainRequested = false;
     }
@@ -1222,6 +1237,7 @@ bool OriginalInputCoordinator::tickOne()
   if (phase != Shared::Phase::Queued || !lease)
     return false;
   bool sent = false;
+  const auto sendingStarted = Clock::now();
   if (observation && observation->live() && admitted() && alive && m_channel &&
       m_preflight->phase() == LocalInputPreflight::Phase::Active) {
     const auto &point = observation->snapshot();
@@ -1238,8 +1254,20 @@ bool OriginalInputCoordinator::tickOne()
   operation->trace(12, "input.delivery", sent ? "sent" : "failed", !sent);
   std::lock_guard lock(m_shared->mutex);
   operation->phase = sent ? Shared::Phase::Sent : Shared::Phase::Revoked;
-  if (sent)
+  if (sent) {
+    if (!m_shared->mappedRecords || m_shared->mappedOwner != operation->owner) {
+      m_shared->mappedOwner = operation->owner;
+      m_shared->mappedStarted = sendingStarted;
+      m_shared->mappedRecords = 0;
+    }
+    ++m_shared->mappedRecords;
     m_shared->mappedOutputDrained = false;
+    // Start the ordered barrier without waiting for the next input to arrive.
+    // Otherwise idle time contaminates the measured service cost and every
+    // new prefix pays an avoidable extra scheduling turn. Only its Pong can
+    // mark output drained; later writes still require a later barrier.
+    m_shared->mappedDrainRequested = true;
+  }
   if (!sent)
     operation->owner->revoked = true;
   return sent;

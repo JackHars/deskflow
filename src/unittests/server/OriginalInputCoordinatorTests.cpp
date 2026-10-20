@@ -10,6 +10,7 @@
 #include "deskflow/PacketStreamFilter.h"
 #include "io/IStream.h"
 #include "server/ClientProxy1_8.h"
+#include "windowshare/OriginalInputBatchBudget.h"
 #include "windowshare/OriginalInputCoordinator.h"
 #if defined(__APPLE__)
 #include "platform/OriginalInputCaptureSource_mac.h"
@@ -1343,6 +1344,32 @@ void OriginalInputCoordinatorTests::consecutiveMappedRecordsRetainSealUntilOwner
 #endif
 }
 
+void OriginalInputCoordinatorTests::nativeDeliveryBudgetRespondsToDispatchCost()
+{
+  OriginalInputBatchBudget budget;
+  QCOMPARE(budget.limit(), std::size_t(4));
+  budget.observe(16, 80ms);
+  QCOMPARE(budget.limit(), inputCutoffMaximumBatch);
+  budget.observe(4, 80ms);
+  QVERIFY(budget.limit() <= 6); // Reserve at least half the 250 ms lifetime.
+  const auto reduced = budget.limit();
+  budget.observe(0, 1ns);
+  budget.observe(inputCutoffMaximumBatch + 1, 1ns);
+  budget.observe(4, 0ns);
+  budget.observe(4, -1ns);
+  QCOMPARE(budget.limit(), reduced);
+  budget.observe(4, 4ms);
+  QVERIFY(budget.limit() > reduced && budget.limit() < inputCutoffMaximumBatch);
+  for (unsigned i = 0; i < 32; ++i)
+    budget.observe(4, 4ms);
+  QCOMPARE(budget.limit(), inputCutoffMaximumBatch);
+  budget.observe(1, 200ms);
+  QCOMPARE(budget.limit(), std::size_t(1));
+  budget.observe(1, std::chrono::nanoseconds::max());
+  QCOMPARE(budget.limit(), std::size_t(1));
+  QCOMPARE(OriginalInputBatchBudget{}.limit(), std::size_t(4)); // A new owner has no inherited timing proof.
+}
+
 void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOrder()
 {
 #if !defined(__APPLE__)
@@ -1383,24 +1410,33 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
     }
     f.dispatcher->preview(preview);
     OriginalInputDispatcher::Result ready;
-    // A full 16-record preview must be split into four delivery prefixes.
+    // Full previews may be split according to observed native delivery cost.
     // No later receipt may start aging behind the preceding prefix's native
     // work, but all mixed records still arrive once and in source order.
-    for (std::size_t offset = 0; offset < captured.size(); offset += 4) {
+    for (std::size_t offset = 0; offset < captured.size();) {
       pending = f.reserve(captured[offset], owner);
       QCOMPARE(pending.state, State::Pending);
       QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
-      QCOMPARE(f.poll(pending.ticket).state, State::Pending);
-      QCOMPARE(f.wire.requests.size(), requested);
-      requested += 4;
-      f.started(pending.ticket, requested);
+      QVERIFY(until([&] {
+        const auto state = f.poll(pending.ticket).state;
+        require(state == State::Pending, "Mapped prefix terminated before its actual reply");
+        return f.wire.batches.size() == batches + 1;
+      }));
       QCOMPARE(f.wire.batches.size(), ++batches);
-      QCOMPARE(f.wire.batches.back().items.size(), std::size_t(4));
+      const auto prefix = f.wire.batches.back().items.size();
+      QVERIFY(prefix > 0 && prefix <= inputCutoffMaximumBatch && prefix <= captured.size() - offset);
+      requested += prefix;
+      QCOMPARE(f.wire.requests.size(), requested);
+      for (std::size_t item = 0; item < prefix; ++item)
+        QCOMPARE(
+            f.wire.batches.back().items[item].mapping.cutoff.binding.capture.sequence,
+            captured[offset + item].input.record.sequence
+        );
       pumpFor(20);
       f.wire.completeBatch();
       ready = f.accepted(pending.ticket);
       QVERIFY(f.dispatcher->commit(*ready.reservation));
-      for (std::size_t item = offset + 1; item < offset + 4; ++item) {
+      for (std::size_t item = offset + 1; item < offset + prefix; ++item) {
         ready = f.reserve(captured[item], owner);
         QCOMPARE(ready.state, State::Accepted);
         QCOMPARE(ready.ticket, std::uint64_t(0));
@@ -1408,6 +1444,7 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
         QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
         QVERIFY(f.dispatcher->commit(*ready.reservation));
       }
+      offset += prefix;
     }
     // Core can receive the next record before Qt sends any of this full
     // batch. Keep one bounded waiting preparation without replacing its

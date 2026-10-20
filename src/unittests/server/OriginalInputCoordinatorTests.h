@@ -26,6 +26,7 @@ private Q_SLOTS:
   void firstClickLostTransportCannotAcknowledgeRelease();
   void firstClickOlderPeerFallsBackBeforeAnyGate();
   void consecutiveMappedRecordsRetainSealUntilOwnerRelease();
+  void nativeDeliveryBudgetRespondsToDispatchCost();
   void mixedInputBatchesKeepEveryRecordAndDrainInOrder();
   void rejectsMappedSubstitution_data();
   void rejectsMappedSubstitution();
