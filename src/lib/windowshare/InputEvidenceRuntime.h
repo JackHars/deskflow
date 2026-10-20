@@ -31,7 +31,7 @@ private:
   friend struct InputEvidenceTestAccess;
   InputEvidenceRuntime() = default;
   void tick();
-  void drain();
+  void drain(bool yield = true);
   void endJournal();
   void write(const QJsonObject &value);
   InputEvidenceRecorder *m_recorder = nullptr;
@@ -41,5 +41,6 @@ private:
   std::uint64_t m_duration = 0, m_rows = 0, m_bytes = 0, m_nextReadiness = 0, m_created = 0;
   std::uint64_t m_preparationTimeout = 0, m_armRequestedAt = 0;
   bool m_armSeen = false, m_stopSeen = false, m_endWritten = false, m_closeSeen = false, m_recordRequested = false;
+  bool m_drainQueued = false;
 };
 } // namespace deskflow::windowshare

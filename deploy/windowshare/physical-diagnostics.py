@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 import time
 import traceback
 
@@ -129,8 +130,11 @@ class LogObserver:
                     value = json.loads(text.split(marker, 1)[1])
                     if not isinstance(value, dict):
                         raise ValueError('Native diagnostic must be an object')
-                    if value.get('state') not in ('started', 'completed', 'failed', 'observed'):
-                        continue
+                    # Preserve native timing and refusal states too. Silently
+                    # dropping 'slow' hid the operation that blocked input.
+                    if not all(isinstance(value.get(key), str) for key in ('component', 'step', 'state', 'message')) or \
+                            not re.fullmatch(r'[a-z][a-z0-9-]{0,63}', value['state']):
+                        raise ValueError('Invalid native lifecycle fields')
                     name = value['component'] + ': ' + value['step']
                     self.native[name] = value
                     self.diagnostics.emit(name, value['state'], value['message'], native=value)

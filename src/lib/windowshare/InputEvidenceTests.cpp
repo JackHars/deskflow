@@ -6,6 +6,7 @@
 #include "OriginalInputCapturedInbox.h"
 #include <QCoreApplication>
 #include <QEvent>
+#include <QEventLoop>
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -30,6 +31,14 @@ struct InputEvidenceTestAccess
   static void tick(InputEvidenceRuntime &runtime)
   {
     runtime.tick();
+  }
+  static void drain(InputEvidenceRuntime &runtime)
+  {
+    runtime.drain();
+  }
+  static auto serialized(const InputEvidenceRuntime &runtime)
+  {
+    return runtime.m_rows;
   }
   static void armWaitElapsed(InputEvidenceRuntime &runtime, std::uint64_t elapsedMs)
   {
@@ -1014,6 +1023,103 @@ void privateConfiguration()
   delete storage;
 }
 
+void cooperativeSerialization()
+{
+  for (const bool destroyPending : {false, true}) {
+    QTemporaryDir directory;
+    check(directory.isValid(), "serialization directory failed");
+    const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+    const auto output = parent + "/evidence.jsonl", config = parent + "/config.json";
+    {
+      QFile file(config);
+      check(file.open(QIODevice::WriteOnly), "serialization config failed");
+      file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      file.write(QJsonDocument(
+                     QJsonObject{
+                         {"version", 1},
+                         {"role", "native"},
+                         {"runId", "serialization"},
+                         {"durationMs", 1000},
+                         {"output", output},
+                         {"control", parent + "/control.json"}
+                     }
+      )
+                     .toJson());
+    }
+    auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+    auto *storage = &runtime->recorder();
+    storage->bindOwner(owner());
+    check(storage->arm(1000000000), "serialization owner could not arm");
+    constexpr unsigned count = 2048;
+    for (unsigned i = 0; i != count; ++i) {
+      InputEvidenceRaw raw;
+      raw.timestamp = 50000 + i;
+      raw.flags = 0x20000000;
+      raw.fields[0] = 22;
+      raw.fields[11] = i;
+      storage->native(raw, 55, 44, 123);
+    }
+    InputEvidenceTestAccess::drain(*runtime);
+    check(
+        !storage->drained() && InputEvidenceTestAccess::serialized(*runtime) <= 129,
+        "one evidence turn serialized the burst instead of yielding to input"
+    );
+    if (!destroyPending) {
+      bool intervened = false, expired = false;
+      QMetaObject::invokeMethod(
+          runtime.get(),
+          [&] {
+            intervened = true;
+            check(!storage->drained(), "queued input was starved until the entire evidence burst completed");
+          },
+          Qt::QueuedConnection
+      );
+      QEventLoop loop;
+      QTimer observe, timeout;
+      QObject::connect(&observe, &QTimer::timeout, &loop, [&] {
+        if (storage->drained())
+          loop.quit();
+      });
+      QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+        expired = true;
+        loop.quit();
+      });
+      observe.start(1);
+      timeout.setSingleShot(true);
+      timeout.start(1000);
+      loop.exec();
+      check(
+          !expired && intervened && storage->drained() && storage->loss() == InputEvidenceLoss::None,
+          "cooperative evidence drain failed or lost its queued input turn"
+      );
+    }
+    // Teardown must finish an outstanding slice synchronously, cancel its
+    // queued callback and leave the exact journal before its terminal row.
+    runtime.reset();
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+    inputEvidenceInstalled.store(nullptr);
+    delete storage;
+    QFile file(output);
+    check(file.open(QIODevice::ReadOnly), "serialization output missing");
+    unsigned received = 0, ends = 0;
+    while (!file.atEnd()) {
+      const auto row = QJsonDocument::fromJson(file.readLine()).object();
+      if (row["type"] == "native") {
+        check(
+            ends == 0 && row["cgTimestampNs"] == QString::number(50000 + received) && row["flags"] == "536870912" &&
+                row["raw"].toArray()[11] == QString::number(received),
+            "serialization changed, reordered or moved an original row after the footer"
+        );
+        ++received;
+      } else if (row["type"] == "end") {
+        ++ends;
+        check(row["rows"] == QString::number(count) && row["drained"].toBool(), "terminal row lost pending evidence");
+      }
+    }
+    check(received == count && ends == 1, "serialization lost, duplicated or failed to close the burst");
+  }
+}
+
 void armAfterBackgroundOutputDrains()
 {
   QTemporaryDir directory;
@@ -1304,6 +1410,7 @@ int main(int argc, char **argv)
     runCase("revokeDuringDrain", revokeDuringDrain);
     runCase("nativeFields", nativeFields);
     runCase("privateConfiguration", privateConfiguration);
+    runCase("cooperativeSerialization", cooperativeSerialization);
     runCase("armAfterBackgroundOutputDrains", armAfterBackgroundOutputDrains);
     runCase("pendingArmDeadlineAndStop", pendingArmDeadlineAndStop);
     runCase("nativePreparationDeadline", nativePreparationDeadline);

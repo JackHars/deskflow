@@ -1,5 +1,37 @@
 # Seamless Windows work state
 
+## Scroll diagnosis — cooperative evidence serialization — 2026-10-20
+
+`84e602975` passes 20 Mac and 16 Ubuntu suites, but scrolling remains unaccepted.
+In `dashboard-replay-7bxz7sd_`, all 1,200 original raw records reach the exact
+process in order at 117.56 Hz; AppKit combines records 340 and 341. The independent
+observer closes cleanly. All 21 queue journals validate and the three 30-second
+recordings drain without loss. Same-Mac process latency is median 83.7 ms,
+p95 223.1 ms and maximum 300.4 ms. The 120-second Active period finishes, but
+ordinary restoration fails with AXErrorCannotComplete when reading position.
+The retained recovery journal restores the source afterwards. This is a failed
+run, not a successful normal restoration. The repeat `dashboard-replay-pyab6et6`
+fails before Active: a fresh WindowServer identity read takes 410 ms and delays
+an environment inspection beyond its unchanged 250 ms deadline. Recovery and
+owned cleanup finish. Removing unused application metadata does not fix those
+WindowServer stalls.
+
+Raw evidence logs show collector turns as long as 55 ms. These run on the input
+owner thread. The collector now serializes at most 128 rows or 2 ms per turn,
+then schedules one continuation. The existing recorder capacity, row contents,
+order and timestamps are unchanged; teardown still flushes before its footer.
+A regression verifies that unrelated queued input runs before a 2,048-row burst
+finishes, every row remains exact, and destruction safely flushes pending work.
+The focused Mac runtime test passes. Full matching builds and desktop checks
+remain required.
+
+The combined diagnostic reader had silently discarded native states such as
+`slow`, `denied` and `expired`. It now preserves every structurally valid state;
+its regression and all 107 coordinator tests pass on Mac. Original raw logs were
+always retained. Earlier claims of no slow collector turns are corrected above.
+No input deadline, authority check, queue bound or acceptance rule is relaxed.
+No attended test is ready and three consecutive qualified passes remain unmet.
+
 ## Scroll diagnosis — metadata on native control paths — 2026-10-20
 
 `8a7f18d9f` passes 20 Mac and 16 Ubuntu suites. Its first desktop run,
@@ -10,9 +42,10 @@ the independent observer has a clean footer. AppKit combines three adjacent
 pairs, leaving 1,197 window receipts. The strict receipt failure is retained.
 Same-Mac HID-to-process latency is median 144.8 ms, p95 427.5 ms, maximum
 467.1 ms, ending at 424.9 ms. This is **not an acceptable scrolling pass**.
-No capture-consumer, collector or coordinator service exceeds its 25 ms logging
-threshold in this run. Network mapping reaches 102.8 ms and the SSH socket
-reports retransmissions. Core activity alone does not prove the issue fixed.
+The combined report initially omitted slow-operation states. The retained raw
+Core log shows evidence collector turns of 39–47 ms. Network mapping reaches
+102.8 ms and the SSH socket reports retransmissions. Core activity alone does
+not prove the issue fixed.
 
 The repeat `dashboard-replay-d3tiagii` stops before input starts. Its initial
 holding-placement identity lookup takes about 335 ms; the background display

@@ -241,10 +241,13 @@ bool InputEvidenceRuntime::requestRecord(const QString &privateNewPath)
     return false;
   }
 }
-void InputEvidenceRuntime::drain()
+void InputEvidenceRuntime::drain(bool yield)
 {
   // Serialization belongs to this timer, never to the event tap or native
-  // filter. Bound each turn so an evidence sink cannot monopolize input work.
+  // filter. A full recorder can take tens of milliseconds to serialize. Keep
+  // one bounded continuation so input can run between slices without waiting
+  // another 10 ms, dropping rows, or allocating a second evidence queue.
+  const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
   for (unsigned i = 0; i != InputEvidenceRecorder::capacity; ++i) {
     const auto row = m_recorder->pop();
     if (!row)
@@ -283,6 +286,16 @@ void InputEvidenceRuntime::drain()
       }
     }
     write(object);
+    if (yield && (i + 1 == 128 || std::chrono::steady_clock::now() >= until)) {
+      if (!m_drainQueued) {
+        m_drainQueued = true;
+        QTimer::singleShot(0, this, [this] {
+          m_drainQueued = false;
+          tick();
+        });
+      }
+      break;
+    }
   }
   if (!m_output.flush())
     m_recorder->fail(InputEvidenceLoss::Output);
@@ -430,7 +443,7 @@ InputEvidenceRuntime::~InputEvidenceRuntime()
     return;
   m_recorder->stop();
   m_recorder->finish(true);
-  drain();
+  drain(false); // Producers have stopped; flush the bounded remainder before the footer.
   endJournal();
 }
 } // namespace deskflow::windowshare
