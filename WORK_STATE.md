@@ -8,12 +8,20 @@
 CPU counters without attaching a sampler. The five non-repeat board checks
 pass, but the burst and recording fail. Core emits 67,767 journal rows, including
 27,043 preview rows; the Python collector and Core consume significant CPU.
-The next candidate publishes each bounded advisory preview by one actual swap,
-recording its complete enqueue/retire counts in one row. Actual capture,
+The next candidate publishes each bounded advisory preview with two actual
+mutations: retire the old snapshot, then swap in the complete new snapshot.
+This preserves each intermediate depth and one-sided journal counts while
+removing up to sixteen partial publications. Actual capture,
 dispatch, raw receipt and queue capacities stay unchanged. Native lookup hints
 now retain only visible sibling references; the retained source is separately
 revalidated later in each input, and any visible-ID change forces discovery.
 No native check result is reused and no deadline or raw event is changed.
+
+Review caught `de3ff8312` combining enqueue and retire counts, which the existing
+recorder correctly rejects. It was built but never packaged or launched. The
+replacement now keeps those mutations separate. The mixed-batch regression
+observes repeated real preview replacement/clear operations with the recorder
+installed, then verifies every mixed input still arrives once and in order.
 
 
 `d25ce97ac` passes the selected Mac/Ubuntu suites. Its lightweight diagnostic

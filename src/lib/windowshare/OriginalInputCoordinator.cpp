@@ -590,14 +590,14 @@ public:
           break;
         next.push_back(value);
       }
-    // Publish the bounded advisory snapshot in one swap. It never delivers or
-    // removes source input; every record still reserves/commits individually.
-    // Account the actual single replacement, including all retired/new entries,
-    // instead of exposing a clear followed by up to sixteen partial previews.
-    if (!next.empty() || !m_preview.empty())
-      inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, next.size(), m_preview.size(), [&] {
-        m_preview.swap(next);
-      });
+    // Replace the bounded advisory snapshot with two actual mutations. Every
+    // source record still reserves/commits individually. Retiring the old
+    // snapshot separately preserves the journal's one-sided mutation contract;
+    // publishing the complete new snapshot avoids sixteen partial previews.
+    if (!m_preview.empty())
+      inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, 0, m_preview.size(), [&] { m_preview.clear(); });
+    if (!next.empty())
+      inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, next.size(), 0, [&] { m_preview.swap(next); });
   }
   void maintain() noexcept override
   {

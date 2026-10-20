@@ -10,6 +10,7 @@
 #include "deskflow/PacketStreamFilter.h"
 #include "io/IStream.h"
 #include "server/ClientProxy1_8.h"
+#include "windowshare/InputEvidence.h"
 #include "windowshare/OriginalInputBatchBudget.h"
 #include "windowshare/OriginalInputCoordinator.h"
 #if defined(__APPLE__)
@@ -1419,7 +1420,27 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
       preview.push_back({value, f.route(value), f.selected, Clock::now() + 500ms});
       sequences.push_back(value.input.record.sequence);
     }
-    f.dispatcher->preview(preview);
+    f.dispatcher->preview({});
+    {
+      // Observe real replacements without pumping unrelated fixture channels
+      // through this process-global recorder. Delivery below still proves that
+      // repeated advisory previews neither duplicate nor lose source input.
+      auto evidence = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Core);
+      evidence->initialize(InputEvidenceQueue::CoordinatorPreview, f.dispatcher.get(), inputCutoffMaximumBatch);
+      struct RestoreRecorder
+      {
+        InputEvidenceRecorder *previous;
+        ~RestoreRecorder()
+        {
+          inputEvidenceInstalled.store(previous);
+        }
+      } restore{inputEvidenceInstalled.exchange(evidence.get())};
+      f.dispatcher->preview(preview);
+      f.dispatcher->preview(preview);
+      f.dispatcher->preview({});
+      f.dispatcher->preview(preview);
+      QCOMPARE(evidence->loss(), InputEvidenceLoss::None);
+    }
     OriginalInputDispatcher::Result ready;
     // Full previews may be split according to observed native delivery cost.
     // No later receipt may start aging behind the preceding prefix's native
