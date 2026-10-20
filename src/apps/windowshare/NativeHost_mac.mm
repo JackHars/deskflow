@@ -1806,7 +1806,23 @@ struct NativeHost::Impl
     const auto state = readNativeWindowState(e->window);
     measured("windowStateUs");
     QJsonObject focusDetails;
-    const bool focused = focusMatches(*e, false, &focusDetails);
+    bool focused = false;
+    if (finalInventory && *finalInventory) {
+      // The inventory's initial classification was provisional. Perform the
+      // strict focused-source proof NOW, after reading current window state,
+      // rather than walking the same ancestry both before and after it.
+      CF<AXUIElementRef> app(AXUIElementCreateApplication(e->identity.pid));
+      AXUIElementSetMessagingTimeout(app.get(), 0.05f);
+      CF<CFTypeRef> observed(attribute(app.get(), kAXFocusedUIElementAttribute));
+      focused = alive && !e->family && !familyBlocked(*e) &&
+                focusedWithinNativeSource(e->identity, e->window, element(observed.get()));
+      CF<CFTypeRef> fresh(focused ? attribute(app.get(), kAXFocusedUIElementAttribute) : nullptr);
+      focused = alive && focused && fresh && CFEqual(fresh.get(), observed.get()) && !familyBlocked(*e);
+      if (!focused)
+        focusDetails.insert("reason", "fresh-focused-source-ancestry-unavailable-or-changed");
+    } else {
+      focused = focusMatches(*e, false, &focusDetails);
+    }
     measured("focusUs");
     const bool holdingCurrent = !e->moved || holding.available();
     if (!focused || !state || (!e->family && !state->minimized.has_value()) || state->minimized.value_or(false) ||
@@ -1970,33 +1986,10 @@ struct NativeHost::Impl
     }
     return false;
   }
-  bool noIndependentAttachedSurface(
-      const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused,
-      QString &reason, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr
-  ) const
+  bool focusedWithinNativeSource(const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef focused) const
   {
-    const auto started = std::chrono::steady_clock::now();
-    auto checkpoint = started;
-    QJsonObject durations;
-    const auto measured = [&](const char *stage) {
-      const auto now = std::chrono::steady_clock::now();
-      durations.insert(stage, qint64(std::chrono::duration_cast<std::chrono::microseconds>(now - checkpoint).count()));
-      checkpoint = now;
-    };
-    const auto timing = qScopeGuard([&] {
-      const auto elapsed = std::chrono::steady_clock::now() - started;
-      if (elapsed >= std::chrono::milliseconds(5)) {
-        durations.insert("elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
-        durations.insert("reason", reason);
-        lifecycleDiagnostic(
-            "Host", "input.surface-inventory-timing", "slow", "Fresh native inventory stages", durations
-        );
-      }
-    });
-    const auto incomplete = [&](const char *message) {
-      reason = message;
+    if (!source || !focused)
       return false;
-    };
     const QPointer<NativeHost> alive(q);
     CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(source)));
     // A focused independently backed child must always take the full path,
@@ -2041,6 +2034,39 @@ struct NativeHost::Impl
       }
     }
     if (!alive || !focusedWithinSource)
+      return false;
+    return true;
+  }
+  bool noIndependentAttachedSurface(
+      const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused,
+      QString &reason, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr
+  ) const
+  {
+    const auto started = std::chrono::steady_clock::now();
+    auto checkpoint = started;
+    QJsonObject durations;
+    const auto measured = [&](const char *stage) {
+      const auto now = std::chrono::steady_clock::now();
+      durations.insert(stage, qint64(std::chrono::duration_cast<std::chrono::microseconds>(now - checkpoint).count()));
+      checkpoint = now;
+    };
+    const auto timing = qScopeGuard([&] {
+      const auto elapsed = std::chrono::steady_clock::now() - started;
+      if (elapsed >= std::chrono::milliseconds(5)) {
+        durations.insert("elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+        durations.insert("reason", reason);
+        lifecycleDiagnostic(
+            "Host", "input.surface-inventory-timing", "slow", "Fresh native inventory stages", durations
+        );
+      }
+    });
+    const auto incomplete = [&](const char *message) {
+      reason = message;
+      return false;
+    };
+    const QPointer<NativeHost> alive(q);
+    CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(source)));
+    if (!finalInventory && !focusedWithinNativeSource(expected, source, focused))
       return incomplete("Focused native surface has no proven source ancestry");
     measured("focusOwnershipUs");
     // Public on-screen inventory excludes dormant backing windows. This is
@@ -2106,12 +2132,17 @@ struct NativeHost::Impl
       if (!alive || !after || !inspection.finish(expected.id, after->ids))
         return incomplete("Native window inventory changed or contains an unclassified surface");
     }
-    CF<CFTypeRef> fresh(attribute(app, kAXFocusedUIElementAttribute));
-    measured("finalFocusUs");
-    if (!alive || !fresh || !CFEqual(fresh.get(), focused))
-      return incomplete("Focused element changed while inspecting native windows");
-    if (finalInventory)
+    if (finalInventory) {
+      // The caller performs the strict fresh focus/ancestry proof after its
+      // window-state read, then joins the final inventory and source identity.
+      // This provisional classification alone cannot authorize an event.
       *finalInventory = std::move(inspection);
+    } else {
+      CF<CFTypeRef> fresh(attribute(app, kAXFocusedUIElementAttribute));
+      measured("finalFocusUs");
+      if (!alive || !fresh || !CFEqual(fresh.get(), focused))
+        return incomplete("Focused element changed while inspecting native windows");
+    }
     reason = finalInventory ? "Native surface classification awaits the final per-input identity snapshot"
                             : "Every independent native window is the source or freshly proven unrelated";
     return true;
@@ -2459,7 +2490,7 @@ struct NativeHost::Impl
       return true;
     if (parent->pendingChild)
       return familyBlocked(*parent);
-    const auto candidate = focusedChild(*parent, finalInventory);
+    const auto candidate = focusedChild(*parent, parent->family ? nullptr : finalInventory);
     if (!candidate)
       return familyBlocked(*parent);
     for (const auto &[id, existing] : entries)

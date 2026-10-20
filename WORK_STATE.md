@@ -39,6 +39,22 @@ unchanged. This removes one WindowServer query per eligible event without
 caching authority or changing queue/deadline policy. It needs actual-desktop
 validation before a scrolling fix can be claimed.
 
+`a42f4678a` passes all selected suites and the complete 360-event actual-desktop
+run `dashboard-replay-fqur__tu` (411 functional receipts, full recording/session,
+21 valid queue histories, restoration, owned cleanup and zero held controls).
+The longer `dashboard-replay-ucdt8z2k` still fails the capture/route join after
+195 of 1,200 burst events arrive; preserve its incomplete recording/restore
+result. Its source emitted all 1,200 records at 119.97 Hz. A single short pass
+does not satisfy the launch gate.
+
+The next refinement performs the existing strict focused-source ancestry proof
+once, after the fresh window-state read and before the final WindowServer
+snapshot. The initial inventory classification remains provisional. Root inputs
+cannot use the weaker focused-window fallback here; missing or changed focus
+denies input. Associated-window and non-input inspection retain their existing
+paths. This removes duplicate AX traversal within each input, not per-event
+validation, and still needs sustained actual-desktop verification.
+
 The adaptive-prefix candidate `e28deb425` passes all 19 selected Mac and 15
 Ubuntu suites, but `dashboard-replay-_kqo3i_b` fails at a mapped receipt deadline.
 The preceding 11-record group took 192 ms and correctly reduced the next group
