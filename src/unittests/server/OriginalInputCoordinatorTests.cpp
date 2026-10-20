@@ -1363,6 +1363,7 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
   QVERIFY(until([&] { return f.count("mapped") == 1; }));
   std::vector<std::uint64_t> sequences{first.input.record.sequence};
   std::size_t requested = 1;
+  std::size_t batches = 0;
   for (unsigned batch = 0; batch < 8; ++batch) {
     std::vector<OriginalInputCaptured> captured;
     captured.push_back(source.button(true));
@@ -1381,26 +1382,32 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
       sequences.push_back(value.input.record.sequence);
     }
     f.dispatcher->preview(preview);
-    pending = f.reserve(captured.front());
-    QCOMPARE(pending.state, State::Pending);
-    QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
-    requested += inputCutoffMaximumBatch;
-    f.started(pending.ticket, requested);
-    QCOMPARE(f.wire.batches.size(), std::size_t(2 * batch + 1));
-    QCOMPARE(f.wire.batches.back().items.size(), inputCutoffMaximumBatch);
-    // One delayed response represents the bounded network/native boundary;
-    // each subsequent item must consume its own receipt without a new wait.
-    pumpFor(20);
-    f.wire.completeBatch();
-    auto ready = f.accepted(pending.ticket);
-    QVERIFY(f.dispatcher->commit(*ready.reservation));
-    for (std::size_t item = 1; item < captured.size(); ++item) {
-      ready = f.reserve(captured[item], owner);
-      QCOMPARE(ready.state, State::Accepted);
-      QCOMPARE(ready.ticket, std::uint64_t(0));
-      QVERIFY(ready.reservation && ready.reservation->owner == owner);
+    OriginalInputDispatcher::Result ready;
+    // A full 16-record preview must be split into four delivery prefixes.
+    // No later receipt may start aging behind the preceding prefix's native
+    // work, but all mixed records still arrive once and in source order.
+    for (std::size_t offset = 0; offset < captured.size(); offset += 4) {
+      pending = f.reserve(captured[offset], owner);
+      QCOMPARE(pending.state, State::Pending);
       QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
+      QCOMPARE(f.poll(pending.ticket).state, State::Pending);
+      QCOMPARE(f.wire.requests.size(), requested);
+      requested += 4;
+      f.started(pending.ticket, requested);
+      QCOMPARE(f.wire.batches.size(), ++batches);
+      QCOMPARE(f.wire.batches.back().items.size(), std::size_t(4));
+      pumpFor(20);
+      f.wire.completeBatch();
+      ready = f.accepted(pending.ticket);
       QVERIFY(f.dispatcher->commit(*ready.reservation));
+      for (std::size_t item = offset + 1; item < offset + 4; ++item) {
+        ready = f.reserve(captured[item], owner);
+        QCOMPARE(ready.state, State::Accepted);
+        QCOMPARE(ready.ticket, std::uint64_t(0));
+        QVERIFY(ready.reservation && ready.reservation->owner == owner);
+        QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
+        QVERIFY(f.dispatcher->commit(*ready.reservation));
+      }
     }
     // Core can receive the next record before Qt sends any of this full
     // batch. Keep one bounded waiting preparation without replacing its
@@ -1412,6 +1419,7 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
     QCOMPARE(f.wire.requests.size(), requested);
     QVERIFY(f.dispatcher->live(owner));
     f.started(pending.ticket, ++requested);
+    QCOMPARE(f.wire.batches.size(), ++batches);
     QCOMPARE(f.wire.batches.back().items.size(), std::size_t(1));
     f.wire.completeBatch();
     ready = f.accepted(pending.ticket);

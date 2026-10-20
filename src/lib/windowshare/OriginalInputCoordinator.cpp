@@ -16,6 +16,13 @@
 
 namespace deskflow::windowshare {
 namespace {
+// A mapped receipt has 250 ms to reach native delivery. Mapping the protocol's
+// entire 16-record preview at once starts every receipt's clock before the
+// preceding native AX checks have run. Keep a smaller delivery prefix in
+// flight, then require the ordered dispatch barrier before mapping the rest.
+// This changes scheduling only: no record, deadline or queue bound changes.
+constexpr std::size_t nativeDeliveryBatch = 4;
+static_assert(nativeDeliveryBatch <= inputCutoffMaximumBatch);
 KeyboardRouteBinding forwarding(const LocalInputLease &lease)
 {
   return {{lease.session, lease.epoch}, lease.keyboardRouteGeneration, lease.focusRequest,
@@ -392,8 +399,7 @@ public:
           return item.route.stamp == operation->route.stamp;
         });
         if (first != m_preview.end()) {
-          for (auto next = std::next(first); next != m_preview.end() && items.size() < inputCutoffMaximumBatch;
-               ++next) {
+          for (auto next = std::next(first); next != m_preview.end() && items.size() < nativeDeliveryBatch; ++next) {
             if (!next->captured.input.live() || !next->selected.sameSelection(selected) ||
                 !next->captured.input.epoch.sameEpoch(operation->captured.input.epoch) ||
                 next->deadline <= Clock::now())
