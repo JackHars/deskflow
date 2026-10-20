@@ -2168,7 +2168,7 @@ private:
       };
       viewer->onForwardingFenceChanged = [this, id, epoch = packet.epoch, viewer, generation] {
         if (currentViewer(id, epoch, viewer, generation) && m_viewportEndpoint)
-          m_viewportEndpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+          m_viewportEndpoint->forwardingFenceChanged();
       };
 #endif
       connect(viewer, &QObject::destroyed, this, [this, id, epoch = packet.epoch, viewer, generation] {

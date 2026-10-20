@@ -1973,6 +1973,13 @@ struct GnomeProviderClient::Impl
       error = failure.what();
     } catch (const std::exception &failure) {
       error = std::string(failure.what()).substr(0, 128);
+      lifecycleDiagnostic(
+          "GNOME input", "input.preparation", "failed", QString::fromStdString(error),
+          {{"request", QString::number(prep->id)},
+           {"cleanup", action == Preparation::Action::Cleanup},
+           {"wireOperation", int(wireOperation)},
+           {"wireRequest", QString::number(wireIssued)}}
+      );
     }
     wireRetired = wireIssued;
     bool publish = false;

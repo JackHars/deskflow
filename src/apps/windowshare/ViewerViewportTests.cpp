@@ -545,7 +545,7 @@ void preparationGatePromotionAndCleanup()
   pair.send(request(GnomeViewportOperation::PreparationPromote, 4));
   check(pair.reply(4).ok && gate && consumed, "Promotion removed the distinct preparation gate");
   all = false; // Host timeout/revocation is independent of provider cleanup.
-  pair.endpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+  pair.endpoint->forwardingFenceChanged();
   auto wrong = request(GnomeViewportOperation::PreparationCleanup, 5);
   ++wrong.preparation.request;
   pair.send(wrong);
@@ -555,6 +555,10 @@ void preparationGatePromotionAndCleanup()
       waitUntil([&] { return completions.size() == 2; }) && gate && !all,
       "Cleanup required the already resumed All fence"
   );
+  // The Host's forwarding notification can arrive after cleanup has begun.
+  // It must not cancel the independent preparation gate's native queue proof.
+  pair.endpoint->forwardingFenceChanged();
+  check(gate, "Forwarding notification opened the preparation gate");
   completions[0](true); // A duplicate old completion cannot retire this gate.
   check(gate, "Late preparation drain reply retired a different operation");
   cleanupCompleted = true;
@@ -590,6 +594,57 @@ void preparationGatePromotionAndCleanup()
   check(cancelGate, "Canceled late witness opened the gate");
   pending[1](true);
   check(canceled.reply(3).ok && !cancelGate, "Post-cancel witness did not complete cleanup");
+}
+void preparationForwardingChangeRetainsRevocation()
+{
+  for (int mode = 0; mode < 3; ++mode) {
+    Pair pair;
+    const auto paint = fixtureState();
+    const InputPreparationBinding origin{90, 6, {71, 83, 2}};
+    const GnomePreparationTarget target{
+        paint.session,          paint.epoch, paint.geometry, paint.surfaceIncarnation, 3, paint.nativeSurface,
+        paint.windowAssociation
+    };
+    bool gate = true, finished = false;
+    std::function<void(bool)> complete;
+    pair.endpoint->onPreparationInventory = [&](const auto &) {
+      return std::optional(GnomePreparationInventory{paint.connection, paint.peerFingerprint, {target}});
+    };
+    pair.endpoint->onPreparationCheck = [&](const auto &binding, const auto &candidate) {
+      return gate && binding == origin && candidate == target;
+    };
+    pair.endpoint->onPreparationDrain = [&](const auto &, const auto &, auto, auto callback) {
+      complete = std::move(callback);
+      return true;
+    };
+    pair.endpoint->onPreparationFinish = [&](const auto &, const auto &, const auto &) {
+      finished = true;
+      return true;
+    };
+    GnomeViewportRequest request;
+    request.operation = GnomeViewportOperation::PreparationInventory;
+    request.request = 1;
+    request.preparation = origin;
+    request.budgetMs = 500;
+    pair.send(request);
+    check(pair.reply(1).ok, "Preparation revocation fixture did not install its gate");
+    request.operation = GnomeViewportOperation::PreparationCleanup;
+    request.request = 2;
+    request.target = target;
+    pair.send(request);
+    check(waitUntil([&] { return bool(complete); }), "Preparation revocation fixture did not begin its witness");
+    pair.endpoint->forwardingFenceChanged();
+    if (mode == 0)
+      pair.endpoint->invalidate(QStringLiteral("viewport-changed"));
+    else if (mode == 1) {
+      gate = false;
+      complete(true); // Native completion cannot bypass the fresh gate check.
+    }
+    // Mode 2 lets the original bounded witness deadline expire.
+    check(!pair.reply(2).ok && !finished, "Forwarding change hid revoked geometry/gate or extended cleanup expiry");
+    complete(true);
+    check(!finished, "A late preparation witness reopened a failed gate");
+  }
 }
 void prefixSealMaps()
 {
@@ -988,7 +1043,7 @@ void fencedInputQueue()
     check(pair.reply(2).ok && pair.reply(2).cutoff == cutoff, "Fenced drain did not echo its exact cutoff");
     // Resume invalidates even a completed receipt, without a geometry change.
     fenced = false;
-    pair.endpoint->invalidate(QStringLiteral("forwarding-fence-changed"));
+    pair.endpoint->forwardingFenceChanged();
     pair.drain();
     check(
         std::any_of(
@@ -1370,6 +1425,7 @@ int main(int argc, char **argv)
     inputDrainProtocol();
     windowDragChannel();
     preparationGatePromotionAndCleanup();
+    preparationForwardingChangeRetainsRevocation();
     prefixSealMaps();
     prefixMapBatches();
     endpointLifetime();

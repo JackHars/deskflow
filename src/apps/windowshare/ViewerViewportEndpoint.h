@@ -78,6 +78,9 @@ public:
       std::function<bool()> exactFence, std::function<void(bool)> finished
   );
   void invalidate(const QString &reason = QStringLiteral("viewport-changed"));
+  // A Host All change retires All observations, but the independent preparation
+  // gate and its pending cleanup witness still need their own exact retirement.
+  void forwardingFenceChanged();
   void close(QString reason = QStringLiteral("owner-closed"));
   const QString &closeReason() const noexcept
   {
@@ -104,7 +107,8 @@ private:
   bool current(std::uint64_t snapshot);
   bool currentInputDrain(const GnomeViewportRequest &request, QDeadlineTimer deadline);
   void finishQtQueue(const GnomeViewportRequest &request, bool observed);
-  void invalidateSnapshot(const QString &reason);
+  void invalidateState(const QString &reason, bool forwardingOnly);
+  void invalidateSnapshot(const QString &reason, bool preservePreparationQueue = false);
   void retireSeal(const QString &reason);
   bool currentInputMap(const GnomeViewportRequest &request, QDeadlineTimer deadline);
   struct RetainedSeal

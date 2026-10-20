@@ -357,6 +357,14 @@ void ViewerViewportEndpoint::write()
 }
 void ViewerViewportEndpoint::invalidate(const QString &reason)
 {
+  invalidateState(reason, false);
+}
+void ViewerViewportEndpoint::forwardingFenceChanged()
+{
+  invalidateState(QStringLiteral("forwarding-fence-changed"), true);
+}
+void ViewerViewportEndpoint::invalidateState(const QString &reason, bool forwardingOnly)
+{
   const QPointer<ViewerViewportEndpoint> alive(this);
   if (m_preparation && m_preparation->focused && !m_preparation->promoted &&
       (!m_preparationPending || m_preparationPending->operation != GnomeViewportOperation::PreparationCleanup)) {
@@ -374,7 +382,7 @@ void ViewerViewportEndpoint::invalidate(const QString &reason)
   }
   retireSeal(reason);
   if (alive)
-    invalidateSnapshot(reason);
+    invalidateSnapshot(reason, forwardingOnly);
 }
 void ViewerViewportEndpoint::retireSeal(const QString &reason)
 {
@@ -387,19 +395,28 @@ void ViewerViewportEndpoint::retireSeal(const QString &reason)
   reply.reason = reason;
   send(reply);
 }
-void ViewerViewportEndpoint::invalidateSnapshot(const QString &reason)
+void ViewerViewportEndpoint::invalidateSnapshot(const QString &reason, bool preservePreparationQueue)
 {
   const QPointer<ViewerViewportEndpoint> alive(this);
-  if (m_preparationPending && (m_preparationPending->operation == GnomeViewportOperation::PreparationDrain ||
-                               m_preparationPending->operation == GnomeViewportOperation::PreparationCleanup)) {
-    finishPreparationQueue(m_preparationPending->request, false);
+  const bool preparationQueue = m_preparation && m_preparationPending && !m_pendingCheck &&
+                                m_preparation->binding == m_preparationPending->preparation &&
+                                (m_preparationPending->operation == GnomeViewportOperation::PreparationDrain ||
+                                 m_preparationPending->operation == GnomeViewportOperation::PreparationCleanup);
+  // Forwarding may resume while its separate preparation gate is still closed.
+  // Do not cancel that gate's in-flight native witness merely because All
+  // changed. Its original timer and fresh exact-fence check remain required.
+  // Geometry, focus, connection and other invalidations still cancel it.
+  if (!(preservePreparationQueue && preparationQueue)) {
+    if (preparationQueue) {
+      finishPreparationQueue(m_preparationPending->request, false);
+      if (!alive)
+        return;
+    }
+    m_queueWitness.cancel();
     if (!alive)
       return;
+    m_queueExpiry.stop();
   }
-  m_queueWitness.cancel();
-  if (!alive)
-    return;
-  m_queueExpiry.stop();
   if (const auto pending = std::exchange(m_pendingCheck, std::nullopt); pending && live()) {
     GnomeViewportReply denied;
     denied.operation = pending->request.operation;
