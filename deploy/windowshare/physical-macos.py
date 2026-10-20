@@ -53,6 +53,19 @@ def command_output_diagnostics(stdout, stderr):
     return "\nstdout:\n" + tail(stdout) + "\nstderr:\n" + tail(stderr)
 
 
+def check_private_port(port):
+    """Check availability only; the native server must still acquire the port."""
+    try:
+        with socket.socket() as reservation:
+            # Match the Unix native listener's restart policy. A closed owned
+            # connection may still be in TIME_WAIT after a recovery test.
+            # Do not use SO_REUSEPORT: a live listener must remain a failure.
+            reservation.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            reservation.bind(("127.0.0.1", port))
+    except OSError as error:
+        raise RuntimeError("Private test port " + str(port) + " unavailable: " + str(error)) from error
+
+
 def private_tunnel_commands(ssh, target, mac, sockets):
     """Keep the input round trip off the video stream's SSH/TCP connection."""
     # -N is classified as non-interactive by SSH, although this dedicated
@@ -816,10 +829,9 @@ def run(arguments):
         report["executableHashes"] = {name: digest(path) for name, path in (
             ("core", mac["coreArgv"][0]), ("host", host_executable),
             ("source", source_executable), ("coordinator", Path(__file__)))}
-        stage("Reserve private connections and trust")
+        stage("Check private connections and prepare trust")
         for port in (mac["corePort"], mac["hostPort"]):
-            with socket.socket() as reservation:
-                reservation.bind(("127.0.0.1", port))
+            check_private_port(port)
         for endpoint in plan["remoteSockets"].values():
             remote(["test", "!", "-e", endpoint])
         # Complete file-only setup before opening the visible Start window.

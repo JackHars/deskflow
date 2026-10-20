@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import socket
 import ssl
 import tempfile
 import threading
@@ -36,6 +37,33 @@ def control_observation(frame, **changes):
 
 
 class PrivateTunnelTests(unittest.TestCase):
+    def test_port_check_allows_a_closed_connection_without_waiting_for_time_wait(self):
+        with socket.socket() as server:
+            server.settimeout(2)
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            port = server.getsockname()[1]
+            server.listen()
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+                connection, _ = server.accept()
+                with connection:
+                    connection.settimeout(2)
+                    # The server initiates close, so its port enters TIME_WAIT.
+                    connection.shutdown(socket.SHUT_WR)
+                    self.assertEqual(client.recv(1), b"")
+                    client.shutdown(socket.SHUT_WR)
+                    self.assertEqual(connection.recv(1), b"")
+        module.check_private_port(port)
+
+    def test_port_check_still_refuses_a_live_listener(self):
+        with socket.socket() as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind(("127.0.0.1", 0))
+            port = server.getsockname()[1]
+            server.listen()
+            with self.assertRaisesRegex(RuntimeError, "Private test port " + str(port)):
+                module.check_private_port(port)
+
     def test_input_and_video_cannot_share_a_forward_or_ssh_master(self):
         ssh = ['ssh', '-F', '/dev/null', '-o', 'StrictHostKeyChecking=yes']
         commands = module.private_tunnel_commands(
