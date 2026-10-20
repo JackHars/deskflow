@@ -1919,6 +1919,24 @@ struct NativeHost::Impl
       const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused, QString &reason
   ) const
   {
+    const auto started = std::chrono::steady_clock::now();
+    auto checkpoint = started;
+    QJsonObject durations;
+    const auto measured = [&](const char *stage) {
+      const auto now = std::chrono::steady_clock::now();
+      durations.insert(stage, qint64(std::chrono::duration_cast<std::chrono::microseconds>(now - checkpoint).count()));
+      checkpoint = now;
+    };
+    const auto timing = qScopeGuard([&] {
+      const auto elapsed = std::chrono::steady_clock::now() - started;
+      if (elapsed >= std::chrono::milliseconds(5)) {
+        durations.insert("elapsedUs", qint64(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+        durations.insert("reason", reason);
+        lifecycleDiagnostic(
+            "Host", "input.surface-inventory-timing", "slow", "Fresh native inventory stages", durations
+        );
+      }
+    });
     const auto incomplete = [&](const char *message) {
       reason = message;
       return false;
@@ -1968,6 +1986,7 @@ struct NativeHost::Impl
     }
     if (!alive || !focusedWithinSource)
       return incomplete("Focused native surface has no proven source ancestry");
+    measured("focusOwnershipUs");
     const auto inventory = [&]() -> std::optional<std::vector<std::uint32_t>> {
       // Ask WindowServer to select live on-screen surfaces. Its all-window
       // list also contains Qt's dormant backing windows, for which the
@@ -1992,9 +2011,11 @@ struct NativeHost::Impl
       return result;
     };
     const auto before = inventory();
+    measured("inventoryBeforeUs");
     if (!before)
       return incomplete("Initial native inventory unavailable");
     CF<CFTypeRef> windows(attribute(app, kAXWindowsAttribute));
+    measured("axWindowsUs");
     if (!alive || !windows || CFGetTypeID(windows.get()) != CFArrayGetTypeID())
       return incomplete("Application AX window list unavailable");
     const auto array = static_cast<CFArrayRef>(windows.get());
@@ -2036,10 +2057,13 @@ struct NativeHost::Impl
       }
       unrelated.push_back(number);
     }
+    measured("classifyUs");
     const auto after = inventory();
+    measured("inventoryAfterUs");
     if (!after || !completeUnrelatedSurfaceInventory(expected.id, *before, *after, unrelated))
       return incomplete("Native window inventory changed or contains an unclassified surface");
     CF<CFTypeRef> fresh(attribute(app, kAXFocusedUIElementAttribute));
+    measured("finalFocusUs");
     if (!alive || !fresh || !CFEqual(fresh.get(), focused))
       return incomplete("Focused element changed while inspecting native windows");
     reason = "Every independent native window is the source or freshly proven unrelated";
