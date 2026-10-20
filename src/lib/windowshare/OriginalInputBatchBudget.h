@@ -9,10 +9,9 @@
 #include <cstddef>
 
 namespace deskflow::windowshare {
-// Scheduling advice for one input owner, never a delivery lease. Keep roughly
-// native work within a short interactive turn, leaving time for mapping,
-// transport and scheduling variation. Every event still
-// needs its original live receipt and fresh native authority at submission.
+// Scheduling advice for one input owner, never a delivery lease. Keep native work within a short interactive turn, leaving time for mapping,
+// transport and scheduling variation. Every event still needs its original
+// live receipt and fresh native authority at submission.
 class OriginalInputBatchBudget
 {
 public:
