@@ -4,10 +4,26 @@
  */
 #pragma once
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <vector>
 
 namespace deskflow::windowshare {
+
+enum class NativeRootWindowKind
+{
+  Unknown,
+  Standard,
+  Dialog
+};
+
+// A root-level nonmodal window is a sibling, not an attached source surface.
+// Unknown modality is not evidence that a window is nonmodal.
+inline bool unrelatedApplicationWindow(NativeRootWindowKind kind, bool applicationParent, std::optional<bool> modal)
+{
+  return applicationParent && modal && !*modal &&
+         (kind == NativeRootWindowKind::Standard || kind == NativeRootWindowKind::Dialog);
+}
 
 // This only permits skipping a child-tree search. Every live independent
 // native window must be the source or freshly proven unrelated in AX. Missing,

@@ -2009,12 +2009,31 @@ struct NativeHost::Impl
       if (number == expected.id || std::find(before->begin(), before->end(), number) == before->end())
         continue;
       AXUIElementSetMessagingTimeout(window, 0.05f);
-      const auto observed =
-          readNativeAttributes(window, std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXParentAttribute});
+      const auto observed = readNativeAttributes(
+          window, std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXParentAttribute, kAXModalAttribute}
+      );
       const auto role = observed.get(0), subrole = observed.get(1), ancestor = observed.get(2);
-      if (!alive || !role || !subrole || !element(ancestor) || !CFEqual(role, kAXWindowRole) ||
-          !CFEqual(subrole, kAXStandardWindowSubrole) || !CFEqual(ancestor, app))
-        return incomplete("Another visible window is not proven an unrelated standard window");
+      auto kind = NativeRootWindowKind::Unknown;
+      if (role && subrole && CFEqual(role, kAXWindowRole)) {
+        if (CFEqual(subrole, kAXStandardWindowSubrole))
+          kind = NativeRootWindowKind::Standard;
+        else if (CFEqual(subrole, kAXDialogSubrole) || CFEqual(subrole, kAXSystemDialogSubrole))
+          kind = NativeRootWindowKind::Dialog;
+      }
+      const auto modalValue = observed.get(3);
+      const std::optional<bool> modal =
+          modalValue && CFGetTypeID(modalValue) == CFBooleanGetTypeID()
+              ? std::optional<bool>(CFBooleanGetValue(static_cast<CFBooleanRef>(modalValue)))
+              : std::nullopt;
+      const bool applicationParent = element(ancestor) && CFEqual(ancestor, app);
+      if (!alive || !unrelatedApplicationWindow(kind, applicationParent, modal)) {
+        reason = QString("Native window %1 is not unrelated (kind=%2, applicationParent=%3, modal=%4)")
+                     .arg(number)
+                     .arg(int(kind))
+                     .arg(applicationParent)
+                     .arg(modal ? (*modal ? "true" : "false") : "unknown");
+        return false;
+      }
       unrelated.push_back(number);
     }
     const auto after = inventory();

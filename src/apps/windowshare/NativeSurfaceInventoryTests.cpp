@@ -28,6 +28,27 @@ int main()
     check(!completeUnrelatedSurfaceInventory(1, {1, 2, 2}, {1, 2}, {2}), "duplicate initial ID was accepted");
     check(!completeUnrelatedSurfaceInventory(1, {1, 2}, {1, 2, 2}, {2}), "duplicate final ID was accepted");
     check(!completeUnrelatedSurfaceInventory(1, {1, 2}, {1, 2}, {2, 2}), "ambiguous AX classification was accepted");
+    const auto dialogInventory = [](bool applicationParent, std::optional<bool> modal) {
+      const std::vector<std::uint32_t> siblings =
+          unrelatedApplicationWindow(NativeRootWindowKind::Dialog, applicationParent, modal)
+              ? std::vector<std::uint32_t>{2}
+              : std::vector<std::uint32_t>{};
+      return completeUnrelatedSurfaceInventory(1, {1, 2}, {1, 2}, siblings);
+    };
+    check(dialogInventory(true, false), "independent nonmodal dialog forced a source control-tree scan");
+    check(!dialogInventory(true, true), "application-modal dialog skipped inspection");
+    check(!dialogInventory(true, std::nullopt), "missing modality skipped inspection");
+    check(!dialogInventory(false, false), "attached nonmodal dialog skipped inspection");
+    check(
+        unrelatedApplicationWindow(NativeRootWindowKind::Standard, true, false) &&
+            !unrelatedApplicationWindow(NativeRootWindowKind::Standard, true, true) &&
+            !unrelatedApplicationWindow(NativeRootWindowKind::Standard, true, std::nullopt),
+        "standard-window subrole substituted for a fresh nonmodal observation"
+    );
+    check(
+        !unrelatedApplicationWindow(NativeRootWindowKind::Unknown, true, false),
+        "unclassified application-owned window skipped inspection"
+    );
     std::puts("PASS: complete fresh native surface inventories and conservative fallbacks");
   } catch (const std::exception &error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

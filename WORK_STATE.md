@@ -79,6 +79,19 @@ both identical inventories, and every other ID must be freshly classified in
 AX. Missing source, newly visible children and changed focus retain the full
 scan. This run's failed drain and raw evidence remain unmodified.
 
+The visible-only candidate (`3d6c230ea`) passes the 19 Mac suites but
+`dashboard-replay-gfe1wgwl` still fails the burst. Active inspections in
+`dashboard-replay-67buzez3/owned-ax-active.txt` and
+`dashboard-replay-ilhzbeuo/owned-ax-active.txt` identify an additional AXDialog
+directly parented by the application's root, with AXModal=false. Both source
+and controls are also direct application children with AXModal=false. The next
+classification accepts only known standard/dialog window roles, an exact
+application parent and an explicit fresh false modality value. Missing or true
+modality, attached parents and unknown roles retain the full scan. Deterministic
+inventory regressions cover each rejection. This avoids treating an unrelated
+nonmodal sibling as a reason to inspect every source control. These diagnostic
+runs failed and remain evidence only, not physical acceptance or launch gates.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its
