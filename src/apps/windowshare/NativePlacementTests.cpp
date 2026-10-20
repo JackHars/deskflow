@@ -221,6 +221,64 @@ void asynchronousNativeInspection()
   dispatchUntil([&] { return !inspection; });
   check(failed, "native exception did not fail closed or completion could not destroy its owner");
 }
+void prioritizedNativeInspection()
+{
+  using Inspection = AsyncNativeInspection<int>;
+  struct Worker
+  {
+    QSemaphore entered;
+    QThread *thread = nullptr; // Published by the semaphore; owner does not dispatch until wait() finishes.
+  };
+  for (int scenario = 0; scenario < 3; ++scenario) {
+    Inspection::Clock::time_point now{};
+    auto inspection = std::make_unique<Inspection>([&] { return now; });
+    QObject normal;
+    std::vector<int> order;
+    std::optional<int> result;
+    int completions = 0;
+    QMetaObject::invokeMethod(
+        &normal,
+        [&] {
+          order.push_back(2);
+          now += Inspection::maximumAge;
+        },
+        Qt::QueuedConnection
+    );
+    const auto worker = std::make_shared<Worker>();
+    check(
+        inspection->request(
+            [worker] {
+              worker->thread = QThread::currentThread();
+              worker->entered.release();
+              return 17;
+            },
+            [&](auto value) {
+              order.push_back(1);
+              result = value;
+              ++completions;
+            }
+        ),
+        "priority fixture could not start its inspection"
+    );
+    check(worker->entered.tryAcquire(1, 2000), "priority fixture worker did not start");
+    // Qt deletion is queued to this thread. Waiting without dispatching keeps
+    // both the ordinary event and the finished inspection pending together.
+    check(worker->thread->wait(2000), "priority fixture worker did not finish");
+    if (scenario == 1)
+      now += Inspection::maximumAge;
+    else if (scenario == 2)
+      inspection.reset();
+    QCoreApplication::sendPostedEvents();
+    if (scenario == 2) {
+      check(completions == 0 && order == std::vector<int>{2}, "queued result survived owner destruction");
+    } else {
+      check(completions == 1 && order == std::vector<int>({1, 2}), "ready inspection waited behind ordinary work");
+      check((scenario == 0 && result == 17) || (scenario == 1 && !result), "priority revived a stale observation");
+      inspection->expire();
+      check(completions == 1, "priority completion was delivered twice");
+    }
+  }
+}
 void asynchronousPlacementObservation()
 {
   for (int scenario = 0; scenario < 6; ++scenario) {
@@ -1154,6 +1212,7 @@ int main(int argc, char **argv)
              std::pair{"global-native-inspection-capacity", &globalNativeInspectionCapacity},
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
+             std::pair{"prioritized-native-inspection", &prioritizedNativeInspection},
              std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},
              std::pair{"asynchronous-placement-preparation", &asynchronousPlacementPreparation},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},

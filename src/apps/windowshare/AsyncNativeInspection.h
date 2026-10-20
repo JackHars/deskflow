@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #pragma once
+#include <QCoreApplication>
+#include <QEvent>
 #include <QObject>
 #include <QThread>
 #include <QTimer>
@@ -10,10 +12,55 @@
 #include <chrono>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 
 namespace deskflow::windowshare {
+
+class NativeInspectionCompletionEvent final : public QEvent
+{
+public:
+  static QEvent::Type eventType()
+  {
+    static const auto value = static_cast<QEvent::Type>(QEvent::registerEventType());
+    return value;
+  }
+  explicit NativeInspectionCompletionEvent(std::function<void()> complete)
+      : QEvent(eventType()),
+        complete(std::move(complete))
+  {
+  }
+  std::function<void()> complete;
+};
+
+// The worker never dereferences its owner. Retirement fences posting before
+// QObject destruction removes any already queued completion. There is still
+// only one read/completion per inspection, under the process-wide worker cap.
+class NativeInspectionDelivery final
+{
+public:
+  explicit NativeInspectionDelivery(QObject *receiver) : m_receiver(receiver)
+  {
+  }
+  void post(std::function<void()> complete)
+  {
+    std::lock_guard lock(m_mutex);
+    if (m_receiver)
+      QCoreApplication::postEvent(
+          m_receiver, new NativeInspectionCompletionEvent(std::move(complete)), Qt::HighEventPriority
+      );
+  }
+  void close()
+  {
+    std::lock_guard lock(m_mutex);
+    m_receiver = nullptr;
+  }
+
+private:
+  std::mutex m_mutex;
+  QObject *m_receiver;
+};
 
 // Shared across result types and owner lifetimes in this process. Cancellation
 // cannot cancel native IPC, and deleting/replacing an owner must not bypass
@@ -82,6 +129,10 @@ public:
     m_timer.setTimerType(Qt::PreciseTimer);
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { expire(); });
   }
+  ~AsyncNativeInspection() override
+  {
+    m_delivery->close();
+  }
   bool request(std::function<Result()> inspect, Completion completion)
   {
     if (QThread::currentThread() != thread() || m_running || !inspect || !completion)
@@ -101,14 +152,15 @@ public:
     // The thread QObject survives its native query and any cancelled owner.
     // Keep its permit until Qt has also retired its deferred deletion.
     QObject::connect(worker, &QObject::destroyed, [permit] { (void)permit; });
-    QObject::connect(
-        worker, &QThread::finished, this,
-        [this, result] {
-          m_running = false;
-          finish(m_now() < m_due ? std::move(*result) : std::nullopt);
-        },
-        Qt::QueuedConnection
-    );
+    QObject::connect(worker, &QThread::finished, [this, result, delivery = m_delivery] {
+      // Completed authority observations must not wait behind an ordinary
+      // frame/control backlog. They still run on the owner and reject the
+      // exact original deadline; priority does not revive an expired read.
+      delivery->post([this, result] {
+        m_running = false;
+        finish(m_now() < m_due ? std::move(*result) : std::nullopt);
+      });
+    });
     // A destroyed owner cancels its callback, without blocking on system IPC.
     QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);
     m_running = true;
@@ -140,6 +192,14 @@ public:
   }
 
 private:
+  bool event(QEvent *event) override
+  {
+    if (event->type() != NativeInspectionCompletionEvent::eventType())
+      return QObject::event(event);
+    auto complete = std::move(static_cast<NativeInspectionCompletionEvent *>(event)->complete);
+    complete(); // May destroy this inspection; do not access it afterward.
+    return true;
+  }
   void finish(std::optional<Result> result)
   {
     m_timer.stop();
@@ -150,6 +210,7 @@ private:
   std::function<Clock::time_point()> m_now;
   Completion m_completion;
   Clock::time_point m_due;
+  std::shared_ptr<NativeInspectionDelivery> m_delivery = std::make_shared<NativeInspectionDelivery>(this);
   QTimer m_timer;
   bool m_running = false;
 };
