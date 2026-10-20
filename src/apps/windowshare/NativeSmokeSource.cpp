@@ -7,6 +7,7 @@
 #include "LifecycleDiagnostics.h"
 #include "ManualStatus.h"
 #include "PhysicalDesktopPreview.h"
+#include "PhysicalInputDashboard.h"
 #include "PhysicalTestReport.h"
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CGEvent.h>
@@ -167,6 +168,10 @@ public:
   {
     m_controlWindow = window;
     save();
+  }
+  void watchDashboard(PhysicalInputDashboard *dashboard)
+  {
+    m_dashboard = dashboard;
   }
   void flush()
   {
@@ -425,6 +430,8 @@ private:
     };
     if (!m_manual.isEmpty())
       metadata["manual"] = m_manual;
+    if (m_dashboard)
+      metadata["inputChecklist"] = m_dashboard->snapshot();
     file.write(QJsonDocument(metadata).toJson(QJsonDocument::Compact));
     file.commit();
   }
@@ -480,6 +487,7 @@ private:
   bool m_evidenceBound = false;
   QString m_path;
   QPointer<QWidget> m_window, m_controlWindow;
+  QPointer<PhysicalInputDashboard> m_dashboard;
   QJsonObject m_originalFrame;
   QJsonObject m_originalControlFrame;
   QJsonObject m_manual;
@@ -584,6 +592,10 @@ public:
   {
     return m_valid && !m_ended && m_state == "active" && m_request == "start";
   }
+  int recordingSeconds() const
+  {
+    return m_sessionSeconds == 150 ? 120 : 30;
+  }
 
 private:
   bool coordinatorLost() const
@@ -672,13 +684,11 @@ private:
       m_status->setText(QStringLiteral("Active — %1 seconds remaining").arg(m_remainingSeconds));
       if (m_recordInput && m_sessionSeconds == 120)
         m_instructions->setText(
-            "1. Ctrl+Option+Shift+Right, then release all keys. Look at the Ubuntu monitor.\n"
-            "2. Move its pointer into the Ubuntu text box. Click and release twice, then press Escape.\n"
-            "3. Type a, Shift+b, c; hold x for 1 second. Drag inside the text box and scroll both ways. Release "
-            "everything. Keep the pointer inside the text box.\n"
-            "4. Press Return to request recording; wait for Recording. Stay on the Ubuntu route.\n"
-            "5. Repeat those inputs for 30 seconds; stay here until Recording complete.\n"
-            "6. Ctrl+Option+Shift+Left to return. Release all keys, then click Stop."
+            "1. Ctrl+Option+Shift+Right, then release all keys. Look at Ubuntu.\n"
+            "2. Practice the four areas on its test board.\n"
+            "3. Click Record on Ubuntu, then release all controls.\n"
+            "4. When the blue RECORDING banner appears, repeat the checks.\n"
+            "5. After recording ends, Ctrl+Option+Shift+Left returns here. Release the keys, then click Stop."
         );
       else
         m_instructions->setText(
@@ -727,7 +737,8 @@ private:
       QMetaObject::invokeMethod(m_start, &QPushButton::click, Qt::QueuedConnection);
     }
     m_stop->setEnabled(!m_ended);
-    m_field.setReadOnly(m_state != "active");
+    if (!m_recordInput)
+      m_field.setReadOnly(m_state != "active");
     m_recorder.setManualMetadata(
         {{"state", m_state},
          {"request", m_request},
@@ -763,16 +774,27 @@ class EvidenceControls final : public QObject
 {
 public:
   EvidenceControls(
-      InputEvidenceRuntime &runtime, ManualAcceptance &manual, QString request, QVBoxLayout &layout, QLineEdit &field
+      InputEvidenceRuntime &runtime, ManualAcceptance &manual, QString request, QVBoxLayout &layout, QLineEdit &field,
+      PhysicalInputDashboard *dashboard
   )
       : m_runtime(runtime),
         m_manual(manual),
-        m_request(std::move(request))
+        m_request(std::move(request)),
+        m_dashboard(dashboard),
+        m_field(field)
   {
+    if (m_dashboard)
+      m_dashboard->setRecordingGate([this] { return m_runtime.recorder().recording(); });
     m_label = new QLabel;
     m_label->setTextFormat(Qt::PlainText);
     m_label->setWordWrap(true);
-    m_record = new QPushButton("Record");
+    m_record = new QPushButton(QStringLiteral("Record %1-second check").arg(m_manual.recordingSeconds()));
+    m_record->setObjectName("recordButton");
+    m_record->setMinimumHeight(40);
+    m_record->setStyleSheet(
+        "QPushButton { background: #245eea; color: white; border-radius: 6px; font-weight: 600; }"
+        "QPushButton:disabled { background: #d6dfeb; color: #526581; }"
+    );
     m_record->setFocusPolicy(Qt::NoFocus);
     layout.addWidget(m_label);
     layout.addWidget(m_record);
@@ -786,12 +808,19 @@ public:
     update();
   }
 
+  ~EvidenceControls() override
+  {
+    if (m_dashboard)
+      m_dashboard->setRecordingGate({});
+  }
+
 private:
   void requestRecord()
   {
     if (!m_requested && m_manual.activeForEvidence() && m_runtime.recorder().state() == InputEvidenceState::Waiting) {
       m_requested = true;
       m_requestOkay = m_runtime.requestRecord(m_request);
+      m_field.setFocus(Qt::OtherFocusReason);
       update();
     }
   }
@@ -800,6 +829,12 @@ private:
     const auto state = m_runtime.recorder().state();
     const bool lost = m_runtime.recorder().loss() != InputEvidenceLoss::None || (m_requested && !m_requestOkay);
     m_record->setEnabled(!m_requested && !lost && m_manual.activeForEvidence() && state == InputEvidenceState::Waiting);
+    m_record->setText(
+        state == InputEvidenceState::Recording ? "Recording — use the test board above"
+        : state == InputEvidenceState::Stopped ? "Recording finished"
+        : m_requested                          ? "Recording requested"
+                      : QStringLiteral("Record %1-second check").arg(m_manual.recordingSeconds())
+    );
     if (lost || state == InputEvidenceState::Denied)
       m_label->setText("Recording declined. Return to Mac and Stop; retain diagnostics.");
     else if (state == InputEvidenceState::Stopped)
@@ -811,13 +846,43 @@ private:
     else if (m_requested)
       m_label->setText("Record requested. Release controls and stay on the Ubuntu route. Wait for Recording.");
     else
-      m_label->setText(
-          "Prime the controls, then press Return in the text box (or click Record). Stay on the Ubuntu route."
-      );
+      m_label->setText("Practice first, then click Record. Wait for the blue banner and repeat the checks on Ubuntu.");
+    if (m_dashboard) {
+      using Phase = PhysicalInputDashboard::Phase;
+      const auto phase = lost || state == InputEvidenceState::Denied ? Phase::Failed
+                         : state == InputEvidenceState::Stopped      ? Phase::Complete
+                         : state == InputEvidenceState::Draining     ? Phase::Draining
+                         : state == InputEvidenceState::Recording    ? Phase::Recording
+                         : m_requested                               ? Phase::Arming
+                         : m_manual.activeForEvidence()              ? Phase::Practice
+                                                                     : Phase::Waiting;
+      const auto elapsed = state == InputEvidenceState::Recording
+                               ? (inputEvidenceNow() - m_runtime.recorder().start()) / 1000000000ULL
+                               : 0;
+      const auto remaining = std::max(0, m_manual.recordingSeconds() - int(elapsed));
+      m_dashboard->setPhase(phase, remaining);
+      const auto snapshot = m_dashboard->snapshot();
+      const auto signature = m_dashboard->phaseName() + ':' + QString::number(m_dashboard->checked());
+      if (signature != m_loggedProgress) {
+        lifecycleDiagnostic("Test board", "input.checklist", "observed", "Visible input checks changed", snapshot);
+        m_loggedProgress = signature;
+      }
+      // A completed timer is not a successful input test. Retain incomplete
+      // visual checks and leave independent native/transport acceptance open.
+      if (phase == Phase::Complete)
+        m_label->setText(
+            m_dashboard->checked() == 6
+                ? "All visual checks observed. Return to Mac and click Stop; logs will be verified."
+                : "Recording ended with missing checks. Return to Mac and click Stop; this is incomplete."
+        );
+    }
   }
   InputEvidenceRuntime &m_runtime;
   ManualAcceptance &m_manual;
   QString m_request;
+  PhysicalInputDashboard *m_dashboard = nullptr;
+  QLineEdit &m_field;
+  QString m_loggedProgress;
   QLabel *m_label = nullptr;
   QPushButton *m_record = nullptr;
   QTimer m_timer;
@@ -889,14 +954,24 @@ int main(int argc, char **argv)
   Recorder recorder(arguments.at(2));
   AcceptanceWindow window;
   window.setWindowTitle(arguments.at(1));
-  window.resize(640, 420);
+  window.resize(manualMode ? QSize(740, 640) : QSize(640, 420));
   auto *layout = new QVBoxLayout(&window);
   if (!manualMode)
     layout->addWidget(
         new QLabel("Deskflow native capture/input test\nThis temporary window closes automatically.", &window)
     );
-  auto *field = new QLineEdit(&window);
-  layout->addWidget(field);
+  PhysicalInputDashboard *dashboard = nullptr;
+  QLineEdit *field = nullptr;
+  if (manualMode && !recordRequestPath.isEmpty()) {
+    dashboard = new PhysicalInputDashboard(&window);
+    layout->setContentsMargins(0, 0, 0, 12);
+    layout->addWidget(dashboard);
+    field = &dashboard->field();
+    recorder.watchDashboard(dashboard);
+  } else {
+    field = new QLineEdit(&window);
+    layout->addWidget(field);
+  }
   std::unique_ptr<AcceptanceWindow> controls;
   QVBoxLayout *controlsLayout = layout;
   if (separateControls) {
@@ -918,7 +993,8 @@ int main(int argc, char **argv)
   // returning to the Mac to arm would replace the route being measured.
   std::unique_ptr<EvidenceControls> evidenceControls;
   if (!recordRequestPath.isEmpty())
-    evidenceControls = std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout, *field);
+    evidenceControls =
+        std::make_unique<EvidenceControls>(*evidence, *manual, recordRequestPath, *layout, *field, dashboard);
   if (controls)
     controls->onManualClose = window.onManualClose;
   if (!disablePresentationAnimation(window, "source") ||

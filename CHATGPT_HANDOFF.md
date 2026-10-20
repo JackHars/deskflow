@@ -4,6 +4,14 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
+Latest UI update (2026-10-19): the disposable source now has a visible input
+board with held-X/repeat feedback, click counts, a puck/drop target, a scroll
+grid and six phase-scoped checks. Practice is cleared when Recording begins;
+empty or incomplete recordings are shown as incomplete. Mac and Ubuntu
+headless widget checks pass. No new physical acceptance is claimed. See the
+October 19 entries in `TESTING.md` and `WORK_STATE.md` for evidence and the
+required new fixture/pipeline binding before another attended attempt.
+
 Latest autonomous repair (2026-10-16): Mac runtime/source fixture `fd2db144c`,
 unchanged Ubuntu runtime `52bddb84b`, harness/postprocessor `c3b545d78`.
 The latest fixes keep repeated Screen Recording preflight out of the input
@@ -33,8 +41,9 @@ still fail acceptance. These are not physical-input passes. Attempt
 `physical-r33-gqm9_8ei` timed out waiting for Start while the user was away;
 sharing never began and cleanup completed. October 19 preparation
 `physical-r34-rgza46pp` retained one helper-startup timeout followed by two
-passing input-disabled checks with unchanged deadlines. Its fresh launch
-permission is pending; no new attended launch is authorized.
+passing input-disabled checks with unchanged deadlines. The user then approved
+the run; it stopped cleanly but recorded no source/native input rows. Its
+approval is consumed, and no further attended launch is authorized.
 Autonomous disposable checks are authorized. Obtain fresh user permission
 immediately before any attended keyboard/trackpad test.
 

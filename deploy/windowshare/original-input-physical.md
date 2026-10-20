@@ -186,14 +186,22 @@ pass exact-library admission.
    the shared test window, and click its text box using the Ubuntu pointer.
    Setup actions are retained as setup; they are not evidence of
    successful original delivery.
-3. Prime the intended physical controls: click/release inside the exported
-   source, press/release a, b, c, x and Shift, and finish a short scroll gesture.
+3. Use the board's **Practice** phase to try each visible control. Type `aBc`,
+   hold x for at least one second and release it, click the click-test button,
+   drag the blue puck into its ring and release, then scroll the numbered grid
+   up, down, left and right. The repeat counter, hold meter, click counter,
+   puck position and moving grid make each effect visible. The six checkmarks
+   describe observations in this test window, not transport acceptance.
+   This primes the intended physical controls: click/release, a, b, c, x,
+   Shift and scrolling.
    The production transition policy intentionally denies an unknown first
    acquisition cycle. Do not invent a neutral physical snapshot to bypass it.
    Release everything and wait for the route to settle. If the source/Viewer
    cannot be reached or focus is wrong, Stop; do not claim the run succeeded.
-4. Press **Return** in the source's text box, or click its distinct **Record**
-   button in the Viewer. Both request the same one-shot recording. Stay on the
+4. Click **Record 30-second check** on the Ubuntu board. Return in the text box
+   remains a fallback when diagnosing pointer delivery. Both request the same
+   one-shot recording. Release the controls and wait for the blue **RECORDING
+   NOW** banner and its countdown. Stay on the
    Ubuntu route; returning left replaces the route being measured. Both controls
    remain in the exported source even when H06 uses separate local controls.
    They create a single exact run request; they do not grant input permission.
@@ -201,10 +209,13 @@ pass exact-library admission.
    rows after that request and the exact source PID/window in the native
    recorder. It attempts arm once and requires accepted receipts from all
    three recorders. A denied, partial or changed-owner arm is terminal.
-5. Wait for the coordinator's `evidence-recording` event before the measured
-   sequence. For 30 seconds, type a, Shift+b, c; hold/release x; move the
-   pointer, click/drag, and scroll vertically and horizontally inside the
-   disposable source. Release each control. Do not change applications,
+5. Recording clears the practice text, counters and checks. Repeat all four
+   areas during the countdown; each of the six checkmarks must light up again.
+   A held-x check requires an initial press, actual repeat events, at least
+   one second held and a release. A drag check requires a drag followed by
+   release inside the ring. Scroll checks require movement in both directions
+   on each axis; moving a scrollbar is not a wheel-input receipt.
+   Release each control. Do not change applications,
    routing owner, source window or geometry while recording. Unrelated keys
    are not a substitute for the declared primed controls.
 6. Finish with all controls released and the pointer still. Wait for
@@ -214,6 +225,15 @@ pass exact-library admission.
    the owner and invalidates that measurement; the harness does not trim the
    failure out or rearm. Stop is always available for early cancellation, and
    the absolute deadline remains an independent stop.
+
+The live board saves phase-scoped counters and checkmarks under `inputChecklist`
+in the source snapshot, and prints `Test board: input.checklist` changes. A
+recording with missing checks is visibly incomplete, including an empty one.
+Scoring stops at the recorder's actual boundary, even before the next label
+refresh. Native journals and the strict normalizer remain authoritative for
+receipt matching; the board never changes raw timestamps or declares physical
+acceptance. Its puck tests button-held pointer dragging; ordinary titlebar
+cross-machine dragging is still a separate H07 acceptance test.
 
 The 30-second recording must begin with at least 35 seconds left in the
 visible session. There is no retry within a run. Start a new run with fresh

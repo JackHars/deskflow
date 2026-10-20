@@ -1,5 +1,12 @@
 # Experimental window sharing
 
+The October 19 test-fixture update makes input effects visible: a held-X
+repeat meter, click counter, drag/drop puck and scroll grid. Practice and
+Recording have separate checklists and clear countdowns. An empty recording
+cannot look complete. This improves test observation; it does not close
+physical acceptance. Current evidence and fresh-fixture retest requirements
+are at the top of `TESTING.md`.
+
 ## Current implementation — 2026-10-16
 
 P1–P8 code is integrated, but physical acceptance remains open. The user

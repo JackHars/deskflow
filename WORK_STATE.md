@@ -1,5 +1,42 @@
 # Seamless Windows work state
 
+## Visible physical-input board — 2026-10-19
+
+The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its
+30-second recording and stopped through the visible Stop control. The source
+returned, all owned processes stopped, held controls were zero, and ordinary
+settings were preserved. All 21 queue histories validate, but the strict join
+rejects the recording: both source and native input rows are empty. The user
+reported repeating the actions, then clarified that a textbox showing `aBc`
+did not let them judge repeat, dragging or scrolling. Preserve that feedback
+and the raw logs; do not call this physical acceptance or assume its cause.
+Review: `build/physical-r34-rgza46pp/receipt-review.json` and `human-feedback.json`.
+
+The new disposable fixture replaces that textbox-only flow with a visible test
+board: actual X-repeat count plus hold/release meter, click count, a puck/drop
+target, and a moving grid with independent two-direction scroll indicators.
+Practice and Recording have distinct banners. Recording resets all six checks,
+shows its countdown and retains incomplete results. Scoring uses the recorder's
+actual cutoff, not only the display timer. Phase-scoped progress is saved in
+`source.json` under `inputChecklist` and printed when checkmarks change. These
+widget observations cannot establish transport/native-field acceptance.
+
+Validation: `build/input-dashboard-0lr7o8hq/`. The Mac source fixture builds;
+`mac-ui-boundary-result.json` records four passing suites (input board, manual
+status, report, input evidence). `linux-ui-boundary-result.json` records the
+same board regressions passing offscreen in the existing pinned build container
+on jack. Tests cover real widget events, missing repeats/releases, failed drops,
+individual scroll axes, practice reset, empty recordings and post-cutoff input.
+Rendered previews are in `previews-boundary/`. No physical test was launched
+for this UI change, and no shared-input deadline or raw journal was changed.
+
+The native Mac/Ubuntu runtime packages remain at `fd2db144c` / `52bddb84b`.
+The source fixture changed: the old three-run artifact proof cannot authorize
+this new fixture. Before the next attended run, refresh the source binding,
+freeze this fixture and repeat the actual-desktop pipeline gate with matching
+artifacts. Obtain fresh user permission immediately before physical launch.
+H03–H12 acceptance remains open.
+
 ## Rapid scrolling repair — 2026-10-16
 
 Current Mac runtime and source fixture: `fd2db144c3576cf9bcd8df8be9efdf4f48b109bb`.
@@ -114,8 +151,9 @@ run completed in 12.828 seconds (`code-admission-uninstrumented.log`). A stack
 sample from the first retry has no usable call graph; it does not establish
 the cause. No timeout or trust check was relaxed. Final preflight confirms
 jack's actual desktop is unlocked and no conflicting Mac primary is running.
-A fresh launch-permission question is pending. H03–H12 physical acceptance
-remains open; setup checks and earlier replies are not launch authorization.
+The user subsequently approved and ran this attempt. It stopped cleanly, but
+its empty input recording remains incomplete; see the October 19 board update
+above. Its approval has been consumed. H03–H12 physical acceptance remains open.
 
 ## Private input dispatch repair — 2026-10-16
 
