@@ -155,6 +155,13 @@ class RecoveryTests(unittest.TestCase):
         before = copy.deepcopy(pipeline)
         self.assertTrue(module.assess(report, pipeline))
         self.assertEqual(pipeline, before)
+        later_exit = copy.deepcopy(pipeline)
+        later_failed = later_exit["cleanupLinuxFailure"]
+        later_failed["sessionCleanupErrors"][0] = \
+            "private core IPC stop: physical fixture core did not exit normally after IPC stop (exit 1)"
+        later_exit["cleanupErrors"] = ["Linux stop: Ubuntu test failed: " + failed["failure"] +
+                                      "; cleanup=[]; sessionCleanup=" + str(later_failed["sessionCleanupErrors"])]
+        self.assertTrue(module.assess(report, later_exit))
         self.assertFalse(module.assess(self.report, pipeline))  # Not an exception for other faults.
         self.assertFalse(module.assess(report, {**pipeline, "cleanupLinuxFailure": None}))
         for changes in ({"coreExit": -11}, {"event": "stopped"}, {"lifecycleCompleted": True},

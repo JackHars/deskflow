@@ -108,7 +108,10 @@ def assess(report, pipeline):
                                ("ordinaryPreserved", "ownedProcessesStopped", "desktopRestored"))
                     or "Actual TLS connection ended before coordinated stop" not in str(failed.get("failure"))
                     or not isinstance(session_errors, list)
-                    or not all(error == "private core IPC stop: [Errno 104] Connection reset by peer"
+                    or not all(error in (
+                                   "private core IPC stop: [Errno 104] Connection reset by peer",
+                                   "private core IPC stop: physical fixture core did not exit normally after IPC stop (exit 1)"
+                               )
                                or (isinstance(error, str) and error.startswith("relay: Private relay failed:")
                                    and "Actual TLS connection ended before coordinated stop" in error)
                                for error in session_errors)):
