@@ -4,6 +4,62 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Scrolling fixes and remaining acceptance gap — 2026-10-20
+
+Current tested runtime: `6d1447f1cf1d7a55086e66b175e12d0f00f45263` on both machines.
+Build/signature records: `build/scroll-worker-final-ye18v6r6/`.
+
+Two sources of blocking work are repaired. Evidence serialization previously
+occupied the input thread for 39–55 ms; it now yields after 128 rows or 2 ms,
+with one continuation and unchanged recorder capacity, content, order and
+footer rules. A separate setup failure occurred when a 336 ms WindowServer
+read blocked delivery of the environment watchdog response. Setup observations
+now run in one background reader, followed by fresh owner/lifecycle/geometry
+checks on the Host thread. Placement retains its original two-second absolute
+verification deadline. Input/environment deadlines remain 250 ms. Cancellation,
+stale results and duplicate completions cannot resume a stopped transaction.
+
+The diagnostic parser also discarded native `slow`, `denied`, `expired` and
+similar states. It now retains all structurally valid states. Native logs carry
+thread IDs without dereferencing the application object from a late worker.
+Original raw failure logs remain intact. No sleep, input rewrite, queue increase
+or acceptance waiver was introduced.
+
+Validation: all 20 selected Mac suites and 16 Ubuntu suites pass. The unchanged
+harness binding in `build/scroll-harness-validation-t0cohbgq/` records 107
+coordinator and 42 normalizer checks passing on each machine. New regressions
+cover cooperative exact-row serialization and teardown, a blocked placement
+read alongside responsive environment/input work, no overlapping native reads,
+coalesced observation notifications, duplicate/late callbacks, expiry,
+cancellation and destruction. An intermediate GCC test-fixture compile error
+is retained in `build/scroll-placement-worker-en697kmi/`; the corrected
+explicit callback parameter passes on both compilers.
+
+Actual-desktop replay: `build/dashboard-replay-64ie7k1n/`, using jack's real
+GNOME monitor. The setup query again takes 326 ms, now on a background thread;
+startup succeeds. The session completes 120 seconds Active and all three
+30-second recordings. All 21 queue journals validate, recorder loss is zero,
+queues drain, held input is zero, and the source restores while its Host is
+still alive. Owned processes stop and ordinary Mac configuration is unchanged.
+
+All 1,200 indexed scroll events at 119.19 Hz reach Core and the exact target
+process with unchanged raw fields and flags. Same-Mac HID-to-process latency
+is median 43.1 ms, p95 98.2 ms and maximum 128.4 ms; the final event is 50.1 ms.
+The process observer closes cleanly. The strict AppKit-window comparison still
+**fails**: events 1105 and 1106 become one combined receipt, leaving 1,199.
+The saved `scroll-boundary-diagnostic.json` explains the sum without replacing
+or repairing the original evidence. The ordinary board observes typing,
+clicking, drag/drop and both scroll axes; repeat and strict timestamp acceptance
+remain separate unresolved requirements.
+
+The local AppKit isolation experiment and earlier failures are detailed in
+`WORK_STATE.md`. It also combines updates without Deskflow or a network path,
+while preserving total point/fixed-point movement. That is diagnostic evidence,
+not permission to weaken exact receipt requirements. Scrolling acceptance and
+the roadmap remain open: three consecutive qualified same-artifact passes
+have not been achieved. No attended test was launched; obtain permission
+immediately before any future physical test.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its

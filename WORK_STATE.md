@@ -1,5 +1,37 @@
 # Seamless Windows work state
 
+## Current scrolling result — 2026-10-20
+
+The tested Mac/Ubuntu candidate is `6d1447f1c` in
+`build/scroll-worker-final-ye18v6r6/`. All 20 selected Mac suites and 16 Ubuntu
+suites pass. The unchanged two-machine harness proof has 107 coordinator and
+42 normalizer checks passing on each machine. Mac archive SHA-256:
+`91c4f611281121f067b5820ff0b62fe22492cd5b5970bfa83c16912211ecbca9`;
+Ubuntu archive SHA-256:
+`8ecbad3ce4fbc1faf1f62bbbd0baa378dea35118c2b9fe3ecaf7d867a829e0ac`;
+source fixture SHA-256:
+`9e2be3a1683e590664b728474a5fa79804e3f0004389749ab9512ad7ca428886`.
+
+`dashboard-replay-64ie7k1n` completes normal startup, 120 seconds Active, the
+three 30-second recordings, all 21 queue journals, normal restoration while
+the Host remains alive, zero held input, owned cleanup and unchanged ordinary
+configuration. The slow startup query is reproduced at 326 ms on the worker;
+its result returns to the owner thread and setup succeeds. Other main-thread
+identity queries still occur (232 and 253 ms during preparation); this is not
+a claim that all native OS calls are nonblocking. No collector turn exceeds
+the 25 ms diagnostic threshold in this run.
+
+All 1,200 originals at 119.19 Hz reach the exact target process unchanged.
+Same-Mac process delay is median 43.1 ms, p95 98.2 ms, maximum 128.4 ms and
+50.1 ms at the tail. The observer has a complete clean footer. AppKit combines
+1105–1106, so exact window delivery remains **failed** (1,199 receipts). The
+normalizer failure, repeat limitation and strict timestamps are retained.
+The report is `build/dashboard-replay-64ie7k1n/scroll-boundary-diagnostic.json`.
+This is a successful diagnostic lifecycle with an unresolved acceptance gap,
+not a complete scrolling/roadmap pass. No attended test is ready: the required
+three consecutive qualified runs have not been obtained. See the current
+`TESTING.md` section for the fixes, regression coverage and remaining scope.
+
 ## Scroll diagnosis — asynchronous placement observation — 2026-10-20
 
 `0fbcc6e2c` passes 20 Mac and 16 Ubuntu suites; the coordinator and normalizer
@@ -37,8 +69,8 @@ old native call remains outstanding.
 The focused Mac placement suite passes with regressions for a blocked read
 alongside a responsive environment/input turn, no overlap, one follow-up for
 concurrent notifications, duplicate/stale callbacks, exact expiry, cancellation
-and destruction. Slow-operation logs now identify whether the operation ran on
-the application thread. Matching full builds and actual-desktop checks remain
+and destruction. Slow-operation logs now include thread IDs for comparison with the owner
+thread, without reading application lifetime from a late worker. Matching full builds and actual-desktop checks remain
 pending; scrolling and the roadmap are not accepted as complete.
 
 ## Scroll diagnosis — cooperative evidence serialization — 2026-10-20
