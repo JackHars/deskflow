@@ -47,8 +47,13 @@ START_WAIT_SECONDS = 300
 
 def private_tunnel_commands(ssh, target, mac, sockets):
     """Keep the input round trip off the video stream's SSH/TCP connection."""
+    # -N is classified as non-interactive by SSH, although this dedicated
+    # connection carries live keyboard/trackpad traffic. Request interactive
+    # packet service for input only; video remains at the OS default. This is
+    # scheduling advice, never a lease extension or evidence of delivery.
     return {"tunnel-" + name: [*ssh, "-N", "-o", "ControlMaster=no", "-o", "ControlPath=none",
                               "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=no",
+                              "-o", "IPQoS=" + ("ef" if name == "core" else "none"),
                               "-R", sockets[name] + ":127.0.0.1:" + str(mac[key]), target]
             for name, key in (("core", "corePort"), ("viewer", "hostPort"))}
 

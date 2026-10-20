@@ -54,6 +54,9 @@ class PrivateTunnelTests(unittest.TestCase):
             forwards.append(command[command.index('-R') + 1])
         self.assertEqual(set(forwards), {'/private/core.sock:127.0.0.1:24860',
                                          '/private/viewer.sock:127.0.0.1:24861'})
+        self.assertIn('IPQoS=ef', commands['tunnel-core'])
+        self.assertNotIn('IPQoS=ef', commands['tunnel-viewer'])
+        self.assertIn('IPQoS=none', commands['tunnel-viewer'])
 
     def test_either_transport_exit_is_terminal_even_during_linux_or_preview_stop(self):
         for failed in ('tunnel-core', 'tunnel-viewer'):

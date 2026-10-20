@@ -2,6 +2,20 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+The adaptive-capacity build `bc6abdcb0` passes 19 Mac and 15 Ubuntu suites, but
+`dashboard-replay-vj5vum94` fails before its stress burst. Core mapping request
+39 exceeds 250 ms; the Mac SSH socket's retransmitted-byte counter rises from
+0 to 756 during the failing ordinary-scroll sequence. Ubuntu receives request
+39 late, rather than spending that time mapping it. An idle 30-packet LAN probe
+has no loss and 1.9 ms average RTT; that does not rule out loss under live video.
+
+The next harness requests SSH's interactive `IPQoS=ef` for the dedicated input
+tunnel, while the separate video tunnel uses the OS default. This affects only
+these disposable connections, not SSH configuration or network settings. It is
+an attempt to reduce transport contention, not proof of a network fix. Runtime
+artifacts remain exactly `bc6abdcb0`; fresh two-machine harness checks and
+actual-desktop verification are required before any acceptance claim.
+
 `6c48b5feb` passes 19 Mac and 15 Ubuntu suites. Its desktop run
 `dashboard-replay-3v32sh4y` improves throughput but still fails exact delivery:
 the source emits 1,200 events at 119.84 Hz, some native receipts are missing or
