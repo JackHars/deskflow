@@ -3,6 +3,18 @@
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
 
+The fresh-ID candidate `c71f653b9` also fails sustained scrolling: its
+`dashboard-replay-pwllvqc6` run emits all 1,200 indexed events at 119.93 Hz but
+receives only 362 burst events before the unchanged capture/route join deadline.
+All five non-repeat board checks pass; restoration and owned cleanup complete.
+The 19 Mac and 15 Ubuntu suites pass, but this is not a scrolling pass.
+A separate sampler run `dashboard-replay-9jv1pgzv` perturbs the Host enough to
+expire a receipt; it is diagnostic only. A lighter per-operation diagnostic now
+separates event construction, native validation, submission and completion, and
+splits the fresh inventory's window-ID and classification costs. No deadline,
+event content, native check, queue capacity or evidence rule changes.
+
+
 The prefix/counter candidate `c50025636` passes all 19 Mac and 15 Ubuntu suites,
 plus 106 coordinator and 42 normalizer checks on each machine. Its
 `dashboard-replay-2xgz_oo1` desktop run still fails the capture/route join after

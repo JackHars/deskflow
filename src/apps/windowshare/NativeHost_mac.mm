@@ -2105,13 +2105,17 @@ struct NativeHost::Impl
     if (CFArrayGetCount(array) > 64)
       return incomplete("Application AX window list exceeded its bound");
     std::vector<std::uint32_t> unrelated;
+    std::chrono::microseconds idTime{}, attributesTime{};
     for (CFIndex i = 0; i < CFArrayGetCount(array); ++i) {
       const auto window = element(CFArrayGetValueAtIndex(array, i));
       CGWindowID number = 0;
+      const auto idStarted = std::chrono::steady_clock::now();
       if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
         return incomplete("AX window has no exact native identity");
+      idTime += std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - idStarted);
       if (number == expected.id || std::find(initialIds.begin(), initialIds.end(), number) == initialIds.end())
         continue;
+      const auto attributesStarted = std::chrono::steady_clock::now();
       AXUIElementSetMessagingTimeout(window, 0.05f);
       const auto observed = readNativeAttributes(
           window, std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXParentAttribute, kAXModalAttribute}
@@ -2139,8 +2143,13 @@ struct NativeHost::Impl
         return false;
       }
       unrelated.push_back(number);
+      attributesTime +=
+          std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - attributesStarted);
     }
     measured("classifyUs");
+    durations.insert("windowIdsUs", qint64(idTime.count()));
+    durations.insert("windowAttributesUs", qint64(attributesTime.count()));
+    durations.insert("axWindows", qint64(CFArrayGetCount(array)));
     std::vector<std::uint32_t> classified = unrelated;
     classified.push_back(expected.id);
     NativeSurfaceInventoryCheck inspection{expected.id, finalInventory ? classified : before->ids, unrelated, visible};
@@ -2914,6 +2923,23 @@ struct NativeHost::Impl
       const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
   )
   {
+    const auto started = std::chrono::steady_clock::now();
+    auto constructed = started, authorized = started, submitted = started;
+    const auto timing = qScopeGuard([&] {
+      const auto finished = std::chrono::steady_clock::now();
+      const auto us = [](auto duration) {
+        return qint64(std::chrono::duration_cast<std::chrono::microseconds>(duration).count());
+      };
+      if (finished - started >= std::chrono::milliseconds(5))
+        lifecycleDiagnostic(
+            "Host", "input.delivery-timing", "slow", "Original input construction, validation and submission timing",
+            {{"elapsedUs", us(finished - started)},
+             {"constructionUs", us(constructed - started)},
+             {"authorityUs", us(authorized - constructed)},
+             {"postUs", us(submitted - authorized)},
+             {"completionUs", us(finished - submitted)}}
+        );
+    });
     const auto admitted = lifecycle->admission();
     if (!admitted || QThread::currentThread() != q->thread() || !originalInput.current(binding, record.epoch))
       return false;
@@ -2982,6 +3008,7 @@ struct NativeHost::Impl
       if (!event)
         return deny("Original event construction failed");
     }
+    constructed = authorized = submitted = std::chrono::steady_clock::now();
     // Native identity/focus reads may block. The receipt is never renewed by
     // them; recheck it and the pending exact owner immediately before posting.
     // Preflight only admits preparation under the exact established local
@@ -2990,9 +3017,11 @@ struct NativeHost::Impl
     if (!originalInputCurrent(binding, record.epoch, true) || !alive || !liveLocalInputMappedPoint(point) ||
         originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
       return deny("Fresh native authority or mapped receipt changed before submission");
+    authorized = submitted = std::chrono::steady_clock::now();
     trace("authorized");
     if (prepared->posts)
       CGEventPostToPid(target->identity.pid, event.get());
+    submitted = std::chrono::steady_clock::now();
     // CGEventPostToPid is a synchronous submission and runs no application/Qt
     // callbacks. Record the submitted press before any further native queries.
     if (!originalInput.submitted(prepared->token))
