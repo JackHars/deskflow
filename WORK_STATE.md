@@ -1,5 +1,34 @@
 # Seamless Windows work state
 
+## Scroll diagnosis — metadata on native control paths — 2026-10-20
+
+`8a7f18d9f` passes 20 Mac and 16 Ubuntu suites. Its first desktop run,
+`dashboard-replay-8i95d_m7`, completes 120 seconds Active and all three 30-second
+recordings with loss=0, drained queues, restoration and owned-process cleanup.
+All 1,200 raw scroll records and flags reach the exact target process in order;
+the independent observer has a clean footer. AppKit combines three adjacent
+pairs, leaving 1,197 window receipts. The strict receipt failure is retained.
+Same-Mac HID-to-process latency is median 144.8 ms, p95 427.5 ms, maximum
+467.1 ms, ending at 424.9 ms. This is **not an acceptable scrolling pass**.
+No capture-consumer, collector or coordinator service exceeds its 25 ms logging
+threshold in this run. Network mapping reaches 102.8 ms and the SSH socket
+reports retransmissions. Core activity alone does not prove the issue fixed.
+
+The repeat `dashboard-replay-d3tiagii` stops before input starts. Its initial
+holding-placement identity lookup takes about 335 ms; the background display
+inspection finishes in 71 ms but its owner-thread delivery expires while that
+lookup blocks. Restoration and owned cleanup succeed. Native identity lookups
+still request titles and application bundle metadata on placement, watchdog,
+focus and release paths although those callers use only ID/PID/birth/frame.
+
+The next candidate defaults native identity reads to those fresh authority
+fields. Only creation of parent/child exports explicitly requests metadata for
+their labels/journal. Separate slow-operation logs identify WindowServer/process
+reads and application metadata. No authority result is cached, no deadline is
+changed, and an expired inspection remains a failure. Matching builds and
+desktop verification are still required; three qualified consecutive passes
+have not been obtained and no attended test is ready.
+
 ## Scroll diagnosis — Core scheduling and native receipt boundary — 2026-10-20
 
 Scrolling is **not accepted**. `08df010f2` passes 19 Mac and 15 Ubuntu suites;

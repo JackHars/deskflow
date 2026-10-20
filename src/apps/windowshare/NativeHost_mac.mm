@@ -492,14 +492,19 @@ std::optional<WindowIdentity> identityFromInfo(CGWindowID id, NSDictionary *info
   result.onScreen = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
   result.launch = launchTime(result.pid);
   if (detail == IdentityDetail::Full) {
+    const SlowOperationDiagnostic timing("Host", "native.application-metadata");
     result.title = string(info[(__bridge NSString *)kCGWindowName]);
     result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
   }
   return result.frame.valid() && result.launch > 0 ? std::optional(result) : std::nullopt;
 }
 std::optional<WindowIdentity>
-identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = IdentityDetail::Full)
+identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = IdentityDetail::Authority)
 {
+  // Placement, input and recovery need fresh WindowServer/process identity,
+  // not LaunchServices metadata. Request titles/bundle names explicitly only
+  // when creating an export; that lookup can block a native owner thread.
+  const SlowOperationDiagnostic timing("Host", "native.window-identity");
   if (knownMissing)
     *knownMissing = false;
   CF<CFArrayRef> list(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id));
@@ -2531,7 +2536,7 @@ struct NativeHost::Impl
       parent->pendingChild.reset(); // It was dismissed before capture began.
       return;
     }
-    const auto native = identity(candidate->id);
+    const auto native = identity(candidate->id, nullptr, IdentityDetail::Full);
     const auto frame = bounds(candidate->window.get());
     SCWindow *shareable = nil;
     for (SCWindow *window in content.windows)
@@ -3546,7 +3551,7 @@ struct NativeHost::Impl
       error("Window is no longer in the capture catalog; refresh and retry");
       return;
     }
-    auto current = identity(id);
+    auto current = identity(id, nullptr, IdentityDetail::Full);
     if (!current || current->pid != found->second.owningApplication.processID) {
       error("Window identity changed; refresh and retry");
       return;
