@@ -343,6 +343,14 @@ class Cancelled(RuntimeError):
     pass
 
 
+class RemoteSessionFailed(RuntimeError):
+    def __init__(self, receipt):
+        self.receipt = receipt
+        super().__init__("Ubuntu test failed: " + str(receipt.get("failure")) +
+                         "; cleanup=" + str(receipt.get("cleanupErrors", [])) +
+                         "; sessionCleanup=" + str(receipt.get("sessionCleanupErrors", [])))
+
+
 class Driver:
     def __init__(self, process, transcript, check, diagnostics=None):
         self.process, self.transcript, self.check = process, transcript, check
@@ -386,8 +394,7 @@ class Driver:
             if kind == "failed":
                 # Preserve the Linux failure before a generic reply-ID/EOF
                 # error can hide it, including failures between commands.
-                raise RuntimeError("Ubuntu test failed: " + str(value.get("failure")) +
-                                   "; cleanup=" + str(value.get("cleanupErrors", [])))
+                raise RemoteSessionFailed(value)
             if kind == "prepared":
                 require(not self.prepared_seen and "id" not in value, "Repeated Linux preparation")
                 self.prepared_seen = True
@@ -1088,6 +1095,10 @@ def run(arguments):
         if driver and not linux_stopped and owned["linux"].poll() is None:
             try:
                 report["cleanupLinuxStop"] = driver.command("stop", check=False)
+            except RemoteSessionFailed as error:
+                report["cleanupLinuxFailure"] = error.receipt
+                report["cleanupLinuxFailureMessage"] = str(error)
+                cleanup_errors.append("Linux stop: " + str(error))
             except Exception as error:
                 cleanup_errors.append("Linux stop: " + str(error))
         stage("Cleanup: stop exact owned processes")

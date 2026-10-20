@@ -432,8 +432,11 @@ class DriverTests(unittest.TestCase):
             with self.driver([{'event': 'diagnostic', 'diagnostic': row},
                               {'event': 'failed', 'failure': 'Provider startup failed', 'id': None}]) as driver:
                 driver.diagnostics = trace
-                with self.assertRaisesRegex(RuntimeError, 'Ubuntu test failed: Provider startup failed'):
+                with self.assertRaisesRegex(module.RemoteSessionFailed,
+                                            'Ubuntu test failed: Provider startup failed') as failed:
                     driver.event('prepared')
+                self.assertEqual(failed.exception.receipt['failure'], 'Provider startup failed')
+                self.assertEqual(failed.exception.receipt['event'], 'failed')
                 self.assertFalse(driver.prepared_seen)
                 self.assertEqual(driver.pending, {})
                 self.assertEqual(trace.first_failure['details']['remote']['elapsedMs'], 999999999)

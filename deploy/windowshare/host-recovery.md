@@ -103,12 +103,25 @@ observation; PID reuse cannot redirect the signal. The SSH helper runs
 asynchronously so the Mac continues observing coordinator logs and restoration.
 The remote exclusive intent and result remain beside the original Linux plan.
 
+If the Viewer fault closes the session controller before Stop arrives, the
+supervisor stops writing and drains its final failure within ten seconds. It
+retains the failed command, original disconnect and native shutdown errors;
+an unbuffered pipe prevents a second flush error from hiding those records.
+A missing final receipt or unsolicited Stop acknowledgement still fails.
+
 Recovery requires the same source window at its original frame, no held
 input, an empty restoration journal, the target's death, completed owned
 cleanup and unchanged ordinary settings on both machines. Host/Core faults
 also require Host death before accepting the observed return. The helper
 and Viewer cases may restore while Host is alive. The wrapper does not move the source
 itself or repair the coordinator's evidence.
+
+The Viewer case may retain the expected TLS disconnect, Core exit 1 and a
+failed session-controller receipt. The diagnostic accepts that specific fault
+only with its verified remote process death and separate complete audits of
+desktop restoration, owned-process cleanup and unchanged ordinary settings.
+Unknown shutdown errors, an incomplete cleanup audit or an unstructured pipe
+failure still prevent a recovery observation. The session itself remains failed.
 
 `recovery.json` records a **diagnostic recovery observation**, never a
 qualified pipeline pass or physical acceptance. The underlying coordinator

@@ -312,7 +312,7 @@ class OrdinaryAudit(unittest.TestCase):
 
 
 FAKE_CHILD = r'''
-import json,sys
+import json,os,sys
 protocol=int(sys.argv[2])
 scope={'routeMode':'production-original-input','macOriginalInputConfigured':True} if protocol==3 else {}
 for sequence in range(int(sys.argv[3])):
@@ -322,7 +322,17 @@ print(json.dumps({'event':'prepared','controlProtocol':protocol,'windowId':42,**
 for line in sys.stdin:
     value=json.loads(line)
     if value['op']=='start':
+        if sys.argv[4] != 'normal':
+            os.close(sys.stdin.fileno())
         print(json.dumps({'event':'ready','id':value['id']}),flush=True)
+        if sys.argv[4] != 'normal':
+            if sys.argv[4] == 'failed':
+                print(json.dumps({'event':'failed','id':None,'failure':'Exact viewer exited',
+                                  'cleanupErrors':['Retained native shutdown failure'],
+                                  'lifecycleCompleted':False}),flush=True)
+            elif sys.argv[4] == 'stopped':
+                print(json.dumps({'event':'stopped','id':2,'lifecycleCompleted':True}),flush=True)
+            raise SystemExit(int(sys.argv[1]))
     elif value['op']=='stop':
         print(json.dumps({'event':'stopped','id':value['id'],'lifecycleCompleted':True}),flush=True)
         raise SystemExit(int(sys.argv[1]))
@@ -332,7 +342,8 @@ raise SystemExit(9)
 
 class Supervisor(unittest.TestCase):
     def drive(self, *, exit_code=0, changed_at_start=False, changed_at_exit=False, start=True, early_stop=False,
-              original=False, prepared_protocol=None, user_desktop=False, desktop_changed=False, diagnostic_count=0):
+              original=False, prepared_protocol=None, user_desktop=False, desktop_changed=False, diagnostic_count=0,
+              closed_control='normal'):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         run = Path(temporary.name)
@@ -374,7 +385,7 @@ class Supervisor(unittest.TestCase):
             if user_desktop:
                 self.assertNotIn('docker', _arguments)
             child = real_popen([sys.executable, '-c', FAKE_CHILD, str(exit_code),
-                               str(prepared_protocol or protocol), str(diagnostic_count)], **kwargs)
+                               str(prepared_protocol or protocol), str(diagnostic_count), closed_control], **kwargs)
             children.append(child)
             return child
 
@@ -470,6 +481,28 @@ class Supervisor(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertEqual(replies[-1]['cleanup']['containerExit'], 7)
         self.assertEqual(report['status'], 'failed')
+
+    def test_closed_control_drains_and_retains_the_actual_session_failure(self):
+        result, replies, report = self.drive(original=True, user_desktop=True, exit_code=1, closed_control='failed')
+        self.assertEqual(result, 1)
+        self.assertEqual(report['failure'], 'Controller reported failure: Exact viewer exited')
+        self.assertEqual(report['controlWriteFailure']['command'], {'id': 2, 'op': 'stop'})
+        self.assertEqual(report['desktopFinal']['failure'], 'Exact viewer exited')
+        self.assertEqual(report['controllerExit'], 1)
+        self.assertEqual(report['cleanupErrors'], [])
+        self.assertEqual(report['sessionCleanupErrors'], ['Retained native shutdown failure'])
+        self.assertEqual(replies[-1]['sessionCleanupErrors'], report['sessionCleanupErrors'])
+        self.assertFalse(replies[-1]['lifecycleCompleted'])
+
+    def test_closed_control_never_accepts_a_missing_or_unsolicited_stop_receipt(self):
+        for response in ('missing', 'stopped'):
+            with self.subTest(response=response):
+                result, replies, report = self.drive(original=True, user_desktop=True, closed_control=response)
+                self.assertEqual(result, 1)
+                self.assertIn('controlWriteFailure', report)
+                self.assertEqual(report['cleanupErrors'], [])
+                self.assertFalse(replies[-1]['lifecycleCompleted'])
+                self.assertIn('before', report['failure'])
 
     def test_production_supervisor_runs_distinct_mode_without_claiming_physical_success(self):
         result, replies, report = self.drive(original=True)

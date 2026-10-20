@@ -88,6 +88,33 @@ def assess(report, pipeline):
                 or remote_fault.get("planSha256") != report["linuxPlanSha256"]
                 or report.get("remoteFaultUnverified")):
             return False
+        failed = pipeline.get("cleanupLinuxFailure")
+        if failed is not None:
+            # Killing the exact Viewer can end both TLS relays and make its
+            # Core exit 1 before Stop arrives. Retain that FAILED session; only
+            # a complete independent cleanup audit can establish restoration.
+            # A pipe error without this structured receipt is never sufficient.
+            if not isinstance(failed, dict) or not isinstance(failed.get("cleanup"), dict):
+                return False
+            cleanup = failed["cleanup"]
+            session_errors = failed.get("sessionCleanupErrors")
+            if (failed.get("event") != "failed" or failed.get("lifecycleCompleted") is not False
+                    or failed.get("linuxEnvironment") != "user-desktop"
+                    or failed.get("routeMode") != "production-original-input"
+                    or failed.get("macOriginalInputConfigured") is not True
+                    or failed.get("coreExit") != 1 or cleanup.get("controllerExit") != 1
+                    or failed.get("cleanupErrors") != []
+                    or not all(cleanup.get(field) is True for field in
+                               ("ordinaryPreserved", "ownedProcessesStopped", "desktopRestored"))
+                    or "Actual TLS connection ended before coordinated stop" not in str(failed.get("failure"))
+                    or not isinstance(session_errors, list)
+                    or not all(error == "private core IPC stop: [Errno 104] Connection reset by peer"
+                               or (isinstance(error, str) and error.startswith("relay: Private relay failed:")
+                                   and "Actual TLS connection ended before coordinated stop" in error)
+                               for error in session_errors)):
+                return False
+            expected_errors.add("Linux stop: Ubuntu test failed: " + str(failed["failure"]) +
+                                "; cleanup=[]; sessionCleanup=" + str(session_errors))
     return bool(
         report.get("faultSubmitted") is True and report.get("restorationObserved") is True
         and pipeline.get("pipelineCheck") is True

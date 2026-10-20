@@ -535,6 +535,7 @@ def finish_session(output, report, stop_id, core, processes, relays, stopped, cl
     emit({'event': 'stopped' if completed else 'failed', 'id': stop_id, 'status': report['status'],
           'lifecycleCompleted': completed, 'physicalAcceptance': 'not-assessed',
           'failure': report.get('failure'), 'coreExit': report.get('coreExit'), 'coreStoppedByPrivateIpc': stopped,
+          'cleanupErrors': list(cleanup_errors),
           'relays': report['relays'], 'physicalReceipts': 'external-Mac-required',
           **original_metadata(report.get('routeMode') == ORIGINAL_MODE)})
     return 0 if completed else 1
@@ -824,8 +825,10 @@ def run(args):
                 (output / 'control.jsonl').open('x', buffering=1) as transcript, contextlib.ExitStack() as resources:
             controls = Controls()
             resources.callback(controls.close)
+            # Commands fit in one pipe write. Do not retain a buffered command
+            # that close() could try flushing again after the controller dies.
             child = subprocess.Popen(arguments, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors,
-                                     start_new_session=True)
+                                     start_new_session=True, bufsize=0)
             selector = selectors.DefaultSelector()
             resources.callback(selector.close)
             selector.register(child.stdout, selectors.EVENT_READ)
@@ -834,9 +837,10 @@ def run(args):
             prepared = False
             replies = 0
             diagnostic_replies = 0
+            control_closed = False
             while terminal is None:
                 require(time.monotonic() < deadline, 'Host supervisor exceeded total lifetime')
-                command = controls.next()
+                command = None if control_closed else controls.next()
                 if command is not None:
                     require(prepared or command['op'] == 'stop',
                             'Wait for prepared before sending commands other than Stop')
@@ -849,8 +853,18 @@ def run(args):
                     if command['op'] == 'stop':
                         stop_id = command['id']
                     report['commands'].append(command)
-                    child.stdin.write((json.dumps(command) + '\n').encode())
-                    child.stdin.flush()
+                    payload = (json.dumps(command) + '\n').encode()
+                    try:
+                        require(child.stdin.write(payload) == len(payload), 'Incomplete controller command write')
+                    except (BrokenPipeError, ConnectionResetError) as error:
+                        # Its final failure may already be waiting on stdout.
+                        # Keep the failed command and drain that receipt before
+                        # diagnosing a generic pipe closure. No further command
+                        # is sent, and the original lifetime can only shrink.
+                        report['controlWriteFailure'] = {'command': command, 'failure': str(error)}
+                        control_closed = True
+                        deadline = min(deadline, time.monotonic() + 10)
+                        child.stdin.close()
                 if b'\n' not in buffer:
                     if not selector.select(timeout=0.01):
                         require(child.poll() is None, f'Container exited without a final receipt: {child.returncode}')
@@ -884,7 +898,12 @@ def run(args):
                 else:
                     emit(value)
             report['desktopFinal' if desktop else 'containerFinal'] = terminal
-            require(child.wait(timeout=10) == 0, f'Container exit was nonzero: {child.returncode}')
+            report['sessionCleanupErrors'] = terminal.get('cleanupErrors', [])
+            child.wait(timeout=10)
+            require(terminal.get('event') != 'failed',
+                    'Controller reported failure: ' + str(terminal.get('failure')))
+            require(child.returncode == 0, f'Container exit was nonzero: {child.returncode}')
+            require(not control_closed, 'Controller command pipe closed before requested stop completed')
             require(terminal.get('event') == 'stopped' and terminal.get('id') == stop_id
                     and terminal.get('lifecycleCompleted') is True, 'Container did not complete the requested stop')
             report['status'] = 'completed'
@@ -945,6 +964,7 @@ def run(args):
     emit({**(terminal or {}), 'event': 'stopped' if completed else 'failed', 'id': stop_id,
           'lifecycleCompleted': completed, 'physicalAcceptance': 'not-assessed', 'cleanup': report['cleanup'],
           'failure': report.get('failure'), 'cleanupErrors': cleanup_errors, **original_metadata(original),
+          'sessionCleanupErrors': report.get('sessionCleanupErrors', []),
           **({'linuxEnvironment': 'user-desktop'} if desktop else {})})
     return 0 if completed else 1
 
