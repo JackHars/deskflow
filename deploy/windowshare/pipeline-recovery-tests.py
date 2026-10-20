@@ -10,10 +10,15 @@ from pathlib import Path
 import signal
 import unittest
 from unittest.mock import Mock
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("pipeline_recovery", Path(__file__).with_name("pipeline-recovery.py"))
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+remote_spec = importlib.util.spec_from_file_location(
+    "pipeline_recovery_linux", Path(__file__).with_name("pipeline-recovery-linux.py"))
+remote = importlib.util.module_from_spec(remote_spec)
+remote_spec.loader.exec_module(remote)
 
 
 class RecoveryTests(unittest.TestCase):
@@ -122,6 +127,71 @@ class RecoveryTests(unittest.TestCase):
             remote = json.loads(self.pipeline["remoteCleanup"])
             remote[field] = False
             self.assertFalse(module.assess(self.report, {**self.pipeline, "remoteCleanup": json.dumps(remote)}))
+
+    def test_viewer_recovery_requires_exact_remote_plan_and_exit(self):
+        report = {**self.report, "fault": "viewer-kill", "linuxPlanSha256": "plan",
+                  "remoteFault": {"fault": "viewer-kill", "planSha256": "plan", "targetExited": True}}
+        self.assertTrue(module.assess(report, self.pipeline))
+        for field, wrong in (("fault", "core-kill"), ("planSha256", "other"), ("targetExited", False)):
+            changed = {**report, "remoteFault": {**report["remoteFault"], field: wrong}}
+            self.assertFalse(module.assess(changed, self.pipeline))
+        self.assertFalse(module.assess({**report, "remoteFaultUnverified": True}, self.pipeline))
+        self.assertFalse(module.assess({**self.report, "fault": "arbitrary-pid"}, self.pipeline))
+
+
+class LinuxViewerFaultTests(unittest.TestCase):
+    def setUp(self):
+        self.plan = {"linuxEnvironment": "user-desktop", "routeMode": "production-original-input",
+                     "token": "unique", "viewerExecutable": "/own/deskflow-windowshare",
+                     "desktopAtPrepare": {"bootId": "boot", "shell": {"pid": 22}}}
+        self.lease = {"token": "unique", "before": self.plan["desktopAtPrepare"], "restored": False}
+        self.expected = {"pid": 31, "startTicks": "12345", "executable": "/own/deskflow-windowshare"}
+
+    def validate(self, plan=None, lease=None, expected=None, current=None, parent=22, boot="boot"):
+        remote.validate_target(plan or self.plan, lease or self.lease, expected or self.expected,
+                               current or {**self.expected, "commandSha256": "command"}, parent, boot)
+
+    def test_exact_live_viewer_is_selected(self):
+        self.validate()
+
+    def test_changed_desktop_owner_or_process_is_refused(self):
+        for changes in ({"linuxEnvironment": "isolated-container"}, {"routeMode": "legacy"},
+                        {"viewerExecutable": "/ordinary/deskflow-windowshare"}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                self.validate(plan={**self.plan, **changes})
+        for changes in ({"token": "other"}, {"before": {}}, {"restored": True}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                self.validate(lease={**self.lease, **changes})
+        for changes in ({"pid": 1}, {"executable": "/own/deskflow-core"}, {"commandSha256": "extra"}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                self.validate(expected={**self.expected, **changes})
+        for changes in ({"pid": 32}, {"startTicks": "new"}, {"executable": "/ordinary/viewer"}):
+            with self.subTest(changes=changes), self.assertRaises(RuntimeError):
+                self.validate(current={**self.expected, **changes})
+        with self.assertRaises(RuntimeError):
+            self.validate(parent=99)
+        with self.assertRaises(RuntimeError):
+            self.validate(boot="restarted")
+
+    def test_pidfd_identity_check_precedes_signal_and_always_closes(self):
+        desktop = Mock()
+        with patch.object(remote.os, "pidfd_open", create=True, return_value=77), \
+             patch.object(remote.os, "close") as close, \
+             patch.object(remote.signal, "pidfd_send_signal", create=True) as send, \
+             patch.object(remote.selectors, "DefaultSelector") as selector:
+            desktop.same_process.return_value = False
+            with self.assertRaisesRegex(RuntimeError, "changed before"):
+                remote.signal_owned_viewer(desktop, self.expected)
+            send.assert_not_called()
+            close.assert_called_once_with(77)
+            close.reset_mock()
+            desktop.same_process.return_value = True
+            selector.return_value.__enter__.return_value.select.return_value = [(77, 1)]
+            remote.signal_owned_viewer(desktop, self.expected)
+            send.assert_called_once_with(77, signal.SIGKILL)
+            close.assert_called_once_with(77)
+            selector.return_value.__enter__.return_value.register.assert_called_once_with(
+                77, remote.selectors.EVENT_READ)
 
 
 if __name__ == "__main__":

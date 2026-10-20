@@ -87,18 +87,27 @@ python3 deploy/windowshare/pipeline-recovery.py \
 ```
 
 Use a fresh preparation/output for each fault. The allowed faults are
-`host-kill`, `core-kill` and `holding-helper-kill`. The procedure waits for
+`host-kill`, `core-kill`, `holding-helper-kill` and `viewer-kill`. The procedure waits for
 observed Active placement, validates the frozen executable hashes and checks
 kernel process-birth identities and exact parent/child relationships before
 signalling its one owned process. It takes neither an arbitrary PID nor an
 ordinary Deskflow process. Readiness and process output are observed through
 events and bounded waits; no fixed sleep starts the fault.
 
+`viewer-kill` starts the separately hashed `pipeline-recovery-linux.py` from
+the prepared source directory. It requires the same plan, boot, active
+disposable desktop lease, runtime hashes and recorded Viewer birth identity.
+Only the prepared compositor's exact Viewer child is eligible. A Linux pidfd
+pins that process lifetime across the final identity check, signal and exit
+observation; PID reuse cannot redirect the signal. The SSH helper runs
+asynchronously so the Mac continues observing coordinator logs and restoration.
+The remote exclusive intent and result remain beside the original Linux plan.
+
 Recovery requires the same source window at its original frame, no held
 input, an empty restoration journal, the target's death, completed owned
 cleanup and unchanged ordinary settings on both machines. Host/Core faults
 also require Host death before accepting the observed return. The helper
-case may restore while Host is alive. The wrapper does not move the source
+and Viewer cases may restore while Host is alive. The wrapper does not move the source
 itself or repair the coordinator's evidence.
 
 `recovery.json` records a **diagnostic recovery observation**, never a

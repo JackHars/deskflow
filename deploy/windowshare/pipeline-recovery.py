@@ -4,7 +4,7 @@
 """Unattended failure diagnosis for one explicitly prepared disposable pipeline.
 
 This does not send input or accept H10. It terminates only the authenticated
-experimental Host, Core or holding helper after observed hidden placement.
+experimental Host, Core, holding helper or Ubuntu Viewer after hidden placement.
 The ordinary coordinator retains its failed result and performs exact cleanup.
 """
 
@@ -14,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import selectors
+import shlex
 import signal
 import subprocess
 import sys
@@ -77,6 +78,16 @@ def assess(report, pipeline):
         "core: Packaged Core/Host did not drain successfully",
     }
     errors = pipeline.get("cleanupErrors", [])
+    fault = report.get("fault")
+    if fault not in ("host-kill", "core-kill", "holding-helper-kill", "viewer-kill"):
+        return False
+    if fault == "viewer-kill":
+        remote_fault = report.get("remoteFault", {})
+        if (remote_fault.get("fault") != fault or remote_fault.get("targetExited") is not True
+                or not report.get("linuxPlanSha256")
+                or remote_fault.get("planSha256") != report["linuxPlanSha256"]
+                or report.get("remoteFaultUnverified")):
+            return False
     return bool(
         report.get("faultSubmitted") is True and report.get("restorationObserved") is True
         and pipeline.get("pipelineCheck") is True
@@ -95,6 +106,23 @@ def assess(report, pipeline):
         and isinstance(errors, list) and all(error in expected_errors for error in errors)
         and pipeline.get("coreExit") == (-signal.SIGKILL if report.get("fault") == "core-kill" else 0)
     )
+
+
+def remote_fault_command(args, linux, coordinator):
+    helper = Path(linux["runArgv"][1]).with_name("pipeline-recovery-linux.py")
+    local_helper = Path(__file__).with_name(helper.name)
+    bootstrap = (
+        "import hashlib,pathlib,runpy,sys;"
+        "p=pathlib.Path(sys.argv.pop(1));expected=sys.argv.pop(1);"
+        "assert hashlib.sha256(p.read_bytes()).hexdigest()==expected,'Recovery helper changed';"
+        "runpy.run_path(str(p),run_name='__main__')"
+    )
+    remote = ["python3", "-c", bootstrap, str(helper), coordinator.digest(local_helper),
+              "--plan", str(Path(linux["runDirectory"]) / "linux-plan.json"),
+              "--expected-plan-sha256", coordinator.digest(args.linux_plan)]
+    return ["ssh", "-F", "/dev/null", "-T", "-i", str(args.ssh_key.resolve()),
+            "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
+            args.ssh_target, shlex.join(remote)]
 
 
 def run(args):
@@ -131,9 +159,19 @@ def run(args):
         saved.write(Path(__file__).read_bytes())
     require(coordinator.digest(output / "procedure.py") == report["procedureSha256"],
             "Diagnostic source changed while freezing")
+    if args.fault == "viewer-kill":
+        remote_source = Path(__file__).with_name("pipeline-recovery-linux.py")
+        report["remoteProcedureSha256"] = coordinator.digest(remote_source)
+        with (output / remote_source.name).open("xb") as saved:
+            saved.write(remote_source.read_bytes())
+        require(coordinator.digest(output / remote_source.name) == report["remoteProcedureSha256"],
+                "Remote diagnostic source changed while freezing")
     coordinator.atomic_json(output / "argv.json", argv)
     inspector = original.ProcessInspector()
     process = None
+    remote_fault = None
+    remote_log = None
+    remote_report = None
     fault_at = None
     core_pid = None
     initial = None
@@ -176,7 +214,7 @@ def run(args):
                             require(type(core_pid) is int and core_pid > 0, "Invalid owned Core PID")
                         if event.get("event") != "active":
                             continue
-                        require(not report["faultSubmitted"] and core_pid is not None,
+                        require(not report["faultSubmitted"] and remote_fault is None and core_pid is not None,
                                 "Active was duplicated or preceded Core ownership")
                         receipt = coordinator.read_json(session / "source.json")
                         original.source_identity(receipt, initial, True)
@@ -187,19 +225,39 @@ def run(args):
                             require(coordinator.digest(Path(artifacts[role]["path"])) == artifacts[role]["sha256"],
                                     "A packaged executable changed before the fault")
                         identity = select_target(inspector, process.pid, core_pid,
-                                                 artifacts["core"]["path"], artifacts["host"]["path"], args.fault,
+                                                 artifacts["core"]["path"], artifacts["host"]["path"],
+                                                 "host-kill" if args.fault == "viewer-kill" else args.fault,
                                                  artifacts["holdingHelper"]["path"])
-                        report["identities"] = identity
+                        report["identities"] = {
+                            key: value for key, value in identity.items()
+                            if args.fault != "viewer-kill" or key != "target"
+                        }
                         report["beforeFault"] = {"frame": receipt["frame"], "initialFrame": initial["frame"],
                                                  "sourcePid": receipt["pid"], "heldKeys": 0, "heldButtons": 0}
                         require(process.poll() is None and inspector.live(identity["target"]),
                                 "Owner exited before the fault")
                         fault_at = time.monotonic()
-                        os.kill(identity["target"]["pid"], signal.SIGKILL)
-                        report["faultSubmitted"] = True
+                        if args.fault == "viewer-kill":
+                            remote_argv = remote_fault_command(args, linux, coordinator)
+                            coordinator.atomic_json(output / "remote-fault-argv.json", remote_argv)
+                            remote_log = (output / "remote-fault.log").open("xb")
+                            remote_fault = subprocess.Popen(remote_argv, stdout=remote_log, stderr=subprocess.STDOUT)
+                            report["remoteFaultRequested"] = True
+                        else:
+                            os.kill(identity["target"]["pid"], signal.SIGKILL)
+                            report["faultSubmitted"] = True
                         coordinator.atomic_json(output / "fault.json", report)
-                        print(json.dumps({"step": "owned-fault-submitted", "fault": args.fault,
-                                          "pid": identity["target"]["pid"]}), flush=True)
+                        print(json.dumps({"step": "owned-fault-requested", "fault": args.fault}), flush=True)
+                if remote_fault is not None and remote_report is None and remote_fault.poll() is not None:
+                    remote_log.close()
+                    require(remote_fault.returncode == 0, "Ubuntu Viewer fault failed; see remote-fault.log")
+                    remote_report = coordinator.read_json(output / "remote-fault.log")
+                    require(remote_report.get("fault") == "viewer-kill" and remote_report.get("targetExited") is True
+                            and remote_report.get("planSha256") == report["linuxPlanSha256"],
+                            "Ubuntu fault result does not match this plan")
+                    report["remoteFault"] = remote_report
+                    report["faultSubmitted"] = True
+                    coordinator.atomic_json(output / "fault.json", report)
                 source = session / "source.json"
                 if source.exists():
                     receipt = coordinator.read_json(source)
@@ -211,8 +269,10 @@ def run(args):
                         journal = session / "restore.json"
                         if (receipt["frame"] == initial["frame"] and receipt["heldKeys"] == receipt["heldButtons"] == 0
                                 and journal.exists() and coordinator.read_json(journal) == {"version": 1, "windows": []}
-                                and not inspector.live(identity["target"])
-                                and (args.fault == "holding-helper-kill" or not inspector.live(identity["host"]))):
+                                and report["faultSubmitted"]
+                                and (remote_report is not None or not inspector.live(identity["target"]))
+                                and (args.fault in ("holding-helper-kill", "viewer-kill")
+                                     or not inspector.live(identity["host"]))):
                             report["restorationObserved"] = True
                             report["restorationObservedMs"] = round((time.monotonic() - fault_at) * 1000, 3)
                             report["hostAliveAtRestoration"] = inspector.live(identity["host"])
@@ -223,6 +283,18 @@ def run(args):
     except Exception as error:
         report["error"] = str(error)
     finally:
+        if remote_fault and remote_fault.poll() is None:
+            # The helper's pidfd observation has its own five-second deadline.
+            # This affects only our SSH client; it cannot signal a remote shell
+            # or broaden the explicitly selected Viewer fault.
+            try:
+                remote_fault.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                remote_fault.terminate()
+                remote_fault.wait(timeout=10)
+                report["remoteFaultUnverified"] = True
+        if remote_log and not remote_log.closed:
+            remote_log.close()
         if process and process.poll() is None:
             # The owned coordinator handles SIGTERM by restoring its source and
             # stopping its exact children. Never kill an unknown process group.
@@ -255,7 +327,7 @@ def main():
     parser.add_argument("--ssh-key", type=Path, required=True)
     parser.add_argument("--ordinary-mac-config", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--fault", choices=("host-kill", "core-kill", "holding-helper-kill"), required=True)
+    parser.add_argument("--fault", choices=("host-kill", "core-kill", "holding-helper-kill", "viewer-kill"), required=True)
     return run(parser.parse_args())
 
 
