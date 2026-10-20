@@ -70,6 +70,15 @@ even when the full-search decision remains false. The previous inventory
 candidate passes 19 Mac suites and the Linux inventory cases; its failed
 desktop run is not a launch gate. The new candidate needs fresh validation.
 
+`dashboard-replay-z_6c0tmv` reached all five recording checks but still failed;
+the added diagnostic identified an unavailable initial native inventory.
+`build/owned-ax-inspection-qg7cup1c/` shows Qt's dormant backing windows omit
+the optional `kCGWindowIsOnscreen` key in the all-window list. The next query
+uses WindowServer's on-screen-only list directly. The source must still be in
+both identical inventories, and every other ID must be freshly classified in
+AX. Missing source, newly visible children and changed focus retain the full
+scan. This run's failed drain and raw evidence remain unmodified.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its

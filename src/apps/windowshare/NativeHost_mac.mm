@@ -1969,7 +1969,12 @@ struct NativeHost::Impl
     if (!alive || !focusedWithinSource)
       return incomplete("Focused native surface has no proven source ancestry");
     const auto inventory = [&]() -> std::optional<std::vector<std::uint32_t>> {
-      CF<CFArrayRef> windows(CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID));
+      // Ask WindowServer to select live on-screen surfaces. Its all-window
+      // list also contains Qt's dormant backing windows, for which the
+      // optional kCGWindowIsOnscreen dictionary key is absent. Treating that
+      // missing key as an inventory failure defeats this check on every input.
+      // A missing source still fails the exact before/after inventory join.
+      CF<CFArrayRef> windows(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID));
       if (!alive || !windows)
         return {};
       std::vector<std::uint32_t> result;
@@ -1978,11 +1983,9 @@ struct NativeHost::Impl
         if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != expected.pid)
           continue;
         NSNumber *number = item[(__bridge NSString *)kCGWindowNumber];
-        NSNumber *visible = item[(__bridge NSString *)kCGWindowIsOnscreen];
-        if (!number || !visible || !number.unsignedIntValue)
+        if (!number || !number.unsignedIntValue)
           return {};
-        if (number.unsignedIntValue == expected.id || visible.boolValue)
-          result.push_back(number.unsignedIntValue);
+        result.push_back(number.unsignedIntValue);
         if (result.size() > 64)
           return {};
       }
