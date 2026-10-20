@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "LocalInputActivity.h"
 #include "NativeInputScheduling_mac.h"
 #include "NativeSharingActivity_mac.h"
 #include <array>
@@ -149,6 +150,8 @@ int main()
       {
         SharingActivity native;
         check(native.active(), "Foundation refused the interactive scheduling activity");
+        deskflow::windowshare::LocalInputActivity core;
+        check(core.active(), "The C++ Core owner did not retain its own process activity");
       }
       std::puts("Sharing activity lifetime and native acquisition checks passed");
       return 0;

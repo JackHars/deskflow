@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "InputEvidenceRuntime.h"
+#include "LifecycleDiagnostics.h"
 #include "UniqueJson.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -288,6 +289,7 @@ void InputEvidenceRuntime::drain()
 }
 void InputEvidenceRuntime::tick()
 {
+  const SlowOperationDiagnostic timing("Input evidence", "evidence.collector-service");
   const auto now = inputEvidenceNow();
   if (!m_armSeen && now >= m_nextReadiness && m_recorder->state() == InputEvidenceState::Waiting) {
     m_nextReadiness = now + 100000000;

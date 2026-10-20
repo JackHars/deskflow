@@ -9,6 +9,9 @@
 #include "OriginalPointerJoin.h"
 #include "SelectedPeerMailbox.h"
 #include "WindowDragEdgeJoin.h"
+#ifdef __APPLE__
+#include "LocalInputActivity.h"
+#endif
 
 namespace deskflow::windowshare {
 
@@ -57,6 +60,7 @@ private:
   int m_stopWaitMs = 2000;
 #ifdef __APPLE__
   void drainCapturedInput();
+  std::unique_ptr<LocalInputActivity> m_activity;
   // Terminal even if the underlying epoch was already revoked by overflow or
   // discontinuity. Capture-timer shutdown never enters stop()'s bounded wait.
   bool m_captureEmergencyHandled = false;

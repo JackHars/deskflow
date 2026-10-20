@@ -84,11 +84,13 @@ if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   if(APPLE)
     enable_language(OBJCXX)
     target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_mac.mm"
+      "${WS_ROOT}/LocalInputActivity_mac.mm"
       "${WS_ROOT}/../platform/OriginalKeyboard_mac.mm"
       "${WS_ROOT}/../platform/OriginalInput_mac.mm"
       "${WS_ROOT}/../platform/OriginalInputCaptureSource_mac.mm")
     set_target_properties(windowshare-local-input PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-    target_link_libraries(windowshare-local-input PRIVATE "-framework Security" "-framework CoreFoundation" "-framework CoreGraphics")
+    set_source_files_properties("${WS_ROOT}/LocalInputActivity_mac.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(windowshare-local-input PRIVATE "-framework Security" "-framework CoreFoundation" "-framework CoreGraphics" "-framework Foundation")
   else()
     target_sources(windowshare-local-input PRIVATE "${WS_ROOT}/LocalInputPeerTrust_stub.cpp")
   endif()
@@ -210,11 +212,12 @@ if(WINDOWSHARE_TRANSPORT_TESTS)
     set_tests_properties(windowshare-companion PROPERTIES TIMEOUT 60)
     if(APPLE)
       target_sources(windowshare-companion-tests PRIVATE
+        "${WS_ROOT}/LocalInputActivity_mac.mm"
         "${WS_ROOT}/../platform/OriginalKeyboard_mac.mm"
         "${WS_ROOT}/../platform/OriginalInput_mac.mm"
         "${WS_ROOT}/../platform/OriginalInputCaptureSource_mac.mm")
       set_target_properties(windowshare-companion-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
-      target_link_libraries(windowshare-companion-tests PRIVATE "-framework CoreGraphics" "-framework CoreFoundation")
+      target_link_libraries(windowshare-companion-tests PRIVATE "-framework CoreGraphics" "-framework CoreFoundation" "-framework Foundation")
       # Compile the verifier here once with a private malformed-image test
       # seam. The archive's ordinary verifier object is not pulled into this
       # target; the seam is absent from every production executable/library.
@@ -487,7 +490,7 @@ if(WINDOWSHARE_APP)
       add_test(NAME windowshare-native-recovery COMMAND windowshare-native-tests)
       add_executable(windowshare-sharing-activity-tests NativeSharingActivityTests.mm)
       target_compile_options(windowshare-sharing-activity-tests PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic -Werror)
-      target_link_libraries(windowshare-sharing-activity-tests PRIVATE "-framework Foundation")
+      target_link_libraries(windowshare-sharing-activity-tests PRIVATE windowshare-local-input "-framework Foundation")
       set_target_properties(windowshare-sharing-activity-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       add_test(NAME windowshare-sharing-activity COMMAND windowshare-sharing-activity-tests)
       set_tests_properties(windowshare-sharing-activity PROPERTIES TIMEOUT 15)

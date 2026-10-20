@@ -85,6 +85,10 @@ struct WindowDragEdgeMailboxTestAccess
 };
 struct LocalInputCoreSessionTestAccess
 {
+  static bool activity(const LocalInputCoreSession &session)
+  {
+    return session.m_activity && session.m_activity->active();
+  }
   static std::unique_ptr<LocalInputCoreSession> captureOnly()
   {
     auto session = std::unique_ptr<LocalInputCoreSession>(new LocalInputCoreSession);
@@ -597,6 +601,7 @@ void coreSessionOwnership()
   );
 #ifdef __APPLE__
   const auto capture = session->captureSource();
+  check(LocalInputCoreSessionTestAccess::activity(*session), "The Core session has no interactive process activity");
   check(capture && !capture->epoch().live(), "Session exposed capture continuity before producer start");
   const auto completed = capture->completedInput();
   check(completed && !completed->bound() && completed->live(), "Session preallocates an unbound completion conduit");
@@ -634,6 +639,9 @@ void coreSessionOwnership()
 #endif
   };
   check(session->stop() && session->stop(), "Core session could not drain its stopped child");
+#ifdef __APPLE__
+  check(!LocalInputCoreSessionTestAccess::activity(*session), "Stopped Core session retained its process activity");
+#endif
   check(
       completions == 1 && mailboxClosedBeforeCallback && firstChild &&
           localInputProcess(firstChild->pid) != firstChild && !session->channel()->authenticated(),

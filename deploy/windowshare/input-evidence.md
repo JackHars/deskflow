@@ -23,6 +23,36 @@ display presentation remain outside that inventory. A normalized trace cannot
 certify those boundaries or substitute for a latency recording. Legacy v1
 traces retain their original scope and explicit null EventQueue capacities.
 
+## Diagnosing scroll coalescence
+
+The optional `scroll-process-observer.m` distinguishes delivery to the target
+process from the later AppKit receipt. Build it on Mac with Clang and the
+ApplicationServices and Foundation frameworks. The disposable harness must
+verify the exact owned fixture process before passing its PID and keep a
+private stdin pipe open. Closing that pipe requests a final drain and footer;
+the observer otherwise stops after 55 seconds. It is listen-only, checks the
+same UID and process birth, and records only Deskflow-tagged events. Its fixed
+4,096-record storage reports overflow, disabled taps and owner loss explicitly.
+It posts no input, changes no event, and never supplies native authority.
+
+For a completed dashboard replay directory containing `burst-source.jsonl`,
+`pid-observer.jsonl` and the ordinary session evidence, run:
+
+```sh
+python3 deploy/windowshare/scroll-diagnostics.py /absolute/private/run
+```
+
+The report binds file hashes and process/run identities, compares raw fields
+and flags at each boundary, and separately lists adjacent Changed events whose
+six scroll deltas sum to a received AppKit event. Such an explanation still
+reports `exactRawAndFlags: false`. Gaps, duplicates, reordering, changed flags,
+phase crossings and unexplained fields remain failures. The process tap does
+not establish the destination window and cannot replace AppKit evidence.
+Missing observer footers remain incomplete; timestamp and physical acceptance
+are not supplied. This tool never rewrites journals or changes the normalizer.
+
+Run its regressions with `python3 deploy/windowshare/scroll-diagnostics-tests.py`.
+
 ## Private configuration and lifetime
 
 Freeze and hash the actual Core, its owned Host, NativeSmoke source, collector

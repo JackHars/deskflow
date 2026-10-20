@@ -1,5 +1,51 @@
 # Seamless Windows work state
 
+## Scroll diagnosis — Core scheduling and native receipt boundary — 2026-10-20
+
+Scrolling is **not accepted**. `08df010f2` passes 19 Mac and 15 Ubuntu suites;
+its desktop runs still vary. Moving periodic native environment inspection
+off the Host thread eliminates the observed long synchronous poll, but does
+not by itself resolve every dispatch stall. Failed runs `ef6ye2n0`, `xvigj6qm`
+and `j7g6da1a` remain intact. `xvigj6qm` also failed restoration verification;
+do not report it as clean cleanup merely because its processes stopped.
+
+`dashboard-replay-bg6ympei` receives 1,198 exact AppKit burst records: 745 and
+746 become one event whose six scroll deltas are their exact sums. Its partial
+same-Mac capture-to-AppKit latency is median 56.2 ms, p95 221.9 ms and maximum
+316.8 ms, with no accumulating tail. This is not an exact delivery pass.
+
+The explicitly diagnostic continuation `dashboard-replay-xgpqbugc` observes
+all 1,200 original raw fields and flags, in order, at a read-only event tap on
+the target process. AppKit combines 683 and 684 downstream of that tap. The
+full 30-second recording and 120-second session complete; all queues drain,
+the source restores and owned processes stop. The exact AppKit mismatch stays
+failed. The observer was terminated before its footer, so its completeness is
+not certified. Its early data cannot replace owned-window AppKit evidence.
+
+The repeat `dashboard-replay-j7g6da1a` exposes a separate actual failure.
+Mapping returns in about 15 ms, but the 11 mapped records wait about 148 ms in
+Core before the first private-channel write. The Host later rejects an expired
+250 ms point. Core queue journals distinguish this delay from native queries
+or Wi-Fi. Restoration and process cleanup succeed. The revised process observer
+has a clean footer with no overflow, timeout or owner loss. Idle SSH probes
+are about 2.3 ms median; Apple SSH already enables TCP_NODELAY, so no speculative
+SSH or Wi-Fi setting changes were made. Owned probe processes/sockets are gone.
+
+The next candidate gives the hidden Core its own scoped Foundation interactive
+activity. Previously only the Host held this process-local scheduling hint.
+It spans the private session and companion teardown, permits normal system
+and display sleep, and changes no authority, queue or deadline. Existing token
+lifetime tests are reused, with Core ownership/start-stop coverage. Slow capture
+consumer and evidence-collector turns are also logged to locate any remaining
+main-thread delay. App Nap is a hypothesis for the observed gap, not yet proven
+as its cause; matching builds and desktop verification remain required.
+
+`deploy/windowshare/scroll-process-observer.m` and `scroll-diagnostics.py`
+preserve both observation points and explicitly report exact AppKit failure
+even when adjacent sums explain it. They are diagnostics only. No acceptance
+criterion or original journal has been changed. Three consecutive qualified
+same-artifact desktop passes are still required before another attended test.
+
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
 `2604393d9` passes the selected 19 Mac and 15 Ubuntu suites, but yielding after

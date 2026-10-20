@@ -50,6 +50,15 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
 {
   auto result = std::unique_ptr<LocalInputCoreSession>(new LocalInputCoreSession);
 #ifdef __APPLE__
+  // The hidden Core owns capture draining and the private-channel Qt wakeups.
+  // The Host's activity token affects only the Host process. Keep this owner
+  // interactive too, including startup and ordered companion shutdown, while
+  // still allowing ordinary system/display sleep.
+  result->m_activity = std::make_unique<LocalInputActivity>();
+  lifecycleDiagnostic(
+      "Core input", "input.process-activity", "observed", "Requested interactive scheduling for the private session",
+      {{"active", result->m_activity->active()}}
+  );
   result->m_captureSource = std::make_shared<OriginalInputCaptureSource>();
   result->m_windowDragEdgeMailbox->bindCapture(
       result->m_captureSource->completedInput()->epoch(), result->m_captureSource->capturePosition()
@@ -106,6 +115,7 @@ std::unique_ptr<LocalInputCoreSession> LocalInputCoreSession::start(
 #ifdef __APPLE__
     self->m_captureSource->stop();
     self->m_captureTimer.stop();
+    self->m_activity.reset();
 #endif
     self->m_selectedPeerMailbox->close();
     self->m_windowDragEdgeMailbox->close();
@@ -156,6 +166,8 @@ LocalInputCoreSession::~LocalInputCoreSession()
 bool LocalInputCoreSession::stop()
 {
 #ifdef __APPLE__
+  // Retain independently: callbacks during companion shutdown may destroy us.
+  const auto activity = std::move(m_activity);
   m_windowDragEdgeJoin.revoke();
   m_captureTimer.stop();
   if (m_captureSource)
@@ -197,6 +209,7 @@ std::shared_ptr<OriginalInputCaptureSource> LocalInputCoreSession::captureSource
 }
 void LocalInputCoreSession::drainCapturedInput()
 {
+  const SlowOperationDiagnostic timing("Core input", "capture.consumer-service");
   if (m_captureEmergencyHandled)
     return;
   const auto source = m_captureSource;
