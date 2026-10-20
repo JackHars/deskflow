@@ -575,21 +575,29 @@ public:
   }
   void preview(std::span<const Preview> values) override
   {
-    inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, 0, m_preview.size(), [&] { m_preview.clear(); });
+    std::vector<Preview> next;
+    next.reserve(std::min(values.size(), inputCutoffMaximumBatch));
     std::lock_guard lock(m_state->mutex);
-    if (m_state->closed || !m_state->owner || !m_state->owner->active || !Shared::live(*m_state->owner))
-      return;
-    for (const auto &value : values) {
-      if (m_preview.size() == inputCutoffMaximumBatch || !value.captured.input.live() ||
-          !m_state->owner->selected.sameSelection(value.selected) ||
-          !m_state->owner->capture.sameEpoch(value.captured.input.epoch) || !value.route.pointKnown ||
-          value.route.stamp !=
-              OriginalInputStamp{value.captured.input.record.epoch, value.captured.input.record.sequence, 1} ||
-          value.captured.translation.parts != 1 || value.captured.translation.uncertain ||
-          (!m_preview.empty() && value.route.stamp.sequence <= m_preview.back().route.stamp.sequence))
-        break;
-      inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, 1, 0, [&] { m_preview.push_back(value); });
-    }
+    if (!m_state->closed && m_state->owner && m_state->owner->active && Shared::live(*m_state->owner))
+      for (const auto &value : values) {
+        if (next.size() == inputCutoffMaximumBatch || !value.captured.input.live() ||
+            !m_state->owner->selected.sameSelection(value.selected) ||
+            !m_state->owner->capture.sameEpoch(value.captured.input.epoch) || !value.route.pointKnown ||
+            value.route.stamp !=
+                OriginalInputStamp{value.captured.input.record.epoch, value.captured.input.record.sequence, 1} ||
+            value.captured.translation.parts != 1 || value.captured.translation.uncertain ||
+            (!next.empty() && value.route.stamp.sequence <= next.back().route.stamp.sequence))
+          break;
+        next.push_back(value);
+      }
+    // Publish the bounded advisory snapshot in one swap. It never delivers or
+    // removes source input; every record still reserves/commits individually.
+    // Account the actual single replacement, including all retired/new entries,
+    // instead of exposing a clear followed by up to sixteen partial previews.
+    if (!next.empty() || !m_preview.empty())
+      inputEvidenceApply(InputEvidenceQueue::CoordinatorPreview, this, next.size(), m_preview.size(), [&] {
+        m_preview.swap(next);
+      });
   }
   void maintain() noexcept override
   {

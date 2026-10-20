@@ -3,6 +3,19 @@
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
 
+`668d515d8` still fails the sustained capture/route join in both
+`dashboard-replay-12sgfc5q` and `dashboard-replay-3gr4kmuq`. The latter records
+CPU counters without attaching a sampler. The five non-repeat board checks
+pass, but the burst and recording fail. Core emits 67,767 journal rows, including
+27,043 preview rows; the Python collector and Core consume significant CPU.
+The next candidate publishes each bounded advisory preview by one actual swap,
+recording its complete enqueue/retire counts in one row. Actual capture,
+dispatch, raw receipt and queue capacities stay unchanged. Native lookup hints
+now retain only visible sibling references; the retained source is separately
+revalidated later in each input, and any visible-ID change forces discovery.
+No native check result is reused and no deadline or raw event is changed.
+
+
 `d25ce97ac` passes the selected Mac/Ubuntu suites. Its lightweight diagnostic
 run `dashboard-replay-sp0x80hq` stops before the long burst: the second ordinary
 scroll map expires, so it is not a throughput pass. Native event construction

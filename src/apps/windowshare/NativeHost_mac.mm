@@ -2105,8 +2105,8 @@ struct NativeHost::Impl
     if (!finalInventory && !focusedWithinNativeSource(expected, source, focused))
       return incomplete("Focused native surface has no proven source ancestry");
     measured("focusOwnershipUs");
-    // Public on-screen inventory excludes dormant backing windows. This is
-    // always a fresh observation; no result survives the current input call.
+    // Public on-screen inventory excludes dormant backing windows. Read it
+    // afresh; retained IDs only select lookup references, never grant input.
     const auto before = finalInventory ? std::optional<NativeWindowInventory>{} : nativeWindowInventory(expected.pid);
     const auto visible = finalInventory ? nativeVisibleWindowIds() : std::optional<std::vector<std::uint32_t>>{};
     measured("inventoryBeforeUs");
@@ -2126,9 +2126,15 @@ struct NativeHost::Impl
     if (CFArrayGetCount(array) > 64)
       return incomplete("Application AX window list exceeded its bound");
     std::vector<std::uint32_t> unrelated;
+    std::vector<const void *> siblingReferences;
     std::chrono::microseconds idTime{}, attributesTime{};
     for (CFIndex i = 0; i < CFArrayGetCount(array); ++i) {
       const auto window = element(CFArrayGetValueAtIndex(array, i));
+      // The exact retained source receives fresh frame, focus/ancestry and
+      // WindowServer identity checks later in this same input call. Do not
+      // repeat its native-ID query while discovering sibling candidates.
+      if (window && CFEqual(window, retained.get()))
+        continue;
       CGWindowID number = 0;
       const auto idStarted = std::chrono::steady_clock::now();
       if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
@@ -2164,6 +2170,7 @@ struct NativeHost::Impl
         return false;
       }
       unrelated.push_back(number);
+      siblingReferences.push_back(window);
       attributesTime +=
           std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - attributesStarted);
     }
@@ -2199,8 +2206,20 @@ struct NativeHost::Impl
     }
     reason = finalInventory ? "Native surface classification awaits the final per-input identity snapshot"
                             : "Every independent native window is the source or freshly proven unrelated";
-    if (finalInventory && discovered)
-      *discovered = reuseReferences ? references : std::make_shared<SurfaceReferences>(array, *visible);
+    if (finalInventory && discovered) {
+      if (reuseReferences) {
+        *discovered = references;
+      } else {
+        // Dormant backing windows need no per-input lookup. Any change in the
+        // fresh global visible ID set forces rediscovery, and the final native
+        // attribution must still account for every currently visible sibling.
+        CF<CFArrayRef> siblings(
+            CFArrayCreate(nullptr, siblingReferences.data(), siblingReferences.size(), &kCFTypeArrayCallBacks)
+        );
+        if (siblings)
+          *discovered = std::make_shared<SurfaceReferences>(siblings.get(), *visible);
+      }
+    }
     return true;
   }
   std::shared_ptr<AttachedSurface>
