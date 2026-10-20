@@ -880,8 +880,10 @@ private:
     }
     // No Host/Entry pointer crosses into this read. Each mutation gets its own
     // before/after observation; results are never reused by another operation.
-    // The existing 250 ms inspection and two-second transaction cutoffs both
-    // apply before the owner thread may continue.
+    // Placement reads share the existing absolute two-second transaction;
+    // they do not inherit the separate 250 ms input/environment cutoff or
+    // grant input authority. No worker result can renew the transaction.
+    const auto started = std::chrono::steady_clock::now();
     lifecycleDiagnostic(
         "Host", "source.holding.authority", "started", "Read fresh placement identity and permissions",
         {{"stage", stage}, {"windowId", qint64(m_expected.id)}}
@@ -910,7 +912,7 @@ private:
             return verified;
           }
         },
-        [weak = weak_from_this(), stage, complete](std::optional<bool> observed) {
+        [weak = weak_from_this(), stage, started, complete](std::optional<bool> observed) {
           const auto self = weak.lock();
           if (!self)
             return;
@@ -921,7 +923,14 @@ private:
               "Host", "source.holding.authority", verified ? "completed" : "failed",
               verified ? "Fresh placement observation joined the current owner and display"
                        : "Placement observation expired, was refused, or lost its current owner/display",
-              {{"stage", stage}, {"windowId", qint64(self->m_expected.id)}}
+              {{"stage", stage},
+               {"windowId", qint64(self->m_expected.id)},
+               {"observationAvailable", observed.has_value()},
+               {"elapsedMs",
+                qint64(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+                        .count()
+                )}}
           );
           complete(verified);
         }
@@ -1037,7 +1046,8 @@ private:
             if (!self)
               return;
             self->observeAuthority(
-                "readback.after", [expected = self->m_expected, observed, complete](bool authorized) {
+                "readback.after",
+                [expected = self->m_expected, observed, complete](bool authorized) {
                   const auto result =
                       observed && authorized
                           ? *observed
@@ -1074,9 +1084,9 @@ private:
     }
   };
   std::shared_ptr<Registration> m_registration;
-  AsyncNativeInspection<std::shared_ptr<Registration>, 2000> m_registrationRead;
-  AsyncNativeInspection<bool> m_authorityRead;
-  AsyncNativeInspection<FrameObservation, 2000> m_frameRead;
+  AsyncNativeInspection<std::shared_ptr<Registration>, NativePlacementVerification::maximumAgeMs> m_registrationRead;
+  AsyncNativeInspection<bool, NativePlacementVerification::maximumAgeMs> m_authorityRead;
+  AsyncNativeInspection<FrameObservation, NativePlacementVerification::maximumAgeMs> m_frameRead;
   NativePlacementVerification m_verification;
 };
 
@@ -3195,10 +3205,8 @@ struct NativeHost::Impl
         return deny("Native button identity exhausted");
       number = buttonDown ? mouseSequence + 1 : target->buttons[*buttonSlot];
       clicks = int(button->clickCount);
-    } else if (
-        const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
-        motion && motion->dragButton < originalInputButtonCount
-    ) {
+    } else if (const auto *motion = std::get_if<OriginalInputMotion>(&record.payload);
+               motion && motion->dragButton < originalInputButtonCount) {
       number = target->buttons[motion->dragButton];
       clicks = int(std::get<OriginalInputButton>(prepared->press->payload).clickCount);
     }

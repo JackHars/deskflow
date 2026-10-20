@@ -632,7 +632,7 @@ void asynchronousPlacementActions()
   // An in-flight per-write authority read must let a separate environment
   // completion run. The action stays pending until its actual read returns.
   Gate::Clock::time_point now{};
-  AsyncNativeInspection<int> authority([&] { return now; });
+  AsyncNativeInspection<int, Gate::maximumAgeMs> authority([&] { return now; });
   AsyncNativeInspection<int, 250, Qt::HighEventPriority> environment([&] { return now; });
   auto entered = std::make_shared<QSemaphore>(), release = std::make_shared<QSemaphore>();
   const auto unblock = qScopeGuard([&] { release->release(); });
@@ -673,6 +673,68 @@ void asynchronousPlacementActions()
   release->release();
   dispatchUntil([&] { return placed; });
   check(writes == 1 && !authority.busy(), "native action wrote more than once or retained its worker slot");
+}
+
+void placementAuthorityDeadline()
+{
+  static_assert(AsyncNativeInspection<int>::maximumAge == 250ms);
+  static_assert(Gate::maximumAgeMs == 2000);
+  for (int scenario = 0; scenario < 3; ++scenario) {
+    Gate::Clock::time_point now{};
+    AsyncNativeInspection<int, Gate::maximumAgeMs> authority([&] { return now; });
+    int writes = 0, completions = 0;
+    bool placed = false, returned = false;
+    Gate gate(
+        [](QString *) { return Gate::Observation::Verified; },
+        [&](bool success, QString) {
+          ++completions;
+          placed = success;
+        },
+        [&] { return now; }
+    );
+    // Earlier preparation has already consumed most of the one transaction.
+    // The fresh worker's timeout must not restart that absolute deadline.
+    now += 1500ms;
+    struct Worker
+    {
+      QSemaphore entered;
+      QThread *thread = nullptr;
+    };
+    const auto worker = std::make_shared<Worker>();
+    gate.prepareAsyncAfter([](auto complete) { complete(true); }, {[&](auto complete) {
+                             check(
+                                 authority.request(
+                                     [worker] {
+                                       worker->thread = QThread::currentThread();
+                                       worker->entered.release();
+                                       return 17;
+                                     },
+                                     [&, complete](auto observed) {
+                                       returned = true;
+                                       const bool current =
+                                           gate.observeAuthority([] { return true; }, [&] { return observed == 17; });
+                                       if (current)
+                                         ++writes;
+                                       complete(current);
+                                     }
+                                 ),
+                                 "placement authority did not start"
+                             );
+                           }});
+    dispatch();
+    check(worker->entered.tryAcquire(1, 2000) && worker->thread->wait(2000), "placement authority did not return");
+    // Reproduce the 232 ms native read plus 55 ms owner-queue delay without
+    // depending on real time. It is valid placement work, not an input receipt.
+    now += scenario == 1 ? 500ms : 287ms;
+    if (scenario == 2)
+      gate.cancel();
+    dispatchUntil([&] { return returned; });
+    for (int turn = 0; turn < 3; ++turn)
+      dispatch();
+    check(writes == (scenario == 0 ? 1 : 0), "expired or cancelled placement authority wrote a window");
+    check(placed == (scenario == 0), "placement authority lost its original transaction deadline");
+    check(completions == (scenario == 2 ? 0 : 1), "placement authority completed more than once after retirement");
+  }
 }
 
 struct Fixture
@@ -1396,6 +1458,7 @@ int main(int argc, char **argv)
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"prioritized-native-inspection", &prioritizedNativeInspection},
              std::pair{"asynchronous-placement-actions", &asynchronousPlacementActions},
+             std::pair{"placement-authority-deadline", &placementAuthorityDeadline},
              std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},
              std::pair{"asynchronous-placement-preparation", &asynchronousPlacementPreparation},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},

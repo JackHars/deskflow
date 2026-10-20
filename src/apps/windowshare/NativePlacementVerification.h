@@ -31,6 +31,7 @@ public:
     Invalid
   };
   using Clock = std::chrono::steady_clock;
+  static constexpr int maximumAgeMs = 2000;
   using Now = std::function<Clock::time_point()>;
   using Probe = std::function<Observation(QString *)>;
   using ObservationCompletion = std::function<void(Observation, QString)>;
@@ -57,12 +58,12 @@ public:
       : m_probe(std::move(probe)),
         m_completion(std::move(completion)),
         m_now(std::move(now)),
-        m_due(m_now() + std::chrono::seconds(2))
+        m_due(m_now() + std::chrono::milliseconds(maximumAgeMs))
   {
     m_timer.setSingleShot(true);
     m_timer.setTimerType(Qt::PreciseTimer);
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { expire(); });
-    m_timer.start(std::chrono::seconds(2));
+    m_timer.start(std::chrono::milliseconds(maximumAgeMs));
   }
   // Each native write returns to Qt before the next operation.
   // The original deadline includes preparation and is never renewed by a step.
