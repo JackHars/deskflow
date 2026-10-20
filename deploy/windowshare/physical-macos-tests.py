@@ -35,6 +35,40 @@ def control_observation(frame, **changes):
                 nativeVisible=True, miniaturized=False) | changes
 
 
+class PrivateTunnelTests(unittest.TestCase):
+    def test_input_and_video_cannot_share_a_forward_or_ssh_master(self):
+        ssh = ['ssh', '-F', '/dev/null', '-o', 'StrictHostKeyChecking=yes']
+        commands = module.private_tunnel_commands(
+            ssh, 'fixture-host', {'corePort': 24860, 'hostPort': 24861},
+            {'core': '/private/core.sock', 'viewer': '/private/viewer.sock'})
+        self.assertEqual(set(commands), {'tunnel-core', 'tunnel-viewer'})
+        forwards = []
+        for command in commands.values():
+            self.assertEqual(command[:len(ssh)], ssh)
+            self.assertEqual(command[-1], 'fixture-host')
+            self.assertEqual(command.count('-R'), 1)
+            self.assertNotIn('-L', command)
+            for option in ('ControlMaster=no', 'ControlPath=none', 'ExitOnForwardFailure=yes',
+                           'StreamLocalBindUnlink=no'):
+                self.assertEqual(command[command.index(option) - 1], '-o')
+            forwards.append(command[command.index('-R') + 1])
+        self.assertEqual(set(forwards), {'/private/core.sock:127.0.0.1:24860',
+                                         '/private/viewer.sock:127.0.0.1:24861'})
+
+    def test_either_transport_exit_is_terminal_even_during_linux_or_preview_stop(self):
+        for failed in ('tunnel-core', 'tunnel-viewer'):
+            with self.subTest(failed=failed):
+                owned = {name: Mock(returncode=None) for name in
+                         ('tunnel-core', 'tunnel-viewer', 'linux', 'preview-stream')}
+                for process in owned.values():
+                    process.poll.return_value = None
+                module.check_owned_processes(owned)
+                owned[failed].poll.return_value = 255
+                owned[failed].returncode = 255
+                with self.assertRaisesRegex(RuntimeError, failed + ' exited early: 255'):
+                    module.check_owned_processes(owned, linux_stopped=True, preview_stopped=True)
+
+
 class HistoryTests(unittest.TestCase):
     def test_automated_start_provenance_is_boolean_and_cannot_change(self):
         for automatic in (False, True):

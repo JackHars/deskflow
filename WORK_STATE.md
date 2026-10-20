@@ -2,6 +2,21 @@
 
 ## Scroll diagnosis in progress — 2026-10-19
 
+The adaptive-prefix candidate `e28deb425` passes all 19 selected Mac and 15
+Ubuntu suites, but `dashboard-replay-_kqo3i_b` fails at a mapped receipt deadline.
+The preceding 11-record group took 192 ms and correctly reduced the next group
+to seven. That next group then waited about 183 ms before native dispatch,
+leaving too little of its unchanged 250 ms receipt lifetime. Its five non-repeat
+board checks passed; the sustained burst and full session did not.
+
+The physical coordinator previously multiplexed its input and video forwards
+over one SSH/TCP connection. It now launches an independently owned connection
+for each, with SSH master reuse disabled, while preserving loopback-only ports,
+private remote Unix sockets, pinned TLS, liveness checks and exact cleanup.
+This isolates a possible source of head-of-line delay; it is not yet evidence
+that scrolling is fixed. The next runs reuse the exact `e28deb425` application
+artifacts and validate the changed coordinator separately on both machines.
+
 `b72edf6ea` adds timing for each fresh native inventory stage. Its replay
 `dashboard-replay-u7sc1pkd` stops before the burst with ScreenCaptureKit -3821,
 so it provides timings only, not scrolling acceptance. A read-only alternative

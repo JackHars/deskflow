@@ -45,6 +45,23 @@ PRODUCTION_CORE_READY_SECONDS = 50
 START_WAIT_SECONDS = 300
 
 
+def private_tunnel_commands(ssh, target, mac, sockets):
+    """Keep the input round trip off the video stream's SSH/TCP connection."""
+    return {"tunnel-" + name: [*ssh, "-N", "-o", "ControlMaster=no", "-o", "ControlPath=none",
+                              "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=no",
+                              "-R", sockets[name] + ":127.0.0.1:" + str(mac[key]), target]
+            for name, key in (("core", "corePort"), ("viewer", "hostPort"))}
+
+
+def check_owned_processes(owned, linux_stopped=False, preview_stopped=False):
+    for name, process in owned.items():
+        if name == "linux" and linux_stopped:
+            continue
+        if name.startswith("preview-") and preview_stopped:
+            continue
+        require(process.poll() is None, name + " exited early: " + str(process.returncode))
+
+
 def core_ready(text, ipc_ready, production):
     if production:
         require("window sharing code admission unavailable:" not in text and
@@ -628,6 +645,7 @@ def run(arguments):
     ssh = ["ssh", "-F", "/dev/null", "-T", "-i", str(arguments.ssh_key), "-o", "BatchMode=yes",
            "-o", "StrictHostKeyChecking=yes", "-o", "ConnectTimeout=8",
            "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
+    tunnel_commands = private_tunnel_commands(ssh, arguments.ssh_target, mac, plan["remoteSockets"])
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith("DYLD_") and key not in
                    ("QT_PLUGIN_PATH", "QT_QPA_PLATFORM_PLUGIN_PATH", "QML2_IMPORT_PATH")}
@@ -692,12 +710,7 @@ def run(arguments):
         native_log.poll()
         source_log.poll()
         require(diagnostics.error is None, "Diagnostic logging failed: " + str(diagnostics.error))
-        for name, process in owned.items():
-            if name == "linux" and linux_stopped:
-                continue
-            if name.startswith("preview-") and preview_stopped:
-                continue
-            require(process.poll() is None, name + " exited early: " + str(process.returncode))
+        check_owned_processes(owned, linux_stopped, preview_stopped)
         if preview_receiver and not preview_stopped:
             preview_receiver.poll()
             if preview_ready:
@@ -886,10 +899,10 @@ def run(arguments):
                                              "exactLibraryAdmissionObserved": True,
                                              "perRecordNativeAuthority": "not-assessed"}
         stage("Connect private tunnels")
-        tunnel_argv = [*ssh, "-N", "-o", "ExitOnForwardFailure=yes", "-o", "StreamLocalBindUnlink=no"]
-        for name, key in (("core", "corePort"), ("viewer", "hostPort")):
-            tunnel_argv += ["-R", plan["remoteSockets"][name] + ":127.0.0.1:" + str(mac[key])]
-        launch("tunnel", [*tunnel_argv, arguments.ssh_target])
+        for name, argv in tunnel_commands.items():
+            launch(name, argv)
+        report["privateTunnelTransport"] = {"separateConnections": True,
+                                            "processes": {name: owned[name].pid for name in tunnel_commands}}
         probe = ("import json,os,stat,sys; out={};\nfor p in sys.argv[1:]:\n"
                  " s=os.lstat(p); assert stat.S_ISSOCK(s.st_mode) and s.st_uid==os.getuid(); "
                  "out[p]=dict(device=s.st_dev,inode=s.st_ino,uid=s.st_uid)\nprint(json.dumps(out))")
@@ -1073,7 +1086,7 @@ def run(arguments):
             except Exception as error:
                 cleanup_errors.append("Linux stop: " + str(error))
         stage("Cleanup: stop exact owned processes")
-        for name in ("linux", "core", "host", "tunnel"):
+        for name in ("linux", "core", "host", *tunnel_commands):
             try:
                 if production and name == "core" and owned.get(name) and owned[name].poll() is None:
                     original.stop_core(owned[name], Path(mac["coreIpcExpectedPath"]), inspector, core_identity)
