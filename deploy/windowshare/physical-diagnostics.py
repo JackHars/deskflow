@@ -161,11 +161,24 @@ class LogObserver:
                         value['step'] == 'input.native-delivery' and value['state'] == 'denied'
                     terminal_stream = value['component'] == 'Host' and \
                         value['step'] == 'capture.failure' and value['state'] == 'failed'
-                    if self.input_failure is None and (terminal_capture or terminal_delivery or terminal_stream):
+                    terminal_dispatch = value['component'] == 'Core input' and \
+                        value['step'] == 'dispatch.stopped' and value['state'] == 'failed'
+                    if self.input_failure is None and \
+                            (terminal_capture or terminal_delivery or terminal_stream or terminal_dispatch):
                         self.input_failure = value
                     self.diagnostics.emit(name, value['state'], value['message'], native=value)
                 except (ValueError, KeyError, TypeError):
                     self.diagnostics.emit('Native diagnostic parsing', 'failed', 'Malformed native lifecycle diagnostic')
+            elif 'WARNING: original input dispatch stopped: ' in text:
+                # Older packages have only this terminal Server warning.
+                # Ordinary owner/lease revocation also occurs on an intentional
+                # return, so those observations alone must not abort a test.
+                value = dict(component='Core input', step='dispatch.stopped', state='failed',
+                             message=text.split('WARNING: original input dispatch stopped: ', 1)[1])
+                if self.input_failure is None:
+                    self.input_failure = value
+                self.diagnostics.emit('Core input: dispatch.stopped', 'failed', value['message'],
+                                      native=value, log=str(self.path))
             elif any(word in text for word in ('WARNING:', 'ERROR:', 'FATAL:', 'Holding display unavailable;',
                                                 'Source-visible fallback changed', 'Cannot start window capture:')):
                 self.diagnostics.emit('Native log', 'observed', text[:4000], log=str(self.path))

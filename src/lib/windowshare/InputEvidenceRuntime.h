@@ -32,6 +32,7 @@ private:
   InputEvidenceRuntime() = default;
   void tick();
   void drain(bool yield = true);
+  void finishJournalIfDrained();
   void endJournal();
   void write(const QJsonObject &value);
   InputEvidenceRecorder *m_recorder = nullptr;

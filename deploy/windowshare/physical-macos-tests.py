@@ -584,6 +584,11 @@ class DiagnosticTests(unittest.TestCase):
         cases = [('Core input', 'capture.continuity', 'failed', True),
                  ('Core input', 'capture.delivery', 'failed', True),
                  ('Core input', 'capture.route-join', 'failed', True),
+                 ('Core input', 'dispatch.stopped', 'failed', True),
+                 ('Core input', 'dispatch.stopped', 'observed', False),
+                 ('Core input', 'input.owner', 'revoked', False),
+                 ('Core private input', 'input.lease', 'revoked', False),
+                 ('Host', 'dispatch.stopped', 'failed', False),
                  ('Host', 'input.native-delivery', 'denied', True),
                  ('Host', 'input.native-delivery', 'submitted', False),
                  ('Host', 'source.holding.window.position', 'observed', False),
@@ -608,6 +613,35 @@ class DiagnosticTests(unittest.TestCase):
                     observer.require_live_input(True)
                 observer.require_live_input(False)
                 trace.close()
+
+    def test_terminal_server_warning_retains_cause_before_fallback_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+            self.addCleanup(trace.close)
+            log = root / 'native.log'
+            observer = module.DIAGNOSTICS.LogObserver(log, trace)
+            reason = 'completed capture arrived after its translated input deadline'
+            warning = '[2026-10-20T15:31:19.864] WARNING: original input dispatch stopped: ' + reason
+            log.write_text(warning[:-4])
+            observer.poll()
+            observer.require_live_input(True)  # Incomplete rows carry no invented cause.
+            with log.open('a') as stream:
+                stream.write(warning[-4:] + '\n')
+                stream.write('DESKFLOW_STEP ' + json.dumps(dict(
+                    component='Core input', step='input.owner', state='revoked',
+                    message='Core dispatcher released the input owner')) + '\n')
+            observer.poll()
+            with self.assertRaisesRegex(RuntimeError, 'dispatch.stopped: ' + reason):
+                observer.require_live_input(True)
+            observer.require_live_input(False)
+            with log.open('a') as stream:
+                stream.write('DESKFLOW_STEP ' + json.dumps(dict(
+                    component='Core input', step='capture.continuity', state='failed',
+                    message='Capture stopped during cleanup')) + '\n')
+            observer.poll()
+            self.assertEqual(observer.input_failure['message'], reason)
+            self.assertEqual(trace.first_failure['message'], reason)
 
     def test_stopped_capture_retains_system_cause_before_restore_or_route_teardown(self):
         with tempfile.TemporaryDirectory() as directory:

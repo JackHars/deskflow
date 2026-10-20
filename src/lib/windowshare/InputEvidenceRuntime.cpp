@@ -243,6 +243,7 @@ bool InputEvidenceRuntime::requestRecord(const QString &privateNewPath)
 }
 void InputEvidenceRuntime::drain(bool yield)
 {
+  const SlowOperationDiagnostic timing("Input evidence", "evidence.journal-drain");
   // Serialization belongs to this timer, never to the event tap or native
   // filter. A full recorder can take tens of milliseconds to serialize. Keep
   // one bounded continuation so input can run between slices without waiting
@@ -291,7 +292,12 @@ void InputEvidenceRuntime::drain(bool yield)
         m_drainQueued = true;
         QTimer::singleShot(0, this, [this] {
           m_drainQueued = false;
-          tick();
+          // Only continue serialization here. tick() has its own 10 ms timer
+          // for fresh control/owner checks; running it for every journal slice
+          // repeatedly resolves and reads the same control file on the native
+          // input thread. This continuation cannot arm or renew any authority.
+          drain();
+          finishJournalIfDrained();
         });
       }
       break;
@@ -348,6 +354,7 @@ void InputEvidenceRuntime::tick()
   }
   try {
     if (QFileInfo::exists(m_control)) {
+      const SlowOperationDiagnostic controlTiming("Input evidence", "evidence.control-read");
       const auto command = readPrivate(m_control, 512);
       require(
           command.size() == 3 && command["version"].isDouble() && command["version"].toDouble() == 1 &&
@@ -409,6 +416,10 @@ void InputEvidenceRuntime::tick()
   (void)m_recorder->recording();
   m_recorder->finish();
   drain();
+  finishJournalIfDrained();
+}
+void InputEvidenceRuntime::finishJournalIfDrained()
+{
   if ((m_recorder->state() == InputEvidenceState::Stopped || m_recorder->state() == InputEvidenceState::Denied) &&
       m_recorder->drained())
     endJournal();

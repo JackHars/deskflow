@@ -2209,6 +2209,13 @@ void Server::flushOriginalBeforeSelection()
 void Server::cancelOriginalDispatch(const char *reason) noexcept
 {
   if (!m_originalDispatchTerminal) {
+    deskflow::windowshare::lifecycleDiagnostic(
+        "Core input", "dispatch.stopped", "failed", reason,
+        {{"pending", qint64(m_originalPending.size())},
+         {"completed", qint64(m_originalCompleted.size())},
+         {"captureLive", m_originalInputCaptured && m_originalInputCaptured->live()},
+         {"routesLive", m_originalInputRoutes && m_originalInputRoutes->live()}}
+    );
     LOG_WARN("original input dispatch stopped: %s", reason);
     if (m_originalInputCaptured)
       LOG_WARN(

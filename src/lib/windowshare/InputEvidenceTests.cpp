@@ -37,6 +37,10 @@ struct InputEvidenceTestAccess
   {
     runtime.drain();
   }
+  static void stopControlTimer(InputEvidenceRuntime &runtime)
+  {
+    runtime.m_timer.stop();
+  }
   static auto serialized(const InputEvidenceRuntime &runtime)
   {
     return runtime.m_rows;
@@ -1098,6 +1102,18 @@ void cooperativeSerialization()
         "one evidence turn serialized the burst instead of yielding to input"
     );
     if (!destroyPending) {
+      // Only the ordinary timer services control files. A serialization
+      // continuation must not repeatedly resolve/read the same file, or carry
+      // an implicit control/authority transition through the drain path.
+      InputEvidenceTestAccess::stopControlTimer(*runtime);
+      {
+        QFile control(parent + "/control.json");
+        check(control.open(QIODevice::WriteOnly), "serialization control failed");
+        control.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        control.write(
+            QJsonDocument(QJsonObject{{"version", 1}, {"runId", "serialization"}, {"command", "stop"}}).toJson()
+        );
+      }
       bool intervened = false, expired = false;
       QMetaObject::invokeMethod(
           runtime.get(),
@@ -1124,6 +1140,16 @@ void cooperativeSerialization()
       check(
           !expired && intervened && storage->drained() && storage->loss() == InputEvidenceLoss::None,
           "cooperative evidence drain failed or lost its queued input turn"
+      );
+      check(
+          storage->state() == InputEvidenceState::Recording,
+          "serialization continuation reread the control file outside its timer"
+      );
+      InputEvidenceTestAccess::tick(*runtime);
+      check(
+          storage->state() == InputEvidenceState::Draining && storage->sourceEnd() != 0 &&
+              storage->loss() == InputEvidenceLoss::None,
+          "ordinary timer failed to stop the source while preserving the native receipt tail"
       );
     }
     // Teardown must finish an outstanding slice synchronously, cancel its

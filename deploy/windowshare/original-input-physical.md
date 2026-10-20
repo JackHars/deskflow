@@ -409,3 +409,10 @@ Failed or timed-out coordinator commands retain separately labelled bounded
 stdout and stderr tails. A structured admission failure on stdout must not be
 hidden by a shutdown diagnostic on stderr. This reporting changes no readiness,
 deadline, input or cleanup requirement.
+
+During Active, a terminal Server dispatch failure stops the test immediately,
+even if the viewer continues showing legacy input afterward. Both the structured
+`Core input / dispatch.stopped` event and the older exact Server warning retain
+the first cause. Ordinary owner/lease revocation during an intentional return
+is not itself treated as this terminal failure. Final logs and owned cleanup
+still run after an abort.

@@ -10,6 +10,14 @@ the original loss name, location and queue. It still rejects every nonzero loss,
 including a drained journal that missed its stop deadline. Failure metadata
 cannot override a loss or turn an incomplete recording into a pass.
 
+Journal serialization yields after at most 128 rows or two milliseconds of
+work, retaining at most one queued continuation. That continuation only drains
+existing rows; it does not reread control files or acquire an owner. The ordinary
+10 ms timer retains all fresh control validation, arm/stop handling and deadlines.
+Separate slow-operation diagnostics distinguish control processing from journal
+serialization and flushes. The native receipt tail, exact rows, output limits
+and sticky failure rules are unchanged.
+
 This collector records actual Mac capture records before the first raw queue,
 mutations of the declared queues below, explicit hover replacements, and actual
 AppKit receipts in the owned NativeSmoke source window. It does not inject input
