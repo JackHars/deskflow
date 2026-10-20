@@ -6,6 +6,7 @@
 #include "HoldingDisplay.h"
 #include "LifecycleDiagnostics.h"
 #include "NativeAssociatedWindow.h"
+#include "NativeAttributeBatch_mac.h"
 #include "NativeCaptureTiming.h"
 #include "NativeHost.h"
 #include "NativeHostLifecycle.h"
@@ -1849,30 +1850,29 @@ struct NativeHost::Impl
   {
     return value && CFGetTypeID(value) == AXUIElementGetTypeID() ? static_cast<AXUIElementRef>(value) : nullptr;
   }
-  static std::optional<WindowFamilyRole> surfaceRole(AXUIElementRef window)
+  static std::optional<WindowFamilyRole> surfaceRole(CFTypeRef role, CFTypeRef subrole)
   {
-    CF<CFTypeRef> role(attribute(window, kAXRoleAttribute));
-    if (!role)
+    if (!role || CFGetTypeID(role) != CFStringGetTypeID())
       return {};
-    if (CFEqual(role.get(), kAXSheetRole))
+    if (CFEqual(role, kAXSheetRole))
       return WindowFamilyRole::Sheet;
-    if (CFEqual(role.get(), kAXDrawerRole))
+    if (CFEqual(role, kAXDrawerRole))
       return WindowFamilyRole::Drawer;
-    if (CFEqual(role.get(), kAXMenuRole))
+    if (CFEqual(role, kAXMenuRole))
       return WindowFamilyRole::Menu;
-    if (CFEqual(role.get(), kAXPopoverRole))
+    if (CFEqual(role, kAXPopoverRole))
       return WindowFamilyRole::Popover;
-    if (CFEqual(role.get(), kAXHelpTagRole))
+    if (CFEqual(role, kAXHelpTagRole))
       return WindowFamilyRole::Tooltip;
-    // Only a Window's subrole can identify a Dialog. Asking every text field,
-    // button and container for an unused subrole adds a second synchronous AX
-    // round trip per node to the fresh attached-surface scan on every input.
-    if (!CFEqual(role.get(), kAXWindowRole))
-      return {};
-    CF<CFTypeRef> subrole(attribute(window, kAXSubroleAttribute));
-    if (subrole && (CFEqual(subrole.get(), kAXDialogSubrole) || CFEqual(subrole.get(), kAXSystemDialogSubrole)))
+    if (CFEqual(role, kAXWindowRole) && subrole && CFGetTypeID(subrole) == CFStringGetTypeID() &&
+        (CFEqual(subrole, kAXDialogSubrole) || CFEqual(subrole, kAXSystemDialogSubrole)))
       return WindowFamilyRole::Dialog;
     return {};
+  }
+  static std::optional<WindowFamilyRole> surfaceRole(AXUIElementRef window)
+  {
+    const auto observed = readNativeAttributes(window, std::array{kAXRoleAttribute, kAXSubroleAttribute});
+    return surfaceRole(observed.get(0), observed.get(1));
   }
   static bool attachedTo(AXUIElementRef child, AXUIElementRef parent, pid_t process)
   {
@@ -1925,11 +1925,10 @@ struct NativeHost::Impl
     std::shared_ptr<AttachedSurface> result;
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(200);
     unsigned childrenVisited = 0;
-    const auto observe = [&](AXUIElementRef candidate, bool focusedPath) {
+    const auto observe = [&](AXUIElementRef candidate, bool focusedPath, std::optional<WindowFamilyRole> role) {
       if (!candidate || CFEqual(candidate, retained.get()) || (!focusedPath && result))
         return;
       AXUIElementSetMessagingTimeout(candidate, 0.05f);
-      const auto role = surfaceRole(candidate);
       if (!role || !attachedTo(candidate, retained.get(), expected.pid))
         return;
       CGWindowID window = 0;
@@ -1952,20 +1951,32 @@ struct NativeHost::Impl
     for (unsigned depth = 0;
          alive && depth < 24 && element(cursor.get()) && std::chrono::steady_clock::now() < deadline; ++depth) {
       AXUIElementSetMessagingTimeout(element(cursor.get()), 0.05f);
-      observe(element(cursor.get()), true);
+      // All of these fields belong to this exact retained AX object. Read
+      // them in one fresh round trip instead of interrupting the source app
+      // separately for its role, children and parent on every scroll event.
+      const auto observed = readNativeAttributes(
+          element(cursor.get()),
+          std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXChildrenAttribute, kAXParentAttribute}
+      );
+      observe(element(cursor.get()), true, surfaceRole(observed.get(0), observed.get(1)));
       // Cocoa menus/help tags need not become AXFocusedUIElement. Inspect the
       // focused control's actual ancestors and their immediate AX children,
       // bounded to 64 nodes, and accept only a live independent native surface.
-      CF<CFTypeRef> children(attribute(element(cursor.get()), kAXChildrenAttribute));
+      CF<CFTypeRef> children(observed.copy(2));
       if (children && CFGetTypeID(children.get()) == CFArrayGetTypeID()) {
         const auto array = static_cast<CFArrayRef>(children.get());
         for (CFIndex i = 0;
-             i < CFArrayGetCount(array) && childrenVisited++ < 64 && std::chrono::steady_clock::now() < deadline; ++i)
-          observe(element(CFArrayGetValueAtIndex(array, i)), false);
+             i < CFArrayGetCount(array) && childrenVisited++ < 64 && std::chrono::steady_clock::now() < deadline; ++i) {
+          const auto child = element(CFArrayGetValueAtIndex(array, i));
+          if (child && !CFEqual(child, retained.get()) && !result) {
+            AXUIElementSetMessagingTimeout(child, 0.05f);
+            observe(child, false, surfaceRole(child));
+          }
+        }
       }
       if (CFEqual(cursor.get(), retained.get()))
         break;
-      CF<CFTypeRef> next(attribute(element(cursor.get()), kAXParentAttribute));
+      CF<CFTypeRef> next(observed.copy(3));
       if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
         break;
       cursor = std::move(next);
@@ -2310,14 +2321,16 @@ struct NativeHost::Impl
     measured("focusedElementUs");
     if (!current() || !element(focused.get()))
       return false;
-    CF<CFTypeRef> top(attribute(element(focused.get()), kAXTopLevelUIElementAttribute));
+    const auto focusedAttributes =
+        readNativeAttributes(element(focused.get()), std::array{kAXTopLevelUIElementAttribute, kAXRoleAttribute});
+    CF<CFTypeRef> top(focusedAttributes.copy(0));
     measured("topLevelUs");
     if (!current())
       return false;
     if (!element(top.get()) || CFEqual(top.get(), retained.get())) {
       // Some apps focus the Sheet/Drawer itself. Its parent shortcut can then
       // name the Window; retain the explicitly typed focused object instead.
-      CF<CFTypeRef> focusedRole(attribute(element(focused.get()), kAXRoleAttribute));
+      CF<CFTypeRef> focusedRole(focusedAttributes.copy(1));
       measured("focusedRoleUs");
       if (!current() || !focusedRole || CFGetTypeID(focusedRole.get()) != CFStringGetTypeID() ||
           (!CFEqual(focusedRole.get(), kAXSheetRole) && !CFEqual(focusedRole.get(), kAXDrawerRole)))

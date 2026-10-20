@@ -5,6 +5,7 @@
 #include "HoldingRelocation.h"
 #include "NativePlacementVerification.h"
 #if defined(__APPLE__)
+#include "NativeAttributeBatch_mac.h"
 #include "NativePlacementNotifications_mac.h"
 #include "NativeWindowState_mac.h"
 #endif
@@ -332,6 +333,56 @@ void preparationStops()
 }
 
 #if defined(__APPLE__)
+void batchedNativeAttributes()
+{
+  auto window = AXUIElementCreateSystemWide();
+  const AXError unavailable = kAXErrorCannotComplete;
+  auto failure = AXValueCreate(kAXValueTypeAXError, &unavailable);
+  const auto cleanup = qScopeGuard([&] {
+    CFRelease(failure);
+    CFRelease(window);
+  });
+  unsigned calls = 0;
+  const auto read = [&](CFTypeRef top, CFTypeRef role, AXError status = kAXErrorSuccess, int count = 2) {
+    return readNativeAttributes(
+        window, std::array{kAXTopLevelUIElementAttribute, kAXRoleAttribute},
+        [&](AXUIElementRef target, CFArrayRef names, auto options, CFArrayRef *out) {
+          ++calls;
+          check(target == window && !options && CFArrayGetCount(names) == 2, "wrong native attribute batch");
+          check(
+              CFEqual(CFArrayGetValueAtIndex(names, 0), kAXTopLevelUIElementAttribute) &&
+                  CFEqual(CFArrayGetValueAtIndex(names, 1), kAXRoleAttribute),
+              "native batch changed the requested observations"
+          );
+          const void *values[] = {top, role};
+          *out = CFArrayCreate(nullptr, values, count, &kCFTypeArrayCallBacks);
+          return status;
+        }
+    );
+  };
+  auto first = read(window, kAXSheetRole);
+  check(first.get(0) == window && CFEqual(first.get(1), kAXSheetRole) && calls == 1, "one fresh batch lost a field");
+  auto second = read(window, kAXDrawerRole);
+  check(CFEqual(second.get(1), kAXDrawerRole) && calls == 2, "a later observation reused a stale role");
+  auto moved = std::move(first);
+  check(!first.get(0) && moved.get(0) == window, "moving a batch lost or duplicated its ownership");
+  check(!moved.get(-1) && !moved.get(2), "out-of-range observation was accepted");
+  const auto partial = read(window, failure);
+  check(partial.get(0) == window && !partial.get(1), "per-field AX failure became an observation");
+  const auto missing = read(kCFNull, kAXSheetRole);
+  check(!missing.get(0) && CFEqual(missing.get(1), kAXSheetRole), "absent field became a value");
+  const auto failed = read(window, kAXSheetRole, kAXErrorCannotComplete);
+  check(!failed.get(0) && !failed.get(1), "failed call admitted partial authority");
+  const auto shortReply = read(window, kAXSheetRole, kAXErrorSuccess, 1);
+  check(!shortReply.get(0) && !shortReply.get(1), "truncated batch was accepted");
+  const auto retained = [&] {
+    const auto temporary = read(window, kAXSheetRole);
+    return temporary.copy(0);
+  }();
+  check(retained && CFEqual(retained, window), "copied element did not survive its reply");
+  CFRelease(retained);
+}
+
 void batchedWindowState()
 {
   auto window = AXUIElementCreateSystemWide();
@@ -617,6 +668,7 @@ int main(int argc, char **argv)
 #if defined(__APPLE__)
              ,
              std::pair{"unavailable-notifications", &unavailableNotifications},
+             std::pair{"batched-native-attributes", &batchedNativeAttributes},
              std::pair{"batched-native-window-state", &batchedWindowState}
 #endif
          }) {

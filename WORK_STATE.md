@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## Dashboard launch checks — 2026-10-19
+
+The requested new attended launch first ran the updated fixture through the
+actual Mac/jack desktop pipeline. Both `dashboard-replay-mn4nnoiv` and
+`dashboard-replay-waqp9_d3` observed all five non-repeat board checks during
+Recording: `aBc`, the click counter, a successful puck drop, and both scroll
+directions on each axis. Neither is a passing pipeline or physical test.
+Rapid scrolling reproduced mapped-receipt expiry while native AX authority
+queries were running. The second producer observed 120 source events at
+122.84 Hz, but native delivery failed before all receipts arrived. Preserve
+both runs, their raw journals and the failed evidence drains. Each restored
+the source and stopped local processes; final held controls were zero.
+
+`build/dashboard-validation-h5m3nl7s/` binds the unchanged coordinator and
+normalizer to fresh passing checks on both computers. The native query repair
+batches fields from the same AX object in one fresh request, including role,
+subrole, children and parent during the attached-surface scan. No observation
+is cached across inputs. Exact window identity, fresh focus rechecks, attached
+surface inspection, receipt deadlines and queue bounds remain in place.
+`NativePlacementTests` covers partial errors, missing fields, changed results,
+truncated/failed replies and ownership of retained values. Build/package and
+pipeline validation for this repair belongs in `build/native-query-batch-0d6scheg/`.
+The attended test has not launched. Refresh matching package/fixture proofs
+and complete three consecutive pipeline runs before asking to launch it.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its
