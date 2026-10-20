@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "DiagnosticWindowSnapshots.h"
 #include "HoldingRelocation.h"
 #include "NativeInputWatchdog.h"
 #include "NativePlacementVerification.h"
@@ -89,6 +90,60 @@ void nativeInputWatchdog()
   check(inspected == 1 && !watchdog.covered(binding, 7), "revocation cancels deferred work");
   watchdog.completed(binding, 0);
   check(!watchdog.covered(binding, 0), "invalid epoch never suppresses inspection");
+}
+
+void diagnosticWindowSnapshots()
+{
+  DiagnosticWindowSnapshots snapshots;
+  const QJsonObject frame{{"x", 30}, {"y", 50}, {"width", 740}, {"height", 709}};
+  const QJsonObject ui{{"qtFrame", frame}, {"qtVisible", true}, {"nativeVisible", true}, {"miniaturized", false}};
+  QJsonObject input{{"windowId", 10},          {"sourceWindowId", 10},     {"controlWindowId", 11},
+                    {"sourceObservation", ui}, {"controlObservation", ui}, {"eventCount", 123}};
+  auto moving = frame;
+  moving["x"] = 1440;
+  auto result = snapshots.complete(input, {moving, true}, {frame, true});
+  check(
+      !result["ready"].toBool() && result["originalFrame"].toObject().isEmpty(),
+      "transformed native frame cannot establish an original position"
+  );
+  check(
+      !result["sourceVisible"].toBool() && result["controlVisible"].toBool(),
+      "source and controls require independent matching observations"
+  );
+  result = snapshots.complete(input, {frame, true}, {frame, true});
+  check(
+      result["ready"].toBool() && result["sourceVisible"].toBool() && result["originalFrame"] == frame,
+      "fresh agreeing observations establish readiness and original position"
+  );
+  auto movedUi = ui;
+  movedUi["qtFrame"] = moving;
+  input["sourceObservation"] = movedUi;
+  result = snapshots.complete(input, {frame, true}, {frame, true});
+  check(
+      !result["ready"].toBool() && !result["sourceVisible"].toBool(),
+      "older native geometry is not accepted against a newer UI snapshot"
+  );
+  result = snapshots.complete(input, {moving, true}, {frame, true});
+  check(
+      result["ready"].toBool() && result["originalFrame"] == frame && result["frame"] == moving,
+      "subsequent movement does not replace the original return position"
+  );
+  result = snapshots.complete(input, {moving, false}, {frame, true});
+  check(!result["sourceVisible"].toBool(), "a matching frame cannot invent on-screen visibility");
+  movedUi["miniaturized"] = true;
+  input["sourceObservation"] = movedUi;
+  result = snapshots.complete(input, {moving, true}, {frame, true});
+  check(!result["sourceVisible"].toBool(), "miniaturized native window is not visible");
+  result = snapshots.complete(input, {}, {});
+  check(
+      !result["ready"].toBool() && result["windowId"].toInteger() == 0 && result["sourceWindowId"].toInteger() == 0 &&
+          result["originalFrame"] == frame,
+      "missing owned WindowServer result remains unavailable without discarding recovery position"
+  );
+  check(
+      result["eventCount"].toInt() == 123 && result["controlWindowId"].toInt() == 11,
+      "worker leaves the immutable UI event snapshot and requested control identity intact"
+  );
 }
 
 void transientReadback()
@@ -695,6 +750,7 @@ int main(int argc, char **argv)
   try {
     for (const auto &[name, test] : {
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
+             std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},

@@ -44,6 +44,26 @@ cover a changed binding/epoch, survive revocation, or postpone the idle cutoff
 because of an old queued timeout. Native placement regressions pass locally;
 this candidate still requires full build/package and actual-desktop validation.
 
+The watchdog candidate `e769ff74e` passes the 19 Mac suites and six integrated
+plus nine application Ubuntu suites. `dashboard-replay-_2dkqfme` completes the
+120-event burst (122.18 Hz at the synthetic source), all 171 functional receipts,
+30-second recording and full 120-second session with clean restore/cleanup.
+It is one qualified automated pass, not physical/raw-timestamp acceptance.
+AppKit receipt times show increasing burst lag (up to about 1.1 seconds), and
+`dashboard-replay-k7r7hj7j` fails the next repetition at the capture/route join
+deadline with 155 receipts. Both leave zero held controls and restore/stop their
+owned windows/processes. Do not treat the single pass as attended readiness.
+
+The next fixture repair moves its two WindowServer diagnostic queries per
+25 ms snapshot off AppKit onto the existing bounded snapshot worker. QWidget
+and NSWindow reads stay on their owning thread; the worker receives immutable
+values and still verifies exact WindowServer IDs/PIDs, matching geometry and
+visibility. Original return frames latch only after agreeing observations.
+Final flush waits for observation before destroying the owned windows. Native
+evidence remains synchronous and lossless. Deterministic missing/moving/hidden
+snapshot cases, the blocked snapshot writer and visible board tests pass locally.
+The changed fixture requires a new hash binding and fresh three-run validation.
+
 ## Dashboard launch checks — 2026-10-19
 
 The `331dd44bc` candidate passes 19 Mac suites and the Linux inventory cases.

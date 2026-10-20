@@ -4,6 +4,7 @@
  */
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
+#include "DiagnosticWindowSnapshots.h"
 #include "LatestSnapshotWriter.h"
 #include "LifecycleDiagnostics.h"
 #include "ManualStatus.h"
@@ -96,14 +97,9 @@ QJsonObject frameJson(const QRect &frame)
   return {{"x", frame.x()}, {"y", frame.y()}, {"width", frame.width()}, {"height", frame.height()}};
 }
 
-struct OwnedWindowObservation
+DiagnosticWindowObservation observeOwnedWindow(long number)
 {
-  QJsonObject frame;
-  bool onScreen = false;
-};
-OwnedWindowObservation observeOwnedWindow(long number)
-{
-  OwnedWindowObservation result;
+  DiagnosticWindowObservation result;
   if (number <= 0)
     return result;
   const auto windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, CGWindowID(number));
@@ -155,11 +151,23 @@ class Recorder final : public QObject, public QAbstractNativeEventFilter
 public:
   explicit Recorder(QString path)
       : m_path(std::move(path)),
-        m_snapshotWriter([path = m_path](const std::string &bytes) {
+        m_snapshotWriter([path = m_path, windows = DiagnosticWindowSnapshots{}](const std::string &bytes) mutable {
+          const SlowOperationDiagnostic timing("Test board", "diagnostic.window-snapshot");
+          const auto document = QJsonDocument::fromJson(QByteArray::fromStdString(bytes));
+          if (!document.isObject())
+            return false;
+          auto metadata = document.object();
+          // Only WindowServer and immutable values are used on this worker.
+          // QWidget/NSWindow access and the native evidence journal stay on
+          // AppKit. Slow diagnostic queries cannot block its AX replies.
+          const auto source = observeOwnedWindow(metadata["sourceWindowId"].toInteger());
+          const auto control = observeOwnedWindow(metadata["controlWindowId"].toInteger());
+          metadata = windows.complete(std::move(metadata), source, control);
+          const auto output = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
           QSaveFile file(path);
           const bool opened = file.open(QIODevice::WriteOnly);
           const bool written = opened && file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) &&
-                               file.write(bytes.data(), qint64(bytes.size())) == qint64(bytes.size()) && file.commit();
+                               file.write(output) == output.size() && file.commit();
           if (!written)
             lifecycleDiagnostic("Test board", "diagnostic.snapshot", "failed", file.errorString());
           return written;
@@ -186,7 +194,11 @@ public:
   }
   void flush()
   {
+    m_stateTimer.stop();
     save();
+    // Finish the last native observation before the owned windows are
+    // destroyed. Normal input callbacks never wait for this worker.
+    m_snapshotWriter.finish();
   }
   void setManualMetadata(QJsonObject metadata)
   {
@@ -350,34 +362,14 @@ private:
     const auto controlWindow =
         m_controlWindow ? nativeMessage<id>(reinterpret_cast<id>(m_controlWindow->winId()), "window") : nullptr;
     const auto controlId = controlWindow ? nativeMessage<long>(controlWindow, "windowNumber") : 0;
-    const auto control = observeOwnedWindow(controlId);
     const auto controlExpected = m_controlWindow ? m_controlWindow->frameGeometry() : QRect();
-    const bool controlSettled = !control.frame.isEmpty() && control.frame["x"].toDouble() == controlExpected.x() &&
-                                control.frame["y"].toDouble() == controlExpected.y() &&
-                                control.frame["width"].toDouble() == controlExpected.width() &&
-                                control.frame["height"].toDouble() == controlExpected.height();
-    if (m_originalControlFrame.isEmpty() && controlSettled)
-      m_originalControlFrame = control.frame;
     const bool controlQtVisible = m_controlWindow && m_controlWindow->isVisible();
     const bool controlNativeVisible = controlWindow && nativeMessage<BOOL>(controlWindow, "isVisible");
     const bool controlMiniaturized = controlWindow && nativeMessage<BOOL>(controlWindow, "isMiniaturized");
-    const bool controlVisible =
-        controlSettled && control.onScreen && controlQtVisible && controlNativeVisible && !controlMiniaturized;
-    const auto source = observeOwnedWindow(ownId);
-    const auto &frame = source.frame;
     const auto expected = m_window ? m_window->frameGeometry() : QRect();
-    const bool settled = !frame.isEmpty() && frame["x"].toDouble() == expected.x() &&
-                         frame["y"].toDouble() == expected.y() && frame["width"].toDouble() == expected.width() &&
-                         frame["height"].toDouble() == expected.height();
     const bool sourceQtVisible = m_window && m_window->isVisible();
     const bool sourceNativeVisible = ownWindow && nativeMessage<BOOL>(ownWindow, "isVisible");
     const bool sourceMiniaturized = ownWindow && nativeMessage<BOOL>(ownWindow, "isMiniaturized");
-    const bool sourceVisible =
-        settled && source.onScreen && sourceQtVisible && sourceNativeVisible && !sourceMiniaturized;
-    // WindowServer can briefly report a transformed frame during the initial
-    // show animation. Latch only the requested Qt frame, not that transient.
-    if (m_originalFrame.isEmpty() && settled)
-      m_originalFrame = frame;
     QJsonArray heldKeyCodes;
     auto sortedKeys = m_keys.values();
     std::sort(sortedKeys.begin(), sortedKeys.end());
@@ -393,18 +385,12 @@ private:
         {"heldKeyCodes", heldKeyCodes},
         {"heldButtons", m_buttons.size()},
         {"pid", qint64(getpid())},
-        {"windowId", frame.isEmpty() ? 0 : qint64(ownId)},
-        {"sourceWindowId", frame.isEmpty() ? 0 : qint64(ownId)},
+        {"windowId", qint64(ownId)},
+        {"sourceWindowId", qint64(ownId)},
         {"controlWindowId", qint64(controlId)},
-        {"controlFrame", control.frame},
-        {"controlOriginalFrame", m_originalControlFrame},
-        {"controlVisible", controlVisible},
-        {"sourceVisible", sourceVisible},
         {"sourceObservation",
          QJsonObject{
              {"qtFrame", frameJson(expected)},
-             {"geometrySettled", settled},
-             {"onScreen", source.onScreen},
              {"qtVisible", sourceQtVisible},
              {"nativeVisible", sourceNativeVisible},
              {"miniaturized", sourceMiniaturized}
@@ -412,18 +398,13 @@ private:
         {"controlObservation",
          QJsonObject{
              {"qtFrame", frameJson(controlExpected)},
-             {"geometrySettled", controlSettled},
-             {"onScreen", control.onScreen},
              {"qtVisible", controlQtVisible},
              {"nativeVisible", controlNativeVisible},
              {"miniaturized", controlMiniaturized}
          }},
         {"nativePendingDropped", QString::number(m_nativePendingDropped)},
         {"diagnosticWriteFailures", int(m_snapshotWriter.failures())},
-        {"ready", !m_originalFrame.isEmpty() && settled},
         {"title", m_window ? m_window->windowTitle() : QString()},
-        {"originalFrame", m_originalFrame},
-        {"frame", frame},
         {"eventCount", m_eventCount},
         {"nativeEventCount", m_nativeEventCount},
         {"eventsDropped", m_eventCount - m_observed.size()},
@@ -440,7 +421,7 @@ private:
       metadata["manual"] = m_manual;
     if (m_dashboard)
       metadata["inputChecklist"] = m_dashboard->snapshot();
-    // Atomic diagnostic file commits can stall AppKit's input and AX replies.
+    // Native diagnostic queries and file commits can stall AppKit/AX replies.
     // Publish an immutable snapshot to a bounded worker. Native evidence still
     // records every event synchronously; it does not use this coalescing path.
     m_snapshotWriter.publish(QJsonDocument(metadata).toJson(QJsonDocument::Compact).toStdString());
@@ -499,8 +480,6 @@ private:
   LatestSnapshotWriter m_snapshotWriter;
   QPointer<QWidget> m_window, m_controlWindow;
   QPointer<PhysicalInputDashboard> m_dashboard;
-  QJsonObject m_originalFrame;
-  QJsonObject m_originalControlFrame;
   QJsonObject m_manual;
   QSet<int> m_keys;
   QSet<int> m_buttons;
