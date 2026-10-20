@@ -1031,6 +1031,13 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         ))
       m_shared->wakeQueued = false;
   };
+  channel.onMappedOutputReady = [alive] {
+    if (!alive)
+      return;
+    std::lock_guard lock(alive->m_shared->mutex);
+    if (!alive->m_shared->closed && alive->m_shared->mappedDrainRequested && alive->m_shared->wake)
+      alive->m_shared->wake();
+  };
   QObject::connect(&m_timer, &QTimer::timeout, this, [this] { tick(); });
   m_timer.start(4);
 }
@@ -1103,6 +1110,7 @@ void OriginalInputCoordinator::stop()
   if (m_channel) {
     m_channel->onInputTarget = {};
     m_channel->onReleased = {};
+    m_channel->onMappedOutputReady = {};
   }
   // Prior channel callbacks may synchronously delete this coordinator. Do not
   // access any member after entering the retained preflight's stop callback.

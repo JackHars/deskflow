@@ -1905,9 +1905,11 @@ void mappedDispatchCostValidation()
     LocalInputChannelTestAccess::freeze(*fixture.core);
     LocalInputChannelTestAccess::expectMappedReply(*fixture.core);
     LocalInputChannelTestAccess::previousMappedReply(*fixture.core);
+    unsigned notifications = 0;
+    fixture.core->onMappedOutputReady = [&] { ++notifications; };
     LocalInputChannelTestAccess::incoming(*fixture.core, 5, invalid);
     check(
-        fixture.closed && fixture.revoked == 1 && !fixture.core->takeMappedDispatchCost(),
+        fixture.closed && fixture.revoked == 1 && !fixture.core->takeMappedDispatchCost() && notifications == 0,
         "Malformed, regressing or substituted dispatch totals were accepted"
     );
   }
@@ -1915,19 +1917,44 @@ void mappedDispatchCostValidation()
   fixture.activate();
   LocalInputChannelTestAccess::freeze(*fixture.core);
   LocalInputChannelTestAccess::expectMappedReply(*fixture.core, true);
+  unsigned notifications = 0;
+  fixture.core->onMappedOutputReady = [&] { ++notifications; };
   LocalInputChannelTestAccess::incoming(*fixture.core, 5, payload(50, 1, 5000000));
   check(
-      !fixture.closed && !fixture.core->mappedOutputDrained() && !fixture.core->takeMappedDispatchCost(),
+      !fixture.closed && !fixture.core->mappedOutputDrained() && !fixture.core->takeMappedDispatchCost() &&
+          notifications == 0,
       "An earlier periodic Pong completed the later mapped barrier"
   );
   LocalInputChannelTestAccess::incoming(*fixture.core, 5, payload(100, 2, 10000000));
-  check(!fixture.closed && fixture.core->mappedOutputDrained(), "Exact dispatch totals did not complete the barrier");
+  check(
+      !fixture.closed && notifications == 1 && fixture.core->mappedOutputDrained(),
+      "Exact dispatch totals did not notify and complete the barrier"
+  );
   const auto cost = fixture.core->takeMappedDispatchCost();
   check(
       cost && cost->records == 2 && cost->work == std::chrono::milliseconds(10) &&
           !fixture.core->takeMappedDispatchCost(),
       "Exact dispatch totals were lost or consumed more than once"
   );
+  for (const QString action : {"close", "delete", "throw"}) {
+    Fixture destructive("freeze");
+    destructive.activate();
+    LocalInputChannelTestAccess::freeze(*destructive.core);
+    LocalInputChannelTestAccess::expectMappedReply(*destructive.core);
+    unsigned invoked = 0;
+    destructive.core->onMappedOutputReady = [&, retained = QString(256, 'd')] {
+      ++invoked;
+      if (action == "close")
+        destructive.core->close();
+      else if (action == "delete")
+        destructive.core.reset();
+      else
+        throw std::runtime_error("Mapped dispatch notification failed");
+      check(retained.size() == 256, "Dispatch notification destroyed its executing callback");
+    };
+    LocalInputChannelTestAccess::incoming(*destructive.core, 5, payload(100, 2, 10000000));
+    check(invoked == 1 && destructive.closed, "Destructive dispatch notification retained channel authority");
+  }
 }
 void preflightRoundtrip()
 {

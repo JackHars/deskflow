@@ -43,6 +43,10 @@ struct LocalInputChannelTestAccess
   {
     return channel.m_drainMappedWrite;
   }
+  static std::uint64_t accountedDispatchRecords(const LocalInputChannel &channel)
+  {
+    return channel.m_takenDispatch.records;
+  }
 };
 struct OriginalInputCoordinatorTestAccess
 {
@@ -1352,6 +1356,30 @@ void OriginalInputCoordinatorTests::consecutiveMappedRecordsRetainSealUntilOwner
   f.wire.receipt(binding, InputCutoffState::Resumed);
   f.dispatcher->maintain();
   QCOMPARE(f.wire.proxy->inputCutoffState(binding), InputCutoffState::Resumed);
+  f.finish();
+#endif
+}
+
+void OriginalInputCoordinatorTests::mappedDispatchAcknowledgementWakesWithoutPollingTimer()
+{
+#if !defined(__APPLE__)
+  QSKIP("Positive source admission uses the actual Mac capture adapter");
+#else
+  Fixture f;
+  Capture source;
+  const auto pending = f.reserve(source.fresh());
+  QCOMPARE(pending.state, State::Pending);
+  f.started(pending.ticket);
+  f.wire.complete(f.wire.result());
+  const auto ready = f.accepted(pending.ticket);
+  OriginalInputCoordinatorTestAccess::stopPolling(*f.coordinator);
+  QVERIFY(f.dispatcher->commit(*ready.reservation));
+  // The commit notification starts the ordered barrier. No subsequent input,
+  // coordinator tick or mappedOutputDrained() poll may complete it for us.
+  QVERIFY(until([&] { return f.count("mapped") == 1; }));
+  QVERIFY(until([&] { return LocalInputChannelTestAccess::accountedDispatchRecords(*f.channel) == 1; }, 250));
+  QVERIFY(!f.closed);
+  QVERIFY(f.dispatcher->live(ready.reservation->owner));
   f.finish();
 #endif
 }

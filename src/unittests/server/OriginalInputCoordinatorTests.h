@@ -18,6 +18,7 @@ private Q_SLOTS:
   void firstClickWaitsForFocusAndExactHostBeforeDelivery();
   void committedInputWakesWithoutPollingTimer_data();
   void committedInputWakesWithoutPollingTimer();
+  void mappedDispatchAcknowledgementWakesWithoutPollingTimer();
   void firstClickRejectsHostSubstitution_data();
   void firstClickRejectsHostSubstitution();
   void firstClickCancellationRetainsOneCleanupOwner_data();

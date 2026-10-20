@@ -1203,6 +1203,8 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
               "Mapped dispatch reply did not cover the exact ordered prefix"
           );
           m_drainDispatch = totals;
+          notify(this, onMappedOutputReady);
+          return; // The callback may destroy this channel.
         }
       } else
         require(payload.isEmpty(), "Invalid local input heartbeat");

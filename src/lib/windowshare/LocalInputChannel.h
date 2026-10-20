@@ -248,6 +248,9 @@ public:
   std::function<void(const LocalInputLease &)> onCandidate, onQuiesced;
   std::function<void(const LocalInputLease &, const LocalInputTarget &)> onInputTarget;
   std::function<void(const LocalInputOffer &)> onReleased;
+  // Scheduling notification after the exact mapped-prefix dispatch barrier
+  // has been validated. It is not a new receipt or delivery permission.
+  std::function<void()> onMappedOutputReady;
   std::function<void(const LocalInputOffer &, LocalInputRevocation)> onOfferCancelled;
   std::function<void(const LocalInputLease &)> onPrepare, onPrepared, onActivated;
   std::function<void(const LocalInputLease &, const OriginalInputRecord &)> onOriginal;
