@@ -387,3 +387,25 @@ contain synthetic input and cannot close physical acceptance or native-field
 preservation checks. The ordinary 30-second pipeline mode still forbids Record
 and requires every recorder to remain unarmed.
 
+## Isolating native repeat delivery
+
+`native-repeat-probe.m` is an optional macOS diagnostic independent of Qt,
+Deskflow routing and Ubuntu. Compile it with `clang -fobjc-arc -fblocks
+-framework AppKit -framework ApplicationServices`. It opens one disposable
+window, waits for its actual active/key-window state and posts only to its own
+PID using a private event source. It requests no new permissions. Its six-event
+sequence compares plain Quartz and window-annotated key down/repeat/up delivery
+at a listen-only process tap and AppKit's `sendEvent:` boundary. Receipt
+deadlines advance missing cases without sleeps; an absolute three-second limit
+closes the window. It never posts to a global keyboard or mouse stream.
+
+Run only within authorized disposable testing, with no other input test active.
+Retain every JSON row and the source/executable hashes. Missing repeats,
+rewritten timestamps, lost focus and startup failure remain failures; a process
+tap receipt cannot replace AppKit receipt or physical acceptance. The exit code
+is nonzero unless all six AppKit receipts retain their timestamps.
+
+Failed or timed-out coordinator commands retain separately labelled bounded
+stdout and stderr tails. A structured admission failure on stdout must not be
+hidden by a shutdown diagnostic on stderr. This reporting changes no readiness,
+deadline, input or cleanup requirement.

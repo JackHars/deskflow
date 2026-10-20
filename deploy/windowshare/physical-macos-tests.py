@@ -1013,6 +1013,46 @@ class ProductionPlans(unittest.TestCase):
                 self.assertTrue(result['localProcessesStopped'])
                 self.assertFalse((args.output / 'source.json').exists())
 
+    def test_failed_admission_retains_stdout_error_and_stderr_before_native_start(self):
+        mac_plan, linux_plan = self.base / 'mac.json', self.base / 'linux.json'
+        module.atomic_json(mac_plan, self.mac)
+        module.atomic_json(linux_plan, self.linux)
+        for timeout in (False, True):
+            with self.subTest(timeout=timeout):
+                args = SimpleNamespace(mac_plan=mac_plan, linux_plan=linux_plan, source=None,
+                                       production_original_input=True, ssh_key=self.base / 'unused-key',
+                                       ssh_target='unused-target', ordinary_mac_config=[],
+                                       output=self.base / ('admission-failed-' + str(timeout)))
+                actual_error = '{"error":"Exact library inspection expired","originalInputEnabled":false}'
+                noise = '🧪' * 10000 + '\nHEARTBEAT: companion stopped'
+
+                def external(argv, **_kwargs):
+                    if '--windowshare-code-admission-probe' in argv:
+                        if timeout:
+                            raise module.subprocess.TimeoutExpired(
+                                argv, 60, output=actual_error.encode(), stderr=noise.encode())
+                        return SimpleNamespace(returncode=1, stdout=actual_error, stderr=noise)
+                    self.assertEqual(argv[0], 'ssh')
+                    return SimpleNamespace(returncode=0, stdout='{"event":"cleaned"}\n', stderr='')
+
+                with patch.object(module, 'original_support', return_value=self.support), \
+                        patch.object(self.support, 'ProcessInspector'), patch.object(module, 'no_other_primary'), \
+                        patch.object(module.subprocess, 'run', side_effect=external), \
+                        patch.object(module.subprocess, 'Popen', side_effect=AssertionError('Native input launched')), \
+                        patch.object(module.signal, 'alarm'), patch.object(module.signal, 'signal'), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(module.run(args), 1)
+                result = module.read_json(args.output / 'result.json')
+                self.assertIn(actual_error, result['failure'])
+                self.assertIn('HEARTBEAT: companion stopped', result['failure'])
+                self.assertIn('stdout:', result['failure'])
+                self.assertIn('stderr:', result['failure'])
+                self.assertLess(len(result['failure'].encode()), 4300)
+                self.assertTrue(result['localProcessesStopped'])
+                self.assertEqual(result['physicalAcceptance'], 'not-assessed')
+                self.assertFalse((args.output / 'source.json').exists())
+                self.assertIn(actual_error, result['diagnostics']['firstFailure']['message'])
+
     def test_unreadable_starting_config_does_not_invent_a_changed_config_audit(self):
         mac_plan, linux_plan = self.base / 'mac.json', self.base / 'linux.json'
         module.atomic_json(mac_plan, self.mac)

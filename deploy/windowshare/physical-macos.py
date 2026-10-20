@@ -45,6 +45,14 @@ PRODUCTION_CORE_READY_SECONDS = 50
 START_WAIT_SECONDS = 300
 
 
+def command_output_diagnostics(stdout, stderr):
+    """Keep a structured failure on stdout even when stderr contains logs."""
+    def tail(value):
+        data = value if isinstance(value, bytes) else (value or "").encode("utf-8", errors="replace")
+        return data[-2000:].decode("utf-8", errors="replace")
+    return "\nstdout:\n" + tail(stdout) + "\nstderr:\n" + tail(stderr)
+
+
 def private_tunnel_commands(ssh, target, mac, sockets):
     """Keep the input round trip off the video stream's SSH/TCP connection."""
     # -N is classified as non-interactive by SSH, although this dedicated
@@ -696,9 +704,15 @@ def run(arguments):
     def command(argv, timeout=15, env=None, observe=True):
         # Arguments can include private configuration; label only the program.
         def execute():
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+            try:
+                result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError("Command timed out: " + Path(argv[0]).name +
+                    " (" + str(timeout) + " seconds)" +
+                    command_output_diagnostics(error.stdout, error.stderr)) from None
             require(result.returncode == 0, "Command failed: " + Path(argv[0]).name +
-                    " (exit " + str(result.returncode) + ")\n" + (result.stderr or result.stdout)[-2500:])
+                    " (exit " + str(result.returncode) + ")" +
+                    command_output_diagnostics(result.stdout, result.stderr))
             return result.stdout
         if not observe:
             return execute()
