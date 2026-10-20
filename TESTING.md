@@ -4,6 +4,636 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Current collector-thread checkpoint — 2026-10-20
+
+Runtime `ccebffffeee68aefdf07d6ce02da4f1f22ad3e51` moves evidence control reads,
+serialization and output onto one dedicated collector thread. Its consumer
+retains the existing 8,192-row producer journal, the one queued continuation,
+fresh control validation, original arm/stop deadlines, native receipt tail and
+sticky failure semantics. No second payload queue or larger capacity is added.
+Shutdown joins the consumer after producers retire; the native-only terminal
+close is queued once onto the application thread. Blocking filesystem calls
+remain outside any verified completion bound.
+
+Native observation now brackets admission through publication with the existing
+activity guard. Drained status requires zero capture/mutation activity as well
+as an empty journal. `nativeCollectorPublicationBoundary` rejects overlapping
+native admission and preserves a late admitted row after a failed forced stop.
+The final focused sanitizer proof is `boundary-asan-test.log`, with source and
+executable hashes in `boundary-validation.json`; the earlier sanitizer pass
+does not cover this added guard.
+
+`build/evidence-worker-check-yvvxwegc/` contains the passing focused Mac suite
+and focused AddressSanitizer/UndefinedBehaviorSanitizer run. The new regression
+blocks the actual collector executor with an explicit rendezvous, verifies
+application callbacks and native-row publication continue, and verifies exact
+ordered teardown with both bounded input and deliberate buffer overflow.
+Existing private-path, arm, stop, tail, continuation and native-close regressions
+still pass. There are no fixed sleeps or deadline waivers.
+
+The optional ThreadSanitizer check is **inconclusive**, not passing. Its warnings
+at Qt queued-call publication/completion also reproduce in
+`qt-tsan-baseline.cpp`, a standalone Qt-only program using the same
+uninstrumented Qt library; every blocking-call value is correct, but it reports
+two warnings and exits abnormally. The full instrumented evidence suite also
+exceeds its unchanged cooperative-test deadline. Preserve `tsan-test.log`,
+`qt-tsan-baseline.log` and their exact build arguments. A fully instrumented Qt
+build would be needed to qualify that sanitizer boundary.
+
+The final candidate in `build/collector-boundary-9rczih8p/` passes all 22
+selected Mac suites and 17 Ubuntu suites. Signed Mac package verification,
+all 77 unchanged Mac dependency hashes and Ubuntu package/dependency checks
+pass. Source-bundle run 39489639299 and all six jobs in foundation run
+39489639329 pass. Earlier `710dae975` local suites passed but were superseded by
+the native publication guard before any live test; its hosted run was cancelled.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `7db28557fbf1808004b48976a90839c0b30ad6ee7ae6f693fbdfc3c549a081d3` |
+| Ubuntu archive | `4f8814d8797f820c979223b5ec1e30ab0010e88e0bfcbe5519ddb22882413927` |
+| Source archive | `7260fb28f17dfdb6c3a946498680516a83ac053b7e40329c3bd9dfa115c2da3e` |
+| Disposable source fixture | `366f3bbf1b484b37d6019f4f7e26550a1e2cadda1192e094f63db3f07accc8af` |
+
+Harness `build/controller-harness-h_h0ffs0/` binds this source and passes all
+211 cases on Ubuntu; Mac passes 210 and skips the Linux-only process-identity
+case. Do not reuse the prior runtime's live results for these binaries.
+
+The following actual-desktop recovery diagnostics use these exact native
+packages and source fixture. Each checks restored source geometry, released
+input, owned-process cleanup and unchanged ordinary configuration. These are
+scoped recovery observations, not complete input or physical acceptance:
+
+| Owned process terminated | Retained run | Restoration observed |
+| --- | --- | --- |
+| Ubuntu viewer | `dashboard-replay-3nstj0u3` | 613.346 ms |
+| Mac Host | `dashboard-replay-zlzcxol1` | 767.395 ms |
+| Mac Core | `dashboard-replay-37apm0g4` | 533.182 ms |
+
+`dashboard-replay-5q07sd_8` failed before submitting the holding-helper fault:
+the coordinator's port-availability check reported `EADDRINUSE`. No test
+window or capture session started, and cleanup completed. Follow-up harness
+`ee7d4012f` reproduces the failure with an owned closed TCP connection in
+TIME_WAIT and uses the Unix native listener's `SO_REUSEADDR` restart policy.
+It does not use `SO_REUSEPORT`, wait for port expiry or accept a live listener.
+The check is explicitly availability-only; the native server must still bind.
+Both the failing reproduction and passing regressions are retained in
+`build/port-preflight-err5humb/`.
+The updated bound harness `build/controller-harness-hk1hv008/` passes 213
+cases on Ubuntu and 212 plus one Linux-only skip on Mac. The native runtime,
+package hashes and source fixture above are unchanged.
+
+The next holding-helper attempt, `dashboard-replay-rejs9ffd`, also submits no
+fault: the recovery wrapper cancels on `ConcurrentPublicationChange` while
+reading the source snapshot. Its original failure and cleanup are retained.
+Harness `81bb308d2` treats only missing/changing live snapshots as pending,
+logs that condition and retains the one-shot Active notification for the next
+stable publication. It does not reuse the preceding snapshot, retry in a tight
+loop or extend the original absolute deadline. Stable malformed data, held
+input, owner/geometry changes and duplicate Active remain failures. The restore
+journal follows the same stable-read rule; frozen plans and final reports still
+use strict reads. Regressions cover pending-to-stable publication and denied
+authority. `build/controller-harness-5gngwzmo/` binds this source and passes
+all 216 cases on Ubuntu; Mac passes 215 with the same Linux-only skip.
+
+The complete fresh recovery matrix passes with harness `81bb308d2` and the
+unchanged `ccebffffe` packages:
+
+| Owned process terminated | Retained run | Restoration observed |
+| --- | --- | --- |
+| Ubuntu viewer | `dashboard-replay-jfd51sdy` | 1,215.755 ms |
+| Mac Host | `dashboard-replay-9mh1rvg3` | 515.087 ms |
+| Mac Core | `dashboard-replay-vs5x8wz5` | 256.604 ms |
+| Holding-display helper | `dashboard-replay-iluitjh8` | 331.964 ms |
+
+`build/collector-boundary-9rczih8p/recovery-matrix-v4.json` indexes these
+unmodified results. All four observe source restoration, zero held keys/buttons,
+unchanged ordinary configuration and exact owned-process cleanup on both hosts.
+No input is submitted. Each deliberately failed pipeline keeps its original
+failure; only the independent scoped recovery assessment passes. No result
+claims H10 physical acceptance, sleep/wake coverage, full input acceptance or
+one of the three required complete pipeline passes.
+
+The first sustained-input attempt on this candidate, `dashboard-replay-0dkhswz_`,
+reaches Active, but its diagnostic activation helper exceeds its unchanged
+two-second subprocess deadline before printing its first stage. No input is
+posted and no recorder is armed. The coordinator subsequently reports the
+missed Record cutoff; source restoration, zero held input, ordinary settings
+and owned cleanup all pass. The original helper timeout remains in
+`synthetic-replay.jsonl` and `replay-driver.log`; this is not a scrolling pass.
+A later permission-only probe of the same helper completes in 38 ms. A separate
+new-copy launch comparison in `build/replay-launch-preflight-v63ldoxe/` takes
+396 ms cold and 44 ms warm, which does not reproduce the original timeout or
+establish its system cause. Diagnostic launcher `build/replay-ready-lihb7ho2/`
+now probes the exact staged helper before opening the coordinator, retaining
+that readiness result and launcher hash per run. Previously it probed the
+source copy. No native binaries or input/session deadlines changed.
+
+The subsequent `dashboard-replay-k14t48ax` completes 120 seconds Active, all
+three 30-second recordings and automatic return. All 1,200 burst events arrive
+at AppKit in order with exact raw fields/flags, at a source rate of 117.84 Hz;
+all five non-repeat board checks and 1,251 functional receipts are observed.
+All 21 queue histories validate and end with zero loss and drained journals.
+Both machines restore/clean up with zero held keys/buttons and unchanged
+ordinary settings. The staged helper readiness check completes in 347 ms.
+
+**Strict input and performance validation still fail.** Only 442/1,200 burst
+timestamps are preserved (493/1,251 functional receipts overall); 758 scroll
+timestamps change. The strict normalizer rejects the original unmodified
+journals. The non-repeat profile does not exercise held-X repeat; the separate
+self-targeted AppKit repeat diagnostics remain failed. The wrapper's
+`verified: true`/`expectedNonRepeatRecordingChecksPassed` describes completion
+of its diagnostic profile, not strict input, physical acceptance or roadmap
+qualification. `fullReplayPassed` remains false.
+
+Same-Mac capture-to-AppKit latency across all 1,200 burst records is median
+133.77 ms, p95 308.27 ms and maximum 370.51 ms. `scroll-stage-latency.json`
+separates capture-to-map waiting (median 66.85 ms, maximum 318.14 ms), the
+mapping round trip, and reply-to-AppKit delivery. The 236 mapping batches
+have median 10.62 ms, p95 91.18 ms and maximum 122.01 ms round trip; Ubuntu
+mapping work itself is at most 25.57 ms. The remainder includes transport and
+scheduling, not established one-way network latency. The owned SSH socket
+records 4,344 retransmitted bytes during the burst; this is a contributor to
+investigate, not proof that network loss explains every delayed record.
+Ubuntu power saving remains off, verified read-only after the run.
+
+Retain `scroll-capture-receipt-latency.json`, `scroll-stage-samples.json`,
+`mapping-timings.json`, `network-counter-summary.json`, the process counters,
+both raw host logs and all evidence journals. No native authority denial or
+terminal dispatch failure occurs in this run, but excessive waiting and changed
+timestamps prevent acceptance. Do not retry the attended test: reduce the
+measured waiting/transport tail without changing authority, raw events, queue
+limits or deadlines, then obtain three complete qualified runs on one frozen
+candidate. The current source-bundle check for harness `81bb308d2` passes
+(39493140816); its foundation run 39493140792 is pending.
+
+`build/native-repeat-layout-y1im_k1d/` removes the isolated self-PID probe's
+explicit Unicode override and uses empty annotated strings like production.
+It still receives all four non-repeat AppKit events with exact timestamps and
+neither repeat. This is another retained diagnostic failure, not physical
+acceptance or a field-preservation waiver.
+`build/native-repeat-psn-2tzv8no7/` also tests the deprecated public
+`CGEventPostToPSN` against only the diagnostic's own process serial number.
+It produces the same four exact non-repeat receipts and no repeat receipt.
+The six submitted events retain their fields; production posting is unchanged.
+
+## Earlier dispatch-failure checkpoint — 2026-10-20
+
+Runtime `835bc6d71ca530b40dcc835aa0b850a4d298d887` is pushed. The new
+candidate in `build/dispatch-failure-broezp0w/` passes all 22 selected Mac suites
+and 17 Ubuntu suites, signing, dependencies and package verification. Its harness
+in `build/controller-harness-_wlilij7/` passes 210 cases plus one Linux-only skip
+on Mac and all 211 cases on Ubuntu. Source-bundle run 39485133920 passes; hosted
+foundation run 39485133853 passes all six jobs. Actual-desktop verification is separate.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `032da90187a7381de2e7f0e218f815c1a74ab0a56ef6aa2d15f9d521c37ddb16` |
+| Ubuntu archive | `027a2ef1bd4d7e104e96db569f71e9da551130fecb2856643f70132e1e31abb9` |
+| Source archive | `e771d55b3776dce857d68dc630dfc060c8b58ba318fee1fdba618ca1c13e934d` |
+| Disposable source fixture | `e2a037745e33f4ac24f28658adb2936e5ca3828b9934b65aaa9fd8375f97262e` |
+
+A terminal Server original-input dispatch failure now emits a structured cause.
+The acceptance coordinator stops an Active run on that event or the exact older
+warning, preserving the first cause through cleanup. It does not confuse normal
+owner/lease revocation on an intentional return with terminal dispatch failure.
+
+Evidence serialization continuations now only drain existing rows; the ordinary
+10 ms timer retains control-file reads, owner/arm checks and stop handling.
+The regression proves a queued stop command is not consumed by serialization,
+then proves the ordinary timer handles it while retaining the native receipt
+collection tail. Separate timing logs distinguish control processing from
+journal serialization/flush. All deadlines, capacities, raw fields and sticky
+failure rules remain unchanged. This removes redundant I/O; it does not yet
+establish a live latency improvement.
+
+The retrospective log replay in
+`dashboard-replay-yz3tc837/retrospective-terminal-result.json` proves the updated
+observer identifies the original deadline failure and still permits cleanup.
+This is a regression replay, not a new live pass. Additional self-PID diagnostics
+in `build/repeat-cadence-oihobxja/` retain the same missing repeat with the system
+repeat delay, zero flags, or a process-local disabled press-and-hold preference.
+Each receives all four non-repeat events with exact timestamps and no repeat at
+AppKit. No global preferences, input source policy or acceptance rule changed.
+
+Actual-desktop run `dashboard-replay-tdvv41lm` reaches Active but stops before
+the scrolling burst when ScreenCaptureKit reports -3821. Its
+`system-capture-failure.json` and `system-capture-cause.json` retain the macOS
+sequence: `replayd` receives a high-urgency cache purge at 19:45:41.876 UTC,
+stops its streams, and the Host reports capture failure at 19:45:41.913.
+The coordinator preserves capture shutdown as the first cause; source restoration
+and owned-process cleanup complete. This run establishes no sustained-input
+improvement. The system requested roughly another 4 GB of cache reclamation
+while about 10 GiB remained free. `build/retired-bundle-compaction-qsy66g7c/`
+subsequently verifies each archive, file, mode and symlink before removing 12
+redundant extracted older test bundles, recovering about 1.5 GB. Current artifacts,
+all archives and raw logs remain. This cleanup does not qualify capture reliability.
+
+Subsequent `dashboard-replay-ekq94s8r` reaches Active, arms all three recorders
+and completes five non-repeat board checks. The burst stops after 106
+posted/observed events. At 19:52:55.791 UTC, the Host denies
+`input.native-candidate`: fresh focused ancestry is unavailable, frame is null
+and minimized state is unknown. Focus and window-state queries take 50 and
+100 ms, respectively; the full candidate takes 163 ms. The mapped receipt still
+has 72 ms left. The coordinator preserves that authority denial as the first
+cause and stops the run. Core journal draining takes 43 ms and source control
+reading takes 34 ms on their application threads in the same interval; these
+are observed stalls, not proof of the sole cause. Source restoration, zero held
+keys/buttons, unchanged ordinary settings and owned cleanup complete. The
+incomplete recorder, repeat and strict replay remain failed. See `verification.log`,
+`authority-timings.json`, `owned-cpu-samples.txt` and the unmodified session logs.
+
+No attended test was launched. Repeat/AppKit preservation, startup and sustained
+input reliability, three qualified same-artifact input runs, H03–H12 acceptance
+and full upstream queue certification remain open.
+
+## Earlier dispatch-cost checkpoint — 2026-10-20
+
+Runtime `787fa54a8fead9749ca892ee1b70ed808b44af52` is pushed. Both packages
+are built from that source in `build/native-dispatch-cost-65pux1r_/`: all 22
+selected Mac suites and 17 Ubuntu suites pass, with signing and dependency/
+package checks. Harness `42cf9560c` in `build/controller-harness-hgx8jc8x/`
+is independently bound: Mac passes 209 cases with one Linux-only skip; Ubuntu
+passes all 210. Source-bundle run 39481585331 passes; foundation run 39481585134
+passes all six jobs. Hosted success does not close the live failures below.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `f5375bf49511c4b741b808813b33f4dec7a17426375eb405d03eb22cb87ecb15` |
+| Ubuntu archive | `9f6e804c21f1f79da2e8d7c4fd5d877291827f67ecf50fcfd93b8b105ea768e8` |
+| Source archive | `4f949dba9932dfeb2774f27aa414ddd980fc59f83a8f93e990af9a1c582da743` |
+| Disposable source fixture | `b55b5f0a04d1a3d6907bdd944453a223c070f7b03572e3168665a1b772e6346e` |
+
+Private channel v10 measures the peer's actual mapped-frame handling rather
+than charging process/acknowledgement waiting as work for every record. The
+coordinator uses that measurement for its existing 50 ms scheduling target,
+retains the 16-record maximum and logs handling and round-trip time separately.
+The exact ordered frame/count acknowledgement remains required. New regressions
+cover scheduling gaps, callback/authorization cost, multiple barriers, one-time
+consumption, earlier periodic replies, malformed/regressing/overflowed totals
+and exact prefix matching. These measurements confer no input authority or
+AppKit receipt. Older private versions cannot connect; the matched Core/Host
+pair is packaged together. All input, preparation, placement and capture/route
+deadlines are unchanged. The independent preparation cleanup fix from
+`ad9e4a447` is also included.
+
+The committed self-PID AppKit diagnostic reproduces the repeat gap without
+Deskflow or Qt. `build/native-repeat-boundary-prdvr08n/v2-result.jsonl`
+records actual active/key-window readiness before all six posts. All six
+events reach its listen-only process tap; four non-repeat events reach AppKit's
+sendEvent handler with exact timestamps and neither repeat does. Both plain
+Quartz events and window-annotated events show the missing repeat. The earlier
+prototype is retained separately; its receipt count measured timestamp matches
+and it lacked the readiness check.
+This narrows the failure boundary on this machine; it is not a platform-wide
+conclusion, physical acceptance or permission to alter repeat/timestamp checks.
+
+`dashboard-replay-8a96rrit` failed the repeated input-disabled package admission
+before opening a test window. Its original structured stdout error was lost
+behind stderr shutdown messages, so the initial cause is not established.
+`build/admission-detail-rf7f7sws/` retains a passing same-package admission with
+both streams. Harness `42cf9560c` now saves separately labelled, bounded stdout
+and stderr for both nonzero exits and timeouts. Its regression proves this
+failure stops before native input startup and still completes scoped cleanup.
+
+`dashboard-replay-yz3tc837` reaches Active and five non-repeat board checks.
+Batch sizing now varies with measured work (including multi-record prefixes),
+but Server terminates original dispatch at 19:31:19.864 after a completed capture
+misses its original 100 ms translated-input arrival deadline. The old test
+observer misses this terminal warning; legacy input continues and the failure
+surfaces only when the 30-second recorder ends. The helper posts all 1,200
+scrolls at 117.31 Hz, but exact delivery fails; 81 functional receipts were
+matched before the first unmatched event. Changed timestamps, host owner loss
+and Core pipeline revocation remain failures. Source restoration, zero held
+keys/buttons and owned cleanup complete. No full session or repeat pass is claimed.
+Three qualified complete input runs, H03–H12 acceptance and full native/library/
+OS queue certification remain open. The user is away; no attended physical test
+was launched. Ask immediately before any attended test.
+
+## Earlier preparation-cleanup checkpoint — 2026-10-20
+
+Runtime `ad9e4a44751d7d912205d0fe355489e1d3a5a96e` passes 22 selected Mac
+suites and 17 Ubuntu suites, with signing/package checks in
+`build/cleanup-witness-t9xcvore/`. A regression reproduces the independent
+preparation-cleanup witness being cancelled by a forwarding-fence change.
+The fix preserves that exact pending cleanup while still rejecting geometry,
+focus, gate or deadline invalidation. The earlier All-input snapshot is always
+retired. Backend failures now log their original GNOME error before shutdown.
+`build/preparation-cleanup-race-2xrtvlwp/` retains the failing and passing
+regression; the live return race is not yet independently qualified.
+
+Its live run, `dashboard-replay-doj2ir3b`, reaches Active and five non-repeat
+checks, but sustained input loses the unchanged two-second capture/route join.
+The producer stops at 313 posted/observed events. All 74 mapping requests contain
+one record: the old delivery budget includes process/acknowledgement waiting as
+per-record native work and stays at a one-record limit during the burst.
+Source restoration, zero held input and owned cleanup complete. Thirteen
+functional receipt timestamps change; the incomplete recording and strict input
+failures remain failed. This run never reaches the return-shortcut check.
+
+## Earlier input latency checkpoint — 2026-10-20
+
+Runtime `5801513591291d9cc821a78d8b175f1fbb53d00f` is built, packaged and
+pushed. `build/input-latency-vf23_d58/` contains 21 passing selected Mac suites,
+16 passing Ubuntu suites, signed Mac package verification and Ubuntu dependency/
+package checks. The coordinator harness in `build/controller-harness-gau69rjd/`
+has 209 cases per platform: Mac passes 208 and skips the Linux-only `/proc`
+exec-identity check; Ubuntu passes all 209. The harness source, package source
+and disposable fixture are independently bound and checked before launch.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `711ed0839784353dd74102f88f17725332ae74b5463c5cf8a4a30dd6901cd3fb` |
+| Ubuntu archive | `9d244dfc463c48c54d8523312688f347dd30df9e33b1c836f5ab27a292ebfbdb` |
+| Source archive | `5c4b0747da95ce498a550833af445ab3a1113f3901fc3298bede78d0e1de2622` |
+| Disposable source fixture | `b55b5f0a04d1a3d6907bdd944453a223c070f7b03572e3168665a1b772e6346e` |
+
+The native input batch now targets 50 ms of observed work instead of 125 ms,
+leaving time for mapping and scheduling. It still preserves order, bounded
+capacity, every event's original receipt and fresh native authority. The test
+window sets its instruction text once per update rather than changing between
+physical and automated text and causing repeated layout. The coordinator retains
+`Host/capture.failure` as the first failure even when later restoration or input
+shutdown reports another cause. Regression checks cover the unchanged ordered
+prefix behavior, adaptive limits and capture-failure reporting.
+
+An isolated, committed `native-timestamp-probe.m` diagnostic posts only to its
+own PID, with no user window or global input posting. On this Mac, ages 0, 50,
+90 and 99 ms retain their timestamp; 101, 125 and 250 ms are rewritten before
+the process tap. All seven pre-post readbacks match the supplied timestamps.
+`build/native-timestamp-3fq2w762/final-result.jsonl` records 7/7 observations
+and 4/7 preserved timestamps. This identifies a native boundary on this machine,
+not a universal OS guarantee or permission to rewrite evidence.
+
+Actual-desktop results on the frozen candidate:
+
+- `dashboard-replay-50csru1o` reaches Active but the synthetic driver's five-second
+  owned-key-window observation expires. It sends no input and never arms the
+  recorders. Source restoration and owned cleanup complete with zero held input;
+  the original focus/readiness and unarmed-recorder failures remain failed.
+- `dashboard-replay-rrbde301` completes the full 120 seconds Active, all three
+  30-second recordings, 21 queue journals, normal source restoration and owned
+  cleanup. All 1,251 functional receipts retain exact raw fields, flags and
+  timestamps; the independent strict recorded-journal comparison also passes.
+  All 1,200 scrolling events arrive at 119.32 Hz. Same-Mac capture-to-AppKit
+  observation is median 30.54 ms, p95 50.25 ms and maximum 85.57 ms; these are not
+  physical display latencies. Five non-repeat board checks pass. Synthetic
+  repeated-x still has no AppKit receipt, so the full replay remains failed.
+- `dashboard-replay-76oi4qmi` receives all 1,251 functional inputs, including
+  1,200 scroll events at 119.11 Hz, but 85 timestamps change. Capture-to-AppKit
+  observation is median 39.79 ms, p95 123.07 ms and maximum 195.46 ms. All
+  recorders finish and the 21 queue checks pass; strict raw matching fails.
+  On the return shortcut, Ubuntu refuses preparation cleanup and terminates
+  its session. Source restoration and owned cleanup complete, while the
+  premature relay disconnect and strict input comparison remain failures.
+  The repeat sequence stops at this failure; no third follow-up is launched.
+  See `followup-nonrepeat-results.json` and the unmodified Ubuntu Core log.
+
+The helper adds changing native focus/owned-window observations to distinguish
+request acceptance from actual readiness. Its five-second limit, posting scope
+and native receipt requirements are unchanged. No attended test was launched.
+Three qualified complete input runs have not been achieved. Original repeat,
+startup reliability, sustained-load repeatability, H03–H12 and the unverified
+native/library/OS queue contract remain open.
+
+Earlier `3ee0cf757` passes all six hosted jobs in
+[run 39472776971](https://github.com/JackHars/deskflow/actions/runs/39472776971).
+Runtime `580151359` also passes all six hosted jobs in
+[run 39476869149](https://github.com/JackHars/deskflow/actions/runs/39476869149).
+These hosted passes do not close its retained actual-desktop failures.
+Both `3ee0cf757` and `da2d1e4c6` pass their 21 Mac/16 Ubuntu local suites.
+The latter accidentally applied the generic 250 ms inspection default to
+placement; `3ee0cf757` restores the pre-existing absolute two-second placement
+contract. Tests reject completion at the original transaction deadline and
+cancelled writes. Input/environment observations remain at 250 ms.
+
+The `3ee0cf757` actual-desktop diagnostics remain failed:
+
+- Sampled `dashboard-replay-fmstxyia` loses native focus/state authority during
+  the burst; it stops at 254 posted events. Profiling can perturb timing.
+  Owned processes stop, but source restoration was not observed; retain the
+  restoration failure.
+- Unprofiled `dashboard-replay-4ct8_67z` posts all 1,200 events and completes all
+  30-second recordings with zero recorder loss. AppKit combines two adjacent
+  scrolls, and ten other timestamps change before the process tap. The strict
+  comparison fails. macOS then stops ScreenCaptureKit with -3821 during a
+  logged high-urgency cache purge, before the full Active interval completes.
+  Source restoration and cleanup succeed. The system log identifies the purge;
+  it does not prove whether storage or memory was its initiating cause.
+
+`build/bundle-compaction-fr5ptjcy/` verifies archive hashes, every regular file,
+symlink target and mode before removing 25 redundant extracted generated app
+bundles. Saved archives and all logs remain. The manifest records exact restore
+commands. Available disk space increased by about 3.2 GiB; this alone does not
+prove system purge failures are fixed.
+
+## Earlier native delivery checkpoint — 2026-10-20
+
+Runtime `c80320392317d3f788460801879f8b6fbca03427` is built and signed in
+`build/inspection-delivery-k2m8kj9o/`. All 21 selected Mac suites and 16 Ubuntu
+suites pass. The read-only environment watchdog delivers completed observations
+at high priority while still rejecting the original 250 ms deadline. Placement
+completion keeps normal FIFO ordering with queued cancellation. The shared
+64-inspection limit now retains a slot until both the QThread object and its
+queued result have retired. Regressions cover late results, destroyed owners,
+queued cancellation and 64 completed results whose thread objects are already
+deleted. No input authority, receipt, deadline or capacity is relaxed.
+
+Mac signed archive SHA-256:
+`0a1bb3ad0bd13d07ea2c678c376dd2cc14435da322c60f3f96ac427a7008bf0b`.
+Ubuntu archive SHA-256:
+`1da444392c28d83113004c954e143b4df161133c4f3192dc21f7da89f20b7c19`.
+Source fixture SHA-256:
+`e3ff0cc74d13007029f064161bf8174d22d874bdfdaaaa540069b0a9d79bce38`.
+The full 208-check coordinator harness passes on both machines and is bound to
+this source in `build/controller-harness-grrf8d5x/`. Preparation initially
+refused the old audit-document hash before launching any desktop session; that
+failure is retained in `prepare-z1hq38fm.log`. No comparison was waived.
+
+Code is pushed. Source-bundle run 39468727732 passes;
+[foundation run 39468727733](https://github.com/JackHars/deskflow/actions/runs/39468727733)
+passes all six jobs. All six hosted jobs for the preceding `8063ae4c9` pass in
+[run 39464867058](https://github.com/JackHars/deskflow/actions/runs/39464867058),
+including the packaged Core/Host handshake. Earlier passes do not qualify the
+new native binaries. Startup, sustained scrolling, original repeat/timestamp
+and exact AppKit receipts, H03–H12 acceptance and the complete upstream queue
+contract remain open. Three qualified same-artifact unattended input runs have
+not been achieved. The user is away; ask immediately before attended testing.
+
+The preceding `8063ae4c9` actual-desktop diagnostics remain failed:
+
+- `dashboard-replay-xfjakh1j` reaches Active and completes five recorded
+  non-repeat board checks in 2.99 seconds. Sustained scrolling then loses the
+  two-second capture-to-route join. The coordinator names that failure about
+  14 ms after its native log, instead of waiting for a generic recorder error.
+  The burst stops after 582 posted/observed events. Source restoration is later
+  observed, held input is zero and owned cleanup completes; the initial native
+  restoration error and incomplete recorder remain failed. Its Host sample
+  covers startup/early input, not the failing burst.
+- `dashboard-replay-ns5kbr_u` reaches Active but the environment observation
+  expires during the practice drag. No burst or burst-triggered sample occurs.
+  Source restoration and owned cleanup complete with zero held input; the
+  incomplete input collection is not a pass.
+
+## Earlier snapshot build and verification — 2026-10-20
+
+Runtime/source-fixture checkpoint `8063ae4c9835ef504c6180d2cf000283d3efbf59`
+is built and packaged in `build/snapshot-publication-final-n9f5bps1/`.
+All 21 selected Mac suites and 16 Ubuntu suites pass; signing, dependency and
+package checks pass. Disposable UI snapshots now use private same-directory
+atomic replacement without forcing every 100 ms update onto durable storage.
+Recovery journals and raw evidence are unchanged. Regressions cover concurrent
+complete-file reads, retained old readers, private permissions, failed rename
+cleanup, missing parents and symlink replacement. The first Mac build failed
+because its C++ library lacks `std::jthread`; `8063ae4c9` fixes the test to use a
+joined thread, and the complete rebuilt suite passes. The failed build remains
+in `build/snapshot-publication-5tb7j7hi/`.
+
+Mac signed archive SHA-256:
+`65f6b0e1e4ca632b0d85836511383b2513d2c6c9574c67ef4a53d5eb96af01f5`.
+Ubuntu archive SHA-256:
+`fb2f9e8f0b586b9f168886596d4265bf23a63c658476b8a382726028c544b5b6`.
+Source fixture SHA-256:
+`e3ff0cc74d13007029f064161bf8174d22d874bdfdaaaa540069b0a9d79bce38`.
+The 208-check coordinator proof remains `controller-harness-efi8wbe4`; its
+source hashes match. The new Linux snapshot regression has its own exact
+source/archive binding beside the package. The first preparation refused an
+old snapshot-test hash before launch; its failure is retained, and preparation
+now uses the freshly passed proof instead of waiving that comparison.
+
+All six hosted jobs on `a3a79385e` pass, including Mac app/integrated tests,
+packaging and private Core/Host handshake:
+[run 39460069913](https://github.com/JackHars/deskflow/actions/runs/39460069913).
+Code through `8063ae4c9` is pushed. Its source-bundle run 39464867178 passes;
+[run 39464867058](https://github.com/JackHars/deskflow/actions/runs/39464867058)
+passes all six jobs. This result covers `8063ae4c9`, not later changes.
+
+The roadmap remains incomplete: startup reliability, sustained scrolling,
+original repeat/timestamp and exact AppKit receipts, H03–H12 acceptance, and
+native/library/OS queue certification remain open. Three qualified same-artifact
+unattended input runs have not been achieved. The user is away; only disposable
+unattended diagnostics are authorized. Ask immediately before an attended test.
+
+## Earlier capture diagnostics and incomplete acceptance — 2026-10-20
+
+Current tested runtime on both machines:
+`b51487025a6277e4677d4b1b1a724b0ba9b052ae`.
+Build/package records: `build/capture-failure-fzgavzj0/`.
+All 21 selected Mac suites and 16 Ubuntu suites pass. The two native capture
+suites additionally pass normally and with ASan/UBSan in
+`build/capture-diagnostic-tests-wb58j7h1/`, with retained source hashes.
+Mac signed archive SHA-256:
+`ad8e387c638fc9489da68acc51aa03950bf52b488917fa4f3f33d0cd28413c19`;
+Ubuntu archive SHA-256:
+`eb7b3c1da78c1a782c89ca227b796d43ddc27f46357a28c73e07308321611af8`;
+source fixture SHA-256:
+`9e2be3a1683e590664b728474a5fa79804e3f0004389749ab9512ad7ca428886`.
+Harness `65d49c18e` is bound to 208 passing checks on each machine in
+`build/controller-harness-efi8wbe4/`: 109 Mac coordinator, 33 Linux supervisor,
+9 desktop, 46 normalizer and 11 recovery checks. The normalizer now explains
+validated recorder failure metadata and still rejects all nonzero losses.
+
+The current diagnostic retains one immutable native capture failure with the
+rejected stage, event types, original timestamp/flags and scroll syntax. It
+allocates no storage and prints nothing in the event tap; the consumer logs
+the publication, including when stream revocation wins the first observation.
+It does not rewrite events, reopen a revoked epoch, loosen deadlines or claim
+to fix the underlying continuity failure. All source/window/focus/geometry
+checks and 250 ms input/environment limits remain.
+
+`cbd9d0c6e` also bounds outstanding native inspection workers at 64 process-wide,
+including cancelled/destroyed owners and finished QThreads awaiting deletion.
+The limit is shared across result types. Exhaustion refuses placement and
+restores exports when the environment watchdog cannot obtain a slot. The
+regression fills all slots and proves they cannot be reused until native work
+and retained QObject lifetimes both finish. This closes that application
+allocation gap only; see the still-incomplete native/library/OS queue audit.
+
+Retained new actual-desktop failures:
+
+| Runtime / run under `build/` | Failure and evidence |
+| --- | --- |
+| c319 / `dashboard-replay-po2emvk6` | Exact disposable source activation exceeded two seconds before input. The first driver lost the helper stderr; newer frozen helpers retain activation stages on success and timeout. |
+| c319 / `dashboard-replay-wkzyo3d_` | Native environment read took 256 ms and crossed the unchanged 250 ms limit during functional input, before the burst. Source restoration and owned cleanup completed. |
+| cbd9 / `dashboard-replay-45kfgqh_` | Initial functional typing/click/drag/two-axis scroll receipts passed and all recorders armed. Capture continuity was then revoked with reason 3 during recorded scrolling. The precise rejected event was not in the old diagnostic. The burst never started; source returned, held state reached zero and owned cleanup completed. |
+| b514 / `dashboard-replay-kqvt3_jj` | Setup failed before Active. A 92 ms environment worker result completed before the owner processed it after the 250 ms deadline. The helper reported a transitional origin `(1440,-1)` rather than requested `(1440,0)`. Initial source restore also failed AX readback and left a journal; owned shutdown ultimately closed the disposable source and the journal is empty. The raw result retains its restoration/recorder failures. This is not a restoration or pipeline pass. |
+
+Two b514 read-only startup profiles target only the exact owned Host during
+successful no-input Core-fault diagnostics: `dashboard-replay-8pblin0b` and
+`dashboard-replay-pxlsd0sk` observe restoration in 286.506 and 259.175 ms.
+The latter samples AppKit display reconfiguration on the main thread. These
+successful samples do not identify the failed startup's exact stack or prove
+input reliability. The cbd9 environment timing attributes almost all polling
+cost to capture-permission preflight (139 ms maximum).
+
+`dashboard-replay-lk5tqqah` reaches all five non-repeat board checks and posts
+1,200 scroll events at 119.35 Hz. The recorded board exercise uses 18.8 seconds;
+per-action process/tap startup then leaves too little of the 30-second interval
+for the ten-second burst. Core expires its 250 ms drain with one server-completed
+item, recording loss 9 (Deadline). Capture reason 5 occurs during later cleanup;
+it is not the original failure. Source restoration, zero held input and owned
+cleanup complete. The raw failed journals remain unchanged. Native timestamps
+still differ, and this is not a scrolling or recording pass. The revised local
+helper removes per-action startup overhead while retaining actual event receipts
+and every deadline; its subsequent result is described below. Older passes
+cannot qualify b514.
+
+`dashboard-replay-cil8b3_9` is another b514 startup failure, before input or a
+scroll sample. A 145 ms environment read completes on its worker, but the main
+thread handles it after the unchanged 250 ms deadline during placement. The
+source restores, held state reaches zero and owned cleanup completes; the
+preparation and incomplete-recorder results remain failures.
+
+Four fresh c319 no-input actual-desktop recovery diagnostics passed, with
+exact source/frame/journal restoration, zero held input, owned cleanup and
+ordinary settings preserved. `build/native-startup-63_08raw/recovery-matrix-v3.json`
+records Viewer kill 552.484 ms, Host kill 768.355 ms, Core kill 291.664 ms and
+holding-helper kill 420.844 ms (Host alive). Exact run directories are in the
+current `WORK_STATE.md`. These observer times include publication delay.
+The underlying sessions remain FAILED after the intended faults; these are
+scoped recovery observations, not H10 or input acceptance. Older raw reports
+are unchanged; `build/async-registration-jtwk28cd/final-recovery-assessment-audit.json`
+separately records reassessment with the corrected bounded supervisor/assessor.
+
+Hosted run 39455238057 executes the explicit Intel Mac runner after two earlier
+Mac jobs failed to acquire ARM runners. Its five non-Mac jobs pass. The Mac
+job passes 37 of 38 application suites, including native startup, but times
+out in `concurrentEventPreparation` within the input-evidence suite's 15-second
+limit. Later Mac build/package steps are not executed. Source-bundle run
+39455238390 passes. Test-only `a3a79385e` replaces standard barriers with explicit
+blocking rendezvous, keeping all producer counts/rounds and the 15-second suite
+limit. The suite passes locally on Mac (1.45 seconds) and Ubuntu (0.26 seconds)
+in `build/evidence-barrier-mz3ata8w/`. Hosted run [39460069913](https://github.com/JackHars/deskflow/actions/runs/39460069913)
+on `a3a79385e` passes all six jobs, including all 38 Mac app suites, integrated
+checks, package verification and the packaged private Core/Host handshake. Its
+source-bundle companion 39460069894 also passes. This does not qualify later
+unpushed source changes or actual-desktop acceptance.
+
+The revised diagnostic helper in `build/scroll-persistent-pr55pgd3/` retains
+one command in flight and fresh source PID-birth/Active/foreground checks, with
+the event tap disabled while waiting. Its three no-input boundary checks pass.
+`dashboard-replay-2tgofzw8` reduces the recorded board exercise to 3.77 seconds,
+then posts the ten-second burst inside the original recording interval. The
+actual route expires its two-second capture-to-route history budget during the
+burst. The capture epoch remains live; the native capture rejection diagnostic
+is not the cause. Core reports PipelineRevoked and Host reports OwnerChanged.
+The raw restoration failure remains failed; later owned shutdown leaves an empty
+journal. It is not a scrolling or recovery pass.
+
+Harness `65d49c18e` stops Active verification as soon as that terminal route failure
+or a native-delivery denial is observed. Cleanup still runs, and the first cause
+survives later stop logs. The new tests cover every terminal class, unrelated
+observations and stopped cleanup. All 208 coordinator/normalizer/recovery checks
+pass on both machines. A separate audit of the original log identifies the join
+deadline; no raw report is rewritten. Read-only profile attempt
+`dashboard-replay-s4kjkmj8` fails to establish the owned native key window within
+five seconds after activation was accepted. It posts no input and takes no sample.
+
+Three consecutive qualified same-artifact input runs remain unmet. H03–H12,
+original repeat/timestamp/window receipts, latency and full native/library/OS
+queue certification remain open. No attended test was launched while the user
+was away. Ask immediately before a future attended launch, after the autonomous
+readiness gate passes. Logs are saved; no results popup or fixed sleep is used.
+
 ## Pending-placement watchdog and actual recovery — 2026-10-20
 
 Latest tested runtime on both machines:
@@ -4400,7 +5030,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 
 | ID | Procedure and required observations | Result / evidence |
 | --- | --- | --- |
-| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `286328d05` source-fixture build and all 151 Python tests pass on Mac; the home Ubuntu enabled/disabled Core, private GNOME/Xvfb, evidence runtime and ASan/UBSan checks pass on this exact source. Mac native permissions and Ubuntu desktop versions are freshly probed. The staged Mac runtime remains the verified unchanged `8132c8554` package; final desktop behavior and installation acceptance remain pending. |
+| H01 | Build current source on Mac and Ubuntu; confirm actual enabled/disabled core flags, load dependencies and run relevant local suites. Verify fresh experimental package identity and supported native capabilities. | PARTIAL — `b51487025` passes 21 selected Mac and 16 Ubuntu suites and fresh package verification; native capture checks also pass normally and with ASan/UBSan. Harness source is bound to 202 checks on each machine. Current exact artifacts are recorded above; hosted Mac evidence-suite timeout, native reliability and installation acceptance remain open. |
 | H02 | Repeat actual disposable Mac capture → Ubuntu viewer → Mac tagged native-receiver tests at Qt scales 1 and 1.25. Check frame identity/geometry, pointer/click/scroll/key receipts, no stuck input and restoration. This is synthetic, not physical acceptance. | NOT_RUN |
 | H03 | Run visible user-started physical flow. Confirm Start/Stop and countdown, actual Option hotkeys, type a/Shift+b/c, hold/release x, move/click/drag and scroll both axes, return to Mac. Match exact native source/host receipts and human result; no duplicate text or missing release. | NOT_RUN |
 | H04 | Exercise actual production original route and native drain with delayed compositor/Qt processing. Verify no legacy duplicate, exact owner through reentry/focus changes and safe failure on timeout/loss. Test emergency chord before/while/after active input and after capture continuity failure. | NOT_RUN |
@@ -4409,7 +5039,7 @@ must add exact commands/options for new code and harnesses before hand-back.
 | H07 | Follow [h07-edge-drag.md](deploy/windowshare/h07-edge-drag.md). Drag a real source window across a configured edge, continue/release the drag on Ubuntu, then drag back. Verify first-frame transfer, source location/focus, single button-up ownership and rollback for canceled drag/disconnect/layout change at each transfer phase. | NOT_RUN |
 | H08 | Test native dialogs, modal child windows, popup/context menus, browser and Electron app. Check intended window association, stacking, focus and input targeting; no unrelated application receives an event. Record app/OS versions. | NOT_RUN |
 | H09 | Verify copy/paste directions and focus policy; modifiers, shortcuts, key repeat, Unicode/composition and both scroll axes/momentum. Check clipboard feedback and unsupported IME behavior. | NOT_RUN |
-| H10 | Terminate only recorded owned experimental processes at defined host/core/viewer/helper stages; test connection loss and sleep/wake. Confirm automatic/journal recovery, no orphan display/process, no stuck input and no changes to ordinary Deskflow. | NOT_RUN |
+| H10 | Terminate only recorded owned experimental processes at defined host/core/viewer/helper stages; test connection loss and sleep/wake. Confirm automatic/journal recovery, no orphan display/process, no stuck input and no changes to ordinary Deskflow. | PARTIAL — four c319 no-input actual-desktop fault diagnostics restore exact source/frame/journal and clean up owned processes. They do not qualify changed binaries or establish held-input release, connection-loss/sleep-wake behavior or human restoration observations. See current evidence above. |
 | H11 | Run a documented long-duration/multiple-stream scenario; measure end-to-end latency, CPU/GPU, memory, bandwidth, dropped frames and fairness. Record hardware/settings, duration and thresholds before running. Verify bounded resources and cleanup. | NOT_RUN for native end-to-end acceptance. The separately scoped synthetic hour/resource comparison passes at `d57e78a0d`; it does not close H11. |
 | H12 | Install, launch, upgrade, restart and remove the separate experimental packages on both machines. Verify code/dependency identity, permission messages, provider version diagnostics and preservation of ordinary Deskflow/settings. | NOT_RUN |
 

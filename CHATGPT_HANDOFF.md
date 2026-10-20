@@ -4,22 +4,54 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
-Current status (2026-10-20): runtime `86699a430f` passes 20 selected Mac and
-16 Ubuntu suites. Pending native placement avoids duplicate watchdog reads;
-commit and input retain fresh ownership checks and unchanged deadlines.
-Three unattended actual-desktop faults (Host, Core and holding helper death)
-restore the source and complete cleanup, with six new recovery-tool unit tests
-passing on both machines. These diagnostics do not close physical H10.
+Current status (2026-10-20): pushed runtime `ccebffffe` moves diagnostic file
+work off the application's input thread onto one collector using the existing
+bounded journal. All 22 selected Mac suites, 17 Ubuntu suites and package/signing
+checks pass, as do focused memory/undefined-behavior sanitizer checks.
+Its full package results are recorded at the top of `TESTING.md`;
+do not transfer prior live results to changed binaries. The bound coordinator
+harness `81bb308d2` has 216 cases: Mac passes 215 with one Linux-only skip;
+Ubuntu passes all 216. Recovery observation waits for stable live publications
+within its existing deadline; uncertain snapshots confer no authority.
+A closed test TCP connection no longer falsely blocks
+the next launch during TIME_WAIT; a live listener still fails. The native
+runtime and packages are unchanged. Failed commands retain both output streams, including structured
+startup errors that stderr shutdown logs previously hid.
+Private channel v10 now measures actual native handling separately from process
+and acknowledgement waiting, preventing that fixed delay from being charged
+as work for every record when sizing a batch. Exact ordered dispatch, per-event
+receipts and authority checks remain required. The preparation cleanup witness
+survives unrelated forwarding changes while still rejecting real invalidation.
+Placement keeps its original absolute two-second deadline; input/environment
+observations retain 250 ms. Terminal Server dispatch failures now immediately
+stop an Active test, and journal continuations no longer repeat control-file
+reads. All six hosted jobs pass on runtime `ccebffffe` (run `39489639329`);
+actual-desktop input qualification remains separate. Current-package
+viewer, Host, Core and holding-helper termination diagnostics all pass, restoring
+the source in 0.26–1.22 seconds with owned cleanup. This is scoped recovery
+evidence, not a full input, sleep/wake or physical acceptance pass.
 
-Scrolling remains blocked: the latest 1,200-event burst reaches the exact
-target process unchanged, but accumulates roughly one second of delay.
-AppKit combines two pairs downstream, so strict window receipt acceptance
-also fails. Repeat and strict timestamps remain open. The roadmap is not
-finished, and there are not three qualified same-artifact pipeline passes.
-See the latest `TESTING.md` and `WORK_STATE.md` entries for exact artifacts,
-the retained failed run and the next work. The user is away; unattended
-disposable checks are authorized, but attended physical tests still require
-permission immediately before launch.
+The roadmap is not finished. Earlier `dashboard-replay-rrbde301` completes a
+full two-minute actual-desktop non-repeat session with all 1,251 functional
+receipts preserving raw fields and timestamps. Later same-candidate runs retain
+failures, and that successful run cannot qualify newer binaries. An isolated
+self-targeted AppKit diagnostic reproduces the synthetic repeat gap without
+Deskflow or Qt: repeats reach the process tap but not AppKit's sendEvent handler.
+Do not waive repeat or timestamp requirements. Current artifact hashes and each
+fresh result are at the top of `TESTING.md`. Three qualified complete input runs,
+H03–H12 acceptance and full queue certification remain open. The user is away;
+disposable unattended checks are authorized, but ask immediately before any
+attended physical test.
+
+Current-package `dashboard-replay-k14t48ax` completes the full two-minute
+session, all three recordings, all 1,200 raw/flag scroll receipts and clean
+restoration. It still fails strict input/performance: 758 scroll timestamps
+change, and capture-to-AppKit latency is median 133.77 ms/p95 308.27 ms.
+The retained stage analysis identifies substantial waiting before mapping and
+intermittent mapping round-trip delays; the input SSH socket also retransmits.
+This is not a qualified pass. The next engineering work is to reduce those
+delays while preserving the existing fields, authority, bounds and deadlines.
+Do not ask for an attended retry until three complete qualified runs pass.
 
 ### Earlier checkpoints
 
@@ -72,13 +104,12 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
 The product is **not physically accepted**, and integration does not imply
-the runtime is reliable. The current tested runtime is `86699a430f` on both
-machines. Basic startup, normal return and three no-input recovery faults now
-complete on the actual desktop, but the sustained 1,200-event input path still
-backs up and fails exact window receipt acceptance. Repeat and strict
-timestamps also remain unresolved. Current artifact hashes and every failed
-check are tracked at the top of `TESTING.md`; earlier passes cannot qualify
-changed artifacts.
+the runtime is reliable. The current candidate is `ccebffffe`; use its exact
+package validation in `TESTING.md` before launching.
+Actual-desktop recovery has scoped successes, while startup and sustained input
+still have retained failures. Scrolling, repeat and strict timestamps remain
+unresolved. Current artifact hashes and every failed check are tracked at the
+top of `TESTING.md`; earlier passes cannot qualify changed artifacts.
 
 Use `--pipeline-check` for authorized autonomous checks. A human keyboard/trackpad
 test still requires fresh permission. Use separate Mac controls and saved logs,
@@ -95,12 +126,17 @@ Do not count synthetic or unattended runs as original physical input acceptance.
 - [x] P6: supported child-window, menu, clipboard and input policies.
 - [x] P7: recovery monitors, application queue limits and synthetic load tooling.
 - [x] P8: separate packages, source/artifact verification and hosted checks.
+- [ ] Resolve startup/scrolling failures and obtain three qualified unattended
+  input runs with one frozen candidate before requesting attended acceptance.
 - [ ] H03/H04/H06: complete the basic physical hidden-window/input test without
   startup failure, missing clicks, duplicate input or incomplete cleanup.
 - [ ] H05/H06: verify real monitor layouts/scales and multiple windows.
 - [ ] H07: verify ordinary dragging in both directions, cancellation and return.
 - [ ] H08/H09: verify supported apps, dialogs, clipboard and input behavior.
-- [ ] H10: verify owned-process failures, disconnect and sleep/wake restoration.
+- [x] H10 diagnostic subset: actual-desktop viewer, Host, Core and holding-helper
+  termination restores the source and releases input; all four scoped cases pass.
+- [ ] H10: complete physical recovery observation, disconnect and sleep/wake
+  acceptance; the diagnostic subset does not close this row.
 - [ ] H11: collect actual input/display timing and the native hour workload.
 - [ ] H12: verify installation, upgrade, restart and removal on both machines.
 - [ ] Complete the remaining native/library/OS queue contract review. Several
@@ -113,7 +149,7 @@ obtain fresh permission immediately before a human physical-input test. No resul
 printed and saved diagnostics. Repeated automated passes cannot close these rows.
 
 **Local implementation resumed on 2026-10-13.** The production coordinator is
-now wired from Server through private protocol v9 (including P5 native-drag/return metadata), negotiated Core IPC5,
+now wired from Server through private protocol v10 (including P5 native-drag/return metadata), negotiated Core IPC5,
 EI/GNOME/Qt and NativeHost. Audited Mutter build identities establish the
 sender-ordering prerequisite; a retained prefix supports bounded exact point
 batches without reopening the full forwarding gate. Original input requires

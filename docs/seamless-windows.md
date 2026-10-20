@@ -7,7 +7,42 @@ cannot look complete. This improves test observation; it does not close
 physical acceptance. Current evidence and fresh-fixture retest requirements
 are at the top of `TESTING.md`.
 
-## Current implementation — 2026-10-16
+## Current implementation — 2026-10-20
+
+P1–P8 implementation is integrated; acceptance is incomplete. Current runtime
+`ccebffffe` moves diagnostic file work onto one dedicated collector using the
+existing bounded journal, keeping that work off the application input thread.
+All 22 selected Mac suites, 17 Ubuntu suites, package/signing checks and focused
+memory/undefined-behavior sanitizer checks pass; exact package and live results
+are recorded in [verification](../TESTING.md).
+The 216-case harness passes on Ubuntu; Mac passes 215 with one Linux-only
+skip. The test port check now permits Unix TCP TIME_WAIT restart while still
+rejecting a live listener. Recovery observation waits for stable publications
+within the existing deadline. Startup failures retain both output streams; terminal dispatch failure
+stops an Active acceptance run. Journal continuations avoid redundant control
+file reads while preserving the normal control timer. Private channel v10
+distinguishes native handling cost from process and
+acknowledgement waiting when sizing input batches, preserving the existing
+ordered barriers, limits and deadlines. The preparation cleanup witness also
+survives an unrelated forwarding-fence change while still rejecting genuine
+invalidation.
+
+Current runtime qualification is recorded in [verification](../TESTING.md).
+Current-package viewer, Host, Core and holding-helper termination recovery all
+pass, restoring the source in 0.26–1.22 seconds with no held input and complete
+owned cleanup; complete input, sleep/wake and physical acceptance remain separate.
+The current two-minute scrolling diagnostic completes with all 1,200 raw/flag
+scroll receipts, but 758 timestamps change and p95 capture-to-AppKit latency
+is 308 ms. This remains a strict input/performance failure. The retained stage
+trace identifies waiting before mapping and intermittent mapping round-trip
+delays; it does not establish a sole cause.
+The isolated repeat diagnostic reaches the process tap but not AppKit's event
+handler; no full original-input pass is claimed. Three qualified complete input
+runs, physical H03–H12 acceptance and full native/library/OS queue certification
+remain open. See [work state](../WORK_STATE.md) and the
+[remaining checklist](../CHATGPT_HANDOFF.md).
+
+## Earlier implementation checkpoint — 2026-10-16
 
 P1–P8 code is integrated, but physical acceptance remains open. The user
 authorized autonomous checks on the Mac and jack's actual Ubuntu desktop;
@@ -94,7 +129,7 @@ Physical H07 remains open. The user deferred
 physical testing; see the newest `TESTING.md` and `WORK_STATE.md` entries.
 
 The configured Mac Core now connects original captured input to the exact
-exported source through the production coordinator. Private protocol v9 and
+exported source through the production coordinator. Private protocol v10 and
 Core IPC5 retain the authenticated selections, full forwarding gate, native
 queue seal, mapped point/deadline and completed cleanup. Up to 16 independently
 mapped records share one closed prefix; held input survives point expiry while
