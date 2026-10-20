@@ -1,5 +1,59 @@
 # Seamless Windows work state
 
+## Unattended recovery and current scroll backlog — 2026-10-20
+
+Current tested runtime: `86699a430f10b60f21aa5a513a63e1e24c7adde3`,
+with build/package records in `build/source-preparation-watchdog-m0_wr8ws/`.
+All 20 selected Mac suites and 16 Ubuntu suites pass. The pending-placement
+watchdog no longer repeats synchronous identity/associated-window queries
+already owned by a bounded native observation. Preparation retains process
+birth, permission, capture and deadline checks; commit and every input retain
+their fresh native authority checks. This does not make every setup query
+asynchronous, cache delivery authority or change any deadline.
+
+The actual-desktop replay `dashboard-replay-nau1a1ge` completes 120 seconds
+Active, all three 30-second recordings, all 21 queue journals, normal
+restoration while Host is alive, zero held input and owned cleanup. All 1,200
+original scroll events at 120.06 Hz reach Core and the exact target process
+with unchanged raw fields and flags. However, latency is **unacceptable**:
+median 984.1 ms, p95 1267.6 ms, maximum 1300.0 ms, tail 122.7 ms. Native
+authority work backs up the serial delivery path; mapping is only 12.7 ms
+median and 28.2 ms maximum. Server pending input peaks at 156/256, without
+overflow. AppKit also combines pairs 405–406 and 657–658, leaving 1,198 exact
+window receipts. This fails strict scrolling acceptance; the earlier 43 ms
+median run is not evidence of current reliability. Repeat and timestamp
+acceptance remain open.
+
+Added `deploy/windowshare/pipeline-recovery.py` for explicitly authorized,
+no-input disposable desktop diagnostics. It waits for real hidden placement,
+checks frozen hashes and the exact owned process tree, then kills one named
+test component. It never changes the failed coordinator result or grants
+physical/input acceptance. Six selection/readiness/evidence regressions pass
+on Mac and Ubuntu and are added to both CI jobs; no new hosted run is claimed.
+
+Actual-machine observations using the same runtime:
+
+| Fault | Retained recovery directory | Return observed |
+| --- | --- | --- |
+| Host killed | `build/dashboard-replay-kz_wr_s8/recovery/` | 770.6 ms |
+| Core killed | `build/dashboard-replay-krka9lez/recovery/` | 283.1 ms |
+| Holding helper killed | `build/dashboard-replay-1htr7kdp/recovery/` | 296.8 ms, Host still alive |
+
+All three restored the exact source frame, emptied the journal, left no held
+input, stopped owned processes and preserved ordinary settings. Times include
+observer/publication delay. These are three different recovery diagnostics,
+**not** three qualified input-pipeline passes. The initial diagnostic attempt
+`dashboard-replay-cnk0xttv` stopped before launch/fault because native window
+identity was not yet published; its failure is retained and the readiness
+regression now covers that ordering.
+
+The user is away. No attended test was launched or authorized by this request.
+Three consecutive qualified same-artifact pipeline passes remain unmet.
+H03–H12 and the incomplete native/library/OS queue review remain open. Next
+work is the serial native-authority backlog, original repeat/timestamp/AppKit
+receipt limitations, then the dependent hardware acceptance rows. Obtain fresh
+permission immediately before a future attended test.
+
 ## Current scrolling result — 2026-10-20
 
 The tested Mac/Ubuntu candidate is `6d1447f1c` in

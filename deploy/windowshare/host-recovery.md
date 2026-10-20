@@ -67,5 +67,52 @@ past both its active period and the cancelled deadline, without early recovery.
 release/restore ordering. The hosted Mac job runs both suites. `TESTING.md`
 records the actual local and hosted results and sanitizer scope.
 
-H10 still requires real owned-process failures, window restoration observations
-and sleep/wake on the final package. Those attended checks remain deferred.
+## Unattended actual-desktop diagnosis
+
+`pipeline-recovery.py` uses the existing prepared H04 plans and
+`--pipeline-check` coordinator on the actual Mac and Ubuntu desktop. It sends
+no keyboard, pointer or scroll input. Run only with authorization for
+disposable desktop checks; a prepared plan alone is not authorization.
+
+```sh
+python3 deploy/windowshare/pipeline-recovery.py \
+  --mac-plan /absolute/prepared/mac/mac-original-plan.json \
+  --linux-plan /absolute/prepared/linux-plan.json \
+  --ssh-target user@ubuntu-host \
+  --ssh-key /absolute/path/to/ssh-key \
+  --ordinary-mac-config /absolute/path/to/Deskflow.conf \
+  --ordinary-mac-config /absolute/path/to/deskflow-server.conf \
+  --fault host-kill \
+  --output /absolute/prepared/recovery
+```
+
+Use a fresh preparation/output for each fault. The allowed faults are
+`host-kill`, `core-kill` and `holding-helper-kill`. The procedure waits for
+observed Active placement, validates the frozen executable hashes and checks
+kernel process-birth identities and exact parent/child relationships before
+signalling its one owned process. It takes neither an arbitrary PID nor an
+ordinary Deskflow process. Readiness and process output are observed through
+events and bounded waits; no fixed sleep starts the fault.
+
+Recovery requires the same source window at its original frame, no held
+input, an empty restoration journal, the target's death, completed owned
+cleanup and unchanged ordinary settings on both machines. Host/Core faults
+also require Host death before accepting the observed return. The helper
+case may restore while Host is alive. The wrapper does not move the source
+itself or repair the coordinator's evidence.
+
+`recovery.json` records a **diagnostic recovery observation**, never a
+qualified pipeline pass or physical acceptance. The underlying coordinator
+run correctly remains failed after the induced fault, with its original
+reason and cleanup details. The output retains the exact procedure, frozen
+plan hashes, process identities, log and result hash. Observation times include
+the status-publication/observer interval and are not physical display timing.
+
+`pipeline-recovery-tests.py` verifies process selection, incomplete readiness
+and evidence rejection without launching or signalling anything. Both hosted
+Mac and Linux jobs run these unit tests; live desktop faults are not CI tests.
+See `TESTING.md` for the observed actual-machine runs and their exact artifacts.
+
+H10 remains open for held-input cleanup, viewer/disconnect cases, physical
+restoration observation and sleep/wake on the final package. The unattended
+no-input checks do not close those requirements.

@@ -4,6 +4,25 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
+Current status (2026-10-20): runtime `86699a430f` passes 20 selected Mac and
+16 Ubuntu suites. Pending native placement avoids duplicate watchdog reads;
+commit and input retain fresh ownership checks and unchanged deadlines.
+Three unattended actual-desktop faults (Host, Core and holding helper death)
+restore the source and complete cleanup, with six new recovery-tool unit tests
+passing on both machines. These diagnostics do not close physical H10.
+
+Scrolling remains blocked: the latest 1,200-event burst reaches the exact
+target process unchanged, but accumulates roughly one second of delay.
+AppKit combines two pairs downstream, so strict window receipt acceptance
+also fails. Repeat and strict timestamps remain open. The roadmap is not
+finished, and there are not three qualified same-artifact pipeline passes.
+See the latest `TESTING.md` and `WORK_STATE.md` entries for exact artifacts,
+the retained failed run and the next work. The user is away; unattended
+disposable checks are authorized, but attended physical tests still require
+permission immediately before launch.
+
+### Earlier checkpoints
+
 Latest UI update (2026-10-19): the disposable source now has a visible input
 board with held-X/repeat feedback, click counts, a puck/drop target, a scroll
 grid and six phase-scoped checks. Practice is cleared when Recording begins;
@@ -49,19 +68,17 @@ immediately before any attended keyboard/trackpad test.
 
 Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
-## Current completion checklist — 2026-10-16
+## Current completion checklist — 2026-10-20
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
-The product is **not physically accepted**. Attended attempt 32 reached the
-actual Ubuntu monitor, but its original-input handoff expired before recording.
-Autonomous testing subsequently fixed transport batching, redundant preparation
-work, delayed private delivery, and the Ubuntu snapshot/ownership confusion.
-The current Mac candidate is `fd2db144c`, with unchanged Ubuntu runtime
-`52bddb84b` and harness/postprocessor `c3b545d78`. The old dispatch-only candidate
-passed three slower runs and then failed rapid scrolling. Retain those failures;
-they do not count toward the new candidate's sustained-scroll proof. Updated
-120-event verification and exact package hashes are tracked at the top of
-`TESTING.md`. Physical acceptance remains open.
+The product is **not physically accepted**, and integration does not imply
+the runtime is reliable. The current tested runtime is `86699a430f` on both
+machines. Basic startup, normal return and three no-input recovery faults now
+complete on the actual desktop, but the sustained 1,200-event input path still
+backs up and fails exact window receipt acceptance. Repeat and strict
+timestamps also remain unresolved. Current artifact hashes and every failed
+check are tracked at the top of `TESTING.md`; earlier passes cannot qualify
+changed artifacts.
 
 Use `--pipeline-check` for authorized autonomous checks. A human keyboard/trackpad
 test still requires fresh permission. Use separate Mac controls and saved logs,

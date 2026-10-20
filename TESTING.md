@@ -4,6 +4,77 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Pending-placement watchdog and actual recovery — 2026-10-20
+
+Latest tested runtime on both machines:
+`86699a430f10b60f21aa5a513a63e1e24c7adde3`.
+Build/signature/test records: `build/source-preparation-watchdog-m0_wr8ws/`.
+Mac package archive SHA-256:
+`25737111c45e3ca349a87dc8f336ead2c97da0da13cee33481ac01445e164736`;
+Ubuntu archive SHA-256:
+`4ccdf5e8b850fb64f2c0f4bee2bb7da17c6b7958042be70218ef4ccaf8d9e03b`;
+unchanged source fixture SHA-256:
+`9e2be3a1683e590664b728474a5fa79804e3f0004389749ab9512ad7ca428886`.
+
+The pending native placement observation now owns its setup query; the
+watchdog avoids repeating blocking identity/associated-window reads while
+that bounded preparation is outstanding. Process birth, permissions, capture
+failure and deadlines remain checked. Final placement and input still require
+fresh native authority. All 20 selected Mac suites and 16 Ubuntu suites pass;
+the signed Mac package and Ubuntu package checks pass. The unchanged harness
+remains bound to 107 coordinator and 42 normalizer checks on each machine in
+`build/scroll-harness-validation-t0cohbgq/`.
+
+The next actual-desktop burst is **not a scrolling pass**:
+`build/dashboard-replay-nau1a1ge/scroll-boundary-diagnostic.json` retains all
+1,200 exact raw/flag arrivals at Core and at the target-process tap, at
+120.06 Hz. The observer closes cleanly. AppKit combines pairs 405–406 and
+657–658, leaving 1,198 window receipts. Same-Mac HID-to-process delay rises
+to median 984.1 ms, p95 1267.6 ms and maximum 1300.0 ms; tail delay is
+122.7 ms. Mapping measures median 12.7 ms and maximum 28.2 ms. Serial native
+checks and shrinking bounded batches accumulate pending input (peak 156/256).
+There is no overflow or evidence loss, but that does not make the delay
+acceptable. The full 120-second Active period, three 30-second recordings,
+21 queue journals, normal restoration, held-zero and owned cleanup complete.
+The five non-repeat board checks pass; repeat and strict timestamps remain
+unaccepted. Earlier lower-latency runs cannot substitute for this result.
+
+The new [recovery procedure](deploy/windowshare/host-recovery.md) performs
+no-input faults on the actual Mac/Ubuntu desktop. It revalidates frozen
+executables and exact owned process identities before the fault, observes
+automatic return and audits cleanup without injecting a manual restore.
+Six unit tests pass locally on Mac and Ubuntu; both hosted job definitions
+now run them, but those CI changes have not been executed on GitHub here.
+
+| Fault/run under `build/` | Observation | Underlying pipeline result |
+| --- | --- | --- |
+| `dashboard-replay-kz_wr_s8/recovery/` — Host killed | Exact frame/journal restored in 770.6 ms | Failed as expected: companion exited |
+| `dashboard-replay-krka9lez/recovery/` — Core killed | Exact frame/journal restored in 283.1 ms | Failed as expected: Core exit -9 |
+| `dashboard-replay-1htr7kdp/recovery/` — holding helper killed | Exact frame/journal restored in 296.8 ms while Host remained alive | Failed as expected: hidden placement ended |
+
+Each reports `recoveryObserved: true`, owned cleanup, zero held input and
+unchanged ordinary settings. These observation times include polling/status
+publication delay, not measured physical display completion. Host/Core
+termination prevents the ordinary input recorder footer; the saved coordinator
+errors are retained. Core-kill additionally retains its expected unsuccessful
+Core drain. The helper case has no cleanup errors.
+
+The first two used procedure SHA-256
+`c6112f8e0ea4a60d5b60281dde16f64c623b5523569ed4b579e04ce36a971e19`;
+the helper case used
+`07e5f3cf4a1635b093f683210b2f81e6eec75a0644d3ebd90d7a4564b12bc41e`
+and retains its exact `procedure.py`. The final assessment additionally
+checks clean source exit and the expected Core exit. Earlier harness attempt
+`dashboard-replay-cnk0xttv/recovery/` submitted no fault and failed while
+waiting for native source identity; keep that result. Readiness now waits for
+the initial native snapshot, with regression coverage.
+
+These no-input faults do not establish held-input release, viewer/network
+disconnect, sleep/wake, physical restoration or H10 acceptance. None counts
+toward the three consecutive qualified input-pipeline passes. H03–H12 remain
+open. No attended physical test was launched while the user was away; obtain
+permission immediately before any future attended launch.
+
 ## Scrolling fixes and remaining acceptance gap — 2026-10-20
 
 Current tested runtime: `6d1447f1cf1d7a55086e66b175e12d0f00f45263` on both machines.
