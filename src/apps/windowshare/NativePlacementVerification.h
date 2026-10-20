@@ -38,6 +38,8 @@ public:
   using AsyncProbe = std::function<void(ObservationCompletion)>;
   using Completion = std::function<void(bool, QString)>;
   using Preparation = std::vector<std::function<bool()>>;
+  using PreparationCompletion = std::function<void(bool)>;
+  using AsyncPreparation = std::function<void(PreparationCompletion)>;
 
   NativePlacementVerification(Probe probe, Completion completion, Now now = Clock::now)
       : NativePlacementVerification(
@@ -61,15 +63,42 @@ public:
     QObject::connect(&m_timer, &QTimer::timeout, this, [this] { expire(); });
     m_timer.start(std::chrono::seconds(2));
   }
-  // Each native registration/write returns to Qt before the next operation.
+  // Each native write returns to Qt before the next operation.
   // The original deadline includes preparation and is never renewed by a step.
   void prepare(Preparation steps)
   {
+    prepareAfter([](PreparationCompletion complete) { complete(true); }, std::move(steps));
+  }
+  // Read-only notification registration may block in another application's
+  // AX bridge. It supplies wakeups, never placement authority. Its completion
+  // must return to this thread before the separately fenced writes can start.
+  // Registration shares the original absolute deadline with all later steps.
+  void prepareAfter(AsyncPreparation observe, Preparation steps)
+  {
     if (m_done || m_issued || m_preparing)
       return;
+    if (m_now() >= m_due) {
+      expire();
+      return;
+    }
     m_preparing = true;
+    m_preparationReading = true;
     m_preparation = std::move(steps);
-    queuePreparation();
+    const QPointer<NativePlacementVerification> alive(this);
+    observe([alive](bool success) {
+      if (!alive || alive->m_done || !alive->m_preparationReading)
+        return;
+      alive->m_preparationReading = false;
+      if (alive->m_now() >= alive->m_due) {
+        alive->expire();
+        return;
+      }
+      if (!success) {
+        alive->fail("Native placement notification preparation failed");
+        return;
+      }
+      alive->queuePreparation();
+    });
   }
   void issued()
   {
@@ -216,6 +245,7 @@ private:
   Preparation m_preparation;
   std::size_t m_preparationIndex = 0;
   std::uint64_t m_readSerial = 0;
-  bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false, m_reading = false, m_recheck = false;
+  bool m_issued = false, m_scheduled = false, m_done = false, m_preparing = false, m_preparationReading = false,
+       m_reading = false, m_recheck = false;
 };
 } // namespace deskflow::windowshare

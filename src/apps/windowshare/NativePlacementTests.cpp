@@ -240,6 +240,122 @@ void asynchronousPlacementObservation()
   dispatchUntil([&] { return placementComplete; });
   check(!reader.busy(), "completed native placement retained its worker slot");
 }
+void asynchronousPlacementPreparation()
+{
+  {
+    Gate::Clock::time_point now{};
+    bool failed = false, started = false;
+    Gate gate(
+        [](QString *) { return Gate::Observation::Verified; },
+        [&](bool success, QString) { failed = !success; }, [&] { return now; }
+    );
+    now += 2s;
+    gate.prepareAfter([&](auto) { started = true; }, {});
+    check(failed && !started, "expired placement started native registration");
+  }
+  for (int scenario = 0; scenario < 8; ++scenario) {
+    Gate::Clock::time_point now{};
+    Gate::PreparationCompletion registered;
+    int starts = 0, writes = 0, completions = 0, checks = 0;
+    bool accepted = false, authority = true;
+    std::unique_ptr<Gate> gate = std::make_unique<Gate>(
+        [](QString *) { return Gate::Observation::Verified; },
+        [&](bool success, QString) {
+          ++completions;
+          accepted = success;
+        },
+        [&] { return now; }
+    );
+    gate->prepareAfter(
+        [&](auto complete) {
+          ++starts;
+          registered = std::move(complete);
+        },
+        {[&] {
+          ++checks;
+          if (!authority)
+            return false;
+          ++writes;
+          return true;
+        }}
+    );
+    gate->prepareAfter([&](auto) { ++starts; }, {});
+    gate->issued();
+    gate->changed();
+    dispatch();
+    check(starts == 1 && writes == 0 && checks == 0 && completions == 0, "registration was skipped or overlapped");
+    if (scenario == 2)
+      gate->cancel();
+    else if (scenario == 3)
+      gate.reset();
+    else if (scenario == 4)
+      now += 2s; // Completion must enforce expiry even before the timer dispatches.
+    else if (scenario == 5) {
+      now += 2s;
+      gate->expire();
+    } else if (scenario == 6)
+      authority = false; // Registration grants no authority to the later write.
+    registered(scenario != 1);
+    registered(true); // A duplicate or contradictory completion cannot start work twice.
+    check(writes == 0, "registration completion performed a native write on its caller's stack");
+    if (scenario == 7)
+      gate->cancel(); // Also cancel after registration, before the queued native write.
+    for (int turn = 0; turn < 4; ++turn)
+      dispatch();
+    const bool cancelled = scenario == 2 || scenario == 3 || scenario == 7;
+    check(completions == (cancelled ? 0 : 1), "registration completion was repeated or revived a cancelled placement");
+    check(accepted == (scenario == 0), "failed, late or revoked registration committed placement");
+    check(writes == (scenario == 0 ? 1 : 0), "unverified registration allowed a native write");
+    check(checks == (scenario == 0 || scenario == 6 ? 1 : 0), "write did not require fresh authority after registration");
+  }
+
+  // Reproduce a busy AX notification registration without blocking Qt or
+  // allowing an unrelated 250 ms environment inspection to expire behind it.
+  using Reader = AsyncNativeInspection<int, 2000>;
+  Gate::Clock::time_point now{};
+  Reader registration([&] { return now; });
+  AsyncNativeInspection<int> environment([&] { return now; });
+  auto entered = std::make_shared<QSemaphore>(), release = std::make_shared<QSemaphore>();
+  const auto unblock = qScopeGuard([&] { release->release(); });
+  bool environmentComplete = false, inputTurn = false, placed = false;
+  int writes = 0;
+  Gate gate(
+      [](QString *) { return Gate::Observation::Verified; },
+      [&](bool success, QString) { placed = success; }, [&] { return now; }
+  );
+  gate.prepareAfter(
+      [&](Gate::PreparationCompletion complete) {
+        check(
+            registration.request(
+                [entered, release] {
+                  entered->release();
+                  release->acquire();
+                  return 7;
+                },
+                [complete](auto result) { complete(result == 7); }
+            ),
+            "notification registration worker failed to start"
+        );
+      },
+      {[&] {
+        ++writes;
+        return true;
+      }}
+  );
+  check(entered->tryAcquire(1, 2000), "registration did not enter its native query");
+  check(
+      environment.request([] { return 11; }, [&](auto result) { environmentComplete = result == 11; }),
+      "environment inspection did not start"
+  );
+  QMetaObject::invokeMethod(&gate, [&] { inputTurn = true; }, Qt::QueuedConnection);
+  dispatchUntil([&] { return environmentComplete && inputTurn; });
+  check(registration.busy() && writes == 0 && !placed, "registration stalled input or started placement too soon");
+  now += 464ms; // The measured blocking registration remains inside the original two seconds.
+  release->release();
+  dispatchUntil([&] { return placed; });
+  check(writes == 1 && !registration.busy(), "registration did not release its slot or repeated placement");
+}
+
 struct Fixture
 {
   Gate::Clock::time_point now{};
@@ -958,6 +1074,7 @@ int main(int argc, char **argv)
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"asynchronous-placement-observation", &asynchronousPlacementObservation},
+             std::pair{"asynchronous-placement-preparation", &asynchronousPlacementPreparation},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},

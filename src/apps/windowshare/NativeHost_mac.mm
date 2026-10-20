@@ -769,9 +769,12 @@ public:
   void cancel()
   {
     m_verification.cancel();
-    if (m_observer) {
-      CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
-      m_observer = CF<AXObserverRef>();
+    m_registrationRead.cancel();
+    if (m_registration) {
+      CFRunLoopRemoveSource(
+          CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_registration->observer.get()), kCFRunLoopCommonModes
+      );
+      m_registration.reset();
     }
   }
   void changed(const QString &trigger)
@@ -786,57 +789,74 @@ public:
   void start()
   {
     NativePlacementVerification::Preparation steps;
-    steps.emplace_back([this] {
-      const auto keepAlive = shared_from_this();
-      const SlowOperationDiagnostic slow("Host", "source.holding.observe.create");
-      if (!authorityCurrent())
-        return false;
-      AXObserverRef raw = nullptr;
-      const auto created = AXObserverCreate(m_expected.pid, notification, &raw);
-      m_observer = CF<AXObserverRef>(raw);
-      lifecycleDiagnostic(
-          "Host", "source.holding.observe", "observed", "Native observer creation returned",
-          {{"axError", int(created)}, {"windowId", qint64(m_expected.id)}}
-      );
-      if (created != kAXErrorSuccess || !m_observer) {
-        m_verification.fail("Cannot observe the exact source window before placement");
-        return false;
-      }
-      CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(m_observer.get()), kCFRunLoopCommonModes);
-      return authorityCurrent();
-    });
-    for (const auto name : placementNotificationNames()) {
-      steps.emplace_back([this, name] {
-        const auto keepAlive = shared_from_this();
-        const SlowOperationDiagnostic slow("Host", "source.holding.observe.register");
-        if (!authorityCurrent())
-          return false;
-        const bool registered = registerPlacementNotification(
-            name,
-            [this](CFStringRef notificationName) {
-              return AXObserverAddNotification(m_observer.get(), m_window.get(), notificationName, this);
-            },
-            [](CFStringRef notificationName, AXError status) {
-              lifecycleDiagnostic(
-                  "Host", "source.holding.observe", "observed", "Native notification registration returned",
-                  {{"notification", string((__bridge NSString *)notificationName)},
-                   {"axError", int(status)},
-                   {"watchdogReadbackRequired",
-                    status == kAXErrorCannotComplete || status == kAXErrorNotificationUnsupported}}
-              );
-            }
-        );
-        if (!registered) {
-          m_verification.fail("Cannot register source placement notifications");
-          return false;
-        }
-        return authorityCurrent();
-      });
-    }
     steps.emplace_back([this] { return placeAttribute(kAXMinimizedAttribute, "unminimize"); });
     steps.emplace_back([this] { return placeAttribute(kAXSizeAttribute, "resize"); });
     steps.emplace_back([this] { return placeAttribute(kAXPositionAttribute, "move"); });
-    m_verification.prepare(std::move(steps));
+    m_verification.prepareAfter(
+        [this](NativePlacementVerification::PreparationCompletion complete) {
+          const auto keepAlive = shared_from_this();
+          if (!m_current() || !m_verification.withinDeadline()) {
+            complete(false);
+            return;
+          }
+          const auto registration = std::make_shared<Registration>(m_window.get(), weak_from_this());
+          const bool accepted = m_registrationRead.request(
+              [registration, expected = m_expected] {
+                // Retained native resources only. No Host/Entry pointer or
+                // placement/input authority crosses into this worker.
+                @autoreleasepool {
+                  const SlowOperationDiagnostic slow("Host", "source.holding.observe.register");
+                  AXObserverRef raw = nullptr;
+                  const auto created = AXObserverCreate(expected.pid, notification, &raw);
+                  registration->observer = CF<AXObserverRef>(raw);
+                  lifecycleDiagnostic(
+                      "Host", "source.holding.observe", "observed", "Native observer creation returned",
+                      {{"axError", int(created)}, {"windowId", qint64(expected.id)}}
+                  );
+                  if (created != kAXErrorSuccess || !registration->observer)
+                    return std::shared_ptr<Registration>{};
+                  const bool registered = registerPlacementNotifications(
+                      [registration](CFStringRef name) {
+                        return AXObserverAddNotification(
+                            registration->observer.get(), registration->window.get(), name, registration.get()
+                        );
+                      },
+                      [](CFStringRef name, AXError status) {
+                        lifecycleDiagnostic(
+                            "Host", "source.holding.observe", "observed", "Native notification registration returned",
+                            {{"notification", string((__bridge NSString *)name)},
+                             {"axError", int(status)},
+                             {"watchdogReadbackRequired",
+                              status == kAXErrorCannotComplete || status == kAXErrorNotificationUnsupported}}
+                        );
+                      }
+                  );
+                  return registered ? registration : std::shared_ptr<Registration>{};
+                }
+              },
+              [weak = weak_from_this(), complete](std::optional<std::shared_ptr<Registration>> observed) {
+                const auto self = weak.lock();
+                if (!self)
+                  return;
+                if (!self->m_verification.withinDeadline() || !self->m_current() || !observed || !*observed) {
+                  complete(false);
+                  return;
+                }
+                self->m_registration = std::move(*observed);
+                CFRunLoopAddSource(
+                    CFRunLoopGetMain(), AXObserverGetRunLoopSource(self->m_registration->observer.get()),
+                    kCFRunLoopCommonModes
+                );
+                // Registration only enables wakeups. Each following mutation
+                // still rechecks exact native identity and placement authority.
+                complete(true);
+              }
+          );
+          if (!accepted)
+            complete(false);
+        },
+        std::move(steps)
+    );
   }
 
 private:
@@ -898,8 +918,10 @@ private:
   }
   static void notification(AXObserverRef, AXUIElementRef window, CFStringRef name, void *context)
   {
-    auto *self = static_cast<ObservedPlacement *>(context);
-    if (self && CFEqual(window, self->m_window.get()))
+    const auto *registration = static_cast<Registration *>(context);
+    if (!registration || !CFEqual(window, registration->window.get()))
+      return;
+    if (const auto self = registration->owner.lock())
       self->changed("Exact native window notification: " + string((__bridge NSString *)name));
   }
   NativePlacementVerification::Observation probe(QString *reason)
@@ -950,7 +972,19 @@ private:
   Rect m_destination;
   std::function<bool()> m_current;
   std::function<bool()> m_nativeCurrent;
-  CF<AXObserverRef> m_observer;
+  struct Registration
+  {
+    std::weak_ptr<ObservedPlacement> owner;
+    CF<AXUIElementRef> window;
+    // Destroy the observer before its raw callback context and retained window.
+    CF<AXObserverRef> observer;
+    Registration(AXUIElementRef value, std::weak_ptr<ObservedPlacement> placement)
+        : owner(std::move(placement)), window(static_cast<AXUIElementRef>(CFRetain(value)))
+    {
+    }
+  };
+  std::shared_ptr<Registration> m_registration;
+  AsyncNativeInspection<std::shared_ptr<Registration>, 2000> m_registrationRead;
   NativePlacementVerification m_verification;
 };
 
