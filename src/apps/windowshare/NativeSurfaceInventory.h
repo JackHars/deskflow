@@ -47,4 +47,17 @@ inline bool completeUnrelatedSurfaceInventory(
   return first == last && first == accounted;
 }
 
+// One stack-local input inspection can join its final inventory with the final
+// native identity read. Initial AX classification is provisional until finish;
+// no observation is reused by another input, and a changed native list fails.
+struct NativeSurfaceInventoryCheck
+{
+  std::uint32_t source;
+  std::vector<std::uint32_t> before, unrelated;
+  bool finish(std::uint32_t expectedSource, const std::vector<std::uint32_t> &after) const
+  {
+    return source == expectedSource && completeUnrelatedSurfaceInventory(source, before, after, unrelated);
+  }
+};
+
 } // namespace deskflow::windowshare

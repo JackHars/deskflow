@@ -22,6 +22,23 @@ on both sides, to distinguish application scheduling from transport delay.
 It changes no socket scheduling, input deadlines, authority or queue bounds.
 Scrolling remains unresolved; no attended test has launched.
 
+`3ca1c32e7` passes the 19 Mac and 15 Ubuntu suites. Its actual-desktop run
+`dashboard-replay-suo0rd44` again exhausts the capture/route join during sustained
+scrolling. Mapping RTT is timely (median 13.3 ms, maximum 27.8 ms); socket-buffer
+delays occur outside the failing burst. Fresh Mac native checks instead spike
+to 28–67 ms, and the backlog reaches the unchanged cutoff. Owned windows and
+processes restore/stop; the failed raw record remains intact.
+
+The next change combines the final native surface inventory and exact source
+identity into one fresh WindowServer snapshot, taken after the other per-input
+AX/native checks. Initial classification remains provisional until that final
+snapshot agrees. No observation survives the input call; missing sources,
+changed/ambiguous inventories, source replacement, focus/geometry changes and
+expired receipts still deny submission. The fallback full child inspection is
+unchanged. This removes one WindowServer query per eligible event without
+caching authority or changing queue/deadline policy. It needs actual-desktop
+validation before a scrolling fix can be claimed.
+
 The adaptive-prefix candidate `e28deb425` passes all 19 selected Mac and 15
 Ubuntu suites, but `dashboard-replay-_kqo3i_b` fails at a mapped receipt deadline.
 The preceding 11-record group took 192 ms and correctly reduced the next group

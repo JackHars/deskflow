@@ -473,19 +473,10 @@ enum class IdentityDetail
   Full,
   Authority
 };
-std::optional<WindowIdentity>
-identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = IdentityDetail::Full)
+std::optional<WindowIdentity> identityFromInfo(CGWindowID id, NSDictionary *info, IdentityDetail detail)
 {
-  if (knownMissing)
-    *knownMissing = false;
-  CF<CFArrayRef> list(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id));
-  if (!list)
+  if (!info)
     return std::nullopt;
-  if (CFArrayGetCount(list.get()) == 0 && knownMissing)
-    *knownMissing = true;
-  if (CFArrayGetCount(list.get()) != 1)
-    return std::nullopt;
-  NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list.get(), 0);
   WindowIdentity result;
   result.id = [info[(__bridge NSString *)kCGWindowNumber] unsignedIntValue];
   result.pid = [info[(__bridge NSString *)kCGWindowOwnerPID] intValue];
@@ -503,6 +494,59 @@ identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = Id
     result.bundle = string([NSRunningApplication runningApplicationWithProcessIdentifier:result.pid].bundleIdentifier);
   }
   return result.frame.valid() && result.launch > 0 ? std::optional(result) : std::nullopt;
+}
+std::optional<WindowIdentity>
+identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = IdentityDetail::Full)
+{
+  if (knownMissing)
+    *knownMissing = false;
+  CF<CFArrayRef> list(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, id));
+  if (!list)
+    return std::nullopt;
+  if (CFArrayGetCount(list.get()) == 0 && knownMissing)
+    *knownMissing = true;
+  if (CFArrayGetCount(list.get()) != 1)
+    return std::nullopt;
+  return identityFromInfo(id, (__bridge NSDictionary *)CFArrayGetValueAtIndex(list.get(), 0), detail);
+}
+
+struct NativeWindowInventory
+{
+  CF<CFArrayRef> windows;
+  std::vector<std::uint32_t> ids;
+  std::optional<WindowIdentity> source(CGWindowID id) const
+  {
+    NSDictionary *match = nil;
+    for (CFIndex i = 0; i < CFArrayGetCount(windows.get()); ++i) {
+      NSDictionary *item = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows.get(), i);
+      if ([item[(__bridge NSString *)kCGWindowNumber] unsignedIntValue] == id) {
+        if (match)
+          return {};
+        match = item;
+      }
+    }
+    return identityFromInfo(id, match, IdentityDetail::Authority);
+  }
+};
+std::optional<NativeWindowInventory> nativeWindowInventory(pid_t process)
+{
+  NativeWindowInventory result{
+      CF<CFArrayRef>(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)), {}
+  };
+  if (!result.windows)
+    return {};
+  for (CFIndex i = 0; i < CFArrayGetCount(result.windows.get()); ++i) {
+    NSDictionary *item = (__bridge NSDictionary *)CFArrayGetValueAtIndex(result.windows.get(), i);
+    if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != process)
+      continue;
+    NSNumber *number = item[(__bridge NSString *)kCGWindowNumber];
+    if (!number || !number.unsignedIntValue)
+      return {};
+    result.ids.push_back(number.unsignedIntValue);
+    if (result.ids.size() > 64)
+      return {};
+  }
+  return result;
 }
 // An exact native window ID is required even when title and geometry collide.
 // The SPI join supplies identity only; the existing session/focus/input gates
@@ -1692,7 +1736,8 @@ struct NativeHost::Impl
   }
   std::optional<KeyboardRouteBinding> keyboardRouteCandidate(
       std::uint64_t session, std::uint64_t epoch, std::uint64_t generation,
-      ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr, bool inspectAssociated = true
+      ForwardingScope scope = ForwardingScope::Keyboard, Rect *observedFrame = nullptr, bool inspectAssociated = true,
+      std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr
   ) const
   {
     const auto started = std::chrono::steady_clock::now();
@@ -1722,7 +1767,7 @@ struct NativeHost::Impl
     };
     const QPointer<NativeHost> alive(q);
     if (QThread::currentThread() != q->thread() ||
-        (inspectAssociated && q->m_impl->handleAssociatedChild({session, epoch})) || !alive)
+        (inspectAssociated && q->m_impl->handleAssociatedChild({session, epoch}, finalInventory)) || !alive)
       return denied("Native owner thread or associated-window admission changed");
     measured("associatedWindowUs");
     const auto admitted = lifecycle->admission();
@@ -1926,7 +1971,8 @@ struct NativeHost::Impl
     return false;
   }
   bool noIndependentAttachedSurface(
-      const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused, QString &reason
+      const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused,
+      QString &reason, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr
   ) const
   {
     const auto started = std::chrono::steady_clock::now();
@@ -1997,32 +2043,11 @@ struct NativeHost::Impl
     if (!alive || !focusedWithinSource)
       return incomplete("Focused native surface has no proven source ancestry");
     measured("focusOwnershipUs");
-    const auto inventory = [&]() -> std::optional<std::vector<std::uint32_t>> {
-      // Ask WindowServer to select live on-screen surfaces. Its all-window
-      // list also contains Qt's dormant backing windows, for which the
-      // optional kCGWindowIsOnscreen dictionary key is absent. Treating that
-      // missing key as an inventory failure defeats this check on every input.
-      // A missing source still fails the exact before/after inventory join.
-      CF<CFArrayRef> windows(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID));
-      if (!alive || !windows)
-        return {};
-      std::vector<std::uint32_t> result;
-      for (CFIndex i = 0; i < CFArrayGetCount(windows.get()); ++i) {
-        NSDictionary *item = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows.get(), i);
-        if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != expected.pid)
-          continue;
-        NSNumber *number = item[(__bridge NSString *)kCGWindowNumber];
-        if (!number || !number.unsignedIntValue)
-          return {};
-        result.push_back(number.unsignedIntValue);
-        if (result.size() > 64)
-          return {};
-      }
-      return result;
-    };
-    const auto before = inventory();
+    // Public on-screen inventory excludes dormant backing windows. This is
+    // always a fresh observation; no result survives the current input call.
+    const auto before = nativeWindowInventory(expected.pid);
     measured("inventoryBeforeUs");
-    if (!before)
+    if (!alive || !before)
       return incomplete("Initial native inventory unavailable");
     CF<CFTypeRef> windows(attribute(app, kAXWindowsAttribute));
     measured("axWindowsUs");
@@ -2037,7 +2062,7 @@ struct NativeHost::Impl
       CGWindowID number = 0;
       if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
         return incomplete("AX window has no exact native identity");
-      if (number == expected.id || std::find(before->begin(), before->end(), number) == before->end())
+      if (number == expected.id || std::find(before->ids.begin(), before->ids.end(), number) == before->ids.end())
         continue;
       AXUIElementSetMessagingTimeout(window, 0.05f);
       const auto observed = readNativeAttributes(
@@ -2068,18 +2093,31 @@ struct NativeHost::Impl
       unrelated.push_back(number);
     }
     measured("classifyUs");
-    const auto after = inventory();
-    measured("inventoryAfterUs");
-    if (!after || !completeUnrelatedSurfaceInventory(expected.id, *before, *after, unrelated))
-      return incomplete("Native window inventory changed or contains an unclassified surface");
+    NativeSurfaceInventoryCheck inspection{expected.id, before->ids, unrelated};
+    if (finalInventory) {
+      // Prove that every initial ID is accounted for before deferring only the
+      // final WindowServer read. The caller must finish after its other fresh
+      // native checks, using that same final snapshot for source identity.
+      if (!inspection.finish(expected.id, before->ids))
+        return incomplete("Initial native inventory contains an unclassified surface");
+    } else {
+      const auto after = nativeWindowInventory(expected.pid);
+      measured("inventoryAfterUs");
+      if (!alive || !after || !inspection.finish(expected.id, after->ids))
+        return incomplete("Native window inventory changed or contains an unclassified surface");
+    }
     CF<CFTypeRef> fresh(attribute(app, kAXFocusedUIElementAttribute));
     measured("finalFocusUs");
     if (!alive || !fresh || !CFEqual(fresh.get(), focused))
       return incomplete("Focused element changed while inspecting native windows");
-    reason = "Every independent native window is the source or freshly proven unrelated";
+    if (finalInventory)
+      *finalInventory = std::move(inspection);
+    reason = finalInventory ? "Native surface classification awaits the final per-input identity snapshot"
+                            : "Every independent native window is the source or freshly proven unrelated";
     return true;
   }
-  std::shared_ptr<AttachedSurface> focusedChild(const Entry &parent) const
+  std::shared_ptr<AttachedSurface>
+  focusedChild(const Entry &parent, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr) const
   {
     const QPointer<NativeHost> alive(q);
     const auto expected = parent.identity;
@@ -2097,8 +2135,9 @@ struct NativeHost::Impl
     // accounted for. Menus, popovers, tooltips, dialogs, sheets, missing AX
     // entries or a changing native inventory conservatively use the full scan.
     QString inventoryReason;
-    const bool completeInventory =
-        noIndependentAttachedSurface(expected, retained.get(), app.get(), element(focused.get()), inventoryReason);
+    const bool completeInventory = noIndependentAttachedSurface(
+        expected, retained.get(), app.get(), element(focused.get()), inventoryReason, finalInventory
+    );
     if (alive) {
       const auto *current = entry(owner.session, owner.epoch);
       if (current && (current->surfaceInventoryLogged != completeInventory ||
@@ -2406,7 +2445,7 @@ struct NativeHost::Impl
     if (!entry(owner.session, owner.epoch))
       failFamily(candidate->parent, "Attached surface capture failed");
   }
-  bool handleAssociatedChild(Owner owner)
+  bool handleAssociatedChild(Owner owner, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr)
   {
     const SlowOperationDiagnostic timing("Host", "native.associated-child");
     if (!familiesEnabled)
@@ -2420,7 +2459,7 @@ struct NativeHost::Impl
       return true;
     if (parent->pendingChild)
       return familyBlocked(*parent);
-    const auto candidate = focusedChild(*parent);
+    const auto candidate = focusedChild(*parent, finalInventory);
     if (!candidate)
       return familyBlocked(*parent);
     for (const auto &[id, existing] : entries)
@@ -2664,8 +2703,10 @@ struct NativeHost::Impl
     QPointer<NativeHost> alive(q);
     const auto target = originalTarget;
     Rect frame;
+    std::optional<NativeSurfaceInventoryCheck> finalInventory;
     const auto candidate = keyboardRouteCandidate(
-        binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame, inspectAssociated
+        binding.owner.session, binding.owner.epoch, binding.generation, ForwardingScope::All, &frame, inspectAssociated,
+        &finalInventory
     );
     candidateFinished = identityFinished = std::chrono::steady_clock::now();
     if (!alive || !keyboardAdmission.quiesced(binding, candidate, qtInputEmpty()))
@@ -2673,7 +2714,18 @@ struct NativeHost::Impl
     // Titles and bundle metadata cannot authorize delivery. Avoid the unused
     // LaunchServices lookup while retaining the exact WindowServer ID, PID,
     // process birth and bounds reads for each authority check.
-    const auto current = identity(target->identity.id, nullptr, IdentityDetail::Authority);
+    std::optional<WindowIdentity> current;
+    if (finalInventory) {
+      // This is later than both the AX classification and candidate checks.
+      // A single fresh public snapshot supplies the final inventory AND exact
+      // source ID/PID/bounds; process birth is read from the live process next.
+      // A popup, missing source, duplicate ID or changed inventory denies input.
+      const auto final = nativeWindowInventory(target->identity.pid);
+      if (final && finalInventory->finish(target->identity.id, final->ids))
+        current = final->source(target->identity.id);
+    } else {
+      current = identity(target->identity.id, nullptr, IdentityDetail::Authority);
+    }
     identityFinished = std::chrono::steady_clock::now();
     if (!alive)
       return false;

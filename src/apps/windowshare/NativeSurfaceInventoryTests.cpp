@@ -28,6 +28,13 @@ int main()
     check(!completeUnrelatedSurfaceInventory(1, {1, 2, 2}, {1, 2}, {2}), "duplicate initial ID was accepted");
     check(!completeUnrelatedSurfaceInventory(1, {1, 2}, {1, 2, 2}, {2}), "duplicate final ID was accepted");
     check(!completeUnrelatedSurfaceInventory(1, {1, 2}, {1, 2}, {2, 2}), "ambiguous AX classification was accepted");
+    const NativeSurfaceInventoryCheck deferred{1, {1, 2}, {2}};
+    check(deferred.finish(1, {2, 1}), "final identity snapshot could not finish the same input inspection");
+    check(!deferred.finish(2, {1, 2}), "deferred inventory changed its exact source window");
+    check(!deferred.finish(1, {1, 2, 3}), "popup appearing during later native checks was ignored");
+    check(!deferred.finish(1, {2}), "source disappearing during later native checks was ignored");
+    check(!deferred.finish(1, {1, 2, 2}), "ambiguous final identity snapshot was accepted");
+    check(!deferred.finish(1, {}), "missing final inventory accepted an initial observation");
     const auto dialogInventory = [](bool applicationParent, std::optional<bool> modal) {
       const std::vector<std::uint32_t> siblings =
           unrelatedApplicationWindow(NativeRootWindowKind::Dialog, applicationParent, modal)
