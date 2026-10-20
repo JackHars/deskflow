@@ -8,6 +8,7 @@
 #include "LifecycleDiagnostics.h"
 #include "LocalInputMapping.h"
 #include "LocalWindowDrag.h"
+#include "NativeApplicationStartup.h"
 #if defined(__APPLE__) && !defined(WINDOWSHARE_BRIDGE_TEST)
 #include "RecoveryWatchdog.h"
 #endif
@@ -2668,11 +2669,17 @@ int main(int argc, char **argv)
     inputProbe.setFlags(QCommandLineOption::HiddenFromHelp);
     inputPeerPairs.setFlags(QCommandLineOption::HiddenFromHelp);
     parser.addOptions({inputDescriptor, inputProbe, inputPeerPairs, inputEvidenceOption});
+#endif
     // Validate inherited-mode combinations before help/version or any identity,
     // recovery, permission, network, or NativeHost action can run.
     if (!parser.parse(app.arguments()))
       throw std::runtime_error(parser.errorText().toStdString());
+#ifdef WINDOWSHARE_LOCAL_INPUT
     inputBootstrap.validateOptions(parser.optionNames());
+#endif
+    if (parser.isSet("enable-seamless") && (parser.isSet("listen") != parser.isSet("connect")))
+      initializeNativeApplication();
+#ifdef WINDOWSHARE_LOCAL_INPUT
     // inputBootstrap retains the trusted core's immutable explicit peer map.
     // An absent/empty map denies every pair; no controller or input authorizer
     // is installed until all real capture/delivery/admission providers exist.

@@ -494,6 +494,13 @@ if(WINDOWSHARE_APP)
       set_target_properties(windowshare-sharing-activity-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
       add_test(NAME windowshare-sharing-activity COMMAND windowshare-sharing-activity-tests)
       set_tests_properties(windowshare-sharing-activity PROPERTIES TIMEOUT 15)
+      add_executable(windowshare-native-startup-tests NativeApplicationStartupTests.mm)
+      target_compile_features(windowshare-native-startup-tests PRIVATE cxx_std_20)
+      target_compile_options(windowshare-native-startup-tests PRIVATE -fobjc-arc -Wall -Wextra -Wpedantic -Werror)
+      target_link_libraries(windowshare-native-startup-tests PRIVATE Qt6::Widgets "-framework AppKit")
+      set_target_properties(windowshare-native-startup-tests PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON)
+      add_test(NAME windowshare-native-startup COMMAND windowshare-native-startup-tests)
+      set_tests_properties(windowshare-native-startup PROPERTIES TIMEOUT 30 ENVIRONMENT "QT_QPA_PLATFORM=cocoa")
       # Explicit native desktop check: two same-title/frame fixture windows,
       # rename and replacement. No input or arbitrary application access.
       add_executable(windowshare-native-identity-tests NativeWindowIdentityTests.mm)
