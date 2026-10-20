@@ -10,10 +10,20 @@ the original loss name, location and queue. It still rejects every nonzero loss,
 including a drained journal that missed its stop deadline. Failure metadata
 cannot override a loss or turn an incomplete recording into a pass.
 
+A single dedicated collector thread reads controls, serializes the existing
+bounded journal and writes its output. Slow diagnostic filesystem calls do not
+run on the application's input thread. There is no second payload queue and no
+extra capacity: a stalled collector can still fill the original 8,192-row buffer,
+which remains a terminal evidence failure. Shutdown joins this consumer after
+producers retire, flushes retained rows and cancels its queued continuations.
+Blocking filesystem calls have no newly asserted completion bound.
+
 Journal serialization yields after at most 128 rows or two milliseconds of
-work, retaining at most one queued continuation. That continuation only drains
-existing rows; it does not reread control files or acquire an owner. The ordinary
-10 ms timer retains all fresh control validation, arm/stop handling and deadlines.
+work between rows, retaining at most one queued continuation. That continuation
+only drains existing rows; it does not reread control files or acquire an owner.
+The collector's ordinary 10 ms timer retains all fresh control validation,
+arm/stop handling and deadlines. The native-only terminal close is queued once
+onto the application thread; it does not bypass the terminal-row prerequisite.
 Separate slow-operation diagnostics distinguish control processing from journal
 serialization and flushes. The native receipt tail, exact rows, output limits
 and sticky failure rules are unchanged.
@@ -217,8 +227,8 @@ retains its separate explicit collection policy above.
 
 The recorder retains only counters before arm. Capture/native callbacks copy
 fixed-size rows into preallocated process-lifetime storage; they perform no
-file I/O, serialization, waits or allocations. Timer-driven serialization has
-a bounded per-turn drain. Loss is sticky; full buffers never overwrite history.
+file I/O, serialization, waits or allocations. Collector-driven serialization
+has a bounded per-turn row count. Loss is sticky; full buffers never overwrite history.
 Process-lifetime storage avoids freeing diagnostic memory beneath a late
 producer, but it does not keep a run armed after shutdown.
 

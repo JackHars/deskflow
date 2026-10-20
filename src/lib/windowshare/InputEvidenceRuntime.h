@@ -6,6 +6,7 @@
 #include "InputEvidence.h"
 #include <QFile>
 #include <QJsonObject>
+#include <QThread>
 #include <QTimer>
 #include <memory>
 
@@ -34,8 +35,14 @@ private:
   void drain(bool yield = true);
   void finishJournalIfDrained();
   void endJournal();
+  void stopCollector();
   void write(const QJsonObject &value);
   InputEvidenceRecorder *m_recorder = nullptr;
+  // One consumer uses the recorder's existing fixed-capacity journal. File
+  // reads, serialization and writes must not block the application's input
+  // thread. No input payloads are copied to a second work queue.
+  QThread m_collectorThread;
+  QObject m_collector;
   QFile m_output;
   QTimer m_timer;
   QString m_run, m_control;
@@ -43,5 +50,6 @@ private:
   std::uint64_t m_preparationTimeout = 0, m_armRequestedAt = 0;
   bool m_armSeen = false, m_stopSeen = false, m_endWritten = false, m_closeSeen = false, m_recordRequested = false;
   bool m_drainQueued = false;
+  bool m_collectorStarted = false, m_collectorStopping = false;
 };
 } // namespace deskflow::windowshare

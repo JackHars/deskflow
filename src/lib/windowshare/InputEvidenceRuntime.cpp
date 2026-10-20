@@ -202,8 +202,16 @@ InputEvidenceRuntime::open(const QString &path, InputEvidenceRole role, std::uin
        {"nativeFieldPreservation", "NOT_RUN"},
        {"observerProvenance", "NOT_RUN"}}
   );
-  QObject::connect(&result->m_timer, &QTimer::timeout, result.get(), [self = result.get()] { self->tick(); });
-  result->m_timer.start(10);
+  result->m_timer.setParent(&result->m_collector);
+  result->m_output.setParent(&result->m_collector);
+  result->m_collectorThread.setObjectName("input-evidence");
+  result->m_collector.moveToThread(&result->m_collectorThread);
+  QObject::connect(&result->m_timer, &QTimer::timeout, &result->m_collector, [self = result.get()] { self->tick(); });
+  result->m_collectorStarted = true;
+  result->m_collectorThread.start();
+  QMetaObject::invokeMethod(
+      &result->m_collector, [self = result.get()] { self->m_timer.start(10); }, Qt::BlockingQueuedConnection
+  );
   return result;
 }
 void InputEvidenceRuntime::write(const QJsonObject &value)
@@ -244,10 +252,10 @@ bool InputEvidenceRuntime::requestRecord(const QString &privateNewPath)
 void InputEvidenceRuntime::drain(bool yield)
 {
   const SlowOperationDiagnostic timing("Input evidence", "evidence.journal-drain");
-  // Serialization belongs to this timer, never to the event tap or native
-  // filter. A full recorder can take tens of milliseconds to serialize. Keep
-  // one bounded continuation so input can run between slices without waiting
-  // another 10 ms, dropping rows, or allocating a second evidence queue.
+  // Serialization belongs to the collector, never to the application, event
+  // tap or native filter. Keep one bounded continuation so controls can run
+  // between slices without waiting another 10 ms, dropping rows, or allocating
+  // a second evidence queue.
   const auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(2);
   for (unsigned i = 0; i != InputEvidenceRecorder::capacity; ++i) {
     const auto row = m_recorder->pop();
@@ -290,12 +298,14 @@ void InputEvidenceRuntime::drain(bool yield)
     if (yield && (i + 1 == 128 || std::chrono::steady_clock::now() >= until)) {
       if (!m_drainQueued) {
         m_drainQueued = true;
-        QTimer::singleShot(0, this, [this] {
+        QTimer::singleShot(0, &m_collector, [this] {
           m_drainQueued = false;
+          if (m_collectorStopping)
+            return;
           // Only continue serialization here. tick() has its own 10 ms timer
           // for fresh control/owner checks; running it for every journal slice
-          // repeatedly resolves and reads the same control file on the native
-          // input thread. This continuation cannot arm or renew any authority.
+          // repeatedly resolves and reads the same control file. This
+          // continuation cannot arm or renew any authority.
           drain();
           finishJournalIfDrained();
         });
@@ -404,9 +414,9 @@ void InputEvidenceRuntime::tick()
         // evidence is written and the coordinator has finished restoration.
         // quit() asks the fixture's manual-close guard, which deliberately
         // vetoes ordinary window closure while that coordinator is alive.
-        // This timer runs on the application thread; exit() ends its event
-        // loop directly, then main still flushes receipts and destroys Qt.
-        QCoreApplication::exit(0);
+        // exit() must run on the application thread. Queue exactly one call
+        // there; the runtime's destruction cancels it if cleanup wins first.
+        QMetaObject::invokeMethod(this, [] { QCoreApplication::exit(0); }, Qt::QueuedConnection);
       }
     }
   } catch (...) {
@@ -447,14 +457,36 @@ void InputEvidenceRuntime::endJournal()
   m_output.flush();
   m_timer.setInterval(100); // Native fixture may receive its explicit clean-close command.
 }
+void InputEvidenceRuntime::stopCollector()
+{
+  m_collectorStopping = true;
+  m_timer.stop();
+  if (m_recorder && !m_endWritten) {
+    m_recorder->stop();
+    m_recorder->finish(true);
+    drain(false); // Producers have stopped; flush the bounded remainder before the footer.
+    endJournal();
+  }
+  m_output.close();
+}
 InputEvidenceRuntime::~InputEvidenceRuntime()
 {
-  m_timer.stop();
-  if (!m_recorder || m_endWritten)
+  if (!m_collectorStarted) {
+    stopCollector();
     return;
-  m_recorder->stop();
-  m_recorder->finish(true);
-  drain(false); // Producers have stopped; flush the bounded remainder before the footer.
-  endJournal();
+  }
+  // The caller has already retired producers. Join the sole consumer before
+  // destroying its file/timer or the retained recorder's test-only storage.
+  // Queued continuations belong to m_collector and are cancelled at destruction.
+  QMetaObject::invokeMethod(
+      &m_collector,
+      [this] {
+        stopCollector();
+        m_collector.moveToThread(thread());
+      },
+      Qt::BlockingQueuedConnection
+  );
+  m_collectorThread.quit();
+  m_collectorThread.wait();
 }
 } // namespace deskflow::windowshare

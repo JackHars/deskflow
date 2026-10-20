@@ -269,7 +269,7 @@ public:
     m_ownerLive = false;
     m_ownerBusy.clear(std::memory_order_release);
   }
-  // Runtime/GUI thread only; no producer waits for these try-locks. A producer
+  // Collector thread only; no producer waits for these try-locks. A producer
   // racing arm invalidates the run rather than hiding an intermediate queue.
   bool arm(std::uint64_t durationNs) noexcept
   {
@@ -326,7 +326,7 @@ public:
   void stop() noexcept
   {
     // Producers may discover the deadline. Publish its boundary before the
-    // Draining state; the GUI must never see a zero/unfinished stop boundary.
+    // Draining state; observers must never see a zero/unfinished stop boundary.
     // Repeated stop requests need no wait and cannot extend this one-shot run.
     if (m_stopBusy.test_and_set(std::memory_order_acquire))
       return;
@@ -337,7 +337,7 @@ public:
       m_state.store(InputEvidenceState::Denied);
     m_stopBusy.clear(std::memory_order_release);
   }
-  // GUI runtime only. Record an explicit source boundary, then retain queue
+  // Collector only. Record an explicit source boundary, then retain queue
   // mutations and native receipts for at most 250 ms. Queue emptiness is a
   // declared local-queue observation, never an OS/compositor drain assertion.
   void finish(bool force = false) noexcept

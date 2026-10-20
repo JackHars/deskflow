@@ -14,6 +14,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <exception>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -23,32 +24,69 @@ using namespace deskflow::windowshare;
 namespace deskflow::windowshare {
 struct InputEvidenceTestAccess
 {
+  template <class F> static void collect(InputEvidenceRuntime &runtime, F &&action)
+  {
+    std::exception_ptr failure;
+    QMetaObject::invokeMethod(
+        &runtime.m_collector,
+        [&] {
+          try {
+            action();
+          } catch (...) {
+            failure = std::current_exception();
+          }
+        },
+        Qt::BlockingQueuedConnection
+    );
+    if (failure)
+      std::rethrow_exception(failure);
+  }
+  static auto open(const QString &path, InputEvidenceRole role, std::uint64_t timeout = 180000, bool runTimer = false)
+  {
+    auto runtime = InputEvidenceRuntime::open(path, role, timeout);
+    if (!runTimer)
+      stopControlTimer(*runtime);
+    return runtime;
+  }
   static void preparationElapsed(InputEvidenceRuntime &runtime, std::uint64_t elapsedMs)
   {
-    runtime.m_created = inputEvidenceNow() - elapsedMs * 1000000;
-    runtime.m_nextReadiness = 0;
-    runtime.tick();
+    collect(runtime, [&] {
+      runtime.m_created = inputEvidenceNow() - elapsedMs * 1000000;
+      runtime.m_nextReadiness = 0;
+      runtime.tick();
+    });
   }
   static void tick(InputEvidenceRuntime &runtime)
   {
-    runtime.tick();
+    collect(runtime, [&] { runtime.tick(); });
   }
-  static void drain(InputEvidenceRuntime &runtime)
+  template <class F> static void firstSlice(InputEvidenceRuntime &runtime, F &&observe)
   {
-    runtime.drain();
+    collect(runtime, [&] {
+      runtime.drain();
+      observe(runtime.m_rows, &runtime.m_collector);
+    });
   }
   static void stopControlTimer(InputEvidenceRuntime &runtime)
   {
-    runtime.m_timer.stop();
+    collect(runtime, [&] { runtime.m_timer.stop(); });
   }
-  static auto serialized(const InputEvidenceRuntime &runtime)
+  static bool drained(InputEvidenceRuntime &runtime)
   {
-    return runtime.m_rows;
+    bool result = false;
+    collect(runtime, [&] { result = runtime.m_recorder->drained(); });
+    return result;
   }
   static void armWaitElapsed(InputEvidenceRuntime &runtime, std::uint64_t elapsedMs)
   {
-    runtime.m_armRequestedAt = inputEvidenceNow() - elapsedMs * 1000000;
-    runtime.tick();
+    collect(runtime, [&] {
+      runtime.m_armRequestedAt = inputEvidenceNow() - elapsedMs * 1000000;
+      runtime.tick();
+    });
+  }
+  template <class F> static void queueCollector(InputEvidenceRuntime &runtime, F &&action)
+  {
+    QMetaObject::invokeMethod(&runtime.m_collector, std::forward<F>(action), Qt::QueuedConnection);
   }
   static std::uint64_t depth(const InputEvidenceRecorder &recorder, InputEvidenceQueue queue)
   {
@@ -952,27 +990,27 @@ void privateConfiguration()
     auto missing = valid;
     missing.remove(name);
     write(QJsonDocument(missing).toJson());
-    denied([&] { InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native); });
+    denied([&] { InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native); });
   }
   for (const auto &duration : {QJsonValue(0), QJsonValue(180001), QJsonValue(1.5), QJsonValue("120000")}) {
     auto changed = valid;
     changed["durationMs"] = duration;
     write(QJsonDocument(changed).toJson());
-    denied([&] { InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native); });
+    denied([&] { InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native); });
   }
   write(QJsonDocument(valid).toJson());
-  denied([&] { InputEvidenceRuntime::open(configPath, InputEvidenceRole::Core); });
+  denied([&] { InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Core); });
   auto duplicate = QJsonDocument(valid).toJson(QJsonDocument::Compact);
   duplicate.insert(1, "\"version\":1,");
   write(duplicate);
-  denied([&] { InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native); });
+  denied([&] { InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native); });
   write(QJsonDocument(valid).toJson());
-  auto runtime = InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native);
+  auto runtime = InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native);
   check(
       runtime->recorder().state() == InputEvidenceState::Waiting && runtime->recorder().written() == 0,
       "configuration implicitly armed recording"
   );
-  denied([&] { InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native); });
+  denied([&] { InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native); });
   const auto recordPath = parent + "/record-request.json";
   check(runtime->requestRecord(recordPath), "explicit native record request failed");
   QFile recordRequest(recordPath);
@@ -1000,7 +1038,7 @@ void privateConfiguration()
     auto changed = valid;
     changed["output"] = parent + "/rejected-" + QString::number(qHash(request)) + ".jsonl";
     write(QJsonDocument(changed).toJson());
-    runtime = InputEvidenceRuntime::open(configPath, InputEvidenceRole::Native);
+    runtime = InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Native);
     check(
         !runtime->requestRecord(request) && runtime->recorder().loss() == InputEvidenceLoss::Output &&
             runtime->recorder().state() == InputEvidenceState::Waiting,
@@ -1015,7 +1053,7 @@ void privateConfiguration()
   coreConfig["role"] = "core";
   coreConfig["output"] = parent + "/core-output.jsonl";
   write(QJsonDocument(coreConfig).toJson());
-  runtime = InputEvidenceRuntime::open(configPath, InputEvidenceRole::Core);
+  runtime = InputEvidenceTestAccess::open(configPath, InputEvidenceRole::Core);
   storage = &runtime->recorder();
   const auto *observer = deskflow::eventInputObserverInstalled.load();
   check(observer == &storage->eventObserver(), "Core runtime did not install its retained event observer");
@@ -1083,7 +1121,7 @@ void cooperativeSerialization()
       )
                      .toJson());
     }
-    auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+    auto runtime = InputEvidenceTestAccess::open(config, InputEvidenceRole::Native);
     auto *storage = &runtime->recorder();
     storage->bindOwner(owner());
     check(storage->arm(1000000000), "serialization owner could not arm");
@@ -1096,16 +1134,10 @@ void cooperativeSerialization()
       raw.fields[11] = i;
       storage->native(raw, 55, 44, 123);
     }
-    InputEvidenceTestAccess::drain(*runtime);
-    check(
-        !storage->drained() && InputEvidenceTestAccess::serialized(*runtime) <= 129,
-        "one evidence turn serialized the burst instead of yielding to input"
-    );
     if (!destroyPending) {
       // Only the ordinary timer services control files. A serialization
       // continuation must not repeatedly resolve/read the same file, or carry
       // an implicit control/authority transition through the drain path.
-      InputEvidenceTestAccess::stopControlTimer(*runtime);
       {
         QFile control(parent + "/control.json");
         check(control.open(QIODevice::WriteOnly), "serialization control failed");
@@ -1114,19 +1146,22 @@ void cooperativeSerialization()
             QJsonDocument(QJsonObject{{"version", 1}, {"runId", "serialization"}, {"command", "stop"}}).toJson()
         );
       }
-      bool intervened = false, expired = false;
-      QMetaObject::invokeMethod(
-          runtime.get(),
-          [&] {
-            intervened = true;
-            check(!storage->drained(), "queued input was starved until the entire evidence burst completed");
-          },
-          Qt::QueuedConnection
+    }
+    std::atomic<bool> intervened{false};
+    InputEvidenceTestAccess::firstSlice(*runtime, [&](auto serialized, QObject *collector) {
+      check(
+          !storage->drained() && serialized <= 129,
+          "one evidence turn serialized the burst instead of yielding to controls"
       );
+      if (!destroyPending)
+        QMetaObject::invokeMethod(collector, [&] { intervened.store(!storage->drained()); }, Qt::QueuedConnection);
+    });
+    if (!destroyPending) {
+      bool expired = false;
       QEventLoop loop;
       QTimer observe, timeout;
       QObject::connect(&observe, &QTimer::timeout, &loop, [&] {
-        if (storage->drained())
+        if (InputEvidenceTestAccess::drained(*runtime))
           loop.quit();
       });
       QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
@@ -1138,8 +1173,9 @@ void cooperativeSerialization()
       timeout.start(1000);
       loop.exec();
       check(
-          !expired && intervened && storage->drained() && storage->loss() == InputEvidenceLoss::None,
-          "cooperative evidence drain failed or lost its queued input turn"
+          !expired && intervened.load() && InputEvidenceTestAccess::drained(*runtime) &&
+              storage->loss() == InputEvidenceLoss::None,
+          "cooperative evidence drain failed or lost its queued control turn"
       );
       check(
           storage->state() == InputEvidenceState::Recording,
@@ -1179,6 +1215,126 @@ void cooperativeSerialization()
   }
 }
 
+void stalledCollectorKeepsApplicationResponsive()
+{
+  for (const bool overflow : {false, true}) {
+    QTemporaryDir directory;
+    check(directory.isValid(), "collector directory failed");
+    const auto parent = QFileInfo(directory.path()).canonicalFilePath();
+    const auto config = parent + "/config.json", output = parent + "/evidence.jsonl";
+    {
+      QFile file(config);
+      check(file.open(QIODevice::WriteOnly), "collector config failed");
+      file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+      file.write(QJsonDocument(
+                     QJsonObject{
+                         {"version", 1},
+                         {"role", "native"},
+                         {"runId", "stalled-collector"},
+                         {"durationMs", 10000},
+                         {"output", output},
+                         {"control", parent + "/control.json"}
+                     }
+      )
+                     .toJson());
+    }
+    auto runtime = InputEvidenceTestAccess::open(config, InputEvidenceRole::Native);
+    auto *storage = &runtime->recorder();
+    storage->bindOwner(owner());
+    check(storage->arm(10000000000ULL), "collector fixture could not arm");
+    std::mutex mutex;
+    std::condition_variable changed;
+    bool entered = false, released = false, workerExpired = false, separateThread = false;
+    const auto applicationThread = QThread::currentThread();
+    // Model a stalled control read or output write on the actual collector
+    // executor. No sleeps, global hooks, input devices or external windows.
+    InputEvidenceTestAccess::queueCollector(*runtime, [&] {
+      std::unique_lock lock(mutex);
+      separateThread = QThread::currentThread() != applicationThread;
+      entered = true;
+      changed.notify_all();
+      workerExpired = !changed.wait_for(lock, std::chrono::seconds(2), [&] { return released; });
+    });
+    bool ready;
+    {
+      std::unique_lock lock(mutex);
+      ready = changed.wait_for(lock, std::chrono::seconds(1), [&] { return entered; });
+      if (!ready)
+        released = true;
+    }
+    changed.notify_all();
+    if (!ready) {
+      runtime.reset();
+      inputEvidenceInstalled.store(nullptr);
+      delete storage;
+      check(false, "collector did not enter its bounded fixture");
+    }
+    const auto count = overflow ? InputEvidenceRecorder::capacity + 1 : 64U;
+    bool applicationRan = false, expired = false;
+    QEventLoop loop;
+    QTimer deadline;
+    deadline.setSingleShot(true);
+    QObject::connect(&deadline, &QTimer::timeout, &loop, [&] {
+      expired = true;
+      loop.quit();
+    });
+    QTimer::singleShot(0, &loop, [&] {
+      // The application's native observer can still append to its existing
+      // bounded storage while all collector I/O is stalled.
+      for (unsigned i = 0; i != count; ++i) {
+        InputEvidenceRaw raw;
+        raw.timestamp = 90000 + i;
+        raw.fields[0] = 22;
+        raw.fields[11] = i;
+        storage->native(raw, 55, 44, 123);
+      }
+      applicationRan = true;
+      loop.quit();
+    });
+    deadline.start(1000);
+    loop.exec();
+    {
+      std::lock_guard lock(mutex);
+      released = true;
+    }
+    changed.notify_all();
+    InputEvidenceTestAccess::collect(*runtime, [] {});
+    const auto loss = storage->loss();
+    runtime.reset(); // Joins the consumer and drains exact retained rows.
+    inputEvidenceInstalled.store(nullptr);
+    delete storage;
+    check(
+        separateThread && applicationRan && !expired && !workerExpired,
+        "stalled evidence collector blocked the application thread"
+    );
+    check(
+        loss == (overflow ? InputEvidenceLoss::BufferFull : InputEvidenceLoss::None),
+        "collector stall concealed overflow or invalidated a bounded producer"
+    );
+    QFile file(output);
+    check(file.open(QIODevice::ReadOnly), "collector output missing");
+    unsigned rows = 0, ends = 0;
+    while (!file.atEnd()) {
+      const auto row = QJsonDocument::fromJson(file.readLine()).object();
+      if (row["type"] == "native") {
+        check(
+            !ends && row["cgTimestampNs"] == QString::number(90000 + rows) &&
+                row["raw"].toArray()[11] == QString::number(rows),
+            "collector stall changed or reordered retained input"
+        );
+        ++rows;
+      } else if (row["type"] == "end") {
+        ++ends;
+        check(row["loss"].toInt() == int(loss) && row["drained"].toBool(), "collector footer concealed loss");
+      }
+    }
+    check(
+        rows == (overflow ? InputEvidenceRecorder::capacity : count) && ends == 1,
+        "collector teardown lost retained rows or emitted duplicate terminal evidence"
+    );
+  }
+}
+
 void armAfterBackgroundOutputDrains()
 {
   QTemporaryDir directory;
@@ -1201,7 +1357,7 @@ void armAfterBackgroundOutputDrains()
                {"output", output},
                {"control", control}}
   );
-  auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Host);
+  auto runtime = InputEvidenceTestAccess::open(config, InputEvidenceRole::Host);
   auto *storage = &runtime->recorder();
   for (const auto queue :
        {InputEvidenceQueue::PrivateOutput, InputEvidenceQueue::PrivateBufferedInput,
@@ -1267,7 +1423,7 @@ void pendingArmDeadlineAndStop()
                  {"output", output},
                  {"control", control}}
     );
-    auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+    auto runtime = InputEvidenceTestAccess::open(config, InputEvidenceRole::Native);
     auto *storage = &runtime->recorder();
     const auto command = [&](const char *action) {
       write(control, {{"version", 1}, {"runId", "pending-arm"}, {"command", action}});
@@ -1333,7 +1489,7 @@ void explicitNativeClose(QuitGuardApplication &app)
                {"output", output},
                {"control", control}}
   );
-  auto runtime = InputEvidenceRuntime::open(config, InputEvidenceRole::Native);
+  auto runtime = InputEvidenceTestAccess::open(config, InputEvidenceRole::Native, 180000, true);
   auto *storage = &runtime->recorder();
   const auto command = [&](const char *action) {
     write(control, {{"version", 1}, {"runId", "close-fixture"}, {"command", action}});
@@ -1400,11 +1556,11 @@ void nativePreparationDeadline()
                      .toJson());
     }
     for (const auto invalid : std::array<std::uint64_t, 3>{0, 600001, UINT64_MAX})
-      denied([&] { InputEvidenceRuntime::open(config, InputEvidenceRole::Native, invalid); });
+      denied([&] { InputEvidenceTestAccess::open(config, InputEvidenceRole::Native, invalid); });
     for (const auto role : {InputEvidenceRole::Core, InputEvidenceRole::Host})
-      denied([&] { InputEvidenceRuntime::open(config, role, 600000); });
-    auto runtime = budget == 180000 ? InputEvidenceRuntime::open(config, InputEvidenceRole::Native)
-                                    : InputEvidenceRuntime::open(config, InputEvidenceRole::Native, budget);
+      denied([&] { InputEvidenceTestAccess::open(config, role, 600000); });
+    auto runtime = budget == 180000 ? InputEvidenceTestAccess::open(config, InputEvidenceRole::Native)
+                                    : InputEvidenceTestAccess::open(config, InputEvidenceRole::Native, budget);
     auto *storage = &runtime->recorder();
     InputEvidenceOwner binding;
     binding.values[0] = 44;
@@ -1470,6 +1626,7 @@ int main(int argc, char **argv)
     runCase("nativeFields", nativeFields);
     runCase("privateConfiguration", privateConfiguration);
     runCase("cooperativeSerialization", cooperativeSerialization);
+    runCase("stalledCollectorKeepsApplicationResponsive", stalledCollectorKeepsApplicationResponsive);
     runCase("armAfterBackgroundOutputDrains", armAfterBackgroundOutputDrains);
     runCase("pendingArmDeadlineAndStop", pendingArmDeadlineAndStop);
     runCase("nativePreparationDeadline", nativePreparationDeadline);
