@@ -114,6 +114,7 @@ struct OriginalInputCoordinator::Shared
     Clock::time_point deadline;
     std::shared_ptr<Owner> owner;
     std::optional<InputCutoffObservation> observation;
+    bool endsMappedPrefix = true;
     Phase phase = Phase::Requested;
     const Clock::time_point started = Clock::now(), diagnosticDeadline;
     const bool initialPreparation;
@@ -491,6 +492,7 @@ public:
       operation->phase = operation->owner->active ? Shared::Phase::Ready : Shared::Phase::Mapped;
       if (!m_batch.empty() && m_batch.front().binding == cutoff)
         inputEvidenceApply(InputEvidenceQueue::CoordinatorBatch, this, 0, 1, [&] { m_batch.pop_front(); });
+      operation->endsMappedPrefix = m_batch.empty();
       if (operation->owner->active) {
         m_reserved = std::exchange(m_preparing, {});
         return Result::accepted({operation->owner->id, ticket}, ticket);
@@ -1262,11 +1264,14 @@ bool OriginalInputCoordinator::tickOne()
     }
     ++m_shared->mappedRecords;
     m_shared->mappedOutputDrained = false;
-    // Start the ordered barrier without waiting for the next input to arrive.
-    // Otherwise idle time contaminates the measured service cost and every
-    // new prefix pays an avoidable extra scheduling turn. Only its Pong can
-    // mark output drained; later writes still require a later barrier.
-    m_shared->mappedDrainRequested = true;
+    // Start one ordered barrier after the complete mapped prefix. A barrier
+    // after its first record cannot cover the remaining writes and forces a
+    // second exchange before the next prefix can map. The dispatcher still
+    // refuses that next mapping until the final ordered Pong arrives.
+    // A single-record acquisition is a complete prefix too; idle time never
+    // delays its barrier or contaminates the delivery-cost measurement.
+    if (operation->endsMappedPrefix)
+      m_shared->mappedDrainRequested = true;
   }
   if (!sent)
     operation->owner->revoked = true;

@@ -2160,9 +2160,12 @@ struct NativeHost::Impl
       return {};
     CF<AXUIElementRef> app(AXUIElementCreateApplication(expected.pid));
     AXUIElementSetMessagingTimeout(app.get(), 0.05f);
-    CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
-    if (!alive || !element(focused.get()))
-      return {};
+    CF<CFTypeRef> focused;
+    if (!finalInventory) {
+      focused = CF<CFTypeRef>(attribute(app.get(), kAXFocusedUIElementAttribute));
+      if (!alive || !element(focused.get()))
+        return {};
+    }
     // No tree scan is needed when every independent native window is freshly
     // accounted for. Menus, popovers, tooltips, dialogs, sheets, missing AX
     // entries or a changing native inventory conservatively use the full scan.
@@ -2183,6 +2186,14 @@ struct NativeHost::Impl
       }
     }
     if (completeInventory || !alive)
+      return {};
+    // Deferred classification does not use an initial focus observation.
+    // Its caller proves fresh focused-source ancestry after the window-state
+    // read and before the final native inventory. An incomplete inventory
+    // still takes the ordinary full child search using a fresh focus read.
+    if (!focused)
+      focused = CF<CFTypeRef>(attribute(app.get(), kAXFocusedUIElementAttribute));
+    if (!alive || !element(focused.get()))
       return {};
     CF<CFTypeRef> cursor(CFRetain(focused.get()));
     std::shared_ptr<AttachedSurface> result;

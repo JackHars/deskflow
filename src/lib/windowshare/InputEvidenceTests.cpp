@@ -212,7 +212,7 @@ void readinessDiagnostics()
   recorder->beginCaptureActivity();
   check(!recorder->readyOwner(&detail) && !detail.captureIdle, "capture activity was not diagnosed");
   recorder->endCaptureActivity();
-  constexpr auto queue = InputEvidenceQueue::Capture;
+  constexpr auto queue = InputEvidenceQueue::ServerPending;
   constexpr auto index = static_cast<std::size_t>(queue);
   check(recorder->beginQueueActivity(queue, recorder.get()), "queue activity failed");
   check(recorder->beginMutation(queue, recorder.get()), "queue lock failed");
@@ -361,10 +361,77 @@ void concurrentEventRecording()
   check(recorder->drained() && recorder->loss() == InputEvidenceLoss::None, "Event journal did not drain cleanly");
 }
 
-void eventJournalPublicationOrder()
+void concurrentCaptureRecording(InputEvidenceQueue queue)
 {
-  constexpr auto queue = InputEvidenceQueue::EventAllOutstanding;
-  const auto row = [](std::uint64_t sequence) {
+  auto recorder = core();
+  inputEvidenceInstalled.store(recorder.get());
+  struct Reset
+  {
+    ~Reset()
+    {
+      inputEvidenceInstalled.store(nullptr);
+    }
+  } reset;
+  check(recorder->arm(180000000000ULL), "capture recording could not arm");
+  // One published item allows both the SPSC producer and consumer to commit
+  // together. Every round starts and ends at depth one; no capacity is added.
+  {
+    InputEvidenceMutation prime(queue, recorder.get(), 1, 0);
+  }
+  constexpr unsigned rounds = 1000;
+  std::barrier phase(2);
+  std::thread producer([&] {
+    for (unsigned round = 0; round != rounds; ++round) {
+      phase.arrive_and_wait();
+      {
+        InputEvidenceMutation mutation(queue, recorder.get(), 1, 0);
+      }
+      phase.arrive_and_wait();
+    }
+  });
+  for (unsigned round = 0; round != rounds; ++round) {
+    phase.arrive_and_wait();
+    {
+      InputEvidenceMutation mutation(queue, recorder.get(), 0, 1);
+    }
+    phase.arrive_and_wait();
+  }
+  producer.join();
+  {
+    InputEvidenceMutation last(queue, recorder.get(), 0, 1);
+  }
+  recorder->stop();
+  recorder->finish();
+  check(recorder->loss() == InputEvidenceLoss::None, "concurrent capture updates lost diagnostic evidence");
+  std::uint64_t enqueued = 0, retired = 0, time = 0, rows = 0;
+  while (const auto row = recorder->pop()) {
+    if (row->queue != queue)
+      continue;
+    check(
+        row->enqueued >= enqueued && row->retired >= retired && row->enqueued >= row->retired &&
+            row->depth == row->enqueued - row->retired && row->depth <= 2 && row->time >= time,
+        "capture journal reordered counts or changed their actual observation time"
+    );
+    const auto delta = row->enqueued - enqueued + row->retired - retired;
+    check(
+        delta == 1 || rows == 0 || rows == 2 * rounds + 3,
+        "capture journal omitted or combined an intermediate mutation"
+    );
+    enqueued = row->enqueued;
+    retired = row->retired;
+    time = row->time;
+    ++rows;
+  }
+  check(
+      enqueued == rounds + 1 && retired == rounds + 1 && rows == 2 * rounds + 4 && recorder->drained() &&
+          recorder->state() == InputEvidenceState::Stopped && recorder->loss() == InputEvidenceLoss::None,
+      "capture journal failed exact counts, empty boundaries or clean drain"
+  );
+}
+
+void concurrentJournalPublicationOrder(InputEvidenceQueue queue)
+{
+  const auto row = [queue](std::uint64_t sequence) {
     return InputEvidenceRow{
         InputEvidenceKind::EventQueue, queue, sequence * 10, 0, sequence, 0, sequence, 0, sequence, 0, {}
     };
@@ -396,7 +463,7 @@ void eventJournalPublicationOrder()
   );
 
   auto bounded = core();
-  constexpr auto pendingCapacity = InputEvidenceRecorder::capacity / 4;
+  constexpr auto pendingCapacity = InputEvidenceRecorder::capacity / 7;
   for (std::uint64_t sequence = 2; sequence <= pendingCapacity + 2; ++sequence)
     InputEvidenceTestAccess::append(*bounded, row(sequence));
   check(
@@ -420,7 +487,12 @@ void eventJournalPublicationOrder()
   auto saturated = core();
   check(saturated->arm(1000000000), "counter saturation fixture did not arm");
   InputEvidenceTestAccess::eventCounts(*saturated, queue, static_cast<std::uint64_t>(UINT32_MAX) << 32);
-  saturated->eventObserver().observe(saturated.get(), saturated.get(), {}, deskflow::EventInputObservation::AllAdmit);
+  if (nativeSpscInputEvidenceQueue(queue)) {
+    check(saturated->beginMutation(queue, saturated.get()), "capture counter fixture did not admit mutation");
+    saturated->endMutation(queue, 1, 0);
+  } else {
+    saturated->eventObserver().observe(saturated.get(), saturated.get(), {}, deskflow::EventInputObservation::AllAdmit);
+  }
   check(saturated->loss() == InputEvidenceLoss::QueueAccounting, "packed Event counter silently wrapped");
 }
 
@@ -446,15 +518,16 @@ void stickyFailures()
   replaced->bindOwner(changed);
   check(replaced->loss() == InputEvidenceLoss::OwnerChanged, "focus replacement retained evidence");
   auto concurrent = core();
-  check(concurrent->beginMutation(InputEvidenceQueue::Capture, concurrent.get()), "queue lock failed");
+  check(concurrent->beginMutation(InputEvidenceQueue::ServerPending, concurrent.get()), "queue lock failed");
   check(
-      !concurrent->beginMutation(InputEvidenceQueue::Capture, concurrent.get()), "reentrant mutation waited or entered"
+      !concurrent->beginMutation(InputEvidenceQueue::ServerPending, concurrent.get()),
+      "reentrant mutation waited or entered"
   );
-  concurrent->endMutation(InputEvidenceQueue::Capture, 0, 0);
+  concurrent->endMutation(InputEvidenceQueue::ServerPending, 0, 0);
   check(concurrent->loss() == InputEvidenceLoss::Contention && !concurrent->arm(100), "contention silently recovered");
   check(
       concurrent->failureSite() == InputEvidenceFailureSite::QueueMutation &&
-          concurrent->failureQueue() == InputEvidenceQueue::Capture,
+          concurrent->failureQueue() == InputEvidenceQueue::ServerPending,
       "first contention lost its exact failure context"
   );
   auto active = core();
@@ -1211,7 +1284,17 @@ int main(int argc, char **argv)
     runCase("readinessDiagnostics", readinessDiagnostics);
     runCase("concurrentEventPreparation", concurrentEventPreparation);
     runCase("concurrentEventRecording", concurrentEventRecording);
-    runCase("eventJournalPublicationOrder", eventJournalPublicationOrder);
+    runCase("concurrentCaptureRecording", [] {
+      for (const auto queue :
+           {InputEvidenceQueue::Capture, InputEvidenceQueue::Translation, InputEvidenceQueue::Completed})
+        concurrentCaptureRecording(queue);
+    });
+    runCase("concurrentJournalPublicationOrder", [] {
+      concurrentJournalPublicationOrder(InputEvidenceQueue::EventAllOutstanding);
+      for (const auto queue :
+           {InputEvidenceQueue::Capture, InputEvidenceQueue::Translation, InputEvidenceQueue::Completed})
+        concurrentJournalPublicationOrder(queue);
+    });
     runCase("stickyFailures", stickyFailures);
     runCase("concurrentJournalWriters", concurrentJournalWriters);
     runCase("unpublishedJournalReservation", unpublishedJournalReservation);

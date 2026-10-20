@@ -564,13 +564,20 @@ estimated transform.
 
 ```sh
 cmake -S src/apps/windowshare -B build/windowshare-app \
-  -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=Debug
+  -DWINDOWSHARE_APP=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
 cmake --build build/windowshare-app --parallel
 ctest --test-dir build/windowshare-app --output-on-failure
 ```
 
+Use `RelWithDebInfo` for real-desktop latency and scrolling verification on both
+machines. It keeps diagnostic symbols while enabling compiler optimization;
+Debug and sanitizer runs remain useful correctness checks but do not establish
+production input throughput. Retain each build configuration alongside its
+exact executable hashes and test logs.
+
 For the full Deskflow application and its opt-in platform hooks, configure the
-repository root with `-DBUILD_WINDOWSHARE=ON`. Leave it off for an ordinary build.
+repository root with `-DBUILD_WINDOWSHARE=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo`.
+Leave `BUILD_WINDOWSHARE` off for an ordinary build.
 Run its tests from `build/src/unittests` (substitute the chosen build directory).
 
 Qt 6.8.3 on this Intel Mac references AGL, which is absent from the macOS 26 SDK.

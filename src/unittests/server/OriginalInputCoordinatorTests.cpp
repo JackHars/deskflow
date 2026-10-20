@@ -36,11 +36,22 @@
 #include <vector>
 
 namespace deskflow::windowshare {
+struct LocalInputChannelTestAccess
+{
+  static std::uint64_t drainThroughFrame(const LocalInputChannel &channel)
+  {
+    return channel.m_drainMappedWrite;
+  }
+};
 struct OriginalInputCoordinatorTestAccess
 {
   static void stopPolling(OriginalInputCoordinator &coordinator)
   {
     coordinator.m_timer.stop();
+  }
+  static void service(OriginalInputCoordinator &coordinator)
+  {
+    coordinator.tick();
   }
 };
 class SelectedPeerTestAccess
@@ -1434,8 +1445,15 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
         );
       pumpFor(20);
       f.wire.completeBatch();
+      const auto previousBarrier = LocalInputChannelTestAccess::drainThroughFrame(*f.channel);
+      const auto deliveredBefore = f.count("mapped");
       ready = f.accepted(pending.ticket);
       QVERIFY(f.dispatcher->commit(*ready.reservation));
+      if (prefix > 1) {
+        QVERIFY(until([&] { return f.count("mapped") == deliveredBefore + 1; }));
+        OriginalInputCoordinatorTestAccess::service(*f.coordinator);
+        QCOMPARE(LocalInputChannelTestAccess::drainThroughFrame(*f.channel), previousBarrier);
+      }
       for (std::size_t item = offset + 1; item < offset + prefix; ++item) {
         ready = f.reserve(captured[item], owner);
         QCOMPARE(ready.state, State::Accepted);
@@ -1444,6 +1462,11 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
         QVERIFY(!f.dispatcher->canCoalesceHoverMotion());
         QVERIFY(f.dispatcher->commit(*ready.reservation));
       }
+      if (offset + prefix < captured.size())
+        QVERIFY(until([&] {
+          return f.count("mapped") == deliveredBefore + prefix &&
+                 LocalInputChannelTestAccess::drainThroughFrame(*f.channel) > previousBarrier;
+        }));
       offset += prefix;
     }
     // Core can receive the next record before Qt sends any of this full

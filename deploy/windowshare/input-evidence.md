@@ -182,8 +182,12 @@ Native SPSC publication commits its counter update before exposing a record
 or free slot to the opposite thread. A separate atomic activity guard spans
 the complete mutation, including publication; it blocks a false empty arm or
 drain boundary without holding the diagnostic counter lock across that handoff.
-Non-Event counter contention is still terminal and never delays native input. The
-shared journal accepts independent concurrent writers through a bounded atomic
+Capture, translation and completed SPSC counters use the same bounded atomic
+updates as Core Event counters, so a simultaneous producer/consumer commit does
+not invent a contention failure. The other serialized queue counters retain
+their try-lock checks. Exhausted atomic progress or genuine boundary contention
+is terminal and never delays native input. The shared journal accepts independent
+concurrent writers through a bounded atomic
 capacity reservation and a unique ticket. Reservations include unpublished rows;
 the consumer returns capacity only after copying a row. A delayed writer cannot
 be skipped or overwritten on ring wrap, and a full journal still reports sticky
@@ -194,12 +198,12 @@ The normalizer validates optional unready `preparation` diagnostics using their
 exact fields, boolean types and unique declared queue names. These fields never
 supply arm authority; unknown fields, loss, denied arm and native timestamp/raw
 mismatches remain rejected. Existing journals are read without modification.
-Event counter updates retain their exact cumulative snapshots and original
+Concurrent counter updates retain their exact cumulative snapshots and original
 timestamps. Time is sampled after reading the previous counter value and before
 the successful atomic update, so counter order also orders the sampled times.
-The consumer uses preallocated storage for at most 2,048 delayed copies per
-Event queue, publishing them in counter-update order without aggregation or
-timestamp adjustment. A gap or reorder-buffer overflow is a recorded failure;
+The consumer divides the existing pending-row allocation among the seven
+concurrent queues (1,170 delayed copies each), publishing them in counter-update
+order without aggregation or timestamp adjustment. A gap or reorder-buffer overflow is a recorded failure;
 it cannot become a complete recording. This storage is separate from the
 8,192-row producer journal. Arm and final drain still require the actual live
 depth and every in-flight observation to be empty. The normalizer is unchanged.

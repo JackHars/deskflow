@@ -1,5 +1,42 @@
 # Seamless Windows work state
 
+## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
+
+The same `4cec4a143` source was rebuilt as RelWithDebInfo on both machines;
+the prior desktop packages were Debug builds. All 19 selected Mac and 15 Ubuntu
+suites pass. `build/scroll-optimized-t4q408gy/` binds the optimized artifacts.
+Its full actual-desktop run `dashboard-replay-xliahnen` delivers all 1,200
+indexed burst events at 120.11 Hz, all 1,251 functional receipts, the complete
+30-second recording and 120-second session. All 21 queue histories validate,
+the source restores, owned processes stop and held controls end at zero.
+However, relative receipt lag accumulates to about 1.43 seconds. This is a
+qualified delivery pass, not an adequate scrolling fix or physical acceptance.
+
+Its 151 mapped prefixes trigger about 300 ordered drain exchanges: Core starts
+a barrier after the first record, then needs another for the remaining writes.
+The next change requests the eager barrier only after the full mapped prefix;
+the next mapping still waits for that final ordered Pong. It also removes an
+unused preliminary AX focus query in provisional inventory classification.
+The later fresh focus/ancestry proof and final native inventory are unchanged.
+
+A separate profiling run, `dashboard-replay-tf1zljk6`, delivers every burst event
+but exposes diagnostic Capture-counter contention between the legitimate SPSC
+producer and consumer. Capture, Translation and Completed now use the existing
+bounded atomic cumulative accounting/journal ordering mechanism also used by
+Core Event queues. Exact intermediate counts and original observation times
+remain; real gaps, overflow, saturation and boundary races still fail. Total
+pending diagnostic storage does not increase. New concurrency/publication tests
+cover all three queues. One coordinator regression needed its event-pump order
+corrected so it still tests arrival before the final queued writes are sent;
+the initial failed test log is retained.
+
+These changes require fresh matching packages, both-machine checks and three
+consecutive full automated desktop passes with acceptable measured scroll lag.
+No deadline or production queue capacity changed; no source records were
+coalesced or rewritten. The synthetic repeat receipt and strict raw timestamp
+acceptance remain separate unresolved limitations. No attended test launched.
+
+
 ## Scroll diagnosis in progress — 2026-10-19
 
 The transport-timing candidate `8bea14176` passes 19 selected Mac suites and
