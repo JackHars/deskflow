@@ -199,6 +199,10 @@ public:
   // and discontinuity revoke instead of becoming deliverable records.
   bool sendOriginal(LocalInputLease lease, OriginalInputRecord record);
   bool sendMappedOriginal(LocalInputLease lease, OriginalInputRecord record, LocalInputMappedPoint point);
+  // Scheduling only: an ordered Ping/Pong proves the peer finished dispatching
+  // the preceding mapped frames. It grants no delivery authority and never
+  // renews a point receipt. Poll on the owner thread before mapping a new batch.
+  bool mappedOutputDrained();
   // Retired control acknowledgements/revokes cannot affect a newer route.
   // Fully validated in-flight Original frames for retired routes advance
   // capture replay protection and are discarded without native delivery.
@@ -268,6 +272,8 @@ private:
   std::uint64_t m_peerCapabilities = 0, m_capabilities = 0;
   std::uint64_t m_sent = 0, m_received = 0, m_originalSequence = 0, m_originalTimestamp = 0, m_routeGeneration = 0,
                 m_captureEpoch = 0;
+  std::uint64_t m_pingsSent = 0, m_pongsReceived = 0, m_lastMappedWrite = 0, m_drainedMappedWrite = 0;
+  std::uint64_t m_drainPing = 0, m_drainMappedWrite = 0;
   std::uint64_t m_evidencePendingBytes = 0;  // Accepted bytes not yet reported by bytesWritten.
   std::uint64_t m_evidenceBufferedBytes = 0; // Actual Qt receive buffer, before queued read().
   int m_handshake = 0;

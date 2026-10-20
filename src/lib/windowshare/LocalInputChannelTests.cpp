@@ -41,6 +41,10 @@ struct LocalInputChannelTestAccess
   {
     return channel.m_received;
   }
+  static std::uint64_t pingsSent(const LocalInputChannel &channel)
+  {
+    return channel.m_pingsSent;
+  }
   static qint64 buffered(const LocalInputChannel &channel)
   {
     return channel.m_socket.bytesAvailable();
@@ -936,11 +940,21 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     ++originalEvents;
     const auto records = mixedRecords();
     check(
-        mode == "mapped" && lease == fixtureLease() && originalEvents <= records.size() &&
+        (mode == "mapped" || mode == "mapped-drain") && lease == fixtureLease() && originalEvents <= records.size() &&
             originalPayload(lease, record) == originalPayload(lease, records[originalEvents - 1]) && point.x == 17.25 &&
             point.y == 33.5 && point.width == 640 && point.height == 480 && liveLocalInputMappedPoint(point),
         "Mapped private input changed its record, position, geometry or deadline"
     );
+    if (mode == "mapped-drain" && originalEvents == 1) {
+      const auto before = LocalInputChannelTestAccess::received(*host);
+      QEventLoop nested;
+      QTimer::singleShot(50, &nested, &QEventLoop::quit);
+      nested.exec();
+      check(
+          LocalInputChannelTestAccess::received(*host) == before,
+          "An ordered drain reply overtook a native callback's nested event loop"
+      );
+    }
     if (originalEvents == records.size()) {
       host->revoke();
       check(host->sendReleased(lease), "Exact mapped owner release could not be acknowledged");
@@ -1154,7 +1168,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
     check(originalEvents == 0, "Revoked or expired original event reached the receiver");
   if (mode == "mapped-expire" || mode == "mapped-malformed")
     check(originalEvents == 0, "Invalid or expired mapping reached delivery");
-  if (mode == "mapped")
+  if (mode == "mapped" || mode == "mapped-drain")
     check(originalEvents == mixedRecords().size(), "Mapped input did not deliver every input family exactly once");
   if (mode == "retired-original")
     check(retiredDelivered && originalEvents == 1, "Retired input prevented the next owner's valid delivery");
@@ -1769,6 +1783,46 @@ void mappedInput()
     );
     fixture.childExitedCleanly();
   }
+}
+void mappedOutputDrain()
+{
+  Fixture fixture("mapped-drain");
+  check(!fixture.core->mappedOutputDrained(), "Unauthenticated output was considered drained");
+  LocalInputChannelTestAccess::stopTimer(*fixture.core);
+  fixture.activate();
+  // timeout() is deliberately queued. Stopping its timer does not remove an
+  // already-posted heartbeat; service it before measuring barrier-only Pings.
+  QCoreApplication::sendPostedEvents(fixture.core.get(), QEvent::MetaCall);
+  check(fixture.core->mappedOutputDrained(), "Empty authenticated output did not drain");
+  const auto records = mixedRecords();
+  auto point = LocalInputMappedPoint{17.25, 33.5, 640, 480, localInputMonotonicNs() + 200000000};
+  const auto before = LocalInputChannelTestAccess::pingsSent(*fixture.core);
+  check(fixture.core->sendMappedOriginal(fixtureLease(), records[0], point), "First mapped drain record failed");
+  check(!fixture.core->mappedOutputDrained(), "Socket write was mistaken for peer dispatch");
+  check(fixture.core->sendMappedOriginal(fixtureLease(), records[1], point), "Second mapped drain record failed");
+  check(!fixture.core->mappedOutputDrained(), "Unacknowledged barrier admitted later output");
+  check(
+      until([&] { return fixture.closed || fixture.core->mappedOutputDrained(); }) && !fixture.closed,
+      "Mapped output did not drain after both native callbacks completed"
+  );
+  check(
+      LocalInputChannelTestAccess::pingsSent(*fixture.core) == before + 2,
+      qPrintable(QString("A barrier for the first frame incorrectly acknowledged a later write: before=%1 after=%2")
+                     .arg(before)
+                     .arg(LocalInputChannelTestAccess::pingsSent(*fixture.core)))
+  );
+  for (std::size_t index = 2; index < records.size(); ++index) {
+    point.deadlineNs = localInputMonotonicNs() + 200000000;
+    check(fixture.core->sendMappedOriginal(fixtureLease(), records[index], point), "Later mapped drain record failed");
+    check(!fixture.core->mappedOutputDrained(), "A completed barrier admitted subsequent output");
+    check(
+        until([&] { return fixture.closed || fixture.core->mappedOutputDrained(); }) && !fixture.closed,
+        "Later mapped output did not drain"
+    );
+  }
+  fixture.core->close();
+  check(!fixture.core->mappedOutputDrained(), "Closed transport retained a dispatch proof");
+  fixture.childExitedCleanly();
 }
 void preflightRoundtrip()
 {
@@ -2876,7 +2930,7 @@ void bufferedInputEvidence()
     // QLocalSocket read buffer. It must be accounted across every refill;
     // nothing is injected directly into the decoder or recorder.
     for (std::uint64_t index = 0; index != bufferedEvidenceFrames; ++index)
-      check(LocalInputChannelTestAccess::raw(*fixture.core, 5, {}), "Cannot send private buffered-input burst");
+      check(LocalInputChannelTestAccess::raw(*fixture.core, 4, {}), "Cannot send private buffered-input burst");
     LocalInputChannelTestAccess::flush(*fixture.core);
     fixture.childExitedCleanly();
   }
@@ -3173,6 +3227,8 @@ int main(int argc, char **argv)
     windowDrag();
     QTextStream(stdout) << "RUN: mappedInput\n" << Qt::flush;
     mappedInput();
+    QTextStream(stdout) << "RUN: mappedOutputDrain\n" << Qt::flush;
+    mappedOutputDrain();
     QTextStream(stdout) << "RUN: preflightRoundtrip\n" << Qt::flush;
     preflightRoundtrip();
     QTextStream(stdout) << "RUN: preflightWireLayout\n" << Qt::flush;

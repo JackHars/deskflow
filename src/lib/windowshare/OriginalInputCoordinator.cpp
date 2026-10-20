@@ -123,6 +123,7 @@ struct OriginalInputCoordinator::Shared
   // QObject context. At most one queued wake crosses to the private thread.
   std::function<void()> wake;
   bool wakeQueued = false;
+  bool mappedOutputDrained = true, mappedDrainRequested = false;
   std::uint64_t nextTicket = 0, nextOwner = 0;
   LocalInputPeerPolicy policy;
   std::shared_ptr<Owner> owner;
@@ -361,8 +362,10 @@ public:
         return Result::revoked(ticket);
       }
       if (m_batch.empty()) {
-        // A new batch revokes the preceding point receipts. Replace them only
-        // after all earlier private output was accepted in source order.
+        // A new batch revokes the preceding point receipts. Wait for their
+        // ordered peer dispatch, not merely a successful local socket write.
+        // Otherwise fresh 250 ms receipts can sit behind native AX work in
+        // the peer's socket queue and expire before their own delivery check.
         {
           std::lock_guard lock(m_state->mutex);
           for (const auto &prior : m_state->operations) {
@@ -370,6 +373,12 @@ public:
               break;
             if (prior->phase != Shared::Phase::Sent)
               return Result::pending(ticket);
+          }
+          if (!m_state->mappedOutputDrained) {
+            m_state->mappedDrainRequested = true;
+            if (m_state->wake)
+              m_state->wake();
+            return Result::pending(ticket);
           }
         }
         const auto maximumDeadline = Clock::now() + inputCutoffMaximumLifetime;
@@ -1102,6 +1111,21 @@ bool OriginalInputCoordinator::tickOne()
   }
   if (!alive)
     return false;
+  bool drainRequested = false;
+  {
+    std::lock_guard lock(m_shared->mutex);
+    drainRequested = m_shared->mappedDrainRequested;
+  }
+  if (available && drainRequested && m_channel) {
+    const bool drained = m_channel->mappedOutputDrained();
+    if (!alive)
+      return false;
+    if (drained) {
+      std::lock_guard lock(m_shared->mutex);
+      m_shared->mappedOutputDrained = true;
+      m_shared->mappedDrainRequested = false;
+    }
+  }
   std::shared_ptr<Shared::Operation> operation;
   bool revoke = false;
   {
@@ -1208,6 +1232,8 @@ bool OriginalInputCoordinator::tickOne()
   operation->trace(12, "input.delivery", sent ? "sent" : "failed", !sent);
   std::lock_guard lock(m_shared->mutex);
   operation->phase = sent ? Shared::Phase::Sent : Shared::Phase::Revoked;
+  if (sent)
+    m_shared->mappedOutputDrained = false;
   if (!sent)
     operation->owner->revoked = true;
   return sent;

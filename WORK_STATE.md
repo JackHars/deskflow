@@ -2,6 +2,24 @@
 
 ## Dashboard launch checks — 2026-10-19
 
+The `331dd44bc` candidate passes 19 Mac suites and the Linux inventory cases.
+Its actual-desktop inventory shortcut engages, but neither new replay passes:
+`dashboard-replay-1w2807iz` stops on an AX frame read failure during source
+activation; `dashboard-replay-yrzy811b` completes the five non-repeat board
+checks then expires a mapped receipt during the 122.596 Hz scroll burst.
+Both restore the source, stop owned processes and leave zero held controls.
+
+The next repair waits for ordered native dispatch of the preceding mapped
+batch before requesting fresh coordinates for another batch. A successful
+socket write alone does not establish dispatch. Existing ordered Ping/Pong
+frames provide this scheduling barrier; periodic replies cannot acknowledge a
+later prefix. The barrier grants no input authority and renews no receipt.
+Batch size, queue bounds, capture deadlines and the 250 ms native deadline
+remain unchanged. Channel subprocess tests cover nested native event loops,
+later writes and closed channels; the coordinator's mixed-batch suite also
+passes. This shared runtime change requires fresh packages and checks on both
+machines, followed by three matching actual-desktop runs before physical launch.
+
 The requested new attended launch first ran the updated fixture through the
 actual Mac/jack desktop pipeline. Both `dashboard-replay-mn4nnoiv` and
 `dashboard-replay-waqp9_d3` observed all five non-repeat board checks during

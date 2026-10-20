@@ -791,6 +791,8 @@ bool LocalInputChannel::send(Type type, const QByteArray &payload)
   out.fixed(m_coreIncarnation);
   out.fixed(m_hostIncarnation);
   out.data += payload;
+  if (type == Type::Ping)
+    ++m_pingsSent; // Bounded by the channel's nonwrapping frame counter.
   qint64 written;
   {
     InputEvidenceMutation evidence(InputEvidenceQueue::PrivateOutput, this, out.data.size(), 0);
@@ -1057,6 +1059,35 @@ bool LocalInputChannel::sendMappedOriginal(
 {
   return sendOriginalRecord(std::move(lease), std::move(record), point);
 }
+bool LocalInputChannel::mappedOutputDrained()
+{
+  if (QThread::currentThread() != thread() || !fresh() || m_role != LocalInputRole::Core || !supportsMappedInput())
+    return false;
+  if (m_drainPing && m_pongsReceived >= m_drainPing) {
+    m_drainedMappedWrite = m_drainMappedWrite;
+    m_drainPing = 0;
+    lifecycleDiagnostic(
+        "Core private input", "input.output-drain", "completed", "Peer dispatched the preceding mapped input",
+        {{"throughFrame", QString::number(m_drainedMappedWrite)}}
+    );
+  }
+  if (m_drainedMappedWrite >= m_lastMappedWrite)
+    return true;
+  if (!m_drainPing) {
+    m_drainMappedWrite = m_lastMappedWrite;
+    m_drainPing = m_pingsSent + 1;
+    lifecycleDiagnostic(
+        "Core private input", "input.output-drain", "started", "Wait for the ordered mapped-input dispatch barrier",
+        {{"throughFrame", QString::number(m_drainMappedWrite)}}
+    );
+    // read() cannot recurse while a native callback is executing. Its Pong
+    // therefore follows completion of every preceding mapped callback, even
+    // if that callback pumps another event loop. Periodic Pongs are counted
+    // separately and cannot satisfy a later barrier early.
+    (void)send(Type::Ping);
+  }
+  return false;
+}
 bool LocalInputChannel::sendOriginalRecord(
     LocalInputLease lease, OriginalInputRecord record, std::optional<LocalInputMappedPoint> point
 )
@@ -1099,7 +1130,11 @@ bool LocalInputChannel::sendOriginalRecord(
   }
   m_originalSequence = record.sequence;
   m_originalTimestamp = record.sourceTimestampNs;
-  return send(point ? Type::MappedOriginal : Type::Original, payload);
+  const auto frame = m_sent + 1;
+  const bool sent = send(point ? Type::MappedOriginal : Type::Original, payload);
+  if (alive && sent && point)
+    m_lastMappedWrite = std::max(m_lastMappedWrite, frame);
+  return alive && sent;
 }
 void LocalInputChannel::receive(Type type, const QByteArray &payload)
 {
@@ -1107,6 +1142,10 @@ void LocalInputChannel::receive(Type type, const QByteArray &payload)
     require(payload.isEmpty(), "Invalid local input heartbeat");
     if (type == Type::Ping)
       send(Type::Pong);
+    else {
+      require(m_pongsReceived < m_pingsSent, "Unsolicited local input heartbeat reply");
+      ++m_pongsReceived;
+    }
     return;
   }
   Reader in{payload};
