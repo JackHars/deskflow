@@ -11,9 +11,10 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QTemporaryDir>
-#include <barrier>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -78,6 +79,38 @@ struct InputEvidenceTestAccess
 };
 } // namespace deskflow::windowshare
 namespace {
+// Keep the full contention workload without spinning between its phases.
+// Avoid depending on library spin/backoff scheduling across hundreds of
+// rendezvous on oversubscribed CI workers. The unchanged suite deadline still
+// detects a recorder hang, with the same producer counts and phase workload.
+class BlockingTestBarrier final
+{
+public:
+  explicit BlockingTestBarrier(std::size_t participants) : m_participants(participants), m_remaining(participants)
+  {
+  }
+  void arrive_and_wait()
+  {
+    std::unique_lock lock(m_mutex);
+    const auto generation = m_generation;
+    if (--m_remaining == 0) {
+      m_remaining = m_participants;
+      ++m_generation;
+      lock.unlock();
+      m_changed.notify_all();
+    } else {
+      m_changed.wait(lock, [&] { return m_generation != generation; });
+    }
+  }
+
+private:
+  const std::size_t m_participants;
+  std::size_t m_remaining;
+  std::uint64_t m_generation = 0;
+  std::mutex m_mutex;
+  std::condition_variable m_changed;
+};
+
 class QuitGuardApplication final : public QCoreApplication
 {
 public:
@@ -251,7 +284,7 @@ void concurrentEventPreparation()
       InputEvidenceQueue::EventAllDispatch
   };
   constexpr unsigned workers = 8, rounds = 200;
-  std::barrier phase(workers + 1);
+  BlockingTestBarrier phase(workers + 1);
   const auto observe = [&](Action action) { observer.observe(observer.context, recorder.get(), {5, 1, 1}, action); };
   std::vector<std::thread> threads;
   for (unsigned worker = 0; worker < workers; ++worker)
@@ -320,7 +353,7 @@ void concurrentEventRecording()
   const auto &observer = recorder->eventObserver();
   using Action = deskflow::EventInputObservation;
   constexpr unsigned workers = 4, rounds = 128;
-  std::barrier phase(workers);
+  BlockingTestBarrier phase(workers);
   std::vector<std::thread> threads;
   for (unsigned worker = 0; worker != workers; ++worker)
     threads.emplace_back([&] {
@@ -388,7 +421,7 @@ void concurrentCaptureRecording(InputEvidenceQueue queue)
     InputEvidenceMutation prime(queue, recorder.get(), 1, 0);
   }
   constexpr unsigned rounds = 1000;
-  std::barrier phase(2);
+  BlockingTestBarrier phase(2);
   std::thread producer([&] {
     for (unsigned round = 0; round != rounds; ++round) {
       phase.arrive_and_wait();
@@ -620,7 +653,7 @@ void concurrentJournalWriters()
   constexpr std::size_t producers = 4, perProducer = 1024, rounds = 4;
   std::uint64_t total = 0;
   for (std::size_t round = 0; round != rounds; ++round) {
-    std::barrier boundary(static_cast<std::ptrdiff_t>(producers));
+    BlockingTestBarrier boundary(producers);
     std::vector<std::thread> writers;
     for (std::size_t producer = 0; producer != producers; ++producer)
       writers.emplace_back([&, producer] {
