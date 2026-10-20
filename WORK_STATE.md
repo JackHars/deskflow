@@ -20,6 +20,34 @@ later writes and closed channels; the coordinator's mixed-batch suite also
 passes. This shared runtime change requires fresh packages and checks on both
 machines, followed by three matching actual-desktop runs before physical launch.
 
+The dispatch-barrier candidate `1fe391f2f` is built and packaged on both machines
+in `build/mapped-output-drain-3ptch20t/`. All 19 selected Mac suites and the six
+integrated plus nine application Linux suites pass. Mac package SHA-256 is
+`d4400993d7afc14ff8778ee322c732038b69cd423f05acf8cf56803b28da3ede`;
+Linux package SHA-256 is
+`3094ab94e1574ffba105dccec9c60e15f4e0e03e255d12e89aa36e6a5c28a8ea`.
+The fixture remains `97aac763cdd7194f5d21cebc670d88e4a6465d2c8f1c3e164c6151a2b0edd7a7`.
+
+Neither replay passes. `dashboard-replay-m7i56iub` stops on an AX frame timeout
+during automatic source activation. The replay driver now requests activation
+only if the fixture does not already report its own active key window; this
+does not remove the need for a fresh focus observation. In
+`dashboard-replay-n7iv615u`, all five non-repeat board checks register during
+Recording, but a 120-event burst at 122.292 Hz still expires a mapped receipt
+by 27.844 ms. The ordered drain works; the native work inside a single batch
+can itself exceed 250 ms. The next investigation is per-event native inventory
+cost and batch scheduling, including contention with the watchdog. Do not
+extend deadlines or infer success from the five widget checkmarks.
+
+Both runs stop their owned local processes and leave zero held controls.
+The latter run briefly logs a restoration read failure, then the final fixture
+observation confirms its original frame and a clean source exit. Its raw
+journals and failed evidence drain remain preserved. No attended test launched,
+and no complete automatic run has passed with this board. The current helpers
+point to these matching Mac/Linux packages; fresh physical approval and three
+consecutive complete automatic passes are still required. GitHub's foundation
+run for `331dd44bc` passed; the `1fe391f2f` run was still in progress when checked.
+
 The requested new attended launch first ran the updated fixture through the
 actual Mac/jack desktop pipeline. Both `dashboard-replay-mn4nnoiv` and
 `dashboard-replay-waqp9_d3` observed all five non-repeat board checks during
