@@ -629,6 +629,18 @@ public:
   }
   void native(const InputEvidenceRaw &raw, std::uint64_t window, std::uint64_t sourcePid, std::uint64_t tag) noexcept
   {
+    // The collector may now arm/finish independently of the AppKit thread.
+    // Include the entire admission-to-publication interval in its boundary;
+    // reserving a journal slot alone misses a paused observer before append().
+    beginCaptureActivity();
+    struct Observation
+    {
+      InputEvidenceRecorder &recorder;
+      ~Observation()
+      {
+        recorder.endCaptureActivity();
+      }
+    } observation{*this};
     if (!recording() && !(state() == InputEvidenceState::Draining && loss() == InputEvidenceLoss::None &&
                           inputEvidenceNow() <= m_sourceEnd.load(std::memory_order_acquire) + 250000000))
       return;
@@ -705,7 +717,14 @@ public:
   }
   bool drained() const noexcept
   {
-    return m_read.load() == m_written.load() && m_occupied.load(std::memory_order_acquire) == 0 && !m_pendingConcurrent;
+    // A producer can be inside its observation/mutation before reserving a
+    // slot. Even a failed forced stop must retain that producer's eventual row
+    // before writing a terminal footer. These checks never wait for producers.
+    return m_read.load() == m_written.load() && m_occupied.load(std::memory_order_acquire) == 0 &&
+           !m_pendingConcurrent && m_captureGate.load(std::memory_order_acquire) == 0 &&
+           std::all_of(m_queues.begin(), m_queues.end(), [](const auto &queue) {
+             return queue.activity.load(std::memory_order_acquire) == 0;
+           });
   }
   std::uint64_t written() const noexcept
   {

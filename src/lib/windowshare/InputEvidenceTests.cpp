@@ -1215,6 +1215,48 @@ void cooperativeSerialization()
   }
 }
 
+void nativeCollectorPublicationBoundary()
+{
+  auto recorder = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Native);
+  recorder->bindOwner(owner());
+  check(recorder->arm(10000000000ULL), "native boundary could not arm");
+  InputEvidenceRaw raw;
+  raw.timestamp = 12345;
+  raw.fields[0] = 22;
+  check(InputEvidenceTestAccess::lockBoundary(*recorder), "native collector boundary unavailable");
+  recorder->native(raw, 55, 44, 123);
+  check(
+      recorder->loss() == InputEvidenceLoss::Baseline && recorder->written() == 0,
+      "native observer crossed the collector boundary without invalidating evidence"
+  );
+  (void)InputEvidenceTestAccess::unlockBoundary(*recorder);
+
+  recorder = std::make_unique<InputEvidenceRecorder>(InputEvidenceRole::Native);
+  recorder->bindOwner(owner());
+  check(recorder->arm(10000000000ULL), "paused native publication could not arm");
+  // Model an observer paused after admission but before its slot reservation.
+  // A forced stop must fail and cannot publish a drained footer ahead of it.
+  recorder->beginCaptureActivity();
+  recorder->stop();
+  recorder->finish(true);
+  check(
+      recorder->state() == InputEvidenceState::Stopped && recorder->loss() == InputEvidenceLoss::Deadline &&
+          !recorder->drained(),
+      "forced stop concealed an admitted native observer without a journal slot"
+  );
+  InputEvidenceRow row;
+  row.kind = InputEvidenceKind::Native;
+  row.raw = raw;
+  InputEvidenceTestAccess::append(*recorder, row);
+  recorder->endCaptureActivity();
+  check(!recorder->drained(), "late admitted publication disappeared from the failed journal");
+  const auto received = recorder->pop();
+  check(
+      received && received->raw == raw && recorder->drained() && recorder->loss() == InputEvidenceLoss::Deadline,
+      "late native publication was changed, dropped or accepted as clean"
+  );
+}
+
 void stalledCollectorKeepsApplicationResponsive()
 {
   for (const bool overflow : {false, true}) {
@@ -1626,6 +1668,7 @@ int main(int argc, char **argv)
     runCase("nativeFields", nativeFields);
     runCase("privateConfiguration", privateConfiguration);
     runCase("cooperativeSerialization", cooperativeSerialization);
+    runCase("nativeCollectorPublicationBoundary", nativeCollectorPublicationBoundary);
     runCase("stalledCollectorKeepsApplicationResponsive", stalledCollectorKeepsApplicationResponsive);
     runCase("armAfterBackgroundOutputDrains", armAfterBackgroundOutputDrains);
     runCase("pendingArmDeadlineAndStop", pendingArmDeadlineAndStop);

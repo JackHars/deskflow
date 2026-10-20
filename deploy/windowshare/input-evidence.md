@@ -17,6 +17,11 @@ extra capacity: a stalled collector can still fill the original 8,192-row buffer
 which remains a terminal evidence failure. Shutdown joins this consumer after
 producers retire, flushes retained rows and cancels its queued continuations.
 Blocking filesystem calls have no newly asserted completion bound.
+Native observers now bracket admission through publication with the existing
+activity guard because the collector can run concurrently with AppKit.
+A drained journal also requires zero observation/mutation activity. An expired
+or forced stop with an observer still copying remains failed, and its eventual
+row must retire before a drained footer can be written.
 
 Journal serialization yields after at most 128 rows or two milliseconds of
 work between rows, retaining at most one queued continuation. That continuation
