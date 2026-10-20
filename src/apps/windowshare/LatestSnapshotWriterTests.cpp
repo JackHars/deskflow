@@ -48,7 +48,7 @@ void snapshotFiles()
   std::condition_variable changed;
   bool started = false;
   std::atomic<bool> readersValid{true};
-  std::jthread reader([&] {
+  std::thread reader([&] {
     {
       std::lock_guard lock(mutex);
       started = true;
@@ -62,6 +62,15 @@ void snapshotFiles()
         readersValid = false;
     }
   });
+  struct Join
+  {
+    std::thread &thread;
+    ~Join()
+    {
+      if (thread.joinable())
+        thread.join();
+    }
+  } joined{reader};
   {
     std::unique_lock lock(mutex);
     changed.wait(lock, [&] { return started; });
