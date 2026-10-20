@@ -54,8 +54,25 @@ struct NativeSurfaceInventoryCheck
 {
   std::uint32_t source;
   std::vector<std::uint32_t> before, unrelated;
-  bool finish(std::uint32_t expectedSource, const std::vector<std::uint32_t> &after) const
+  // A cheap initial public ID list can defer process attribution to the final
+  // full snapshot. In that case EVERY visible native ID must remain stable,
+  // and the final process inventory must exactly match fresh AX classification.
+  // Unknown windows cannot disappear between the two observations unnoticed.
+  std::optional<std::vector<std::uint32_t>> allBefore;
+  bool finish(
+      std::uint32_t expectedSource, const std::vector<std::uint32_t> &after,
+      const std::vector<std::uint32_t> &allAfter = {}
+  ) const
   {
+    if (allBefore) {
+      const std::set<std::uint32_t> first(allBefore->begin(), allBefore->end()), last(allAfter.begin(), allAfter.end());
+      if (first.empty() || first.contains(0) || first.size() != allBefore->size() || last.size() != allAfter.size() ||
+          first != last)
+        return false;
+      for (const auto id : before)
+        if (!first.contains(id))
+          return false;
+    }
     return source == expectedSource && completeUnrelatedSurfaceInventory(source, before, after, unrelated);
   }
 };

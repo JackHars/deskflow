@@ -35,6 +35,22 @@ int main()
     check(!deferred.finish(1, {2}), "source disappearing during later native checks was ignored");
     check(!deferred.finish(1, {1, 2, 2}), "ambiguous final identity snapshot was accepted");
     check(!deferred.finish(1, {}), "missing final inventory accepted an initial observation");
+    const NativeSurfaceInventoryCheck attributedLater{1, {1, 2}, {2}, std::vector<std::uint32_t>{1, 2, 3}};
+    check(attributedLater.finish(1, {2, 1}, {3, 2, 1}), "stable global IDs and exact final attribution were rejected");
+    check(!attributedLater.finish(1, {1, 2, 3}, {1, 2, 3}), "unclassified source-process popup was accepted");
+    check(!attributedLater.finish(1, {1, 2}, {1, 2}), "unclassified disappearing window escaped the global check");
+    check(!attributedLater.finish(1, {1, 2}, {1, 2, 3, 4}), "new native window escaped the global check");
+    check(!attributedLater.finish(1, {1, 2}, {1, 2, 3, 3}), "duplicate global ID was accepted");
+    check(!attributedLater.finish(1, {1, 2}), "missing final global observation was accepted");
+    check(!attributedLater.finish(1, {1}, {1, 2, 3}), "stale AX sibling classification was accepted");
+    check(
+        !NativeSurfaceInventoryCheck{1, {1, 2}, {2}, std::vector<std::uint32_t>{1, 2, 2}}.finish(1, {1, 2}, {1, 2}),
+        "ambiguous preliminary global IDs were accepted"
+    );
+    check(
+        !NativeSurfaceInventoryCheck{1, {1, 2}, {2}, std::vector<std::uint32_t>{1, 3}}.finish(1, {1, 2}, {1, 3}),
+        "AX sibling absent from native inventory was accepted"
+    );
     const auto dialogInventory = [](bool applicationParent, std::optional<bool> modal) {
       const std::vector<std::uint32_t> siblings =
           unrelatedApplicationWindow(NativeRootWindowKind::Dialog, applicationParent, modal)

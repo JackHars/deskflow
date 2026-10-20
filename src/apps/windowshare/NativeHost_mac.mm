@@ -514,7 +514,7 @@ identity(CGWindowID id, bool *knownMissing = nullptr, IdentityDetail detail = Id
 struct NativeWindowInventory
 {
   CF<CFArrayRef> windows;
-  std::vector<std::uint32_t> ids;
+  std::vector<std::uint32_t> ids, allIds;
   std::optional<WindowIdentity> source(CGWindowID id) const
   {
     NSDictionary *match = nil;
@@ -532,22 +532,39 @@ struct NativeWindowInventory
 std::optional<NativeWindowInventory> nativeWindowInventory(pid_t process)
 {
   NativeWindowInventory result{
-      CF<CFArrayRef>(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)), {}
+      CF<CFArrayRef>(CGWindowListCopyWindowInfo(kCGWindowListOptionOnScreenOnly, kCGNullWindowID)), {}, {}
   };
-  if (!result.windows)
+  if (!result.windows || CFArrayGetCount(result.windows.get()) > 4096)
     return {};
   for (CFIndex i = 0; i < CFArrayGetCount(result.windows.get()); ++i) {
     NSDictionary *item = (__bridge NSDictionary *)CFArrayGetValueAtIndex(result.windows.get(), i);
-    if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != process)
-      continue;
     NSNumber *number = item[(__bridge NSString *)kCGWindowNumber];
     if (!number || !number.unsignedIntValue)
       return {};
+    result.allIds.push_back(number.unsignedIntValue);
+    if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != process)
+      continue;
     result.ids.push_back(number.unsignedIntValue);
     if (result.ids.size() > 64)
       return {};
   }
   return result;
+}
+std::optional<std::vector<std::uint32_t>> nativeVisibleWindowIds()
+{
+  CF<CFArrayRef> list(CGWindowListCreate(kCGWindowListOptionOnScreenOnly, kCGNullWindowID));
+  if (!list || CFArrayGetCount(list.get()) > 4096)
+    return {};
+  std::vector<std::uint32_t> ids;
+  ids.reserve(CFArrayGetCount(list.get()));
+  for (CFIndex i = 0; i < CFArrayGetCount(list.get()); ++i) {
+    // CGWindowListCreate returns raw CGWindowID values, not CFNumber objects.
+    const auto number = reinterpret_cast<std::uintptr_t>(CFArrayGetValueAtIndex(list.get(), i));
+    if (!number || number > UINT32_MAX)
+      return {};
+    ids.push_back(static_cast<std::uint32_t>(number));
+  }
+  return ids;
 }
 // An exact native window ID is required even when title and geometry collide.
 // The SPI join supplies identity only; the existing session/focus/input gates
@@ -2072,10 +2089,14 @@ struct NativeHost::Impl
     measured("focusOwnershipUs");
     // Public on-screen inventory excludes dormant backing windows. This is
     // always a fresh observation; no result survives the current input call.
-    const auto before = nativeWindowInventory(expected.pid);
+    const auto before = finalInventory ? std::optional<NativeWindowInventory>{} : nativeWindowInventory(expected.pid);
+    const auto visible = finalInventory ? nativeVisibleWindowIds() : std::optional<std::vector<std::uint32_t>>{};
     measured("inventoryBeforeUs");
-    if (!alive || !before)
+    if (!alive || (finalInventory ? !visible : !before))
       return incomplete("Initial native inventory unavailable");
+    const auto &initialIds = finalInventory ? *visible : before->ids;
+    if (std::find(initialIds.begin(), initialIds.end(), expected.id) == initialIds.end())
+      return incomplete("Initial native inventory has no source window");
     CF<CFTypeRef> windows(attribute(app, kAXWindowsAttribute));
     measured("axWindowsUs");
     if (!alive || !windows || CFGetTypeID(windows.get()) != CFArrayGetTypeID())
@@ -2089,7 +2110,7 @@ struct NativeHost::Impl
       CGWindowID number = 0;
       if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
         return incomplete("AX window has no exact native identity");
-      if (number == expected.id || std::find(before->ids.begin(), before->ids.end(), number) == before->ids.end())
+      if (number == expected.id || std::find(initialIds.begin(), initialIds.end(), number) == initialIds.end())
         continue;
       AXUIElementSetMessagingTimeout(window, 0.05f);
       const auto observed = readNativeAttributes(
@@ -2120,13 +2141,15 @@ struct NativeHost::Impl
       unrelated.push_back(number);
     }
     measured("classifyUs");
-    NativeSurfaceInventoryCheck inspection{expected.id, before->ids, unrelated};
+    std::vector<std::uint32_t> classified = unrelated;
+    classified.push_back(expected.id);
+    NativeSurfaceInventoryCheck inspection{expected.id, finalInventory ? classified : before->ids, unrelated, visible};
     if (finalInventory) {
-      // Prove that every initial ID is accounted for before deferring only the
-      // final WindowServer read. The caller must finish after its other fresh
-      // native checks, using that same final snapshot for source identity.
-      if (!inspection.finish(expected.id, before->ids))
-        return incomplete("Initial native inventory contains an unclassified surface");
+      // Classification is provisional: final process attribution must account
+      // for every native source-process window, with no global ID change.
+      // Initial IDs alone never grant authority or hide an unknown popup.
+      if (!inspection.finish(expected.id, classified, *visible))
+        return incomplete("Initial native inventory or AX classification is ambiguous");
     } else {
       const auto after = nativeWindowInventory(expected.pid);
       measured("inventoryAfterUs");
@@ -2764,7 +2787,7 @@ struct NativeHost::Impl
       // source ID/PID/bounds; process birth is read from the live process next.
       // A popup, missing source, duplicate ID or changed inventory denies input.
       const auto final = nativeWindowInventory(target->identity.pid);
-      if (final && finalInventory->finish(target->identity.id, final->ids))
+      if (final && finalInventory->finish(target->identity.id, final->ids, final->allIds))
         current = final->source(target->identity.id);
     } else {
       current = identity(target->identity.id, nullptr, IdentityDetail::Authority);

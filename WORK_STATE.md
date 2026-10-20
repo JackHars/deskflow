@@ -2,6 +2,26 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+
+The prefix/counter candidate `c50025636` passes all 19 Mac and 15 Ubuntu suites,
+plus 106 coordinator and 42 normalizer checks on each machine. Its
+`dashboard-replay-2xgz_oo1` desktop run still fails the capture/route join after
+273 burst receipts (324 functional receipts overall), despite timely mapping
+(median 11.1 ms, maximum 25.7 ms). The source emits all 1,200 events at 120.10 Hz.
+The barrier now occurs once per prefix as intended. Fresh Mac native queries
+still exceed available throughput, especially the preliminary full WindowServer
+inventory and AX window-list reads. The source restores, owned processes stop,
+and the failed raw journals remain untouched. No attended launch is ready.
+
+The next native inspection uses the public on-screen ID list for its preliminary
+observation, then attributes every source-process window using the final full
+WindowServer snapshot after fresh AX classification/focus/frame checks. It
+requires the entire visible native ID set to remain unchanged, so an unknown
+surface cannot disappear between observations unnoticed. Any missing, new,
+duplicate, unclassified or changed window still fails; no authority is cached
+between events. The ordinary non-input inventory path retains full snapshots.
+
+
 The same `4cec4a143` source was rebuilt as RelWithDebInfo on both machines;
 the prior desktop packages were Debug builds. All 19 selected Mac and 15 Ubuntu
 suites pass. `build/scroll-optimized-t4q408gy/` binds the optimized artifacts.
