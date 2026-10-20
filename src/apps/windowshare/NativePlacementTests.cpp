@@ -152,7 +152,7 @@ void asynchronousPlacementObservation()
     bool accepted = false;
     std::unique_ptr<Gate> gate;
     gate = std::make_unique<Gate>(
-        Gate::AsyncProbe([&](auto complete) { reads.push_back(std::move(complete)); }),
+        Gate::AsyncProbe([&](Gate::ObservationCompletion complete) { reads.push_back(std::move(complete)); }),
         [&](bool success, QString) {
           ++completions;
           accepted = success;
@@ -208,7 +208,7 @@ void asynchronousPlacementObservation()
   const auto unblock = qScopeGuard([&] { release->release(); });
   bool placementComplete = false, environmentComplete = false, inputTurn = false;
   Gate gate(
-      Gate::AsyncProbe([&](auto complete) {
+      Gate::AsyncProbe([&](Gate::ObservationCompletion complete) {
         check(
             reader.request(
                 [entered, release] {
