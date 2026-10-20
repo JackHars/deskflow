@@ -2,8 +2,11 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "NativeInputScheduling_mac.h"
 #include "NativeSharingActivity_mac.h"
+#include <array>
 #include <cstdio>
+#include <set>
 #include <stdexcept>
 #include <type_traits>
 
@@ -39,6 +42,7 @@
 }
 @end
 
+using deskflow::windowshare::native::InputScheduling;
 using deskflow::windowshare::native::SharingActivity;
 
 static void check(bool value, const char *message)
@@ -47,10 +51,66 @@ static void check(bool value, const char *message)
     throw std::runtime_error(message);
 }
 
+namespace {
+std::array<int, 4> schedulingTokens{};
+std::set<pthread_override_t> schedulingLive;
+unsigned schedulingStarted = 0, schedulingEnded = 0;
+bool schedulingRefused = false;
+pthread_override_t startScheduling(pthread_t thread, qos_class_t qos, int priority)
+{
+  check(
+      pthread_equal(thread, pthread_self()) && qos == QOS_CLASS_USER_INTERACTIVE && priority == 0,
+      "Input scheduling changed another thread or requested a different priority"
+  );
+  auto token = reinterpret_cast<pthread_override_t>(&schedulingTokens.at(schedulingStarted++));
+  if (schedulingRefused)
+    return nullptr;
+  check(schedulingLive.insert(token).second, "Input scheduling reused a live override");
+  return token;
+}
+int endScheduling(pthread_override_t token)
+{
+  check(schedulingLive.erase(token) == 1, "Input ended another operation's scheduling override");
+  ++schedulingEnded;
+  return 0;
+}
+void schedulingLifetime()
+{
+  struct NativeOperationFailure
+  {
+  };
+  static_assert(!std::is_copy_constructible_v<InputScheduling>);
+  static_assert(!std::is_move_constructible_v<InputScheduling>);
+  {
+    InputScheduling first(startScheduling, endScheduling);
+    check(first.active(), "Input did not acquire a scheduling override");
+    try {
+      InputScheduling nested(startScheduling, endScheduling);
+      check(nested.active() && schedulingLive.size() == 2, "Nested input replaced an existing override");
+      throw NativeOperationFailure{};
+    } catch (const NativeOperationFailure &) {
+    }
+    check(schedulingEnded == 1 && schedulingLive.size() == 1, "Failed native work leaked its override");
+  }
+  check(schedulingEnded == 2 && schedulingLive.empty(), "Completed input kept elevated scheduling");
+  schedulingRefused = true;
+  {
+    InputScheduling refused(startScheduling, endScheduling);
+    check(!refused.active(), "Refused scheduling appeared acquired");
+  }
+  check(schedulingEnded == 2 && schedulingLive.empty(), "Missing scheduling token was ended");
+  {
+    InputScheduling native;
+    check(native.active(), "macOS refused the scoped native input scheduling request");
+  }
+}
+} // namespace
+
 int main()
 {
   @autoreleasepool {
     try {
+      schedulingLifetime();
       static_assert(!std::is_copy_constructible_v<SharingActivity>);
       static_assert(!std::is_move_constructible_v<SharingActivity>);
       static_assert((SharingActivity::options & NSActivityIdleSystemSleepDisabled) == 0);

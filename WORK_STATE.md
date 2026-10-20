@@ -55,6 +55,20 @@ denies input. Associated-window and non-input inspection retain their existing
 paths. This removes duplicate AX traversal within each input, not per-event
 validation, and still needs sustained actual-desktop verification.
 
+`51b7644e7` passes the selected suites, but `dashboard-replay-vpk2if48` still
+fails its longer burst: the final 15-record mapped prefix takes 259 ms, including
+a 40 ms periodic native poll, and the existing 250 ms receipt correctly expires.
+The source emitted 1,200 records at 120.32 Hz; only 232 burst receipts arrived.
+Network mapping is timely in this failure. The failed journals remain intact.
+
+The next candidate limits each mapped delivery prefix to eight records (the
+protocol and queue capacity remain 16; all later records stay ordered). It also
+uses a scoped macOS interactive QoS override for each native input operation,
+ending that exact override on every return/exception. This scheduling hint is
+neither authority nor a deadline extension. Tests cover nested operations,
+failure cleanup, refused acquisition, native acquisition and full mixed-event
+delivery through changing bounded prefixes.
+
 The adaptive-prefix candidate `e28deb425` passes all 19 selected Mac and 15
 Ubuntu suites, but `dashboard-replay-_kqo3i_b` fails at a mapped receipt deadline.
 The preceding 11-record group took 192 ms and correctly reduced the next group

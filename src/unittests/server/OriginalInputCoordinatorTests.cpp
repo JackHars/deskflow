@@ -1349,7 +1349,7 @@ void OriginalInputCoordinatorTests::nativeDeliveryBudgetRespondsToDispatchCost()
   OriginalInputBatchBudget budget;
   QCOMPARE(budget.limit(), std::size_t(4));
   budget.observe(16, 80ms);
-  QCOMPARE(budget.limit(), inputCutoffMaximumBatch);
+  QCOMPARE(budget.limit(), OriginalInputBatchBudget::maximumPrefix);
   budget.observe(4, 80ms);
   QVERIFY(budget.limit() <= 6); // Reserve at least half the 250 ms lifetime.
   const auto reduced = budget.limit();
@@ -1359,10 +1359,10 @@ void OriginalInputCoordinatorTests::nativeDeliveryBudgetRespondsToDispatchCost()
   budget.observe(4, -1ns);
   QCOMPARE(budget.limit(), reduced);
   budget.observe(4, 4ms);
-  QVERIFY(budget.limit() > reduced && budget.limit() < inputCutoffMaximumBatch);
+  QVERIFY(budget.limit() > reduced && budget.limit() <= OriginalInputBatchBudget::maximumPrefix);
   for (unsigned i = 0; i < 32; ++i)
     budget.observe(4, 4ms);
-  QCOMPARE(budget.limit(), inputCutoffMaximumBatch);
+  QCOMPARE(budget.limit(), OriginalInputBatchBudget::maximumPrefix);
   budget.observe(1, 200ms);
   QCOMPARE(budget.limit(), std::size_t(1));
   budget.observe(1, std::chrono::nanoseconds::max());
@@ -1424,7 +1424,7 @@ void OriginalInputCoordinatorTests::mixedInputBatchesKeepEveryRecordAndDrainInOr
       }));
       QCOMPARE(f.wire.batches.size(), ++batches);
       const auto prefix = f.wire.batches.back().items.size();
-      QVERIFY(prefix > 0 && prefix <= inputCutoffMaximumBatch && prefix <= captured.size() - offset);
+      QVERIFY(prefix > 0 && prefix <= OriginalInputBatchBudget::maximumPrefix && prefix <= captured.size() - offset);
       requested += prefix;
       QCOMPARE(f.wire.requests.size(), requested);
       for (std::size_t item = 0; item < prefix; ++item)

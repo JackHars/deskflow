@@ -16,13 +16,17 @@ namespace deskflow::windowshare {
 class OriginalInputBatchBudget
 {
 public:
+  // A full 16-point protocol batch can outlive its receipt after one native
+  // scheduling stall. Keep the queued prefix smaller even after fast samples;
+  // the rest stays ordered in the existing queue and maps after dispatch ack.
+  static constexpr std::size_t maximumPrefix = inputCutoffMaximumBatch / 2;
   std::size_t limit() const
   {
     if (m_perRecord.count() <= 0)
       return 4;
     return std::clamp<std::size_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(inputCutoffMaximumLifetime / 2) / m_perRecord, 1,
-        inputCutoffMaximumBatch
+        maximumPrefix
     );
   }
   void observe(std::size_t records, std::chrono::nanoseconds elapsed)

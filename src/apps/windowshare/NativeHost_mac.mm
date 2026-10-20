@@ -10,6 +10,7 @@
 #include "NativeCaptureTiming.h"
 #include "NativeHost.h"
 #include "NativeHostLifecycle.h"
+#include "NativeInputScheduling_mac.h"
 #include "NativeInputWatchdog.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
@@ -2899,6 +2900,8 @@ struct NativeHost::Impl
     // immediately before posting. Repeated AX walks here consume the receipt.
     if (!target || target->binding != binding || !lifecycle->current(admitted))
       return deny("Retained native target is no longer current");
+    const auto requestedQos = qos_class_self();
+    const InputScheduling scheduling;
     const bool firstDelivery = !std::exchange(target->deliveryLogged, true);
     const auto trace = [&](const char *state) {
       if (firstDelivery)
@@ -2907,6 +2910,8 @@ struct NativeHost::Impl
             {{"routeGeneration", QString::number(binding.generation)},
              {"captureSequence", QString::number(record.sequence)},
              {"payloadKind", int(record.payload.index())},
+             {"requestedThreadQos", int(requestedQos)},
+             {"interactiveScheduling", scheduling.active()},
              {"receiptRemainingUs", qint64(point.deadlineNs) / 1000 - qint64(localInputMonotonicNs()) / 1000}}
         );
     };
