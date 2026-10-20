@@ -2,6 +2,22 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+With interactive tunnel classification, `dashboard-replay-p12sjp02` has no
+observed SSH retransmitted bytes and stays connected through the burst.
+The adaptive prefix eliminates accumulating lag in the matched records
+(partial relative lag ends around -58 ms, maximum 267 ms). This is still not
+an exact delivery pass: AppKit combines indexed scrolls 819 and 820 into one
+native event with point delta 1639. Only 1,198 unique original records match;
+duplicates also remain. The raw mismatch must not be normalized away.
+
+The next channel change yields to the existing zero-delay event loop after
+every native input callback, even when it takes less than the ordinary 8 ms
+dispatch quantum. It prevents a fast mapped prefix from issuing consecutive
+synchronous AX queries without giving native event handling a turn. No sleep,
+input rewrite, merge, queue increase, receipt renewal or reordered barrier is
+introduced. The mixed-record child fixture now requires a queued event-loop
+marker between every native delivery while existing drain-order tests remain.
+
 The adaptive-capacity build `bc6abdcb0` passes 19 Mac and 15 Ubuntu suites, but
 `dashboard-replay-vj5vum94` fails before its stress burst. Core mapping request
 39 exceeds 250 ms; the Mac SSH socket's retransmitted-byte counter rises from
