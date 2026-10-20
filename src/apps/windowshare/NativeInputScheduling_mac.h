@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #pragma once
+#include <pthread.h>
 #include <pthread/qos.h>
 
 namespace deskflow::windowshare::native {
