@@ -43,13 +43,11 @@ public:
   explicit NativeInspectionDelivery(QObject *receiver) : m_receiver(receiver)
   {
   }
-  void post(std::function<void()> complete)
+  void post(std::function<void()> complete, Qt::EventPriority priority)
   {
     std::lock_guard lock(m_mutex);
     if (m_receiver)
-      QCoreApplication::postEvent(
-          m_receiver, new NativeInspectionCompletionEvent(std::move(complete)), Qt::HighEventPriority
-      );
+      QCoreApplication::postEvent(m_receiver, new NativeInspectionCompletionEvent(std::move(complete)), priority);
   }
   void close()
   {
@@ -64,7 +62,8 @@ private:
 
 // Shared across result types and owner lifetimes in this process. Cancellation
 // cannot cancel native IPC, and deleting/replacing an owner must not bypass
-// admission. Include finished threads awaiting Qt deletion in the bound.
+// admission. Include finished threads awaiting Qt deletion and results awaiting
+// owner-thread consumption/discard in the bound.
 class NativeInspectionCapacity final
 {
 public:
@@ -113,7 +112,8 @@ private:
 // One read-only native inspection, never an input-authority cache. A stalled
 // system query must not stall native input or create more worker requests.
 // Completion runs on the owner thread and expires at the original deadline.
-template <class Result, int MaximumAgeMs = 250> class AsyncNativeInspection final : public QObject
+template <class Result, int MaximumAgeMs = 250, Qt::EventPriority CompletionPriority = Qt::NormalEventPriority>
+class AsyncNativeInspection final : public QObject
 {
 public:
   using Clock = std::chrono::steady_clock;
@@ -152,14 +152,21 @@ public:
     // The thread QObject survives its native query and any cancelled owner.
     // Keep its permit until Qt has also retired its deferred deletion.
     QObject::connect(worker, &QObject::destroyed, [permit] { (void)permit; });
-    QObject::connect(worker, &QThread::finished, [this, result, delivery = m_delivery] {
-      // Completed authority observations must not wait behind an ordinary
-      // frame/control backlog. They still run on the owner and reject the
-      // exact original deadline; priority does not revive an expired read.
-      delivery->post([this, result] {
-        m_running = false;
-        finish(m_now() < m_due ? std::move(*result) : std::nullopt);
-      });
+    QObject::connect(worker, &QThread::finished, [this, result, permit, delivery = m_delivery] {
+      // The environment watchdog opts into priority over ordinary work.
+      // Placement retains FIFO ordering with already queued cancellation.
+      // Both still reject results at their original absolute deadline.
+      delivery->post(
+          [this, result, permit] {
+            // A retired QThread must not free capacity while its result still
+            // occupies the owner's event queue. Discard on destruction also
+            // releases this claim without invoking the former owner.
+            (void)permit;
+            m_running = false;
+            finish(m_now() < m_due ? std::move(*result) : std::nullopt);
+          },
+          CompletionPriority
+      );
     });
     // A destroyed owner cancels its callback, without blocking on system IPC.
     QObject::connect(worker, &QThread::finished, worker, &QObject::deleteLater);

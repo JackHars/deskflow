@@ -979,7 +979,8 @@ private:
     // Destroy the observer before its raw callback context and retained window.
     CF<AXObserverRef> observer;
     Registration(AXUIElementRef value, std::weak_ptr<ObservedPlacement> placement)
-        : owner(std::move(placement)), window(static_cast<AXUIElementRef>(CFRetain(value)))
+        : owner(std::move(placement)),
+          window(static_cast<AXUIElementRef>(CFRetain(value)))
     {
     }
   };
@@ -1692,7 +1693,9 @@ struct NativeHost::Impl
     std::optional<std::vector<PhysicalOutputSignature>> outputs;
     bool accessibility = false, screenCapture = false;
   };
-  AsyncNativeInspection<EnvironmentObservation> environmentInspection;
+  // This read-only watchdog can revoke exports but never authorizes input.
+  // Its finished observation should not expire behind queued frame work.
+  AsyncNativeInspection<EnvironmentObservation, 250, Qt::HighEventPriority> environmentInspection;
   bool originalCleanupFailed = false;
   std::map<std::pair<std::uint64_t, std::uint32_t>, KeyPress> keys;
   QTimer timer;

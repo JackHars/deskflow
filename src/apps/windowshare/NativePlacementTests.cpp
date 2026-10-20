@@ -18,6 +18,7 @@
 #include <QEventLoop>
 #include <QScopeGuard>
 #include <QSemaphore>
+#include <array>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -221,9 +222,54 @@ void asynchronousNativeInspection()
   dispatchUntil([&] { return !inspection; });
   check(failed, "native exception did not fail closed or completion could not destroy its owner");
 }
-void prioritizedNativeInspection()
+void queuedNativeInspectionCapacity()
 {
   using Inspection = AsyncNativeInspection<int>;
+  struct Workers
+  {
+    QSemaphore entered;
+    std::array<QThread *, NativeInspectionCapacity::maximum> threads{};
+  };
+  check(NativeInspectionCapacity::retained() == 0, "queued-result fixture did not start with empty capacity");
+  const auto workers = std::make_shared<Workers>();
+  unsigned completions = 0;
+  std::vector<std::unique_ptr<Inspection>> owners;
+  for (unsigned i = 0; i < NativeInspectionCapacity::maximum; ++i) {
+    auto owner = std::make_unique<Inspection>();
+    check(
+        owner->request(
+            [workers, i] {
+              workers->threads[i] = QThread::currentThread();
+              workers->entered.release();
+              return 17;
+            },
+            [&](auto) { ++completions; }
+        ),
+        "queued-result fixture could not claim capacity"
+    );
+    owners.push_back(std::move(owner));
+  }
+  check(workers->entered.tryAcquire(NativeInspectionCapacity::maximum, 2000), "queued-result workers did not start");
+  for (auto *thread : workers->threads)
+    check(thread->wait(2000), "queued-result worker did not finish");
+  // Retire the thread objects without consuming custom result events.
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+  QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+  check(completions == 0, "queued native results were consumed as thread deletion");
+  check(
+      NativeInspectionCapacity::retained() == NativeInspectionCapacity::maximum,
+      "retired threads released capacity still occupied by queued results"
+  );
+  Inspection replacement;
+  check(!replacement.request([] { return 23; }, [](auto) {}), "unconsumed results bypassed the process bound");
+  owners.clear();
+  check(NativeInspectionCapacity::retained() == 0, "destroying result owners leaked their capacity");
+  QCoreApplication::sendPostedEvents();
+  check(completions == 0, "destroyed result owner received a completion");
+}
+void prioritizedNativeInspection()
+{
+  using Inspection = AsyncNativeInspection<int, 250, Qt::HighEventPriority>;
   struct Worker
   {
     QSemaphore entered;
@@ -278,6 +324,32 @@ void prioritizedNativeInspection()
       check(completions == 1, "priority completion was delivered twice");
     }
   }
+  AsyncNativeInspection<int, 2000> placement;
+  QObject normal;
+  bool completed = false, cancelled = false;
+  QMetaObject::invokeMethod(
+      &normal,
+      [&] {
+        placement.cancel();
+        cancelled = true;
+      },
+      Qt::QueuedConnection
+  );
+  const auto worker = std::make_shared<Worker>();
+  check(
+      placement.request(
+          [worker] {
+            worker->thread = QThread::currentThread();
+            worker->entered.release();
+            return 17;
+          },
+          [&](auto) { completed = true; }
+      ),
+      "ordered placement fixture did not start"
+  );
+  check(worker->entered.tryAcquire(1, 2000) && worker->thread->wait(2000), "ordered placement worker did not finish");
+  QCoreApplication::sendPostedEvents();
+  check(cancelled && !completed && !placement.busy(), "placement result overtook an earlier cancellation");
 }
 void asynchronousPlacementObservation()
 {
@@ -1210,6 +1282,7 @@ int main(int argc, char **argv)
   try {
     for (const auto &[name, test] : {
              std::pair{"global-native-inspection-capacity", &globalNativeInspectionCapacity},
+             std::pair{"queued-native-inspection-capacity", &queuedNativeInspectionCapacity},
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"prioritized-native-inspection", &prioritizedNativeInspection},
