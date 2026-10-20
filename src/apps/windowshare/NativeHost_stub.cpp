@@ -127,6 +127,10 @@ bool NativeHost::originalInputCurrent(const KeyboardRouteBinding &, std::uint64_
 {
   return false;
 }
+bool NativeHost::originalInputPending(const KeyboardRouteBinding &, std::uint64_t) const
+{
+  return false;
+}
 bool NativeHost::deliverOriginalInput(
     const KeyboardRouteBinding &, const OriginalInputRecord &, const LocalInputMappedPoint &
 )

@@ -35,6 +35,17 @@ Write failures are logged and exposed in snapshot metadata. Deterministic
 blocked-writer, shutdown and failure tests pass on Mac and Ubuntu; the five
 Mac fixture suites pass. Actual-desktop validation is still required.
 
+`dashboard-replay-i5st7oq8` shows snapshot offloading alone also does not resolve
+the expiry. The next runtime change keeps fresh native admission at Commit and
+at final native posting, but uses an exact local pending-event fence for the
+active private-channel preparation check. It checks the established owner,
+capture epoch/failure latch, legacy gate/ledger, geometry generation, focus
+request/revision, family fence and retained target. This cannot authorize
+posting: `deliverOriginalInput` still makes the complete fresh native query
+after constructing the event and checks the unchanged mapped deadline before
+submission. This removes a redundant AX/WindowServer round trip from every
+active event. It requires a newly built package and fresh pipeline evidence.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its

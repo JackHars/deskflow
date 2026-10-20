@@ -97,6 +97,9 @@ public:
   // do not establish physical neutrality, code admission or compositor drain.
   bool establishOriginalInput(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch);
   bool originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const;
+  // Local preparation fence only; cannot authorize native posting. Delivery
+  // independently performs the full fresh native check immediately before it.
+  bool originalInputPending(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const;
   bool deliverOriginalInput(
       const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
   );

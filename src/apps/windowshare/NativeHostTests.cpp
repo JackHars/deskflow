@@ -988,7 +988,8 @@ int main(int argc, char **argv)
         "full-input acknowledgement cannot create native ownership without an exported entry"
     );
     check(
-        !host.establishOriginalInput(all, 71) && !host.originalInputCurrent(all, 71),
+        !host.establishOriginalInput(all, 71) && !host.originalInputCurrent(all, 71) &&
+            !host.originalInputPending(all, 71),
         "original endpoint requires a real exact exported native owner"
     );
     const deskflow::windowshare::OriginalInputRecord original{

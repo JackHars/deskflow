@@ -952,8 +952,13 @@ public:
     const bool current = m_native->originalInputCurrent(binding, captureEpoch);
     return alive && current && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
   }
-  // Local route state only. Preflight's isActive callback independently reads
-  // fresh native authority before acknowledging Commit or allowing delivery.
+  bool nativeOriginalInputPending(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+  {
+    return keyboardAttemptCurrent(binding, KeyboardPhase::Active) &&
+           m_native->originalInputPending(binding, captureEpoch);
+  }
+  // Local route state only. Commit independently reads native authority, and
+  // each pending delivery must pass the full fresh native check before posting.
   bool originalInputRouteActive(const KeyboardRouteBinding &binding) const
   {
     return binding.scope == ForwardingScope::All && keyboardAttemptCurrent(binding, KeyboardPhase::Active);
@@ -961,8 +966,8 @@ public:
   bool originalInputRouteReady(const KeyboardRouteBinding &binding) const
   {
     // Preparation grants no native delivery. Check the exact local route and
-    // drained legacy ledger here; activation and isActive independently read
-    // fresh native focus/geometry before Commit or any input can be accepted.
+    // drained legacy ledger here; activation reads fresh native focus/geometry
+    // before Commit, and native delivery rechecks it before posting any input.
     return originalInputRouteActive(binding) || originalInputBoundary(binding);
   }
   bool deliverNativeOriginalInput(
@@ -2902,8 +2907,15 @@ int main(int argc, char **argv)
       };
       host.isActive = [&](const auto &binding) {
         const auto lease = inputPreflight ? inputPreflight->lease() : std::nullopt;
-        return lease && inputBinding(*lease) == binding &&
-               bridge.nativeOriginalInputCurrent(binding, lease->captureEpoch);
+        if (!lease || inputBinding(*lease) != binding)
+          return false;
+        // Commit still observes fresh native authority. Once active, this
+        // admits only construction of a pending event, never its submission.
+        // deliverNativeOriginalInput performs the full current native check
+        // after construction, retaining the original mapped receipt deadline.
+        return inputPreflight->phase() == LocalInputPreflight::Phase::Active
+                   ? bridge.nativeOriginalInputPending(binding, lease->captureEpoch)
+                   : bridge.nativeOriginalInputCurrent(binding, lease->captureEpoch);
       };
       inputPreflight =
           LocalInputPreflight::host(*coreInput, inputBootstrap.peerPolicy(), std::move(host), std::move(checks));

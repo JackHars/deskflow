@@ -2424,6 +2424,21 @@ struct NativeHost::Impl
     return QThread::currentThread() == q->thread() && !destroying && !callbackDepth && lifecycle->admission() &&
            keyboardAdmission.fenced(binding, qtInputEmpty());
   }
+  bool originalInputPending(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+  {
+    if (QThread::currentThread() != q->thread() || destroying || callbackDepth || originalCleanupFailed ||
+        !lifecycle->admission() || binding.scope != ForwardingScope::All ||
+        !originalInput.current(binding, captureEpoch) || !originalTarget || originalTarget->binding != binding ||
+        !keyboardAdmission.fenced(binding, qtInputEmpty()))
+      return false;
+    const auto *e = entry(binding.owner.session, binding.owner.epoch);
+    return e && e->visible && e->session.phase == Phase::Remote && !familyBlocked(*e) &&
+           e->session.geometry == binding.geometry && focusOwnerRequest == binding.focusRequest &&
+           focusOwnerRevision == binding.focusRevision && focusOwner == binding.owner &&
+           focus.permits(binding.owner, binding.focusRevision) && e->capture && !e->capture->stopped &&
+           !e->capture->failurePending && CFEqual(e->window, originalTarget->window.get()) &&
+           sameGeometry(e->session.source, originalTarget->frame);
+  }
   bool originalInputCurrent(
       const KeyboardRouteBinding &binding, std::uint64_t captureEpoch, bool inspectAssociated = false
   ) const
@@ -2648,9 +2663,9 @@ struct NativeHost::Impl
     }
     // Native identity/focus reads may block. The receipt is never renewed by
     // them; recheck it and the pending exact owner immediately before posting.
-    // Inspect new attached surfaces here once per delivery. The preflight
-    // query still verifies focus/geometry and known family fences, but does
-    // not repeat the full AX child-tree search before this final native check.
+    // Preflight only admits preparation under the exact established local
+    // fence. All fresh native identity/focus/geometry and associated-surface
+    // observations happen here, once, after construction and before posting.
     if (!originalInputCurrent(binding, record.epoch, true) || !alive || !liveLocalInputMappedPoint(point) ||
         originalTarget != target || !originalInput.pending(prepared->token) || !lifecycle->current(admitted))
       return deny("Fresh native authority or mapped receipt changed before submission");
@@ -5031,6 +5046,10 @@ bool NativeHost::establishOriginalInput(const KeyboardRouteBinding &binding, std
 bool NativeHost::originalInputCurrent(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
 {
   return m_impl->originalInputCurrent(binding, captureEpoch);
+}
+bool NativeHost::originalInputPending(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch) const
+{
+  return m_impl->originalInputPending(binding, captureEpoch);
 }
 bool NativeHost::deliverOriginalInput(
     const KeyboardRouteBinding &binding, const OriginalInputRecord &record, const LocalInputMappedPoint &point
