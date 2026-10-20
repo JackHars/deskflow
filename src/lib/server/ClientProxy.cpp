@@ -12,6 +12,7 @@
 #include "deskflow/OptionTypes.h"
 #include "deskflow/ProtocolUtil.h"
 #include "io/IStream.h"
+#include "windowshare/LifecycleDiagnostics.h"
 
 #include <algorithm>
 #include <atomic>
@@ -300,9 +301,11 @@ void ClientProxy::writeInputPacket(const void *buffer, std::uint32_t size)
   const auto slot = std::find(m_inputSequencePending.begin(), m_inputSequencePending.end(), std::nullopt);
   if (!inputSequenceTlsLive()) {
     stopInputSequenceTrace();
-  } else if (slot != m_inputSequencePending.end() && m_inputSequenceWire != std::numeric_limits<std::uint64_t>::max() &&
-             validInputSequenceToken({m_inputSequenceGeneration, m_inputSequenceWire + 1, stamp}) &&
-             validInputSequencePayload(payload)) {
+  } else if (
+      slot != m_inputSequencePending.end() && m_inputSequenceWire != std::numeric_limits<std::uint64_t>::max() &&
+      validInputSequenceToken({m_inputSequenceGeneration, m_inputSequenceWire + 1, stamp}) &&
+      validInputSequencePayload(payload)
+  ) {
     const InputSequenceToken token{m_inputSequenceGeneration, m_inputSequenceWire + 1, stamp};
     const auto bytes = encodeInputSequenceEnvelope(token, payload);
     *slot = token;
@@ -837,7 +840,21 @@ ClientProxy::startMappedInputBatch(const InputCutoffSeal &seal, const std::vecto
   m_cutoff->mapped.reset();
   m_cutoff->state = InputCutoffState::Pending;
   const auto alive = proxyLifetime();
+  lifecycleDiagnostic(
+      "Mac input", "input.map-batch", "started", "Sending ordered input map request",
+      {{"firstSequence", QString::number(items.front().capture.sequence)},
+       {"lastSequence", QString::number(items.back().capture.sequence)},
+       {"records", qint64(items.size())},
+       {"remainingUs",
+        qint64(std::chrono::duration_cast<std::chrono::microseconds>(earliest - InputCutoffClock::now()).count())}}
+  );
   m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
+  lifecycleDiagnostic(
+      "Mac input", "input.map-batch-write", "completed", "Input map request handed to the transport",
+      {{"lastSequence", QString::number(items.back().capture.sequence)},
+       {"elapsedUs",
+        qint64(std::chrono::duration_cast<std::chrono::microseconds>(InputCutoffClock::now() - now).count())}}
+  );
   return *alive && inputCutoffTlsLive() && m_cutoff && m_cutoff->binding == bindings.back() && !m_cutoff->resuming &&
                  seal.live()
              ? std::optional(bindings)
@@ -1023,6 +1040,15 @@ void ClientProxy::receiveInputCutoffBatchResult(const InputCutoffBatchResult &re
     return;
   if (m_cutoff->state == InputCutoffState::DrainObserved)
     return; // An identical duplicate cannot expire still-live sibling points.
+  lifecycleDiagnostic(
+      "Mac input", "input.map-batch", "observed", "Received the ordered input map result",
+      {{"lastSequence", QString::number(result.items.back().binding.capture.sequence)},
+       {"records", qint64(result.items.size())},
+       {"remainingUs",
+        qint64(
+            std::chrono::duration_cast<std::chrono::microseconds>(m_cutoff->deadline - InputCutoffClock::now()).count()
+        )}}
+  );
   if (InputCutoffClock::now() >= m_cutoff->deadline) {
     resumeInputCutoff(*m_cutoff->seal);
     return;

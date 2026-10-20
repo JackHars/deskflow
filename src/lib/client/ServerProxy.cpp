@@ -1600,6 +1600,10 @@ void ServerProxy::inputCutoffBatch()
   const auto origin = *m_cutoff->seal;
   const auto binding = request->items.back().mapping.cutoff.binding;
   const auto now = InputCutoffClock::now();
+  lifecycleDiagnostic(
+      "Ubuntu input", "input.map-batch", "started", "Received the ordered input map request",
+      {{"lastSequence", QString::number(binding.capture.sequence)}, {"records", qint64(request->items.size())}}
+  );
   std::vector<InputCutoffBatchItem> items;
   auto earliest = now + inputCutoffMaximumLifetime;
   for (const auto &item : request->items) {
@@ -1761,6 +1765,15 @@ void ServerProxy::pollInputCutoff()
                            : seal         ? encodeInputCutoffSealedResult({*mappedResult, seal->request})
                                           : encodeInputCutoffMappedResult(*mappedResult)
                          : encodeInputCutoffReceipt({binding, state});
+  if (!batch.empty())
+    lifecycleDiagnostic(
+        "Ubuntu input", "input.map-batch", state == InputCutoffState::DrainObserved ? "completed" : "denied",
+        "Sending the ordered input map result",
+        {{"lastSequence", QString::number(binding.capture.sequence)},
+         {"records", qint64(batch.size())},
+         {"remainingUs",
+          qint64(std::chrono::duration_cast<std::chrono::microseconds>(deadline - InputCutoffClock::now()).count())}}
+    );
   m_stream->write(bytes.data(), static_cast<std::uint32_t>(bytes.size()));
 }
 
