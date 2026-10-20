@@ -721,6 +721,7 @@ def run(arguments):
     def check(allow_stop=False):
         native_log.poll()
         source_log.poll()
+        native_log.require_live_input(publisher is not None and publisher.snapshot()["state"] == "active")
         require(diagnostics.error is None, "Diagnostic logging failed: " + str(diagnostics.error))
         check_owned_processes(owned, linux_stopped, preview_stopped)
         if preview_receiver and not preview_stopped:

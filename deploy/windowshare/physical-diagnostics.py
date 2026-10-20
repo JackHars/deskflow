@@ -111,6 +111,21 @@ class LogObserver:
         self.path, self.diagnostics = Path(path), diagnostics
         self.offset, self.pending = 0, b''
         self.native = {}
+        self.input_failure = None
+
+    def require_live_input(self, active):
+        """A revoked input route cannot continue an Active acceptance run.
+
+        The normal shutdown path still consumes final logs and recorder
+        footers. This guard never interrupts that owned cleanup.
+        """
+        if active and self.input_failure is not None:
+            value = self.input_failure
+            details = value.get('details')
+            reason = details.get('reason') if isinstance(details, dict) else None
+            suffix = ' (reason=' + str(reason) + ')' if reason is not None else ''
+            raise RuntimeError('Original input route failed at ' + value['step'] +
+                               ': ' + value['message'] + suffix)
 
     def poll(self):
         try:
@@ -137,6 +152,13 @@ class LogObserver:
                         raise ValueError('Invalid native lifecycle fields')
                     name = value['component'] + ': ' + value['step']
                     self.native[name] = value
+                    terminal_capture = value['component'] == 'Core input' and \
+                        value['step'] in ('capture.continuity', 'capture.delivery', 'capture.route-join') and \
+                        value['state'] == 'failed'
+                    terminal_delivery = value['component'] == 'Host' and \
+                        value['step'] == 'input.native-delivery' and value['state'] == 'denied'
+                    if self.input_failure is None and (terminal_capture or terminal_delivery):
+                        self.input_failure = value
                     self.diagnostics.emit(name, value['state'], value['message'], native=value)
                 except (ValueError, KeyError, TypeError):
                     self.diagnostics.emit('Native diagnostic parsing', 'failed', 'Malformed native lifecycle diagnostic')

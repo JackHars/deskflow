@@ -555,6 +555,58 @@ class DiagnosticTests(unittest.TestCase):
             recorded = [json.loads(line)['details']['native'] for line in (root / 'trace').read_text().splitlines()]
             self.assertEqual(recorded, rows)
 
+    def test_revoked_capture_stops_active_run_with_first_cause_but_allows_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+            self.addCleanup(trace.close)
+            log = root / 'native.log'
+            observer = module.DIAGNOSTICS.LogObserver(log, trace)
+            first = dict(component='Core input', step='capture.route-join', state='failed',
+                         message='Captured input and Core route correlation stopped',
+                         details={'reason': 'deadline'})
+            log.write_text('DESKFLOW_STEP ' + json.dumps(first) + '\n')
+            observer.poll()
+            with self.assertRaisesRegex(RuntimeError, r'capture.route-join:.*reason=deadline'):
+                observer.require_live_input(True)
+            observer.require_live_input(False)
+            later = dict(component='Core input', step='capture.continuity', state='failed',
+                         message='Capture stopped during cleanup', details={'reason': 5})
+            with log.open('a') as stream:
+                stream.write('DESKFLOW_STEP ' + json.dumps(later) + '\n')
+            observer.poll()
+            self.assertEqual(observer.input_failure, first)
+            observer.require_live_input(False)
+            with self.assertRaisesRegex(RuntimeError, 'reason=deadline'):
+                observer.require_live_input(True)
+
+    def test_only_terminal_capture_and_native_delivery_abort_input_run(self):
+        cases = [('Core input', 'capture.continuity', 'failed', True),
+                 ('Core input', 'capture.delivery', 'failed', True),
+                 ('Core input', 'capture.route-join', 'failed', True),
+                 ('Host', 'input.native-delivery', 'denied', True),
+                 ('Host', 'input.native-delivery', 'submitted', False),
+                 ('Host', 'source.holding.window.position', 'observed', False),
+                 ('Host', 'input.surface-inventory-timing', 'slow', False),
+                 ('Host', 'capture.route-join', 'failed', False),
+                 ('Core input', 'capture.route-join', 'observed', False)]
+        for component, step, state, terminal in cases:
+            with self.subTest(component=component, step=step, state=state), \
+                 tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+                observer = module.DIAGNOSTICS.LogObserver(root / 'native.log', trace)
+                row = dict(component=component, step=step, state=state, message='test')
+                (root / 'native.log').write_text('DESKFLOW_STEP ' + json.dumps(row) + '\n')
+                observer.poll()
+                if terminal:
+                    with self.assertRaisesRegex(RuntimeError, 'Original input route failed'):
+                        observer.require_live_input(True)
+                else:
+                    observer.require_live_input(True)
+                observer.require_live_input(False)
+                trace.close()
+
     def test_event_wait_observes_readiness_and_deadline_without_sleep(self):
         now = [0]
         wake = Mock()
