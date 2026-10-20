@@ -46,6 +46,18 @@ after constructing the event and checks the unchanged mapped deadline before
 submission. This removes a redundant AX/WindowServer round trip from every
 active event. It requires a newly built package and fresh pipeline evidence.
 
+The corresponding `dashboard-replay-xtsa443o` and `dashboard-replay-j8_qwhoj`
+runs still fail the rapid burst; neither is an attended-launch gate pass.
+The next candidate reconciles two fresh WindowServer inventories with the
+application's current AX window list. It skips the control-tree search only
+when the focused element belongs to the source and every other visible native
+window is freshly proven to be a standard window parented directly by that
+application. Unknown IDs, attached roles, missing attributes, duplicates,
+changed inventories or changed focus retain the full search. No observation
+is cached across input events. Fresh source focus/identity/geometry checks and
+mapped deadlines still precede posting. The decision has deterministic
+regressions for missing/new/changed/duplicate windows and stale classifications.
+
 ## Visible physical-input board — 2026-10-19
 
 The attended `physical-r34-rgza46pp` run on the unchanged runtime completed its

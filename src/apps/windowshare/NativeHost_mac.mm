@@ -16,6 +16,7 @@
 #include "NativePlacementVerification.h"
 #include "NativeSharingActivity_mac.h"
 #include "NativeSourceTransaction.h"
+#include "NativeSurfaceInventory.h"
 #include "NativeTitlebarObservation.h"
 #include "NativeWindowIdentity_mac.h"
 #include "NativeWindowState_mac.h"
@@ -1475,6 +1476,7 @@ struct NativeHost::Impl
     bool holdingPending = false;
     std::uint64_t holdingPaintedGeometry = 0;
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
+    mutable std::optional<bool> surfaceInventoryLogged;
     NativeAssociatedReturn associatedReturn;
     std::optional<WindowFamily> family;
     std::shared_ptr<AttachedSurface> pendingChild;
@@ -1912,6 +1914,78 @@ struct NativeHost::Impl
     }
     return false;
   }
+  bool noIndependentAttachedSurface(
+      const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused, QString &reason
+  ) const
+  {
+    const auto incomplete = [&](const char *message) {
+      reason = message;
+      return false;
+    };
+    const QPointer<NativeHost> alive(q);
+    CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(source)));
+    // A focused independently backed child must always take the full path,
+    // including one that AXFocusedWindow reports as part of its parent.
+    CF<CFTypeRef> top(attribute(focused, kAXTopLevelUIElementAttribute));
+    CGWindowID focusedId = 0;
+    if (!alive || !top || !CFEqual(top.get(), retained.get()) || axWindowId(focused, focusedId) != kAXErrorSuccess ||
+        focusedId != expected.id)
+      return incomplete("Focused native surface needs an ancestry search");
+    const auto inventory = [&]() -> std::optional<std::vector<std::uint32_t>> {
+      CF<CFArrayRef> windows(CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID));
+      if (!alive || !windows)
+        return {};
+      std::vector<std::uint32_t> result;
+      for (CFIndex i = 0; i < CFArrayGetCount(windows.get()); ++i) {
+        NSDictionary *item = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows.get(), i);
+        if ([item[(__bridge NSString *)kCGWindowOwnerPID] intValue] != expected.pid)
+          continue;
+        NSNumber *number = item[(__bridge NSString *)kCGWindowNumber];
+        NSNumber *visible = item[(__bridge NSString *)kCGWindowIsOnscreen];
+        if (!number || !visible || !number.unsignedIntValue)
+          return {};
+        if (number.unsignedIntValue == expected.id || visible.boolValue)
+          result.push_back(number.unsignedIntValue);
+        if (result.size() > 64)
+          return {};
+      }
+      return result;
+    };
+    const auto before = inventory();
+    if (!before)
+      return incomplete("Initial native inventory unavailable");
+    CF<CFTypeRef> windows(attribute(app, kAXWindowsAttribute));
+    if (!alive || !windows || CFGetTypeID(windows.get()) != CFArrayGetTypeID())
+      return incomplete("Application AX window list unavailable");
+    const auto array = static_cast<CFArrayRef>(windows.get());
+    if (CFArrayGetCount(array) > 64)
+      return incomplete("Application AX window list exceeded its bound");
+    std::vector<std::uint32_t> unrelated;
+    for (CFIndex i = 0; i < CFArrayGetCount(array); ++i) {
+      const auto window = element(CFArrayGetValueAtIndex(array, i));
+      CGWindowID number = 0;
+      if (!window || axWindowId(window, number) != kAXErrorSuccess || !alive)
+        return incomplete("AX window has no exact native identity");
+      if (number == expected.id || std::find(before->begin(), before->end(), number) == before->end())
+        continue;
+      AXUIElementSetMessagingTimeout(window, 0.05f);
+      const auto observed =
+          readNativeAttributes(window, std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXParentAttribute});
+      const auto role = observed.get(0), subrole = observed.get(1), ancestor = observed.get(2);
+      if (!alive || !role || !subrole || !element(ancestor) || !CFEqual(role, kAXWindowRole) ||
+          !CFEqual(subrole, kAXStandardWindowSubrole) || !CFEqual(ancestor, app))
+        return incomplete("Another visible window is not proven an unrelated standard window");
+      unrelated.push_back(number);
+    }
+    const auto after = inventory();
+    if (!after || !completeUnrelatedSurfaceInventory(expected.id, *before, *after, unrelated))
+      return incomplete("Native window inventory changed or contains an unclassified surface");
+    CF<CFTypeRef> fresh(attribute(app, kAXFocusedUIElementAttribute));
+    if (!alive || !fresh || !CFEqual(fresh.get(), focused))
+      return incomplete("Focused element changed while inspecting native windows");
+    reason = "Every independent native window is the source or freshly proven unrelated";
+    return true;
+  }
   std::shared_ptr<AttachedSurface> focusedChild(const Entry &parent) const
   {
     const QPointer<NativeHost> alive(q);
@@ -1925,6 +1999,24 @@ struct NativeHost::Impl
     AXUIElementSetMessagingTimeout(app.get(), 0.05f);
     CF<CFTypeRef> focused(attribute(app.get(), kAXFocusedUIElementAttribute));
     if (!alive || !element(focused.get()))
+      return {};
+    // No tree scan is needed when every independent native window is freshly
+    // accounted for. Menus, popovers, tooltips, dialogs, sheets, missing AX
+    // entries or a changing native inventory conservatively use the full scan.
+    QString inventoryReason;
+    const bool completeInventory =
+        noIndependentAttachedSurface(expected, retained.get(), app.get(), element(focused.get()), inventoryReason);
+    if (alive) {
+      const auto *current = entry(owner.session, owner.epoch);
+      if (current && current->surfaceInventoryLogged != completeInventory) {
+        current->surfaceInventoryLogged = completeInventory;
+        lifecycleDiagnostic(
+            "Host", "input.surface-inventory", "observed", inventoryReason,
+            {{"sourceWindowId", qint64(expected.id)}, {"fullTreeSearchRequired", !completeInventory}}
+        );
+      }
+    }
+    if (completeInventory || !alive)
       return {};
     CF<CFTypeRef> cursor(CFRetain(focused.get()));
     std::shared_ptr<AttachedSurface> result;
