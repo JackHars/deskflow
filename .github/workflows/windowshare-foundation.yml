@@ -275,7 +275,9 @@ jobs:
             build/gnome-provider/**/*.json
             build/gnome-provider/**/*.jsonl
   mac-app:
-    runs-on: macos-15
+    # Keep the Intel target explicit. The unqualified label now selects ARM,
+    # whose hosted capacity failed to allocate our last two Mac jobs.
+    runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
