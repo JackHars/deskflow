@@ -29,6 +29,7 @@ inline void lifecycleDiagnostic(
               {"message", message},
               {"details", details},
               {"pid", QCoreApplication::applicationPid()},
+              {"threadId", QString::number(quintptr(QThread::currentThreadId()))},
               {"utc", QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs)},
               {"monotonicNs", QString::number(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count())}
           }
@@ -56,9 +57,7 @@ public:
     if (elapsed >= 25)
       lifecycleDiagnostic(
           m_component, m_step, "slow", "Operation exceeded the diagnostic duration threshold",
-          {{"elapsedMs", qint64(elapsed)},
-           {"applicationThread",
-            QCoreApplication::instance() && QThread::currentThread() == QCoreApplication::instance()->thread()}}
+          {{"elapsedMs", qint64(elapsed)}}
       );
   }
   SlowOperationDiagnostic(const SlowOperationDiagnostic &) = delete;
