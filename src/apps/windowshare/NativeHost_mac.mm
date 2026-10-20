@@ -1871,8 +1871,13 @@ struct NativeHost::Impl
   }
   static std::optional<WindowFamilyRole> surfaceRole(AXUIElementRef window)
   {
-    const auto observed = readNativeAttributes(window, std::array{kAXRoleAttribute, kAXSubroleAttribute});
-    return surfaceRole(observed.get(0), observed.get(1));
+    CF<CFTypeRef> role(attribute(window, kAXRoleAttribute));
+    // An unsupported subrole is still work for the source's AX bridge. Only
+    // actual Window roles need it to distinguish a Dialog from a normal window.
+    CF<CFTypeRef> subrole(
+        role && CFEqual(role.get(), kAXWindowRole) ? attribute(window, kAXSubroleAttribute) : nullptr
+    );
+    return surfaceRole(role.get(), subrole.get());
   }
   static bool attachedTo(AXUIElementRef child, AXUIElementRef parent, pid_t process)
   {
@@ -1955,14 +1960,19 @@ struct NativeHost::Impl
       // them in one fresh round trip instead of interrupting the source app
       // separately for its role, children and parent on every scroll event.
       const auto observed = readNativeAttributes(
-          element(cursor.get()),
-          std::array{kAXRoleAttribute, kAXSubroleAttribute, kAXChildrenAttribute, kAXParentAttribute}
+          element(cursor.get()), std::array{kAXRoleAttribute, kAXChildrenAttribute, kAXParentAttribute}
       );
-      observe(element(cursor.get()), true, surfaceRole(observed.get(0), observed.get(1)));
+      const auto role = observed.get(0);
+      CF<CFTypeRef> subrole(
+          !CFEqual(cursor.get(), retained.get()) && role && CFEqual(role, kAXWindowRole)
+              ? attribute(element(cursor.get()), kAXSubroleAttribute)
+              : nullptr
+      );
+      observe(element(cursor.get()), true, surfaceRole(role, subrole.get()));
       // Cocoa menus/help tags need not become AXFocusedUIElement. Inspect the
       // focused control's actual ancestors and their immediate AX children,
       // bounded to 64 nodes, and accept only a live independent native surface.
-      CF<CFTypeRef> children(observed.copy(2));
+      CF<CFTypeRef> children(observed.copy(1));
       if (children && CFGetTypeID(children.get()) == CFArrayGetTypeID()) {
         const auto array = static_cast<CFArrayRef>(children.get());
         for (CFIndex i = 0;
@@ -1976,7 +1986,7 @@ struct NativeHost::Impl
       }
       if (CFEqual(cursor.get(), retained.get()))
         break;
-      CF<CFTypeRef> next(observed.copy(3));
+      CF<CFTypeRef> next(observed.copy(2));
       if (!element(next.get()) || CFEqual(next.get(), cursor.get()))
         break;
       cursor = std::move(next);
