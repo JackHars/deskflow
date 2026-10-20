@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "HoldingRelocation.h"
+#include "NativeInputWatchdog.h"
 #include "NativePlacementVerification.h"
 #if defined(__APPLE__)
 #include "NativeAttributeBatch_mac.h"
@@ -55,6 +56,40 @@ struct Fixture
       [&] { return now; }
   };
 };
+
+void nativeInputWatchdog()
+{
+  NativeInputWatchdog::Clock::time_point now{};
+  int inspected = 0;
+  NativeInputWatchdog watchdog([&] { ++inspected; }, [&] { return now; });
+  KeyboardRouteBinding binding{{1, 2}, 3, 4, 5, 6, ForwardingScope::All};
+  check(!watchdog.covered(binding, 7), "no prior native delivery covers watchdog work");
+  watchdog.completed(binding, 7);
+  check(watchdog.covered(binding, 7), "same exact live route has already been inspected");
+  auto changed = binding;
+  ++changed.geometry;
+  check(
+      !watchdog.covered(changed, 7) && !watchdog.covered(binding, 8), "geometry and capture epoch cannot inherit work"
+  );
+  now += 499ms;
+  check(watchdog.covered(binding, 7), "idle deadline is not rounded down");
+  watchdog.completed(binding, 7);
+  now += 1ms;
+  watchdog.expire();
+  check(inspected == 0 && watchdog.covered(binding, 7), "old queued timeout cannot supersede a fresh delivery");
+  now += 499ms;
+  check(!watchdog.covered(binding, 7), "exact 500 ms cutoff requires a new inspection");
+  watchdog.expire();
+  watchdog.expire();
+  check(inspected == 1 && !watchdog.covered(binding, 7), "idle inspection runs once and grants no input authority");
+  watchdog.completed(binding, 7);
+  watchdog.clear();
+  now += 1s;
+  watchdog.expire();
+  check(inspected == 1 && !watchdog.covered(binding, 7), "revocation cancels deferred work");
+  watchdog.completed(binding, 0);
+  check(!watchdog.covered(binding, 0), "invalid epoch never suppresses inspection");
+}
 
 void transientReadback()
 {
@@ -659,6 +694,7 @@ int main(int argc, char **argv)
   QCoreApplication app(argc, argv);
   try {
     for (const auto &[name, test] : {
+             std::pair{"native-input-watchdog", &nativeInputWatchdog},
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},
              std::pair{"cancellation-and-destruction", &cancellationAndDestruction},

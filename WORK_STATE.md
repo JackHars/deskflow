@@ -1,5 +1,49 @@
 # Seamless Windows work state
 
+## Scroll diagnosis in progress — 2026-10-19
+
+`b72edf6ea` adds timing for each fresh native inventory stage. Its replay
+`dashboard-replay-u7sc1pkd` stops before the burst with ScreenCaptureKit -3821,
+so it provides timings only, not scrolling acceptance. A read-only alternative
+WindowServer-owner lookup disagreed with the public inventory and was rejected;
+no private owner lookup was added to the runtime.
+
+`a7894f921` maps at most four records per delivery prefix instead of mapping
+all 16 available preview records at once. The existing ordered peer-dispatch
+barrier precedes each new prefix. All records, source/native deadlines,
+ownership checks and queue bounds remain unchanged. The mixed-input regression
+checks full previews split into ordered prefixes without omission/duplication.
+All 19 selected Mac suites and the six integrated plus nine application Ubuntu
+suites pass. Matching packages are in `build/scroll-prefix-xdkorvaf/`.
+
+`dashboard-replay-d_0b7og3` also stops before its burst with -3821. The saved
+`system-capture-detail.log` establishes that replayd received an urgent volume
+cache purge and called `stopAllStreamsWithError`; it is not a scrolling pass.
+The source's native restore readback succeeds and owned processes stop, but
+preserve the collector's incomplete restore result. Superseded generated Mac
+38 packages were archived with per-file/metadata verification to Ubuntu in
+`build/scroll-storage-zwy8d7wh/`; current packages, reusable base, source and all
+logs remain local. The archive SHA-256 is
+`3f500ff370d8d56f7d39d6250ec8d476806c782fb8990ca4c613e909c623e391`.
+Removing the verified inactive Mac copies recovered about 7.2 GiB and raised
+free space to 16.1 GiB. The interrupted run left no current HID keys/buttons
+held, checked independently without rewriting its failed fixture snapshot.
+Automated exact-artifact checks have resumed.
+No new attended test has launched.
+
+After storage recovery, `dashboard-replay-515ku4e3` reaches the rapid burst
+without a capture interruption but still expires a mapped receipt by 9.746 ms.
+A periodic native watchdog occupies 111 ms immediately before the four-record
+prefix; fresh delivery checks then use the rest of its unchanged 250 ms budget.
+The next candidate keeps permission, topology, capture and preparation polling
+on the existing cadence, but avoids repeating native root-window checks when
+that exact live input owner has just passed them. A separate precise idle timer
+schedules reinspection 500 ms after the last successful delivery. Every input
+still performs its full fresh native check. The schedule cannot authorize input,
+cover a changed binding/epoch, survive revocation, or postpone the idle cutoff
+because of an old queued timeout. Native placement regressions pass locally;
+this candidate still requires full build/package and actual-desktop validation.
+
 ## Dashboard launch checks — 2026-10-19
 
 The `331dd44bc` candidate passes 19 Mac suites and the Linux inventory cases.

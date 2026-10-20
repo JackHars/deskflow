@@ -10,6 +10,7 @@
 #include "NativeCaptureTiming.h"
 #include "NativeHost.h"
 #include "NativeHostLifecycle.h"
+#include "NativeInputWatchdog.h"
 #include "NativeKeyboardAdmission.h"
 #include "NativeOriginalInputState.h"
 #include "NativePlacementNotifications_mac.h"
@@ -1509,13 +1510,15 @@ struct NativeHost::Impl
   struct OriginalTarget
   {
     KeyboardRouteBinding binding;
+    const std::uint64_t captureEpoch;
     WindowIdentity identity;
     CF<AXUIElementRef> window;
     Rect frame;
     std::array<std::int64_t, originalInputButtonCount> buttons{};
     bool repeatLogged = false, deliveryLogged = false;
-    OriginalTarget(const KeyboardRouteBinding &binding, const Entry &entry)
+    OriginalTarget(const KeyboardRouteBinding &binding, std::uint64_t captureEpoch, const Entry &entry)
         : binding(binding),
+          captureEpoch(captureEpoch),
           identity(entry.identity),
           window(static_cast<AXUIElementRef>(CFRetain(entry.window))),
           frame(entry.session.source)
@@ -1560,6 +1563,7 @@ struct NativeHost::Impl
   NativeKeyboardAdmission keyboardAdmission;
   NativeOriginalInputState originalInput;
   std::shared_ptr<OriginalTarget> originalTarget;
+  std::unique_ptr<NativeInputWatchdog> inputWatchdog;
   bool originalCleanupFailed = false;
   std::map<std::pair<std::uint64_t, std::uint32_t>, KeyPress> keys;
   QTimer timer;
@@ -1611,6 +1615,11 @@ struct NativeHost::Impl
     });
     QObject::connect(&timer, &QTimer::timeout, q, [this] { poll(); });
     timer.start(500);
+    const QPointer<NativeHost> watchdogOwner(q);
+    inputWatchdog = std::make_unique<NativeInputWatchdog>([watchdogOwner] {
+      if (watchdogOwner)
+        watchdogOwner->m_impl->poll();
+    });
     const QPointer<NativeHost> clipboardOwner(q);
     ClipboardChangeMonitor::Callbacks clipboardCallbacks;
     clipboardCallbacks.focus = [clipboardOwner] {
@@ -1635,6 +1644,7 @@ struct NativeHost::Impl
   {
     lifecycle->signal(NativeHostLifecycle::Event::Shutdown);
     destroying = true;
+    inputWatchdog.reset();
     clipboardTimer.stop();
     clipboardMonitor->setEnabled(false);
     restoreAll();
@@ -2690,7 +2700,7 @@ struct NativeHost::Impl
     const auto *e = entry(binding.owner.session, binding.owner.epoch);
     if (!e || !e->window || !eventSource || !targetedPointerAvailable() || !lifecycle->current(admitted))
       return false;
-    auto target = std::make_shared<OriginalTarget>(binding, *e);
+    auto target = std::make_shared<OriginalTarget>(binding, captureEpoch, *e);
     if (!originalInput.establish(binding, captureEpoch))
       return false;
     originalTarget = std::move(target);
@@ -2706,6 +2716,8 @@ struct NativeHost::Impl
     const auto cleanup = originalInput.revoke(binding);
     if (!cleanup)
       return;
+    if (inputWatchdog)
+      inputWatchdog->clear();
     originalTarget.reset();
     if (!target || target->binding != binding)
       return;
@@ -2883,7 +2895,16 @@ struct NativeHost::Impl
     if (!liveLocalInputMappedPoint(point) || originalTarget != target ||
         !originalInput.current(binding, record.epoch) || !lifecycle->current(admitted))
       return deny("Native submission lost its lifetime, owner, or receipt");
+    inputWatchdog->completed(binding, record.epoch);
     return true;
+  }
+  bool inputCoversNativeWatchdog(Owner owner) const
+  {
+    const auto target = originalTarget;
+    const auto *e = entry(owner.session, owner.epoch);
+    return inputWatchdog && target && target->binding.owner == owner && e && !e->family && !e->pendingChild &&
+           !e->relocating && !e->holdingPending && originalInputPending(target->binding, target->captureEpoch) &&
+           inputWatchdog->covered(target->binding, target->captureEpoch);
   }
   void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)
   {
@@ -4714,11 +4735,12 @@ struct NativeHost::Impl
     for (const auto &[id, e] : entries)
       parents.push_back({id, e->session.epoch});
     for (const auto owner : parents) {
-      handleAssociatedChild(owner);
+      if (!inputCoversNativeWatchdog(owner))
+        handleAssociatedChild(owner);
       if (!childGuard)
         return;
     }
-    if (focusOwner.session) {
+    if (focusOwner.session && !inputCoversNativeWatchdog(focusOwner)) {
       auto *focused = entry(focusOwner.session, focusOwner.epoch);
       const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
       if (!focused || !active || active.processIdentifier != focused->identity.pid)
@@ -4763,6 +4785,13 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
+      // Every original input independently checks native ownership, focus,
+      // geometry, minimized state and associated surfaces before posting.
+      // The idle timer schedules those checks 500 ms after the last input;
+      // do not block fresh mapped receipts with the same work here. Display,
+      // permission, capture and preparation watchdogs above still run.
+      if (inputCoversNativeWatchdog({id, e->session.epoch}))
+        continue;
       bool missing = false;
       auto current = identity(e->identity.id, &missing);
       if (e->family && (missing || (current && (!current->onScreen || current->pid != e->identity.pid ||
