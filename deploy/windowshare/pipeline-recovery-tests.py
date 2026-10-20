@@ -4,7 +4,9 @@
 """Fault-selection and recovery-evidence tests; never launch or signal a process."""
 
 import copy
+import contextlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import signal
@@ -22,6 +24,56 @@ remote_spec.loader.exec_module(remote)
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_changing_live_snapshot_is_pending_without_reusing_or_retrying_it(self):
+        coordinator = module.load_coordinator()
+        report = {}
+        original = Mock()
+        initial = {"frame": [1, 2, 3, 4]}
+        stable = {"manual": {"state": "active"}, "heldKeys": 0, "heldButtons": 0,
+                  "frame": [100, 2, 3, 4]}
+        with patch.object(coordinator, "read_json", side_effect=[
+                coordinator.ConcurrentPublicationChange("changing"), stable]) as read, \
+                contextlib.redirect_stdout(io.StringIO()) as log:
+            value = module.live_snapshot(coordinator, Path("source.json"), report)
+            self.assertIsNone(module.active_observation(value, initial, original))
+            original.source_identity.assert_not_called()
+            self.assertEqual(read.call_count, 1)
+            value = module.live_snapshot(coordinator, Path("source.json"), report)
+            self.assertIs(module.active_observation(value, initial, original), stable)
+            original.source_identity.assert_called_once_with(stable, initial, True)
+        self.assertEqual(report["pendingSnapshotReads"], 1)
+        self.assertIn("snapshot-pending", log.getvalue())
+
+    def test_only_missing_or_changing_live_publications_are_pending(self):
+        coordinator = module.load_coordinator()
+        with patch.object(coordinator, "read_json", side_effect=FileNotFoundError()), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertIsNone(module.live_snapshot(coordinator, Path("restore.json"), {}))
+        for error in (ValueError("Malformed JSON"), RuntimeError("JSON exceeds bound"),
+                      PermissionError("Denied")):
+            with patch.object(coordinator, "read_json", side_effect=error), \
+                    self.assertRaises(type(error)):
+                module.live_snapshot(coordinator, Path("restore.json"), {})
+
+    def test_active_fault_waits_for_source_publication_but_refuses_changed_authority(self):
+        original = Mock()
+        initial = {"frame": [1, 2, 3, 4]}
+        active = {"manual": {"state": "active"}, "heldKeys": 0, "heldButtons": 0,
+                  "frame": [100, 2, 3, 4]}
+        for state in ("ready", "preparing"):
+            self.assertIsNone(module.active_observation({**active, "manual": {"state": state}},
+                                                       initial, original))
+        original.source_identity.assert_not_called()
+        for changes in ({"manual": {"state": "failed"}}, {"heldKeys": 1},
+                        {"heldButtons": 1}, {"frame": initial["frame"]}):
+            with self.assertRaises(RuntimeError):
+                module.active_observation({**active, **changes}, initial, original)
+        with self.assertRaisesRegex(RuntimeError, "known source"):
+            module.active_observation(active, None, original)
+        original.source_identity.side_effect = RuntimeError("Source owner changed")
+        with self.assertRaisesRegex(RuntimeError, "owner changed"):
+            module.active_observation(active, initial, original)
+
     def setUp(self):
         self.core = {"pid": 10, "parent": 9, "birthMicroseconds": 100, "executable": "/own/core"}
         self.host = {"pid": 11, "parent": 10, "birthMicroseconds": 110, "executable": "/own/host"}

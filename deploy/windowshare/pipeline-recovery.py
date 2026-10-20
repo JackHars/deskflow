@@ -66,6 +66,28 @@ def initial_observation(receipt, original):
     return receipt
 
 
+def live_snapshot(coordinator, path, report):
+    """Read once; a changing publication supplies no observation or authority."""
+    try:
+        return coordinator.read_json(path)
+    except (FileNotFoundError, coordinator.ConcurrentPublicationChange) as error:
+        report["pendingSnapshotReads"] = report.get("pendingSnapshotReads", 0) + 1
+        print(json.dumps({"step": "snapshot-pending", "path": str(path),
+                          "reason": type(error).__name__}), flush=True)
+        return None
+
+
+def active_observation(receipt, initial, original):
+    if receipt is None or receipt.get("manual", {}).get("state") in ("ready", "preparing"):
+        return None
+    require(receipt.get("manual", {}).get("state") == "active", "Source is no longer Active")
+    require(initial is not None and receipt.get("heldKeys") == receipt.get("heldButtons") == 0,
+            "Fault requires a known source with no held input")
+    original.source_identity(receipt, initial, True)
+    require(receipt["frame"] != initial["frame"], "Source was not relocated")
+    return receipt
+
+
 def assess(report, pipeline):
     """A fault result cannot qualify as an ordinary pipeline or physical pass."""
     final = pipeline.get("finalSource", {}).get("receipt") or {}
@@ -214,6 +236,7 @@ def run(args):
     fault_at = None
     core_pid = None
     initial = None
+    active_received = False
     identity = None
     pending = b""
     started = time.monotonic()
@@ -253,13 +276,30 @@ def run(args):
                             require(type(core_pid) is int and core_pid > 0, "Invalid owned Core PID")
                         if event.get("event") != "active":
                             continue
-                        require(not report["faultSubmitted"] and remote_fault is None and core_pid is not None,
+                        require(not active_received and core_pid is not None,
                                 "Active was duplicated or preceded Core ownership")
-                        receipt = coordinator.read_json(session / "source.json")
-                        original.source_identity(receipt, initial, True)
-                        require(initial is not None and receipt.get("heldKeys") == receipt.get("heldButtons") == 0,
-                                "Fault requires a known source with no held input")
-                        require(receipt["frame"] != initial["frame"], "Source was not relocated")
+                        # Keep this one-shot notification while a source
+                        # publication is changing. The event loop's original
+                        # absolute deadline still bounds the wait.
+                        active_received = True
+                if remote_fault is not None and remote_report is None and remote_fault.poll() is not None:
+                    remote_log.close()
+                    require(remote_fault.returncode == 0, "Ubuntu Viewer fault failed; see remote-fault.log")
+                    remote_report = coordinator.read_json(output / "remote-fault.log")
+                    require(remote_report.get("fault") == "viewer-kill" and remote_report.get("targetExited") is True
+                            and remote_report.get("planSha256") == report["linuxPlanSha256"],
+                            "Ubuntu fault result does not match this plan")
+                    report["remoteFault"] = remote_report
+                    report["faultSubmitted"] = True
+                    coordinator.atomic_json(output / "fault.json", report)
+                source = session / "source.json"
+                if source.exists():
+                    receipt = live_snapshot(coordinator, source, report)
+                    if receipt is None:
+                        continue
+                    if initial is None:
+                        initial = initial_observation(receipt, original)
+                    if active_received and fault_at is None and active_observation(receipt, initial, original):
                         for role in ("core", "host", "holdingHelper"):
                             require(coordinator.digest(Path(artifacts[role]["path"])) == artifacts[role]["sha256"],
                                     "A packaged executable changed before the fault")
@@ -287,27 +327,13 @@ def run(args):
                             report["faultSubmitted"] = True
                         coordinator.atomic_json(output / "fault.json", report)
                         print(json.dumps({"step": "owned-fault-requested", "fault": args.fault}), flush=True)
-                if remote_fault is not None and remote_report is None and remote_fault.poll() is not None:
-                    remote_log.close()
-                    require(remote_fault.returncode == 0, "Ubuntu Viewer fault failed; see remote-fault.log")
-                    remote_report = coordinator.read_json(output / "remote-fault.log")
-                    require(remote_report.get("fault") == "viewer-kill" and remote_report.get("targetExited") is True
-                            and remote_report.get("planSha256") == report["linuxPlanSha256"],
-                            "Ubuntu fault result does not match this plan")
-                    report["remoteFault"] = remote_report
-                    report["faultSubmitted"] = True
-                    coordinator.atomic_json(output / "fault.json", report)
-                source = session / "source.json"
-                if source.exists():
-                    receipt = coordinator.read_json(source)
-                    if initial is None:
-                        initial = initial_observation(receipt, original)
                     if fault_at is not None and not report["restorationObserved"]:
                         require(receipt["pid"] == initial["pid"] and
                                 receipt["sourceWindowId"] == initial["sourceWindowId"], "Source owner changed")
                         journal = session / "restore.json"
                         if (receipt["frame"] == initial["frame"] and receipt["heldKeys"] == receipt["heldButtons"] == 0
-                                and journal.exists() and coordinator.read_json(journal) == {"version": 1, "windows": []}
+                                and journal.exists() and live_snapshot(coordinator, journal, report) ==
+                                    {"version": 1, "windows": []}
                                 and report["faultSubmitted"]
                                 and (remote_report is not None or not inspector.live(identity["target"]))
                                 and (args.fault in ("holding-helper-kill", "viewer-kill")
