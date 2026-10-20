@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "AsyncNativeInspection.h"
 #include "CaptureRate.h"
 #include "HoldingDisplay.h"
 #include "LifecycleDiagnostics.h"
@@ -1639,6 +1640,12 @@ struct NativeHost::Impl
   NativeOriginalInputState originalInput;
   std::shared_ptr<OriginalTarget> originalTarget;
   std::unique_ptr<NativeInputWatchdog> inputWatchdog;
+  struct EnvironmentObservation
+  {
+    std::optional<std::vector<PhysicalOutputSignature>> outputs;
+    bool accessibility = false, screenCapture = false;
+  };
+  AsyncNativeInspection<EnvironmentObservation> environmentInspection;
   bool originalCleanupFailed = false;
   std::map<std::pair<std::uint64_t, std::uint32_t>, KeyPress> keys;
   QTimer timer;
@@ -1719,6 +1726,7 @@ struct NativeHost::Impl
   {
     lifecycle->signal(NativeHostLifecycle::Event::Shutdown);
     destroying = true;
+    environmentInspection.cancel();
     inputWatchdog.reset();
     clipboardTimer.stop();
     clipboardMonitor->setEnabled(false);
@@ -4914,9 +4922,61 @@ struct NativeHost::Impl
   }
   void poll()
   {
-    const SlowOperationDiagnostic timing("Host", "native.poll");
-    if (!recovered || !lifecycle->admission())
+    const auto admitted = lifecycle->admission();
+    if (!recovered || !admitted || destroying || environmentInspection.busy())
       return;
+    std::vector<Owner> owners;
+    for (const auto &[id, e] : entries)
+      owners.push_back({id, e->session.epoch});
+    const auto generation = exportGeneration;
+    const bool hasEntries = !owners.empty();
+    environmentInspection.request(
+        [hasEntries] {
+          @autoreleasepool {
+            const auto started = std::chrono::steady_clock::now();
+            const auto timing = qScopeGuard([&] {
+              const auto elapsed =
+                  std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+                      .count();
+              if (elapsed >= 25)
+                lifecycleDiagnostic(
+                    "Host", "native.environment-inspection", "observed",
+                    "Read-only display/permission check completed off the input thread",
+                    {{"elapsedMs", qint64(elapsed)}}
+                );
+            });
+            EnvironmentObservation observed;
+            if (hasEntries)
+              observed.outputs = physicalOutputSnapshot();
+            observed.accessibility = AXIsProcessTrusted();
+            observed.screenCapture = !hasEntries || CGPreflightScreenCaptureAccess();
+            return observed;
+          }
+        },
+        [this, admitted, generation, owners = std::move(owners)](std::optional<EnvironmentObservation> observed) {
+          if (!lifecycle->current(admitted) || destroying || generation != exportGeneration)
+            return;
+          std::vector<Owner> current;
+          for (const auto &[id, e] : entries)
+            current.push_back({id, e->session.epoch});
+          if (current != owners)
+            return; // A later export cannot inherit an earlier inspection.
+          if (!observed) {
+            if (!entries.empty()) {
+              const QPointer<NativeHost> alive(q);
+              error("Native display/permission inspection failed or timed out; restoring exact source owners");
+              if (alive)
+                restoreAll(KeyboardRouteReason::AuthorityLost);
+            }
+            return;
+          }
+          pollObserved(*observed);
+        }
+    );
+  }
+  void pollObserved(const EnvironmentObservation &observed)
+  {
+    const SlowOperationDiagnostic timing("Host", "native.poll");
     if (titlebar && WindowDragTransaction::Clock::now() >= titlebarDeadline) {
       titlebar.reset();
       titlebarPress.reset();
@@ -4925,17 +4985,17 @@ struct NativeHost::Impl
     if (entries.empty())
       physicalAtExport.reset();
     else {
-      const auto outputs = physicalOutputSnapshot();
+      const auto &outputs = observed.outputs;
       if (!physicalAtExport || !outputs || !samePhysicalOutputLayout(*physicalAtExport, *outputs)) {
-        // The existing 500ms owner-thread poll is deliberately a conservative
-        // recovery trigger, not a proof that old compositor input was drained.
+        // A fresh bounded inspection from the 500 ms watchdog is a recovery
+        // trigger, never proof that old compositor input was drained.
         error("Physical display disconnected, rotated or changed resolution; restoring exact source owners");
         restoreAll(KeyboardRouteReason::AuthorityLost);
         physicalAtExport.reset();
         return;
       }
     }
-    if (AXIsProcessTrusted() && !tap)
+    if (observed.accessibility && !tap)
       installTap();
     const QPointer<NativeHost> childGuard(q);
     std::vector<Owner> parents;
@@ -4975,7 +5035,7 @@ struct NativeHost::Impl
         restoreIds.push_back(id);
         continue;
       }
-      if (!AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() ||
+      if (!observed.accessibility || !observed.screenCapture ||
           (e->session.phase == Phase::Preparing && !e->windowDrag && now - e->started > prepareTimeoutMs)) {
         releases(
             Owner{id, e->session.epoch},

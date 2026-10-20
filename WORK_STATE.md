@@ -2,13 +2,38 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+`2604393d9` passes the selected 19 Mac and 15 Ubuntu suites, but yielding after
+each native delivery does not fix coalescence. `dashboard-replay-e73e9whz`
+combines scrolls 18 and 19, then expires a mapped receipt after a slow network
+round trip. The SSH connection records 8,688 retransmitted bytes; the source
+restores and owned processes stop. The extra per-record yield is removed;
+the existing 8 ms dispatch quantum and ordered drain tests remain.
+
+The next change moves periodic read-only display and permission inspection
+off the input owner thread. Only one worker may run, with a 250 ms absolute
+completion limit; a stalled or cancelled native call keeps its slot until it
+returns. Its result can trigger recovery only for the same lifecycle, restore
+generation and exported owners. Every input retains its fresh native checks.
+Tests cover owner-thread responsiveness, no overlapping work, exact expiry,
+cancellation/destruction, late results, exceptions and a fresh later read.
+The first regression run caught a callback retained after moving its small
+`std::function`; explicitly exchanging it with an empty callable makes expiry
+and later worker completion invoke recovery only once. The repaired test passes.
+No input deadline, event content, input queue bound or evidence rule changes.
+Actual-desktop validation is still required; scrolling is not yet accepted.
+
 With interactive tunnel classification, `dashboard-replay-p12sjp02` has no
 observed SSH retransmitted bytes and stays connected through the burst.
 The adaptive prefix eliminates accumulating lag in the matched records
 (partial relative lag ends around -58 ms, maximum 267 ms). This is still not
 an exact delivery pass: AppKit combines indexed scrolls 819 and 820 into one
-native event with point delta 1639. Only 1,198 unique original records match;
-duplicates also remain. The raw mismatch must not be normalized away.
+native event with point delta 1639. Only 1,198 unique original records match.
+There are no duplicate originals within the burst. Earlier exploratory counts
+included preceding ordinary scroll checks with the same raw deltas; corrected
+partial analyses restrict the interval to the burst. The real coalescence must
+not be normalized away. Same-Mac capture-to-AppKit diagnostic latency for the
+1,198 matched events is median 38.9 ms, p95 243.5 ms and maximum 366.3 ms; this
+partial result is not acceptance of exact delivery or full replay.
 
 The next channel change yields to the existing zero-delay event loop after
 every native input callback, even when it takes less than the ordinary 8 ms
@@ -34,8 +59,8 @@ actual-desktop verification are required before any acceptance claim.
 
 `6c48b5feb` passes 19 Mac and 15 Ubuntu suites. Its desktop run
 `dashboard-replay-3v32sh4y` improves throughput but still fails exact delivery:
-the source emits 1,200 events at 119.84 Hz, some native receipts are missing or
-duplicated, and a later map response arrives after 250 ms. Observed matching
+the source emits 1,200 events at 119.84 Hz, some native receipts are combined or
+missing, and a later map response arrives after 250 ms. Observed matching
 events accumulate roughly 1.7 seconds of lag; that partial analysis is not a
 latency pass. The raw journals, mapping timings, restoration and cleanup remain.
 

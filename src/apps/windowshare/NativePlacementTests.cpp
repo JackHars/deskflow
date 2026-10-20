@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
+#include "AsyncNativeInspection.h"
 #include "DiagnosticWindowSnapshots.h"
 #include "HoldingRelocation.h"
 #include "NativeInputWatchdog.h"
@@ -14,7 +15,9 @@
 
 #include <QCoreApplication>
 #include <QEvent>
+#include <QEventLoop>
 #include <QScopeGuard>
+#include <QSemaphore>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -33,6 +36,112 @@ void check(bool condition, const char *message)
 void dispatch()
 {
   QCoreApplication::sendPostedEvents(nullptr, QEvent::MetaCall);
+}
+void dispatchUntil(const std::function<bool()> &done)
+{
+  bool expired = false;
+  QTimer deadline;
+  deadline.setSingleShot(true);
+  QObject::connect(&deadline, &QTimer::timeout, &deadline, [&] { expired = true; });
+  deadline.start(2000);
+  while (!done() && !expired)
+    QCoreApplication::processEvents(QEventLoop::WaitForMoreEvents);
+  check(done(), "native worker did not complete within the fixture deadline");
+}
+void asynchronousNativeInspection()
+{
+  using Inspection = AsyncNativeInspection<int>;
+  struct BlockedRead
+  {
+    QSemaphore entered, release, returned;
+    int read()
+    {
+      entered.release();
+      release.acquire();
+      returned.release();
+      return 17;
+    }
+  };
+  for (int scenario = 0; scenario < 5; ++scenario) {
+    Inspection::Clock::time_point now{};
+    auto inspection = std::make_unique<Inspection>([&] { return now; });
+    const auto blocked = std::make_shared<BlockedRead>();
+    const auto unblock = qScopeGuard([&] { blocked->release.release(); });
+    int completions = 0;
+    std::optional<int> result;
+    auto *ownerThread = QThread::currentThread();
+    check(
+        inspection->request(
+            [blocked, ownerThread] {
+              check(QThread::currentThread() != ownerThread, "native read ran on the input owner thread");
+              return blocked->read();
+            },
+            [&](std::optional<int> value) {
+              check(QThread::currentThread() == ownerThread, "inspection callback left the owner thread");
+              ++completions;
+              result = value;
+            }
+        ),
+        "initial native inspection was refused"
+    );
+    check(blocked->entered.tryAcquire(1, 2000), "worker did not enter its native query");
+    bool dispatched = false;
+    QMetaObject::invokeMethod(inspection.get(), [&] { dispatched = true; }, Qt::QueuedConnection);
+    dispatch();
+    check(dispatched && completions == 0, "blocked native query stalled the owner event loop");
+    check(!inspection->request([] { return 99; }, [](auto) {}), "overlapping native worker was admitted");
+    if (scenario == 1) {
+      now += Inspection::maximumAge;
+      inspection->expire();
+      check(completions == 1 && !result, "exact inspection deadline accepted an old observation");
+      inspection->expire();
+    } else if (scenario == 2) {
+      inspection->cancel();
+    } else if (scenario == 3) {
+      inspection.reset();
+    } else if (scenario == 4) {
+      now += Inspection::maximumAge; // Completion must check even if the timer has not dispatched.
+    }
+    if (inspection)
+      check(!inspection->request([] { return 99; }, [](auto) {}), "cancelled read lost its worker bound");
+    blocked->release.release();
+    check(blocked->returned.tryAcquire(1, 2000), "cancelled worker did not finish independently");
+    if (!inspection) {
+      dispatch();
+      check(completions == 0, "destroyed inspection called its former owner");
+      continue;
+    }
+    dispatchUntil([&] { return !inspection->busy(); });
+    check(completions == (scenario == 2 ? 0 : 1), "late native result repeated or revived completion");
+    check((scenario == 0 && result == 17) || (scenario != 0 && !result), "native result was changed or reused");
+    const auto previous = completions;
+    check(
+        inspection->request(
+            [] { return 23; },
+            [&](auto fresh) {
+              ++completions;
+              result = fresh;
+            }
+        ),
+        "completed worker retained its slot"
+    );
+    dispatchUntil([&] { return !inspection->busy(); });
+    check(completions == previous + 1 && result == 23, "a new inspection reused the preceding result");
+  }
+  auto inspection = std::make_unique<Inspection>();
+  bool failed = false;
+  check(
+      inspection->request(
+          []() -> int { throw std::runtime_error("native read failed"); },
+          [&](auto value) {
+            failed = !value;
+            inspection.reset();
+          }
+      ),
+      "failing native read was refused"
+  );
+  dispatchUntil([&] { return !inspection; });
+  check(failed, "native exception did not fail closed or completion could not destroy its owner");
 }
 struct Fixture
 {
@@ -750,6 +859,7 @@ int main(int argc, char **argv)
   try {
     for (const auto &[name, test] : {
              std::pair{"native-input-watchdog", &nativeInputWatchdog},
+             std::pair{"asynchronous-native-inspection", &asynchronousNativeInspection},
              std::pair{"diagnostic-window-snapshots", &diagnosticWindowSnapshots},
              std::pair{"transient-readback", &transientReadback}, std::pair{"absolute-deadline", &absoluteDeadline},
              std::pair{"native-authority-fences", &nativeAuthorityFences},

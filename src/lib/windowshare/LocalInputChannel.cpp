@@ -922,13 +922,6 @@ void LocalInputChannel::read()
         if (!alive || !fresh())
           return;
         m_lastRead.restart();
-        // Native submission can be quick while AppKit still has the preceding
-        // event queued. Yield after each input so a mapped prefix cannot keep
-        // the native run loops occupied with back-to-back synchronous AX calls.
-        // Continue through the existing zero-delay read turn; retain exact wire
-        // order, queue accounting and deadlines, including any following Pong.
-        if (m_role == LocalInputRole::Host && (type == Type::Original || type == Type::MappedOriginal))
-          break;
         if (m_dispatchNow() - started >= std::chrono::milliseconds(8))
           break;
       }

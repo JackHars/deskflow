@@ -853,7 +853,7 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   check((fcntl(descriptor, F_GETFD) & FD_CLOEXEC) != 0, "Adopted child capability is inheritable");
   if (mode == "synthetic")
     LocalInputChannelTestAccess::stopTimer(*host);
-  std::uint64_t originalEvents = 0, yieldedOriginalEvents = 0;
+  std::uint64_t originalEvents = 0;
   int callbackEvents = 0;
   bool retiredDelivered = false;
   host->authorize = [&, marker = QString(256, 'a')](const LocalInputLease &lease, LocalInputCheck phase) {
@@ -938,8 +938,6 @@ int childMain(QCoreApplication &application, int descriptor, const QString &mode
   host->onMappedOriginal = [&](const LocalInputLease &lease, const OriginalInputRecord &record,
                                const LocalInputMappedPoint &point) {
     ++originalEvents;
-    check(yieldedOriginalEvents == originalEvents - 1, "Fast mapped delivery monopolized one native event-loop turn");
-    QTimer::singleShot(0, host.get(), [&] { ++yieldedOriginalEvents; });
     const auto records = mixedRecords();
     check(
         (mode == "mapped" || mode == "mapped-drain") && lease == fixtureLease() && originalEvents <= records.size() &&
