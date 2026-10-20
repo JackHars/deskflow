@@ -3134,6 +3134,17 @@ struct NativeHost::Impl
            !e->relocating && !e->holdingPending && originalInputPending(target->binding, target->captureEpoch) &&
            inputWatchdog->covered(target->binding, target->captureEpoch);
   }
+  bool preparationOwnsNativeObservation(Owner owner) const
+  {
+    const auto *e = entry(owner.session, owner.epoch);
+    // These transactions cannot enable input. Display creation re-enters
+    // ready(), and relocation verifies fresh native identity/frame/paint both
+    // before mutation and before commit, under their existing deadlines.
+    // Do not run a second WindowServer/AX walk on the input thread while
+    // those observations are pending.
+    return e && e->session.phase == Phase::Preparing && !e->family &&
+           (e->holdingPending || (e->relocating && (e->placement || e->windowObservation)));
+  }
   void invalidateKeyboard(KeyboardRouteReason reason, std::optional<Owner> owner = std::nullopt)
   {
     if (const auto binding = originalInput.binding(); binding && (!owner || binding->owner == *owner))
@@ -5054,7 +5065,7 @@ struct NativeHost::Impl
     for (const auto &[id, e] : entries)
       parents.push_back({id, e->session.epoch});
     for (const auto owner : parents) {
-      if (!inputCoversNativeWatchdog(owner))
+      if (!inputCoversNativeWatchdog(owner) && !preparationOwnsNativeObservation(owner))
         handleAssociatedChild(owner);
       if (!childGuard)
         return;
@@ -5111,6 +5122,27 @@ struct NativeHost::Impl
       // permission, capture and preparation watchdogs above still run.
       if (inputCoversNativeWatchdog({id, e->session.epoch}))
         continue;
+      if (preparationOwnsNativeObservation({id, e->session.epoch})) {
+        // Continue the cheap process-lifetime check and all display,
+        // permission, capture and preparation watchdogs above. The bounded
+        // transaction owns window identity and geometry until it returns;
+        // its observations never grant original-input authority.
+        if (launchTime(e->identity.pid) != e->identity.launch) {
+          restoreIds.push_back(id);
+          continue;
+        }
+        if (e->holdingPending) {
+          lifecycleDiagnostic(
+              "Host", "source.holding.watchdog", "pending", "Display setup owns the pending source observation",
+              {{"windowId", qint64(e->identity.id)}}
+          );
+        } else if (e->windowObservation) {
+          e->windowObservation->changed();
+        } else {
+          e->placement->changed("Host watchdog requested a fresh source observation");
+        }
+        continue;
+      }
       bool missing = false;
       auto current = identity(e->identity.id, &missing);
       if (e->family && (missing || (current && (!current->onScreen || current->pid != e->identity.pid ||
@@ -5121,27 +5153,6 @@ struct NativeHost::Impl
       if (!familyCurrent(*e) || !current || current->pid != e->identity.pid || current->launch != e->identity.launch) {
         releases(Owner{id, e->session.epoch}, KeyboardRouteReason::AuthorityLost);
         restoreIds.push_back(id);
-        continue;
-      }
-      if (e->holdingPending) {
-        // Display reconfiguration temporarily blocks the source's AX bridge.
-        // This Preparing entry owns no remote input yet. Keep all identity,
-        // permission, capture, topology and deadline checks above, but let the
-        // bounded display transaction finish before its fresh frame read.
-        lifecycleDiagnostic(
-            "Host", "source.holding.watchdog", "pending", "Display setup owns the pending source observation",
-            {{"windowId", qint64(e->identity.id)}}
-        );
-        continue;
-      }
-      if (e->relocating && (e->placement || e->windowObservation)) {
-        // Keep identity, topology, permission, capture and preparation watchdogs
-        // above active. The placement transaction owns transient geometry and
-        // AX timeouts; its queued check cannot erase entries during this loop.
-        if (e->windowObservation)
-          e->windowObservation->changed();
-        else
-          e->placement->changed("Host watchdog observed the exact source");
         continue;
       }
       CF<CFTypeRef> minimized(attribute(e->window, kAXMinimizedAttribute));
