@@ -2,6 +2,21 @@
 
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
+`6c48b5feb` passes 19 Mac and 15 Ubuntu suites. Its desktop run
+`dashboard-replay-3v32sh4y` improves throughput but still fails exact delivery:
+the source emits 1,200 events at 119.84 Hz, some native receipts are missing or
+duplicated, and a later map response arrives after 250 ms. Observed matching
+events accumulate roughly 1.7 seconds of lag; that partial analysis is not a
+latency pass. The raw journals, mapping timings, restoration and cleanup remain.
+
+The next candidate lets the existing adaptive dispatch budget use up to the
+protocol's existing 16 records instead of an extra fixed ceiling of eight.
+It still budgets only half of the unchanged 250 ms receipt lifetime from actual
+ordered-dispatch timing, reduces immediately after slow work, and waits for the
+preceding prefix's exact dispatch acknowledgement. No queue is enlarged and
+no receipt, event, or evidence rule changes. This targets the remaining mapping
+and scheduling gaps between small prefixes; it still requires desktop proof.
+
 `cd6a86f6d` passes 19 Mac and 15 Ubuntu suites, but the actual-desktop run
 `dashboard-replay-sf4gu98g` still fails: only 33 of 1,200 burst events arrive
 before a translated-input deadline. Preview rows fall from 27,043 to 639 in
