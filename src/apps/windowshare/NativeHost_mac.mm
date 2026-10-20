@@ -1518,6 +1518,21 @@ struct NativeHost::Impl
     WindowFamilyRole role;
     CGWindowID id = 0;
   };
+  // Opaque AX lookup hints, not observations or authority. Each input still
+  // reads every candidate's current ID, role, parent and modality, then proves
+  // completeness against fresh public WindowServer inventories. Re-enumerate
+  // when the visible ID set changes; a missing/new/changed surface must fail
+  // the final join even if these references are stale.
+  struct SurfaceReferences
+  {
+    CF<CFArrayRef> windows;
+    const std::set<std::uint32_t> visibleIds;
+    SurfaceReferences(CFArrayRef values, const std::vector<std::uint32_t> &ids)
+        : windows(static_cast<CFArrayRef>(CFRetain(values))),
+          visibleIds(ids.begin(), ids.end())
+    {
+    }
+  };
   struct Entry
   {
     Session session;
@@ -1541,6 +1556,7 @@ struct NativeHost::Impl
     bool visible = true, moved = false, relocating = false, dragReleaseFrameObserved = false;
     mutable std::optional<bool> surfaceInventoryLogged;
     mutable QString surfaceInventoryReasonLogged;
+    mutable std::shared_ptr<const SurfaceReferences> surfaceReferences;
     NativeAssociatedReturn associatedReturn;
     std::optional<WindowFamily> family;
     std::shared_ptr<AttachedSurface> pendingChild;
@@ -2057,7 +2073,9 @@ struct NativeHost::Impl
   }
   bool noIndependentAttachedSurface(
       const WindowIdentity &expected, AXUIElementRef source, AXUIElementRef app, AXUIElementRef focused,
-      QString &reason, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr
+      QString &reason, std::optional<NativeSurfaceInventoryCheck> *finalInventory = nullptr,
+      const std::shared_ptr<const SurfaceReferences> &references = {},
+      std::shared_ptr<const SurfaceReferences> *discovered = nullptr
   ) const
   {
     const auto started = std::chrono::steady_clock::now();
@@ -2097,8 +2115,11 @@ struct NativeHost::Impl
     const auto &initialIds = finalInventory ? *visible : before->ids;
     if (std::find(initialIds.begin(), initialIds.end(), expected.id) == initialIds.end())
       return incomplete("Initial native inventory has no source window");
-    CF<CFTypeRef> windows(attribute(app, kAXWindowsAttribute));
+    const bool reuseReferences = finalInventory && references &&
+                                 references->visibleIds == std::set<std::uint32_t>(visible->begin(), visible->end());
+    CF<CFTypeRef> windows(reuseReferences ? CFRetain(references->windows.get()) : attribute(app, kAXWindowsAttribute));
     measured("axWindowsUs");
+    durations.insert("referenceLookupReuse", reuseReferences);
     if (!alive || !windows || CFGetTypeID(windows.get()) != CFArrayGetTypeID())
       return incomplete("Application AX window list unavailable");
     const auto array = static_cast<CFArrayRef>(windows.get());
@@ -2178,6 +2199,8 @@ struct NativeHost::Impl
     }
     reason = finalInventory ? "Native surface classification awaits the final per-input identity snapshot"
                             : "Every independent native window is the source or freshly proven unrelated";
+    if (finalInventory && discovered)
+      *discovered = reuseReferences ? references : std::make_shared<SurfaceReferences>(array, *visible);
     return true;
   }
   std::shared_ptr<AttachedSurface>
@@ -2186,6 +2209,7 @@ struct NativeHost::Impl
     const QPointer<NativeHost> alive(q);
     const auto expected = parent.identity;
     const Owner owner{parent.session.id, parent.session.epoch};
+    const auto references = parent.surfaceReferences;
     CF<AXUIElementRef> retained(static_cast<AXUIElementRef>(CFRetain(parent.window)));
     const auto active = NSWorkspace.sharedWorkspace.frontmostApplication;
     if (!active || active.processIdentifier != expected.pid || launchTime(expected.pid) != expected.launch)
@@ -2202,11 +2226,20 @@ struct NativeHost::Impl
     // accounted for. Menus, popovers, tooltips, dialogs, sheets, missing AX
     // entries or a changing native inventory conservatively use the full scan.
     QString inventoryReason;
+    std::shared_ptr<const SurfaceReferences> discovered;
     const bool completeInventory = noIndependentAttachedSurface(
-        expected, retained.get(), app.get(), element(focused.get()), inventoryReason, finalInventory
+        expected, retained.get(), app.get(), element(focused.get()), inventoryReason, finalInventory, references,
+        &discovered
     );
     if (alive) {
       const auto *current = entry(owner.session, owner.epoch);
+      if (current && current->identity.id == expected.id && current->identity.pid == expected.pid &&
+          current->identity.launch == expected.launch) {
+        if (!completeInventory)
+          current->surfaceReferences.reset();
+        else if (discovered)
+          current->surfaceReferences = std::move(discovered);
+      }
       if (current && (current->surfaceInventoryLogged != completeInventory ||
                       current->surfaceInventoryReasonLogged != inventoryReason)) {
         current->surfaceInventoryLogged = completeInventory;
@@ -2798,6 +2831,9 @@ struct NativeHost::Impl
       const auto final = nativeWindowInventory(target->identity.pid);
       if (final && finalInventory->finish(target->identity.id, final->ids, final->allIds))
         current = final->source(target->identity.id);
+      else if (alive)
+        if (const auto *item = entry(binding.owner.session, binding.owner.epoch))
+          item->surfaceReferences.reset();
     } else {
       current = identity(target->identity.id, nullptr, IdentityDetail::Authority);
     }

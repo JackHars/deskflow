@@ -3,6 +3,23 @@
 ## Scroll diagnosis — optimized pipeline and prefix drain — 2026-10-20
 
 
+`d25ce97ac` passes the selected Mac/Ubuntu suites. Its lightweight diagnostic
+run `dashboard-replay-sp0x80hq` stops before the long burst: the second ordinary
+scroll map expires, so it is not a throughput pass. Native event construction
+and posting are tens of microseconds; native checks dominate successful input
+processing. The raw failure and both-machine logs are retained.
+
+The next candidate retains bounded opaque AX window references as lookup hints.
+It re-enumerates when the fresh visible native ID set changes. Every event still
+reads each referenced window's current native ID, role, parent and modality,
+plus source focus, geometry, lifetime and permissions, then requires complete
+fresh final WindowServer attribution. Missing/new/stale references cannot grant
+input: incomplete final attribution denies submission and discards the hints.
+No native authority result is reused between events. Existing inventory tests
+cover unknown/disappearing/replaced windows and changed/unknown modality. The
+candidate still needs matching builds and actual desktop verification.
+
+
 The fresh-ID candidate `c71f653b9` also fails sustained scrolling: its
 `dashboard-replay-pwllvqc6` run emits all 1,200 indexed events at 119.93 Hz but
 receives only 362 burst events before the unchanged capture/route join deadline.
