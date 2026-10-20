@@ -98,6 +98,13 @@ def assess(report, pipeline):
                 return False
             cleanup = failed["cleanup"]
             session_errors = failed.get("sessionCleanupErrors")
+            def disconnected(error):
+                # FIN and reset take different relay branches. Match the final
+                # exception, not a matching phrase quoted earlier in a traceback.
+                return isinstance(error, str) and error.rstrip().endswith((
+                    "Actual TLS connection ended before coordinated stop",
+                    "Actual TLS viewer closed before coordinated stop",
+                ))
             if (failed.get("event") != "failed" or failed.get("lifecycleCompleted") is not False
                     or failed.get("linuxEnvironment") != "user-desktop"
                     or failed.get("routeMode") != "production-original-input"
@@ -106,14 +113,16 @@ def assess(report, pipeline):
                     or failed.get("cleanupErrors") != []
                     or not all(cleanup.get(field) is True for field in
                                ("ordinaryPreserved", "ownedProcessesStopped", "desktopRestored"))
-                    or "Actual TLS connection ended before coordinated stop" not in str(failed.get("failure"))
+                    or not isinstance(failed.get("failure"), str)
+                    or not failed["failure"].startswith("Controller reported failure: Private relay failed:")
+                    or not disconnected(failed["failure"])
                     or not isinstance(session_errors, list)
                     or not all(error in (
                                    "private core IPC stop: [Errno 104] Connection reset by peer",
                                    "private core IPC stop: physical fixture core did not exit normally after IPC stop (exit 1)"
                                )
                                or (isinstance(error, str) and error.startswith("relay: Private relay failed:")
-                                   and "Actual TLS connection ended before coordinated stop" in error)
+                                   and disconnected(error))
                                for error in session_errors)):
                 return False
             expected_errors.add("Linux stop: Ubuntu test failed: " + str(failed["failure"]) +

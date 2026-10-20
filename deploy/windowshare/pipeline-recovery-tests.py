@@ -146,7 +146,7 @@ class RecoveryTests(unittest.TestCase):
                   "coreExit": 1, "cleanupErrors": [], "sessionCleanupErrors": [
                       "private core IPC stop: [Errno 104] Connection reset by peer",
                       "relay: Private relay failed: Actual TLS connection ended before coordinated stop"],
-                  "failure": "Controller reported failure: Actual TLS connection ended before coordinated stop",
+                  "failure": "Controller reported failure: Private relay failed: Actual TLS connection ended before coordinated stop",
                   "cleanup": {"controllerExit": 1, "ordinaryPreserved": True,
                               "ownedProcessesStopped": True, "desktopRestored": True}}
         message = "Linux stop: Ubuntu test failed: " + failed["failure"] + \
@@ -162,10 +162,19 @@ class RecoveryTests(unittest.TestCase):
         later_exit["cleanupErrors"] = ["Linux stop: Ubuntu test failed: " + failed["failure"] +
                                       "; cleanup=[]; sessionCleanup=" + str(later_failed["sessionCleanupErrors"])]
         self.assertTrue(module.assess(report, later_exit))
+        reset_exit = copy.deepcopy(pipeline)
+        reset_failed = reset_exit["cleanupLinuxFailure"]
+        reset_failed["failure"] = reset_failed["failure"].replace("connection ended", "viewer closed")
+        reset_failed["sessionCleanupErrors"][1] = \
+            "relay: Private relay failed: Actual TLS viewer closed before coordinated stop\n"
+        reset_exit["cleanupErrors"] = ["Linux stop: Ubuntu test failed: " + reset_failed["failure"] +
+                                      "; cleanup=[]; sessionCleanup=" + str(reset_failed["sessionCleanupErrors"])]
+        self.assertTrue(module.assess(report, reset_exit))
         self.assertFalse(module.assess(self.report, pipeline))  # Not an exception for other faults.
         self.assertFalse(module.assess(report, {**pipeline, "cleanupLinuxFailure": None}))
         for changes in ({"coreExit": -11}, {"event": "stopped"}, {"lifecycleCompleted": True},
                         {"failure": "Unrelated crash"}, {"cleanupErrors": ["Desktop restore failed"]},
+                        {"failure": failed["failure"] + "\nRuntimeError: Unrelated final error"},
                         {"sessionCleanupErrors": ["Unrelated shutdown failure"]}):
             self.assertFalse(module.assess(report, {**pipeline, "cleanupLinuxFailure": {**failed, **changes}}))
         for field in ("ordinaryPreserved", "ownedProcessesStopped", "desktopRestored", "controllerExit"):
