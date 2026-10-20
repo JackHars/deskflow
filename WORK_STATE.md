@@ -64,6 +64,21 @@ evidence remains synchronous and lossless. Deterministic missing/moving/hidden
 snapshot cases, the blocked snapshot writer and visible board tests pass locally.
 The changed fixture requires a new hash binding and fresh three-run validation.
 
+The background-snapshot fixture (`ba821fad2`) passes the 19 selected Mac and
+15 selected Ubuntu suites. `dashboard-replay-8mjuqy08` and
+`dashboard-replay-_ys511me` each complete the full session, all 120 burst
+receipts and clean cleanup, but `dashboard-replay-19861wfb` fails before input
+on an unavailable AX source frame after activation. The 360-event, 120.92 Hz
+stress run `dashboard-replay-lc3o_g17` reproduces the route-join deadline with
+145 total receipts. This remains incomplete; no attended test has launched.
+
+The next fixture change limits diagnostic refresh to 10 Hz and queries its two
+owned WindowServer IDs in one request. Repeated unchanged control metadata no
+longer schedules additional writes. The worker still observes fresh exact
+ID/PID/frame/visibility data; raw input evidence, per-input native authority,
+queue limits and all deadlines remain unchanged. This targets test-induced
+WindowServer and storage contention, not permission to accept stale input.
+
 ## Dashboard launch checks — 2026-10-19
 
 The `331dd44bc` candidate passes 19 Mac suites and the Linux inventory cases.

@@ -97,12 +97,24 @@ QJsonObject frameJson(const QRect &frame)
   return {{"x", frame.x()}, {"y", frame.y()}, {"width", frame.width()}, {"height", frame.height()}};
 }
 
-DiagnosticWindowObservation observeOwnedWindow(long number)
+std::array<DiagnosticWindowObservation, 2> observeOwnedWindows(long source, long control)
 {
-  DiagnosticWindowObservation result;
-  if (number <= 0)
+  std::array<DiagnosticWindowObservation, 2> result;
+  const std::array<long, 2> numbers{source, control};
+  std::array<const void *, 2> requested{};
+  CFIndex count = 0;
+  for (const auto number : numbers)
+    if (number > 0 && number <= UINT32_MAX)
+      requested[count++] = reinterpret_cast<const void *>(std::uintptr_t(number));
+  if (!count)
     return result;
-  const auto windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, CGWindowID(number));
+  // CGWindowID arrays contain integer values, not CFNumber objects. Query the
+  // two owned windows together; diagnostic refresh must not double the number
+  // of WindowServer round trips competing with original input delivery.
+  const auto ids = CFArrayCreate(nullptr, requested.data(), count, nullptr);
+  const auto windows = ids ? CGWindowListCreateDescriptionFromArray(ids) : nullptr;
+  if (ids)
+    CFRelease(ids);
   if (!windows)
     return result;
   for (CFIndex i = 0; i < CFArrayGetCount(windows); ++i) {
@@ -112,16 +124,18 @@ DiagnosticWindowObservation observeOwnedWindow(long number)
     int owner = 0, observed = 0;
     CGRect bounds{};
     if (!ownerValue || !numberValue || !CFNumberGetValue(ownerValue, kCFNumberIntType, &owner) || owner != getpid() ||
-        !CFNumberGetValue(numberValue, kCFNumberIntType, &observed) || observed != number ||
+        !CFNumberGetValue(numberValue, kCFNumberIntType, &observed) ||
+        std::find(numbers.begin(), numbers.end(), observed) == numbers.end() ||
         !CGRectMakeWithDictionaryRepresentation(
             static_cast<CFDictionaryRef>(CFDictionaryGetValue(info, kCGWindowBounds)), &bounds
         ))
       continue;
-    result.frame = {
+    auto &observation = result[observed == source ? 0 : 1];
+    observation.frame = {
         {"x", bounds.origin.x}, {"y", bounds.origin.y}, {"width", bounds.size.width}, {"height", bounds.size.height}
     };
     const auto visible = static_cast<CFBooleanRef>(CFDictionaryGetValue(info, kCGWindowIsOnscreen));
-    result.onScreen = visible && CFGetTypeID(visible) == CFBooleanGetTypeID() && CFBooleanGetValue(visible);
+    observation.onScreen = visible && CFGetTypeID(visible) == CFBooleanGetTypeID() && CFBooleanGetValue(visible);
   }
   CFRelease(windows);
   return result;
@@ -160,9 +174,9 @@ public:
           // Only WindowServer and immutable values are used on this worker.
           // QWidget/NSWindow access and the native evidence journal stay on
           // AppKit. Slow diagnostic queries cannot block its AX replies.
-          const auto source = observeOwnedWindow(metadata["sourceWindowId"].toInteger());
-          const auto control = observeOwnedWindow(metadata["controlWindowId"].toInteger());
-          metadata = windows.complete(std::move(metadata), source, control);
+          const auto observed =
+              observeOwnedWindows(metadata["sourceWindowId"].toInteger(), metadata["controlWindowId"].toInteger());
+          metadata = windows.complete(std::move(metadata), observed[0], observed[1]);
           const auto output = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
           QSaveFile file(path);
           const bool opened = file.open(QIODevice::WriteOnly);
@@ -175,7 +189,10 @@ public:
   {
     m_clock.start();
     connect(&m_stateTimer, &QTimer::timeout, this, [this] { save(); });
-    m_stateTimer.start(25);
+    // Human-readable diagnostics need ten updates per second, not a native
+    // inventory and durable file replacement for every display refresh. The
+    // independent evidence recorder still records every original event.
+    m_stateTimer.start(100);
     save();
   }
   void watchWindow(QWidget *window)
@@ -202,6 +219,8 @@ public:
   }
   void setManualMetadata(QJsonObject metadata)
   {
+    if (m_manual == metadata)
+      return;
     m_manual = std::move(metadata);
     save();
   }
