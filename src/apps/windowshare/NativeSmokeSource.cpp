@@ -5,6 +5,7 @@
 #include "../../lib/windowshare/InputEvidenceRuntime.h"
 #include "../../lib/windowshare/PlatformMarkers.h"
 #include "DiagnosticWindowSnapshots.h"
+#include "DisposableSnapshotFile.h"
 #include "LatestSnapshotWriter.h"
 #include "LifecycleDiagnostics.h"
 #include "ManualStatus.h"
@@ -32,7 +33,6 @@
 #include <QMouseEvent>
 #include <QPointer>
 #include <QPushButton>
-#include <QSaveFile>
 #include <QSet>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -178,12 +178,10 @@ public:
               observeOwnedWindows(metadata["sourceWindowId"].toInteger(), metadata["controlWindowId"].toInteger());
           metadata = windows.complete(std::move(metadata), observed[0], observed[1]);
           const auto output = QJsonDocument(metadata).toJson(QJsonDocument::Compact);
-          QSaveFile file(path);
-          const bool opened = file.open(QIODevice::WriteOnly);
-          const bool written = opened && file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner) &&
-                               file.write(output) == output.size() && file.commit();
+          QString error;
+          const bool written = writeDisposableSnapshot(path, output, error);
           if (!written)
-            lifecycleDiagnostic("Test board", "diagnostic.snapshot", "failed", file.errorString());
+            lifecycleDiagnostic("Test board", "diagnostic.snapshot", "failed", error);
           return written;
         })
   {
@@ -345,8 +343,8 @@ public:
       observed["button"] = int(mouse->button());
     }
     appendReceipt(m_observed, m_eventCount, std::move(observed));
-    // The 25 ms state timer publishes these counters and the bounded receipt
-    // history. Rewriting/fsyncing the full snapshot here blocks AppKit/AX for
+    // The 100 ms state timer publishes these counters and the bounded receipt
+    // history. Rewriting the full snapshot here blocks AppKit/AX for
     // every event (and again when an ignored wheel propagates to a parent).
     // Native evidence is recorded synchronously above; no evidence row or
     // source timestamp is delayed, aggregated or discarded by this batching.
