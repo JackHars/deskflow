@@ -33,6 +33,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <mutex>
 
 using namespace deskflow::server;
 
@@ -71,6 +72,51 @@ KeyModifierMask modifierForRoutedKey(KeyID id)
   }
 }
 } // namespace
+
+// The target has its own lifetime; a queued old wake cannot target a new
+// Server at the same address. Close serializes with private-thread enqueue
+// before either the Server or its event queue can be destroyed.
+struct Server::OriginalInputWake : std::enable_shared_from_this<OriginalInputWake>
+{
+  struct Payload final : EventData
+  {
+    explicit Payload(std::shared_ptr<OriginalInputWake> value) : state(std::move(value))
+    {
+    }
+    ~Payload() override
+    {
+      // Also retire a wake dropped by queue admission/platform shutdown.
+      if (!handled)
+        state->pending.store(false, std::memory_order_release);
+    }
+    std::shared_ptr<OriginalInputWake> state;
+    mutable bool handled = false;
+  };
+  explicit OriginalInputWake(IEventQueue *value) : events(value)
+  {
+  }
+  void notify() noexcept
+  {
+    std::lock_guard lock(mutex);
+    if (!events || pending.exchange(true, std::memory_order_acq_rel))
+      return;
+    try {
+      events->addEvent(Event(EventTypes::OriginalInputProgress, this, new Payload(shared_from_this())));
+    } catch (...) {
+      // No input/authority lives in this notification. The existing maintenance
+      // timer still checks the same absolute deadline if scheduling fails.
+      pending.store(false, std::memory_order_release);
+    }
+  }
+  void close()
+  {
+    std::lock_guard lock(mutex);
+    events = nullptr;
+  }
+  std::mutex mutex;
+  IEventQueue *events;
+  std::atomic_bool pending{false};
+};
 
 std::uint64_t Server::reserveServerIncarnation(std::atomic<std::uint64_t> &next) noexcept
 {
@@ -255,6 +301,12 @@ Server::~Server()
 {
 #if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
   *m_originalLifetime = false;
+  if (m_originalWake) {
+    m_originalWake->close();
+    m_events->removeHandler(EventTypes::OriginalInputProgress, m_originalWake.get());
+  }
+  if (m_originalDispatcher)
+    m_originalDispatcher->setProgressNotifier({});
   m_disconnectingInputClients.clear();
   revokeSelectedPeer();
   if (m_originalDispatchTimer)
@@ -1837,6 +1889,30 @@ bool Server::setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher>
   if (!dispatcher || m_originalDispatcher || !m_originalInputCaptured || !m_originalInputCaptured->live() ||
       !m_originalInputRoutes || !m_originalInputRoutes->live() || m_selectionShutdown || m_originalDispatchTerminal)
     return false;
+  try {
+    m_originalWake = std::make_shared<OriginalInputWake>(m_events);
+    m_events->addHandler(EventTypes::OriginalInputProgress, m_originalWake.get(), [this](const Event &event) {
+      const auto *payload = dynamic_cast<const OriginalInputWake::Payload *>(event.getDataObject());
+      if (!payload || payload->state != m_originalWake)
+        return;
+      // Clear before draining, so a completion racing the drain schedules the
+      // next turn. The notification never extends a deadline or grants a receipt.
+      payload->handled = true;
+      m_originalWake->pending.store(false, std::memory_order_release);
+      drainOriginalInput();
+    });
+    dispatcher->setProgressNotifier([weak = std::weak_ptr(m_originalWake)] {
+      if (const auto state = weak.lock())
+        state->notify();
+    });
+  } catch (...) {
+    if (m_originalWake) {
+      m_originalWake->close();
+      m_events->removeHandler(EventTypes::OriginalInputProgress, m_originalWake.get());
+      m_originalWake.reset();
+    }
+    return false;
+  }
   m_originalDispatcher = std::move(dispatcher);
   return true;
 }

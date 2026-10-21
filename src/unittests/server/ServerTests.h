@@ -35,6 +35,8 @@ private Q_SLOTS:
   void originalDispatch_timeoutOverflowAndFeatureDefault();
   void originalDispatch_reentrantFailureAndDestruction();
   void originalDispatch_pendingOrderingAndCaptureArrival();
+  void originalDispatch_progressWakesWithoutTimer();
+  void originalDispatch_progressWakeLifetimeAndCoalescing();
   void originalDispatch_hoverCompressionPreservesBarriersAndHistory();
   void originalDispatch_inlineTerminalReservationContract();
   void originalDispatch_retainedLookaheadPreventsHoverReplacement();

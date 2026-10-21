@@ -128,6 +128,9 @@ enum class EventTypes : uint32_t
   /// This is event sent when all the clients have disconnected.
   ServerDisconnected,
 
+  /// Bounded wake for original-input preparation/dispatch progress, not input authority.
+  OriginalInputProgress,
+
   /** This event is sent to inform the server to switch computers.
       The event data is a pointer to SwitchToComputerInfo that indicates the target computer.
   */

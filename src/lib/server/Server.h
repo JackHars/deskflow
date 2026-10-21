@@ -532,6 +532,8 @@ private:
   deskflow::windowshare::OriginalInputRouteDecision
   originalDispatchRoute(const InputRoutes::Recipients &recipients, bool relative) const;
   std::shared_ptr<bool> m_originalLifetime = std::make_shared<bool>(true);
+  struct OriginalInputWake;
+  std::shared_ptr<OriginalInputWake> m_originalWake;
   std::shared_ptr<deskflow::windowshare::OriginalInputCapturedInbox> m_originalInputCaptured;
   std::shared_ptr<OriginalInputDispatcher> m_originalDispatcher;
   EventQueueTimer *m_originalDispatchTimer = nullptr;

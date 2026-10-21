@@ -1373,11 +1373,14 @@ void OriginalInputCoordinatorTests::mappedDispatchAcknowledgementWakesWithoutPol
   f.wire.complete(f.wire.result());
   const auto ready = f.accepted(pending.ticket);
   OriginalInputCoordinatorTestAccess::stopPolling(*f.coordinator);
+  auto progress = std::make_shared<std::atomic_uint>(0);
+  f.dispatcher->setProgressNotifier([progress] { ++*progress; });
   QVERIFY(f.dispatcher->commit(*ready.reservation));
   // The commit notification starts the ordered barrier. No subsequent input,
   // coordinator tick or mappedOutputDrained() poll may complete it for us.
   QVERIFY(until([&] { return f.count("mapped") == 1; }));
   QVERIFY(until([&] { return LocalInputChannelTestAccess::accountedDispatchRecords(*f.channel) == 1; }, 250));
+  QVERIFY(progress->load() > 0); // The exact acknowledgement also wakes the Core consumer.
   QVERIFY(!f.closed);
   QVERIFY(f.dispatcher->live(ready.reservation->owner));
   f.finish();

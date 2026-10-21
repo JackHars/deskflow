@@ -125,6 +125,18 @@ struct OriginalInputCoordinator::Shared
   // Called only under mutex, which stop() also holds before retiring the
   // QObject context. At most one queued wake crosses to the private thread.
   std::function<void()> wake;
+  // Unlike wake, this only schedules a Core event. It must never reenter the
+  // dispatcher while this mutex is held or run a Core backend on the Qt thread.
+  std::function<void()> progress;
+  void notifyProgress() noexcept
+  {
+    if (progress)
+      try {
+        progress();
+      } catch (...) {
+        // The maintenance timer remains responsible for deadlines/cleanup.
+      }
+  }
   bool wakeQueued = false;
   bool mappedOutputDrained = true, mappedDrainRequested = false;
   std::shared_ptr<Owner> mappedOwner;
@@ -162,6 +174,7 @@ struct OriginalInputCoordinator::Shared
       operation->owner->revoked = true;
       operation->phase = Phase::Revoked;
     }
+    notifyProgress();
   }
 };
 
@@ -176,6 +189,11 @@ public:
   ~Dispatcher() override
   {
     abort();
+  }
+  void setProgressNotifier(std::function<void()> notifier) noexcept override
+  {
+    std::lock_guard lock(m_state->mutex);
+    m_state->progress = std::move(notifier);
   }
   Result reserve(
       const OriginalInputCaptured &captured, const OriginalInputRouteDecision &route, const SelectedPeer &selected,
@@ -983,6 +1001,7 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         operation.deadline = std::min(operation.deadline, deadline);
         operation.phase = Shared::Phase::Preparing;
         operation.trace(4, "input.host-quiescence", "completed");
+        alive->m_shared->notifyProgress();
       },
       [alive](const LocalInputLease &lease, const LocalInputTarget &target) {
         if (!alive)
@@ -1000,6 +1019,7 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         }
         alive->m_shared->owner->target = target;
         alive->m_shared->owner->lease = lease;
+        alive->m_shared->notifyProgress();
       }
   );
   channel.onReleased = [alive](const LocalInputOffer &offer) {
@@ -1011,6 +1031,7 @@ OriginalInputCoordinator::OriginalInputCoordinator(
       return; // Retired releases cannot affect a newer owner.
     owner->revoked = true;
     owner->hostReleased = true;
+    alive->m_shared->notifyProgress();
   };
   m_shared->wake = [this] {
     if (m_shared->wakeQueued)
@@ -1171,6 +1192,7 @@ bool OriginalInputCoordinator::tickOne()
       m_shared->mappedRecords = 0;
       m_shared->mappedOutputDrained = true;
       m_shared->mappedDrainRequested = false;
+      m_shared->notifyProgress();
     }
   }
   std::shared_ptr<Shared::Operation> operation;
@@ -1257,6 +1279,7 @@ bool OriginalInputCoordinator::tickOne()
       operation->owner->active = true;
       operation->phase = Shared::Phase::Ready;
       operation->trace(8, "input.handoff", "ready");
+      m_shared->notifyProgress();
     }
     return false;
   }

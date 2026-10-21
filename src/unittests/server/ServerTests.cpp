@@ -481,6 +481,11 @@ struct RecordingOriginalDispatcher : Server::OriginalInputDispatcher
   std::vector<Preview> previewed;
   std::optional<std::uint64_t> forcedOwner;
   std::function<void()> onReserve, onCommit, onPoll, onCancelPreparation;
+  std::function<void()> progressNotifier;
+  void setProgressNotifier(std::function<void()> notifier) noexcept override
+  {
+    progressNotifier = std::move(notifier);
+  }
   std::vector<std::uint64_t> polled, cancelledPreparations;
   std::map<std::uint64_t, Reservation> preparations;
   std::vector<Clock::time_point> preparationDeadlines;
@@ -1155,6 +1160,74 @@ void ServerTests::originalDispatch_reentrantFailureAndDestruction()
     QVERIFY(f.second->take().isEmpty());
     QCOMPARE(server.m_inputRoutes.size(), std::size_t(0));
   }
+}
+
+void ServerTests::originalDispatch_progressWakesWithoutTimer()
+{
+  using namespace deskflow::windowshare;
+  OriginalDispatchFixture f;
+  QVERIFY(f.install());
+  f.first->authenticate();
+  f.server->switchComputer(f.firstClient, 100, 100, false);
+  f.clear();
+  f.dispatcher->asynchronous = true;
+  f.events.retainQueued = true;
+  const auto down = f.capture(OriginalInputKey{});
+  QVERIFY(f.inbox->publish(down));
+  IPlatformComputer::KeyInfo key{'a', 0, 30, 1, ""};
+  QVERIFY(f.dispatch(EventTypes::KeyStateKeyDown, &key, down));
+  QCOMPARE(f.server->m_originalPending.size(), std::size_t(1));
+  const auto deadline = f.server->m_originalPending.front().preparationDeadline;
+  QVERIFY(f.dispatcher->committed.empty());
+  QVERIFY(bool(f.dispatcher->progressNotifier));
+  f.dispatcher->progressNotifier(); // A wake cannot substitute for readiness.
+  QVERIFY(f.events.drain());
+  QVERIFY(f.dispatcher->committed.empty());
+  QCOMPARE(f.server->m_originalPending.front().preparationDeadline, deadline);
+  f.dispatcher->waiting = false;
+  QVERIFY(bool(f.dispatcher->progressNotifier));
+  f.dispatcher->progressNotifier();
+  // A completion does not run Server work on the producer's thread.
+  QVERIFY(f.dispatcher->committed.empty());
+  QCOMPARE(f.events.queued.size(), std::size_t(1));
+  // No timer, new input or direct drain call is needed to commit the receipt.
+  QVERIFY(f.events.drain());
+  QCOMPARE(f.dispatcher->committed.size(), std::size_t(1));
+  QVERIFY(f.server->m_originalPending.empty());
+  QVERIFY(!f.server->m_originalDispatchTerminal);
+}
+
+void ServerTests::originalDispatch_progressWakeLifetimeAndCoalescing()
+{
+  OriginalDispatchFixture f;
+  QVERIFY(f.install());
+  const auto notify = f.dispatcher->progressNotifier;
+  QVERIFY(bool(notify));
+  notify(); // The fixture drops this notification, as a closed queue may do.
+  f.events.retainQueued = true;
+  for (unsigned i = 0; i < 100; ++i)
+    notify();
+  QCOMPARE(f.events.queued.size(), std::size_t(1));
+  auto first = std::move(f.events.queued.front());
+  f.events.queued.pop_front();
+  QVERIFY(f.events.dispatchEvent(first));
+  notify(); // Completion between dispatch and destruction of the old payload.
+  QCOMPARE(f.events.queued.size(), std::size_t(1));
+  Event::deleteData(first);
+  for (unsigned i = 0; i < 100; ++i)
+    notify();
+  QCOMPARE(f.events.queued.size(), std::size_t(1));
+  auto stale = std::move(f.events.queued.front());
+  f.events.queued.pop_front();
+  f.server.reset();
+  QVERIFY(!f.dispatcher->progressNotifier);
+  const auto size = f.events.queued.size();
+  notify(); // A callback already copied by the producer cannot touch Server.
+  QCOMPARE(f.events.queued.size(), size);
+  QVERIFY(!f.events.dispatchEvent(stale));
+  Event::deleteData(stale);
+  notify(); // Nor can an already retired queue target be revived.
+  QCOMPARE(f.events.queued.size(), size);
 }
 
 void ServerTests::originalDispatch_pendingOrderingAndCaptureArrival()

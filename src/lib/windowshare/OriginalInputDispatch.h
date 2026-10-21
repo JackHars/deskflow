@@ -8,6 +8,7 @@
 #include "SelectedPeer.h"
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 
@@ -79,6 +80,12 @@ public:
     }
   };
   virtual ~OriginalInputDispatcher() = default;
+  // Scheduling only: may run on the private coordinator thread while its
+  // state is locked. The callback must only enqueue a bounded Core wake and
+  // must never call dispatcher/Server methods inline. Empty clears it.
+  virtual void setProgressNotifier(std::function<void()>) noexcept
+  {
+  }
   // Retain exact capture/recipient/selection/point and reserve output capacity
   // before returning Pending or Accepted. The one absolute deadline must not
   // be extended by traffic, polling, a native stage transition or a retry.
