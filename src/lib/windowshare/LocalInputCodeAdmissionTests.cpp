@@ -27,7 +27,11 @@
 namespace {
 thread_local bool failNextAllocation = false;
 }
-void *operator new(std::size_t size)
+// Keep the replacement allocation pair opaque at call sites. GCC's optimized
+// mismatched-new-delete check otherwise folds the replacement delete's free()
+// into callers of new while treating new as the built-in allocator. The pair
+// deliberately uses malloc/free so the one-shot failure remains deterministic.
+Q_NEVER_INLINE void *operator new(std::size_t size)
 {
   if (failNextAllocation) {
     failNextAllocation = false;
@@ -37,11 +41,11 @@ void *operator new(std::size_t size)
     return memory;
   throw std::bad_alloc();
 }
-void operator delete(void *memory) noexcept
+Q_NEVER_INLINE void operator delete(void *memory) noexcept
 {
   std::free(memory);
 }
-void operator delete(void *memory, std::size_t) noexcept
+Q_NEVER_INLINE void operator delete(void *memory, std::size_t) noexcept
 {
   std::free(memory);
 }
