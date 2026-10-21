@@ -1207,7 +1207,8 @@ void ClientProxyTests::sealedCutoff_refreshRetainsPrefixAndExactCleanup()
     );
     QVERIFY(!f.proxy->refreshMappedInputCutoff(*seal, {31, 500 + index, 1}, point, deadline, false));
     QVERIFY(!f.proxy->inputCutoffObservation(latest));
-    f.receive({QByteArray::fromStdString(encodeInputCutoffSealedResult({mappedResult(*next, point), origin->request}))}
+    f.receive(
+        {QByteArray::fromStdString(encodeInputCutoffSealedResult({mappedResult(*next, point), origin->request}))}
     );
     observation = f.proxy->inputCutoffObservation(*next);
     QVERIFY(observation && observation->live() && observation->seal() && observation->seal()->live());
@@ -1296,6 +1297,8 @@ void ClientProxyTests::batchedCutoff_preservesEveryReceiptAndExactCleanup()
   if (!traceBuilt)
     QSKIP("Input cutoff is disabled in this build");
   TraceFixture f;
+  auto notifications = std::make_shared<unsigned>(0);
+  f.proxy->setInputMappingNotifier([notifications] { ++*notifications; });
   f.negotiateCutoff(true, true, true);
   const auto origin = f.proxy->startSealedInputCutoff(
       {31, 401, 3}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17, {-10, 27},
@@ -1306,6 +1309,7 @@ void ClientProxyTests::batchedCutoff_preservesEveryReceiptAndExactCleanup()
   f.receive({QByteArray::fromStdString(encodeInputCutoffSealedResult({mappedResult(*origin), origin->request}))});
   const auto seal = f.proxy->inputCutoffSeal(*origin);
   QVERIFY(seal && seal->live());
+  QCOMPARE(*notifications, 1u);
   std::vector<InputCutoffObservation> previous;
   std::vector<InputCutoffBinding> latest;
   for (unsigned group = 0; group < 4; ++group) {
@@ -1337,8 +1341,10 @@ void ClientProxyTests::batchedCutoff_preservesEveryReceiptAndExactCleanup()
     QVERIFY(!f.proxy->startMappedInputBatch(*seal, items)); // No unresolved replacement.
     f.cutoffReceipt(bindings->back(), InputCutoffState::BackendObserved);
     QVERIFY(!f.proxy->inputCutoffObservation(bindings->front())); // PONG is insufficient.
+    QCOMPARE(*notifications, group + 1);                          // Only exact mapped receipts wake the consumer.
     const auto packet = QByteArray::fromStdString(encodeInputCutoffBatchResult(result));
     f.receive({packet, packet}); // Identical duplicate cannot replace any point.
+    QCOMPARE(*notifications, group + 2);
     previous.clear();
     for (std::size_t index = 0; index < items.size(); ++index) {
       const auto observed = f.proxy->inputCutoffObservation((*bindings)[index]);
@@ -1355,6 +1361,7 @@ void ClientProxyTests::batchedCutoff_preservesEveryReceiptAndExactCleanup()
     QVERIFY(stillLive && stillLive->live());
     f.proxy->m_cutoff->deadline = InputCutoffClock::now();
     f.receive({packet});
+    QCOMPARE(*notifications, group + 2);
     QVERIFY(f.proxy->inputCutoffObservation(bindings->back()).has_value());
     QVERIFY(previous.back().live());
     QVERIFY(seal->live());
@@ -1371,12 +1378,46 @@ void ClientProxyTests::batchedCutoff_preservesEveryReceiptAndExactCleanup()
   QCOMPARE(f.proxy->inputCutoffState(latest.front()), InputCutoffState::Resumed);
 }
 
+void ClientProxyTests::mappedCutoff_notificationMayRetireProxy()
+{
+  if (!traceBuilt)
+    QSKIP("Input cutoff is disabled in this build");
+  for (bool batch : {false, true}) {
+    TraceFixture f;
+    f.negotiateCutoff(true, true, true);
+    const auto origin = f.proxy->startSealedInputCutoff(
+        {31, 401, 3}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17, {-10, 27},
+        InputCutoffClock::now() + std::chrono::milliseconds(250)
+    );
+    QVERIFY(origin);
+    auto packet = QByteArray::fromStdString(encodeInputCutoffSealedResult({mappedResult(*origin), origin->request}));
+    if (batch) {
+      f.receive({packet});
+      const auto seal = f.proxy->inputCutoffSeal(*origin);
+      QVERIFY(seal && seal->live());
+      const std::vector<InputCutoffMapItem> items{
+          {{31, 402, 1}, {40, 50}, InputCutoffClock::now() + std::chrono::milliseconds(200), true}
+      };
+      const auto bindings = f.proxy->startMappedInputBatch(*seal, items);
+      QVERIFY(bindings && bindings->size() == 1);
+      packet = QByteArray::fromStdString(
+          encodeInputCutoffBatchResult({origin->request, {mappedResult(bindings->front(), items.front().point)}})
+      );
+    }
+    f.proxy->setInputMappingNotifier([&] { f.proxy.reset(); });
+    f.receive({packet});
+    QVERIFY(!f.proxy);
+  }
+}
+
 void ClientProxyTests::batchedCutoff_rejectsPartialChangedAndLateResults()
 {
   if (!traceBuilt)
     QSKIP("Input cutoff is disabled in this build");
   for (int invalid = 0; invalid < 8; ++invalid) {
     TraceFixture f;
+    auto notifications = std::make_shared<unsigned>(0);
+    f.proxy->setInputMappingNotifier([notifications] { ++*notifications; });
     f.negotiateCutoff(true, true, true);
     const auto origin = f.proxy->startSealedInputCutoff(
         {31, 401, 3}, {{11, 12}, 13, 14, 15, 16, ForwardingScope::All}, 17, {-10, 27},
@@ -1421,6 +1462,7 @@ void ClientProxyTests::batchedCutoff_rejectsPartialChangedAndLateResults()
     QVERIFY(!f.proxy->inputCutoffObservation(bindings->front()));
     QVERIFY(!f.proxy->inputCutoffObservation(bindings->back()));
     QVERIFY(!seal->live());
+    QCOMPARE(*notifications, invalid == 5 ? 2u : 1u);
   }
   TraceFixture old;
   old.negotiateCutoff(true, true);

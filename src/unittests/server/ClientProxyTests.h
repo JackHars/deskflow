@@ -47,6 +47,7 @@ private Q_SLOTS:
   void sealedCutoff_rejectsSubstitutionAndRevokesLifetime();
   void batchedCutoff_preservesEveryReceiptAndExactCleanup();
   void batchedCutoff_rejectsPartialChangedAndLateResults();
+  void mappedCutoff_notificationMayRetireProxy();
   void preparation_negotiatesPromotesAndWaitsForCleanup();
   void preparation_boundsCancellationAndPreservesAttemptIdentity();
 

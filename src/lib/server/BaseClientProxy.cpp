@@ -22,6 +22,20 @@ void BaseClientProxy::setJumpCursorPos(int32_t x, int32_t y)
   m_y = y;
 }
 
+void BaseClientProxy::setInputMappingNotifier(std::function<void()> notifier) noexcept
+{
+  m_inputMappingNotifier = std::move(notifier);
+}
+
+void BaseClientProxy::notifyInputMappingProgress() const
+{
+  // The caller must finish publishing state before this call and must not
+  // access the proxy afterwards: a test/consumer callback may retire it.
+  const auto callback = m_inputMappingNotifier;
+  if (callback)
+    callback();
+}
+
 void BaseClientProxy::getJumpCursorPos(int32_t &x, int32_t &y) const
 {
   x = m_x;

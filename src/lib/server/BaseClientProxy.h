@@ -11,6 +11,7 @@
 
 #include "deskflow/IClient.h"
 
+#include <functional>
 #include <optional>
 
 namespace deskflow {
@@ -35,6 +36,10 @@ public:
   Save the position of the cursor when jumping from client.
   */
   void setJumpCursorPos(int32_t x, int32_t y);
+
+  // Core-thread scheduling only. A validated map completion can wake the
+  // original-input consumer, but never authorizes delivery by itself.
+  void setInputMappingNotifier(std::function<void()> notifier) noexcept;
 
   //@}
   //! @name accessors
@@ -206,7 +211,11 @@ public:
   std::string getName() const override;
   virtual deskflow::IStream *getStream() const = 0;
 
+protected:
+  void notifyInputMappingProgress() const;
+
 private:
+  std::function<void()> m_inputMappingNotifier;
   std::string m_name;
   int32_t m_x = 0;
   int32_t m_y = 0;

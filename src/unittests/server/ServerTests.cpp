@@ -326,6 +326,11 @@ public:
   }
   bool mayLeave = true;
 
+  void mappingProgress()
+  {
+    notifyInputMappingProgress();
+  }
+
 private:
   std::shared_ptr<WireCapture> m_capture;
 };
@@ -1185,8 +1190,7 @@ void ServerTests::originalDispatch_progressWakesWithoutTimer()
   QVERIFY(f.dispatcher->committed.empty());
   QCOMPARE(f.server->m_originalPending.front().preparationDeadline, deadline);
   f.dispatcher->waiting = false;
-  QVERIFY(bool(f.dispatcher->progressNotifier));
-  f.dispatcher->progressNotifier();
+  f.firstClient->mappingProgress(); // The Linux receipt shares the bounded wake.
   // A completion does not run Server work on the producer's thread.
   QVERIFY(f.dispatcher->committed.empty());
   QCOMPARE(f.events.queued.size(), std::size_t(1));

@@ -989,8 +989,11 @@ void ClientProxy::receiveMappedInputCutoffResult(const InputCutoffMappedResult &
   }
   if (m_cutoff->state == InputCutoffState::Denied || (m_cutoff->mapped && m_cutoff->mapped != result))
     throw BadClientException("Mapped cutoff changed or revived its observation");
+  const bool first = !m_cutoff->mapped;
   m_cutoff->mapped = result;
   m_cutoff->state = InputCutoffState::DrainObserved;
+  if (first)
+    notifyInputMappingProgress();
 }
 
 void ClientProxy::receiveSealedInputCutoffResult(const InputCutoffSealedResult &result)
@@ -1013,12 +1016,15 @@ void ClientProxy::receiveSealedInputCutoffResult(const InputCutoffSealedResult &
   if (m_cutoff->state == InputCutoffState::Denied || m_cutoff->sealRevoked->load(std::memory_order_acquire) ||
       (m_cutoff->mapped && m_cutoff->mapped != mapped))
     throw BadClientException("Sealed cutoff changed or revived its observation");
+  const bool first = !m_cutoff->mapped;
   m_cutoff->mapped = mapped;
   m_cutoff->sealIssued = true;
   m_cutoff->state = InputCutoffState::DrainObserved;
   if (m_preparation && m_preparation->promotion == mapped.binding &&
       m_preparation->state->load() == InputPreparationState::Promoting)
     m_preparation->state->store(InputPreparationState::Sealed, std::memory_order_release);
+  if (first)
+    notifyInputMappingProgress();
 }
 
 void ClientProxy::receiveInputCutoffBatchResult(const InputCutoffBatchResult &result)
@@ -1058,6 +1064,7 @@ void ClientProxy::receiveInputCutoffBatchResult(const InputCutoffBatchResult &re
   for (std::size_t index = 0; index < result.items.size(); ++index)
     m_cutoff->batch[index].mapped = result.items[index];
   m_cutoff->state = InputCutoffState::DrainObserved;
+  notifyInputMappingProgress();
 }
 
 std::optional<InputCutoffObservation> ClientProxy::inputCutoffObservation(const InputCutoffBinding &binding)

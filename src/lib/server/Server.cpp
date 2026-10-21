@@ -457,6 +457,12 @@ void Server::adoptClient(BaseClientProxy *client)
     closeClient(client, kMsgEBusy);
     return;
   }
+#if defined(BUILD_WINDOWSHARE) && BUILD_WINDOWSHARE
+  client->setInputMappingNotifier([weak = std::weak_ptr(m_originalWake)] {
+    if (const auto state = weak.lock())
+      state->notify();
+  });
+#endif
   LOG_DEBUG("client \"%s\" has connected", getName(client).c_str());
   ipcSendConnectionState(deskflow::core::ConnectionState::Connected);
   sendConnectedClientsIpc();
@@ -1901,10 +1907,13 @@ bool Server::setOriginalInputDispatcher(std::shared_ptr<OriginalInputDispatcher>
       m_originalWake->pending.store(false, std::memory_order_release);
       drainOriginalInput();
     });
-    dispatcher->setProgressNotifier([weak = std::weak_ptr(m_originalWake)] {
+    const auto notify = [weak = std::weak_ptr(m_originalWake)] {
       if (const auto state = weak.lock())
         state->notify();
-    });
+    };
+    dispatcher->setProgressNotifier(notify);
+    for (const auto &[name, client] : m_clients)
+      client->setInputMappingNotifier(notify);
   } catch (...) {
     if (m_originalWake) {
       m_originalWake->close();
