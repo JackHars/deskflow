@@ -23,7 +23,12 @@ int localInputCodeAdmissionProbe(LocalInputSocketPair pair)
       {"nativeInputHooks", false}
   };
   QString error;
-  const auto session = LocalInputCoreSession::start(std::move(pair), {"--core-input-probe"}, &error);
+  // This explicit diagnostic must retain the child's reason for startup,
+  // channel or shutdown failure. Forward directly, without an output queue
+  // that could block the private heartbeat behind undrained diagnostic data.
+  LocalInputCompanionLimits limits;
+  limits.forwardStandardError = true;
+  const auto session = LocalInputCoreSession::start(std::move(pair), {"--core-input-probe"}, &error, limits);
   bool success = false;
   if (session) {
     result["privateInputHandshake"] = session->channel()->authenticated();
@@ -52,6 +57,10 @@ int localInputCodeAdmissionProbe(LocalInputSocketPair pair)
     result["admissionElapsedMs"] = admission.elapsed();
     const bool stopped = session->stop();
     const auto exit = session->exitResult();
+    if (exit) {
+      result["companionExitCode"] = exit->exitCode;
+      result["companionNormalExit"] = exit->normalExit;
+    }
     const bool clean = stopped && exit && exit->normalExit && exit->exitCode == 0;
     result["companionStopped"] = clean;
     success = success && clean;

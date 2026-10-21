@@ -2611,6 +2611,20 @@ int main(int argc, char **argv)
 #endif
 #ifdef WINDOWSHARE_LOCAL_INPUT
     auto inputBootstrap = LocalInputHostBootstrap::inspect(argc, argv);
+#ifdef __APPLE__
+    // The inherited Host is hidden before it has an export, including during
+    // the input-disabled admission probe. Keep its private-channel timers
+    // responsive from startup through teardown, not only while sharing a
+    // window. This token grants no input authority and allows normal sleep.
+    std::unique_ptr<LocalInputActivity> inputActivity;
+    if (inputBootstrap.inherited()) {
+      inputActivity = std::make_unique<LocalInputActivity>();
+      lifecycleDiagnostic(
+          "Host input", "input.process-activity", "observed",
+          "Requested interactive scheduling for the inherited private session", {{"active", inputActivity->active()}}
+      );
+    }
+#endif
 #endif
     ViewerApplication app(argc, argv);
     // Declared before coreInput and Bridge: its callbacks remain valid through
