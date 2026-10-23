@@ -1,6 +1,139 @@
 # Seamless Windows work state
 
-## Current collector-thread checkpoint — 2026-10-20
+## Resumed verification — 2026-10-23
+
+Current source is `a17067ac776f74ce514dabdaa4cb6d7b2843d5ed`: the startup
+activity fix below plus a test-only allocation override boundary for GCC 15.
+`Q_NEVER_INLINE` keeps the matched malloc/free replacements opaque to optimized
+callers without suppressing warnings or removing the allocation-failure check.
+All 18 selected Ubuntu suites and packaging checks pass in
+`build/startup-qualified-ilanoah3/`. Hosted source run 39639307808 and all
+foundation jobs in run 39639307856 pass.
+
+The interrupted local Mac build completed, but its 23-suite run failed evidence
+serialization, private bootstrap and companion timing. The original logs remain
+in `mac-app-tests.log`; the isolated retry is `build/resumed-mac-check-l_vi2xi2/`.
+All three failed suites pass that isolated retry with the same binaries and
+unchanged deadlines (1.05 s, 17.72 s and 11.01 s respectively). This covers all
+23 selected Mac suites, but does not erase the earlier scheduling failures.
+No new candidate has completed a full live input run. The regular Mac Deskflow
+session is running again and must not compete with a disposable capture session.
+
+The signed package and all 77 unchanged Mac dependencies verify. Two packaged
+input-disabled probes pass in 21.566 s and 11.629 s with exact code admission,
+Host startup activity active, and clean exit. Logs are `resumed-admission*`
+in the current validation directory. Artifact hashes are at the top of
+`TESTING.md`. These are startup checks, not live input acceptance.
+
+The user explicitly declined pausing the active regular Deskflow connection on
+October 23: **Keep the regular connection running**. Leave it running. No
+competing capture test was launched, and no physical test was requested or
+launched. Continue input-free work; obtain authorization to resolve the capture
+conflict before a future live run. Exact scroll timestamp preservation and
+held-key repeat remain unresolved, as do the three-run and physical gates.
+
+## Hidden-Host startup change — 2026-10-21
+
+Runtime `1e9271ddb` gives an inherited Mac Host its scoped interactive activity
+before GUI startup and retains it through teardown, including the input-disabled
+admission probe. Previously only Core's private session and the Host's exports
+owned tokens, leaving the hidden pre-export Host unprotected. Normal sleep is
+still allowed; this grants no input authority or longer deadline. The explicit
+code-admission probe now forwards child stderr directly and reports its exact
+exit status instead of discarding the diagnostic evidence. Four focused suites
+pass in `build/host-startup-activity-2efn6cn1/`.
+
+Preceding `4061abb31` live attempt `dashboard-replay-y7zhbguh` fails before
+sharing during its second code-admission probe. The first input-disabled probe
+passes; the second loses the companion heartbeat after 2.545 seconds without a
+read, within a 35.58-second overall probe. Exact-library admission stays false;
+owned cleanup and ordinary settings preservation pass. No scrolling, source
+export or full-session pass occurred. The activity gap is a code finding,
+not yet a proven explanation for every earlier startup failure.
+
+## Earlier peer-map wake checkpoint — 2026-10-21
+
+Runtime `4061abb3148cee4a1251558e9d21c5d0dee2966b` also wakes Core after
+validated sealed, single and batched peer-mapping receipts. Earlier Pongs,
+invalid/late mappings and identical duplicates do not wake it. State is
+published before notification; callbacks may retire a proxy safely. Existing
+and newly connected clients use the same bounded wake, without granting input
+authority or extending any deadline. Focused Server, ClientProxy and
+coordinator suites pass in `build/mapped-core-wake-0teq87p7/`. All 22 selected
+Mac and 17 Ubuntu suites, package/signing and unchanged-library checks pass in
+`build/peer-wake-validation-j7_nh9yl/`. Exact hashes are at the top of `TESTING.md`.
+Hosted source run 39637249557 passes; foundation run 39637249597 was superseded and cancelled.
+
+## Earlier private-path wake checkpoint — 2026-10-21
+
+Runtime `6f46ce690` wakes the Core consumer on private preparation, exact
+mapped-dispatch acknowledgement and release progress. The wake holds no input
+or authority, is bounded to one queued notification, retires dropped messages
+and cannot address a later Server at a reused address. Existing maintenance
+checks and absolute deadlines remain. The focused Mac suites pass: 60 Server
+cases and 34 coordinator cases in `build/core-progress-wake-9li2hhwi/`.
+Tests cover readiness without a timer, no authority from a wake, unchanged
+preparation deadlines, duplicate/dropped notifications, the dispatch/destruction
+race and a retained producer callback after Server destruction. The complete
+candidate passes all 22 Mac and 17 Ubuntu suites plus package/signing checks in
+`build/core-wake-validation-9ea_q2lt/`; it has no qualifying live result yet.
+
+Its `dashboard-replay-wlfk3mxg` completes 120 seconds Active and all three
+30-second recorders, delivers all 1,251 functional receipts in exact raw order
+(including 1,200 scrolls at 119.75 Hz), and restores normally with zero held
+input and complete owned cleanup. All 21 queue histories validate. It still
+**fails strict acceptance**: 29/1,200 scroll timestamps change; repeat is not
+exercised by this diagnostic profile. Exact capture-to-AppKit delivery is median
+25.26 ms/p95 66.57 ms/max 128.60 ms (not display latency). All 29 changes cluster
+in the early burst with delivery above 100 ms. The owned return stack observer
+runs after restoration starts and sees normal idle operation; it does not
+reproduce or explain the preceding Host shutdown stall.
+
+Preceding runtime `f13684d349570d08b30a1a0343c648394e45f34b` wakes the private
+coordinator on the exact validated dispatch Pong, rather than waiting for its
+4 ms maintenance timer. Earlier/unrelated/malformed Pongs cannot notify it;
+callback close/delete/throw tests pass. All 22 selected Mac suites, 17 Ubuntu
+suites, package and signing/dependency checks pass in
+`build/mapped-wake-validation-jjbp47u2/`. Hosted source run 39501010497 and
+foundation run 39501010547 pass.
+
+Its actual-desktop `dashboard-replay-pk6fcntt` runs for 120 seconds and arms
+all three 30-second recorders, but **fails**. The 1,200-event scroll burst runs
+at 119.25 Hz; native receipts combine several events and fail strict raw order,
+multiplicity and timestamps. Both exact latency analyzers reject the mismatched
+join instead of producing misleading latency percentiles. Mapping RTT is
+median 9.56 ms/p95 19.13 ms/max 145.08 ms; this is neither full input latency nor
+display latency. Native pending overflow is zero and all 21 queue histories
+validate. Bounded snapshot-history eviction counters are not journal loss.
+
+Normal source return fails a position read with AX error -25204 after the frame
+writes succeed. The recovery helper subsequently restores the source and both
+machines finish owned cleanup with zero held keys/buttons. The session remains
+failed, including a companion-exit failure; recovery success does not qualify
+normal shutdown. Do not reuse the older runtime's four-case recovery matrix.
+
+Repeat remains unresolved. Owned PID, source-state, no-observer, cross-process
+and HID interception controls still miss repeat at AppKit. The corrected later
+annotated interception control in `build/repeat-annotated-owned-l8q4v77s/`
+receives six events with exact timestamps. Retaining the original pre-intercept
+fields in `build/repeat-original-late-capture-2_xbnqy5/` also delivers both repeat
+flags and all original key fields, but two timestamps change under build load.
+This is diagnostic evidence, not a production fix: shortcut behavior is not
+qualified. The first modifier-chord Carbon control is inconclusive. The corrected
+unmodified F18 control (`repeat-shortcut-control-ifk9e79i`) activates its owned
+shortcut. Paired `repeat-shortcut-stages-r9se6z0x` runs prove early HID capture
+blocks it, while later annotated capture lets it activate before interception.
+Therefore moving keyboard capture later is not a safe repeat fix. IOHID driver posting with early capture in
+`build/repeat-hid-driver-9r2bo0h4/` still misses both repeats; it does not establish
+physical hardware key-state behavior. No global preference or production
+capture-stage change was made.
+
+No attended test was launched. Strict repeat/scroll/timestamp preservation,
+normal restoration, three qualifying same-artifact full runs, H03–H12 physical
+acceptance and full queue certification remain open. Ask immediately before
+an attended test; do not request one while unattended qualification still fails.
+
+## Earlier collector-thread checkpoint — 2026-10-20
 
 Runtime `ccebffffeee68aefdf07d6ce02da4f1f22ad3e51` moves diagnostic control
 reads, serialization and output off the application's input thread. One

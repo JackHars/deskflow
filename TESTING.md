@@ -4,7 +4,159 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
-## Current collector-thread checkpoint — 2026-10-20
+## Current startup and scheduling candidate — 2026-10-23
+
+Runtime `a17067ac776f74ce514dabdaa4cb6d7b2843d5ed` includes:
+
+- `f13684d34`: coordinator wake on the exact private dispatch acknowledgement.
+- `6f46ce690`: bounded Core wake on private preparation and release progress.
+- `4061abb31`: Core wake on validated peer-mapping receipts, without waiting
+  for the maintenance timer. Duplicate, malformed and late results grant nothing.
+- `1e9271ddb`: inherited Mac Host activity protection from startup through
+  teardown, including the input-disabled admission probe. Child diagnostic
+  stderr and exit status are retained. Normal sleep remains allowed.
+- `a17067ac7`: keep the test-only matched allocation replacements opaque to
+  optimized GCC callers. No warning suppression or allocation-check removal.
+
+All 18 selected Ubuntu suites and package checks pass in `build/startup-qualified-ilanoah3/`.
+The Mac build succeeds and all 23 selected suites have passing evidence, with
+three timing failures in the initial run retained. Evidence serialization,
+private bootstrap and companion checks pass the isolated same-binary retry in
+`build/resumed-mac-check-l_vi2xi2/`, with unchanged deadlines. The retry does not
+prove scheduling reliability under every load. `mac-test-results-initial.json`
+and `mac-app-tests.log` preserve the first failures; `mac-test-results.json`
+links both attempts. Hosted source run 39639307808 and all foundation jobs in
+39639307856 pass.
+
+The signed Mac package verifies with all 77 dependency hashes unchanged. Two
+fresh input-disabled packaged startup checks pass on October 23, including
+exact library admission and clean companion exit. Total times are
+21.566 s and 11.629 s; their logs show the inherited Host activity
+token active before the handshake. These probes install no native input hooks
+and do not qualify live input or establish the cause of every previous stall.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `7ed28a95c906c8c960753a686e67a3e98e56a80d8c0323cf363e51dceae8ebb1` |
+| Ubuntu archive | `9f0bc54f0769d1ce4db34a9186ad051c2b36a125ada77d69ac7809a801e05a00` |
+| Source archive | `fb15edf15e9e556afd0af4150e84154e5beb17a0d455ebabb01036815898da32` |
+| Disposable source fixture | `366f3bbf1b484b37d6019f4f7e26550a1e2cadda1192e094f63db3f07accc8af` |
+
+No full live input run has qualified these artifacts. Earlier 4061abb31 run
+`dashboard-replay-y7zhbguh` fails its second admission probe before sharing;
+the first passes. The failure retains a 2.545-second heartbeat gap and failed
+code admission, with complete owned cleanup and ordinary settings preserved.
+
+On October 23, the user explicitly chose **Keep the regular connection running**.
+The ordinary Mac Deskflow server is connected to jack. Do not stop it or launch
+a competing capture/input session. The proposed unattended two-minute run was
+not launched. A future live run must first resolve that conflict with user
+authorization; any attended physical test still requires permission immediately
+before launch. Strict scroll timestamps, held-repeat delivery, three complete
+same-artifact qualifying runs, H03–H12 physical acceptance and queue certification
+remain open. No acceptance rule or deadline has been relaxed.
+
+## Earlier peer-map notification candidate — 2026-10-21
+
+Runtime `4061abb3148cee4a1251558e9d21c5d0dee2966b` is pushed. It adds a bounded Core wake after
+the exact validated peer-mapping result. Entire groups are validated before
+publication; malformed/late results, an earlier Pong and identical duplicates
+cannot trigger an input wake. Proxy-retirement callbacks and timer-free Core
+completion are covered. No input field, authority, queue limit or deadline
+changes. Focused regressions pass in `build/mapped-core-wake-0teq87p7/`.
+
+All 22 selected Mac suites and 17 Ubuntu suites pass in `build/peer-wake-validation-j7_nh9yl/`.
+Both packages verify, and all 77 Mac dependency hashes remain unchanged.
+Hosted source run 39637249557 passes; foundation run 39637249597 was superseded and cancelled.
+The unchanged test harness remains bound by `build/controller-harness-5gngwzmo/`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `4073b7dbe84d9c11fb72bd25c0a6072e5266f437d8572502d1600a4e68df5012` |
+| Ubuntu archive | `d618bcc11ab33a74a39571fae5d7e6bb0ada6654e784e281a15c18eed50a9dd7` |
+| Source archive | `39c1a5ae85e574227426b6d779cadb59dcf1b95fc38b8715b66b8d322d9f352c` |
+| Disposable source fixture | `366f3bbf1b484b37d6019f4f7e26550a1e2cadda1192e094f63db3f07accc8af` |
+
+## Earlier private-path notification candidate — 2026-10-21
+
+Runtime `6f46ce6906553641b947ee8b7d9d5228b7462149` is pushed. It removes a
+Core polling delay after private preparation, exact dispatch acknowledgement
+and release. The notification conveys scheduling only. At most one is queued;
+dropped notifications, a completion arriving during dispatch, stale callbacks
+and Server destruction retain their exact lifetimes. No input field, authority
+check, capacity or deadline changes. The focused 60-case Server and 34-case
+coordinator suites pass in `build/core-progress-wake-9li2hhwi/`.
+
+All 22 selected Mac suites and 17 Ubuntu suites pass in
+`build/core-wake-validation-9ea_q2lt/`. Both packages pass dependency/package
+verification; the Mac package is signed and retains the same 77 verified
+libraries. The unchanged harness is bound by `build/controller-harness-5gngwzmo/`
+(216 Ubuntu cases; 215 Mac cases plus one Linux-only skip).
+
+| Artifact | SHA-256 |
+| --- | --- |
+| Mac signed archive | `a86db87404e520e68af038f13c5de8f83fb306a14cda5697d2f03e1c143186c4` |
+| Ubuntu archive | `4d6b64df4b9a79fae742310b5a4c846272687cc2ef18bd9be3f23f96b57054c5` |
+| Source archive | `6b88bfc3472e2c81bf539411b3605084a29eb3d0aa07fffddd8dce51379ab7c7` |
+| Disposable source fixture | `366f3bbf1b484b37d6019f4f7e26550a1e2cadda1192e094f63db3f07accc8af` |
+
+The `6f46ce690` live run `dashboard-replay-wlfk3mxg` lasts 120 seconds and
+completes all three 30-second recorders. All 1,251 functional receipts match
+exact raw fields and order, including all 1,200 scroll events at 119.75 Hz.
+Normal restoration, zero held input, owned cleanup and all 21 queue histories
+pass. **Strict acceptance still fails:** 29 scroll timestamps change, all in
+the early burst above 100 ms delivery time; this profile does not exercise
+repeat. Exact capture-to-AppKit latency is median 25.26 ms/p95 66.57 ms/max
+128.60 ms, not display latency. The owned return stack sample observes normal
+idle operation after successful restoration and does not reproduce the earlier
+stall. Hosted source run 39634416930 passes; foundation run 39634417089 was
+cancelled by the newer revision and is not a pass.
+
+The immediately preceding `f13684d34` candidate also passes 22 Mac/17 Ubuntu
+suites in `build/mapped-wake-validation-jjbp47u2/`, plus hosted source run
+39501010497 and foundation run 39501010547. It wakes the Qt coordinator only
+on the exact validated dispatch Pong. Earlier, malformed and unrelated Pongs
+do not notify it; callback close/delete/throw regressions pass.
+
+Its live `dashboard-replay-pk6fcntt` completes 120 seconds Active and all three
+recordings but fails exact scroll delivery and normal restoration. The
+1,200-event burst is 119.25 Hz. Native scroll combination changes raw order and
+multiplicity, and timestamps also change. Both strict latency analyzers reject
+the mismatched join; no valid full capture-to-AppKit latency result is claimed.
+Mapping RTT alone is median 9.56/p95 19.13/max 145.08 ms, with Ubuntu mapping
+work median 5.79/p95 13.51/max 30.58 ms. This is not display latency. All 21
+queue histories validate; native pending overflow is zero.
+
+Return frame writes succeed, but the immediate position read fails with
+`kAXErrorCannotComplete` (-25204). Normal restoration stays failed and retains
+the journal. A later recovery helper restores the source with zero held input
+and clean owned teardown. The companion-exit/heartbeat failure remains in the
+session result; recovery is not a normal-shutdown pass.
+
+The repeat boundary controls are preserved in:
+
+- `build/repeat-annotated-owned-l8q4v77s/`: corrected owned later-stage capture
+  observes all six events and exact timestamps, including both repeats.
+- `build/repeat-original-late-capture-2_xbnqy5/`: copying the original event
+  fields through that later boundary also preserves repeat/key/flag fields;
+  two timestamps change under concurrent build load. Early HID interception
+  still loses both repeats.
+- `build/repeat-owned-shortcut-6mr_xlkt/`: the Carbon shortcut never activates
+  even in the unfiltered control, so shortcut safety is **inconclusive**.
+- `build/repeat-shortcut-control-ifk9e79i/` and
+  `build/repeat-shortcut-stages-r9se6z0x/`: corrected unmodified F18 control
+  activates an owned shortcut. HID capture blocks it; annotated interception
+  lets it activate before interception. Moving capture later is therefore
+  unsafe as a production repeat fix.
+- `build/repeat-hid-driver-9r2bo0h4/`: owned IOHID posting through the early
+  filter still loses repeat; it does not reproduce physical hardware state.
+
+None changes the production capture stage, global preferences or acceptance
+rules. Repeat, timestamp/raw delivery, reliable normal restoration, three full
+same-artifact qualified runs, H03–H12 and upstream queue certification remain
+open. No attended test has been launched.
+
+## Earlier collector-thread checkpoint — 2026-10-20
 
 Runtime `ccebffffeee68aefdf07d6ce02da4f1f22ad3e51` moves evidence control reads,
 serialization and output onto one dedicated collector thread. Its consumer

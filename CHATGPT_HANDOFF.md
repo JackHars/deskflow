@@ -4,54 +4,47 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
-Current status (2026-10-20): pushed runtime `ccebffffe` moves diagnostic file
-work off the application's input thread onto one collector using the existing
-bounded journal. All 22 selected Mac suites, 17 Ubuntu suites and package/signing
-checks pass, as do focused memory/undefined-behavior sanitizer checks.
-Its full package results are recorded at the top of `TESTING.md`;
-do not transfer prior live results to changed binaries. The bound coordinator
-harness `81bb308d2` has 216 cases: Mac passes 215 with one Linux-only skip;
-Ubuntu passes all 216. Recovery observation waits for stable live publications
-within its existing deadline; uncertain snapshots confer no authority.
-A closed test TCP connection no longer falsely blocks
-the next launch during TIME_WAIT; a live listener still fails. The native
-runtime and packages are unchanged. Failed commands retain both output streams, including structured
-startup errors that stderr shutdown logs previously hid.
-Private channel v10 now measures actual native handling separately from process
-and acknowledgement waiting, preventing that fixed delay from being charged
-as work for every record when sizing a batch. Exact ordered dispatch, per-event
-receipts and authority checks remain required. The preparation cleanup witness
-survives unrelated forwarding changes while still rejecting real invalidation.
-Placement keeps its original absolute two-second deadline; input/environment
-observations retain 250 ms. Terminal Server dispatch failures now immediately
-stop an Active test, and journal continuations no longer repeat control-file
-reads. All six hosted jobs pass on runtime `ccebffffe` (run `39489639329`);
-actual-desktop input qualification remains separate. Current-package
-viewer, Host, Core and holding-helper termination diagnostics all pass, restoring
-the source in 0.26–1.22 seconds with owned cleanup. This is scoped recovery
-evidence, not a full input, sleep/wake or physical acceptance pass.
+Current status (2026-10-23): runtime `a17067ac7` is pushed. It contains the
+exact-ack and Core/peer-map wake fixes, hidden Host activity protection from
+startup through teardown, retained child diagnostics for the input-disabled
+admission probe, and a test-only GCC allocation-override correction.
+No input field, authority requirement, queue capacity or deadline changes.
 
-The roadmap is not finished. Earlier `dashboard-replay-rrbde301` completes a
-full two-minute actual-desktop non-repeat session with all 1,251 functional
-receipts preserving raw fields and timestamps. Later same-candidate runs retain
-failures, and that successful run cannot qualify newer binaries. An isolated
-self-targeted AppKit diagnostic reproduces the synthetic repeat gap without
-Deskflow or Qt: repeats reach the process tap but not AppKit's sendEvent handler.
-Do not waive repeat or timestamp requirements. Current artifact hashes and each
-fresh result are at the top of `TESTING.md`. Three qualified complete input runs,
-H03–H12 acceptance and full queue certification remain open. The user is away;
-disposable unattended checks are authorized, but ask immediately before any
-attended physical test.
+All 18 selected Ubuntu suites and packaging checks pass. All 23 selected Mac
+suites have passing evidence; three initial timing failures are preserved and
+pass an isolated same-binary retry with unchanged deadlines. Both hosted
+workflows pass. The signed package retains all 77 verified dependency hashes.
+Two input-disabled packaged startup probes pass with clean exits and the Host
+activity token active from startup. This is not live input acceptance.
+Current hashes and every failure are at the top of `TESTING.md`; engineering
+state is at the top of `WORK_STATE.md`. Never transfer earlier acceptance to
+changed binaries.
 
-Current-package `dashboard-replay-k14t48ax` completes the full two-minute
-session, all three recordings, all 1,200 raw/flag scroll receipts and clean
-restoration. It still fails strict input/performance: 758 scroll timestamps
-change, and capture-to-AppKit latency is median 133.77 ms/p95 308.27 ms.
-The retained stage analysis identifies substantial waiting before mapping and
-intermittent mapping round-trip delays; the input SSH socket also retransmits.
-This is not a qualified pass. The next engineering work is to reduce those
-delays while preserving the existing fields, authority, bounds and deadlines.
-Do not ask for an attended retry until three complete qualified runs pass.
+The roadmap remains incomplete. The best earlier `6f46ce690` actual-desktop
+run `dashboard-replay-wlfk3mxg` completes two minutes and all three recorders,
+with all 1,251 functional receipts in exact raw order, including 1,200 scrolls.
+Normal restoration and owned cleanup pass. It still changes 29 scroll
+timestamps; the diagnostic does not exercise repeat. A later `4061abb31`
+attempt fails admission before sharing. The current startup fix has not yet
+had a full live input run. Do not mark scroll timestamps or held repeat fixed.
+
+Owned later annotated interception allows repeats through AppKit, but a valid
+owned shortcut control proves it lets a local shortcut activate before capture.
+The early HID filter blocks that shortcut. Moving capture later is not a safe
+production fix. Do not clear repeat bits, replace repeats, rewrite timestamps,
+fabricate receipts or waive exact matching. An additional HID-manager posting
+control still observes two repeats at early capture and none at AppKit; it has
+a cold first-event timeout and is not physical/hardware-state acceptance.
+
+On October 23 the user explicitly chose **Keep the regular connection running**
+when asked about pausing regular Deskflow for an unattended test. Leave that
+active Mac–jack connection running. Do not launch competing input capture or
+silently stop the ordinary session. Input-free work remains authorized. Obtain
+user authorization to resolve the conflict before a future live run, and ask
+immediately before any attended physical test. Three qualified full runs on
+identical artifacts, H03–H12 acceptance and full queue certification remain
+open. Preserve failed logs and source/package bindings. No fixed sleeps; use
+event-driven waits and unchanged absolute deadlines.
 
 ### Earlier checkpoints
 
@@ -104,8 +97,8 @@ Prepared 2026-10-12. Read this file first, then `TESTING.md`.
 
 P1–P8 implementation is integrated, with the supported-capability limits below.
 The product is **not physically accepted**, and integration does not imply
-the runtime is reliable. The current candidate is `ccebffffe`; use its exact
-package validation in `TESTING.md` before launching.
+the runtime is reliable. Use the current candidate and its exact
+package validation at the top of `TESTING.md` before launching.
 Actual-desktop recovery has scoped successes, while startup and sustained input
 still have retained failures. Scrolling, repeat and strict timestamps remain
 unresolved. Current artifact hashes and every failed check are tracked at the
