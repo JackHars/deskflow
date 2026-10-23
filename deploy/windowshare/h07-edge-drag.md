@@ -3,8 +3,12 @@
 
 # H07: ordinary titlebar dragging in both directions
 
-Status: **NOT_RUN**. The user deferred physical testing. This procedure is for
-the next attended session; builds, fixtures and cleanup alone cannot pass it.
+Status: **NOT_RUN**. On 2026-10-23 the user prioritized Mac-to-Ubuntu transfer
+through the Mac display's top edge and put interactive drag-back last. Verify
+the outbound row and its cancellation/cleanup first; keep Return and repeated
+round trips deferred, not passed. Normal Stop/failure restoration remains
+required. Obtain fresh permission immediately before the attended session;
+builds, fixtures and cleanup alone cannot pass it.
 
 ## Freeze and configure
 
@@ -29,8 +33,10 @@ For H07, prepare a distinct attended session with these actual runtime settings:
   titlebar drag must be what creates the first export. Keep the Viewer owned by
   the real GNOME provider, with its actual private Wayland/viewport descriptors.
 - Add reciprocal links to the private Deskflow server configuration, using the
-  real test screen names, for example Mac `right = Ubuntu` and Ubuntu
-  `left = Mac`. Preserve the explicit Control+Option+Shift+Left emergency return
+  real test screen names. For the user's current arrangement, place Ubuntu
+  **above** Mac: Mac's top edge reaches Ubuntu's bottom edge. Reciprocal cursor
+  routing does not require testing the deferred window drag-back gesture.
+  Preserve the explicit Control+Option+Shift+Left emergency return
   hotkey and the separate local Stop control. Start with default edge delays
   and no corner locks, then test configured policy separately.
 - Use one independently identified disposable ordinary AppKit source and a

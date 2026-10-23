@@ -4,6 +4,15 @@ SPDX-License-Identifier: MIT
 -->
 # Deskflow Seamless Windows: cloud implementation handoff
 
+Current priority (2026-10-23): ordinary titlebar drag through the **top edge of
+the Mac display onto Ubuntu above it**. The user puts interactive drag-back to
+Mac last. Preserve automatic source restoration on Stop/failure and cancellation.
+Top-edge recognition has production code and a mapping regression; the full
+physical outbound gesture remains unverified. H04 automatically exports its
+window and disables edge links, so its passes cannot establish this behavior.
+Prepare the separate outbound H07 setup without automatic export. Keep the
+remaining input defects visible and request permission before desktop capture.
+
 Current status (2026-10-23): runtime `a17067ac7` is pushed. It contains the
 exact-ack and Core/peer-map wake fixes, hidden Host activity protection from
 startup through teardown, retained child diagnostics for the input-disabled

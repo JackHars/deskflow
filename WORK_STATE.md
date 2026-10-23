@@ -1,5 +1,27 @@
 # Seamless Windows work state
 
+## Priority change: Mac top edge to Ubuntu — 2026-10-23
+
+The user now prioritizes ordinary Mac titlebar dragging through the top of the
+Mac display onto the Ubuntu monitor above it. Interactive dragging back to the
+Mac is the last priority. Keep normal stop/failure restoration and cancellation;
+deferring the return gesture must not strand a hidden source window.
+
+Existing production code handles the Top boundary, with an explicit Server
+mapping regression. Earlier owned physical checks establish titlebar identity
+and real release; they do not prove the complete outward transfer. P5's
+outbound preparation, preview movement, release/drop, holding relocation and
+cursor transfer are connected, but physical H07 remains unrun.
+
+The latest H04 test automatically exported its source and had no edge links.
+It cannot verify this requested gesture. Next focus: a separate supervised H07
+outbound setup with Ubuntu above Mac, no automatic export, normal titlebar as
+the trigger, and stage-by-stage evidence through drop and usable remote input.
+Prioritize this path over the interactive return gesture. Keep scrolling and
+repeat defects open; no overall acceptance requirement has been waived.
+No new desktop-routing launch is authorized by this priority change; continue
+preparation and ask immediately before a physical test or pausing regular Deskflow.
+
 ## Authorized actual-desktop run — 2026-10-23
 
 The user subsequently approved **Yes, pause it and run the test**. One
