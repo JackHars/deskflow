@@ -1,5 +1,39 @@
 # Seamless Windows work state
 
+## Authorized actual-desktop run — 2026-10-23
+
+The user subsequently approved **Yes, pause it and run the test**. One
+automated attempt ran against jack's actual GNOME desktop with runtime
+`a17067ac7`: `build/dashboard-replay-4uiu2bwv/`. The normal Mac GUI's Stop
+and Start controls paused and restored the regular connection. Ubuntu's
+existing client was explicitly audited by PID and remained running,
+disconnected from the ordinary server during the test; private test ports
+were separate. No attended physical test was launched.
+
+The candidate completes 120 seconds Active and all three 30-second recorders.
+All 1,251 functional receipts preserve raw fields, flags and order, including
+1,200 scrolls at 119.86 Hz. All five non-repeat board checks pass. Normal
+restoration, owned cleanup, zero held keys/buttons, unchanged ordinary Mac
+settings and all 21 queue histories pass. Strict acceptance still fails:
+two scroll timestamps change, and this diagnostic does not exercise held-key
+repeat. The normalizer rejects the timestamp mismatch; no requirement is waived.
+
+The exact ordered scroll join shows median capture-to-AppKit latency 24.38 ms,
+p95 53.36 ms and maximum 103.00 ms. The changed records are sequences 121 and
+122, at 103.00 and 101.41 ms. Before their map request they wait 83.43 and
+75.81 ms; mapping RTT is 10.08 ms. This is input-path diagnostic timing,
+not display latency. See `scroll-stage-samples.json` and
+`scroll-capture-receipt-latency.json` in the run directory.
+
+`build/regular-connection-test-a4g3u35a/result.json` records the approval and
+successful Stop/Start actions. The first reconnection monitor had a Python
+context-manager error after Start succeeded; its original report is retained.
+An independent connection check confirms ordinary Core 38904 connected to
+jack, and the unchanged Ubuntu client 3597072 remains running. The monitor
+implementation is corrected. This single-test authorization is consumed;
+leave the restored regular connection running. No new attended retry is ready:
+exact timestamps, held repeat and the three qualifying-run gate remain open.
+
 ## Resumed verification — 2026-10-23
 
 Current source is `a17067ac776f74ce514dabdaa4cb6d7b2843d5ed`: the startup

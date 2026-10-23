@@ -15,18 +15,21 @@ suites have passing evidence; three initial timing failures are preserved and
 pass an isolated same-binary retry with unchanged deadlines. Both hosted
 workflows pass. The signed package retains all 77 verified dependency hashes.
 Two input-disabled packaged startup probes pass with clean exits and the Host
-activity token active from startup. This is not live input acceptance.
+activity token active from startup. A subsequently authorized actual-desktop
+run completes its full lifecycle but fails strict timestamp acceptance below.
 Current hashes and every failure are at the top of `TESTING.md`; engineering
 state is at the top of `WORK_STATE.md`. Never transfer earlier acceptance to
 changed binaries.
 
-The roadmap remains incomplete. The best earlier `6f46ce690` actual-desktop
-run `dashboard-replay-wlfk3mxg` completes two minutes and all three recorders,
-with all 1,251 functional receipts in exact raw order, including 1,200 scrolls.
-Normal restoration and owned cleanup pass. It still changes 29 scroll
-timestamps; the diagnostic does not exercise repeat. A later `4061abb31`
-attempt fails admission before sharing. The current startup fix has not yet
-had a full live input run. Do not mark scroll timestamps or held repeat fixed.
+The roadmap remains incomplete. Current `a17067ac7` actual-desktop run
+`dashboard-replay-4uiu2bwv` completes two minutes and all three recorders,
+with all 1,251 functional receipts in exact raw order, including 1,200 scrolls
+at 119.86 Hz. Normal restoration, owned cleanup and all 21 queue histories
+pass. Two scroll timestamps still change; the diagnostic does not exercise
+held repeat. Exact capture-to-AppKit timing is median 24.38 ms/p95 53.36 ms,
+with the two changed records taking 103.00/101.41 ms. This is not display
+latency. Earlier runtime `6f46ce690` changed 29 timestamps, and `4061abb31`
+failed admission before sharing. Do not mark timestamps or held repeat fixed.
 
 Owned later annotated interception allows repeats through AppKit, but a valid
 owned shortcut control proves it lets a local shortcut activate before capture.
@@ -36,13 +39,15 @@ fabricate receipts or waive exact matching. An additional HID-manager posting
 control still observes two repeats at early capture and none at AppKit; it has
 a cold first-event timeout and is not physical/hardware-state acceptance.
 
-On October 23 the user explicitly chose **Keep the regular connection running**
-when asked about pausing regular Deskflow for an unattended test. Leave that
-active Mac–jack connection running. Do not launch competing input capture or
-silently stop the ordinary session. Input-free work remains authorized. Obtain
-user authorization to resolve the conflict before a future live run, and ask
-immediately before any attended physical test. Three qualified full runs on
-identical artifacts, H03–H12 acceptance and full queue certification remain
+On October 23 the user initially chose **Keep the regular connection running**,
+then explicitly approved **Yes, pause it and run the test** for one automated
+attempt. That attempt is complete and the normal Mac–jack connection is
+restored. Approval and reconnection proof are in
+`build/regular-connection-test-a4g3u35a/`; its initial monitoring error is
+retained separately. This one-run authorization is consumed. Leave the regular
+connection running and obtain permission before pausing it for another run.
+Ask immediately before any attended physical test. Three qualified full runs
+on identical artifacts, H03–H12 acceptance and full queue certification remain
 open. Preserve failed logs and source/package bindings. No fixed sleeps; use
 event-driven waits and unchanged absolute deadlines.
 

@@ -4,6 +4,39 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Actual-desktop attempt after pause approval — 2026-10-23
+
+The user authorized pausing regular Deskflow for one automated test, then
+restoring it. Runtime `a17067ac7`, with the exact signed packages below,
+ran on jack's actual GNOME desktop in `build/dashboard-replay-4uiu2bwv/`.
+This is synthetic input evidence, not physical acceptance.
+
+- Full 120-second Active interval and three 30-second recorders complete.
+- All 1,251 functional receipts preserve raw fields, flags and order. The
+  1,200-event scroll burst runs at 119.86 Hz; five non-repeat board checks pass.
+- Normal source restoration, owned process cleanup, zero held input, unchanged
+  ordinary Mac settings and all 21 queue histories pass.
+- **Strict input acceptance fails:** 2/1,200 scroll timestamps change. Held
+  repeat is not exercised by this profile and remains unresolved. The raw
+  normalizer rejects the timestamp mismatch; the wrapper's diagnostic success
+  is not a complete input pass or one of the three required qualifying runs.
+
+Exact capture-to-AppKit timing is median 24.38 ms, p95 53.36 ms, maximum
+103.00 ms. The two changed timestamps belong to sequences 121/122, with
+103.00/101.41 ms total delivery and 83.43/75.81 ms before the map request.
+Both share a 10.08 ms mapping round trip. These are same-Mac monotonic
+input-path measurements, not display latency. Detailed joins are saved in
+`scroll-stage-samples.json` and `scroll-capture-receipt-latency.json`.
+
+Regular Deskflow was paused and restarted through its normal GUI controls.
+Ubuntu's ordinary client stayed running under the supported explicit-PID
+audit and reconnected after the test. The wrapper's first post-Start monitor
+failed because Python's kqueue has no context-manager protocol; the original
+failure is retained, the monitor is corrected, and a separate live connection
+check verifies restoration. Approval, actions and connection proof are in
+`build/regular-connection-test-a4g3u35a/`. No test helpers remain. The one-run
+authorization is consumed; keep the restored regular connection running.
+
 ## Current startup and scheduling candidate — 2026-10-23
 
 Runtime `a17067ac776f74ce514dabdaa4cb6d7b2843d5ed` includes:
