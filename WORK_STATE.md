@@ -1,5 +1,45 @@
 # Seamless Windows work state
 
+## Everyday pairing and Start/Stop controls — 2026-10-23
+
+The experimental Mac bundle now opens graphical controls when launched without
+arguments; explicit Core server/client/probe commands keep their original path.
+Ubuntu packages provide `bin/deskflow-seamless-controls`. Both use the persistent
+profile backend for setup creation, public pairing-file exchange, monitor choice,
+optional copied text and explicit Start/Stop. The Ubuntu-above-Mac diagram explains
+the normal top-edge drag. Paired setup fields collapse; opening controls does not
+start input. The UI says "Session started", not that a peer is connected.
+
+Closing, quitting or losing the controls closes an inherited lifetime pipe and
+requests the existing owned Core shutdown. The UI waits for completion. Startup
+refusals are visible and saved in bounded `logs/controls.log`; runtime logs and
+recovery journals remain separate. Public export uses the backend's validated
+identity. An existing ordinary Core still prevents Start; no automatic pause or
+resume was added.
+
+Mac and Ubuntu builds pass the offscreen controls lifecycle checks, 21 profile
+cases and 12 archive cases. The controls fixture exercises an owned fake backend,
+including startup refusal, output overflow, Stop, Close and Quit; it captures no
+desktop input. Five related app suites and the Core argument suite also pass on
+both platforms. Evidence: `build/session-controls-l44vpcvk/` and final changes in
+`build/session-controls-final-mmf6v_n5/`, including the frozen source overlay and
+Ubuntu build/package reports. These packages are development candidates, not a
+qualified native input release.
+
+Both development packages verify; the Mac bundle has a valid signature and
+77 exact dependency records, with Core still its bundle main. Final hashes and
+source-overlay limitations are recorded in `TESTING.md`.
+
+Next: support the newly published Ubuntu Mutter build, then improve persistent
+setup/upgrade handling and outward drag/input.
+Base commit `532eea437` source CI passes, but foundation run `40043623182` fails
+the GNOME sender prerequisite with newly installed Mutter `50.1-0ubuntu2.5`.
+Its other five jobs pass. Keep the build allowlist closed until the new source,
+builder provenance, exact modules and native fixture are reviewed.
+Held repeat, scroll timestamps, native queue limits and physical acceptance
+remain open. Interactive drag-back remains last. The regular session was left
+running; no native capture or desktop extension change occurred.
+
 ## Persistent top-edge session foundation — 2026-10-23
 
 `deploy/windowshare/seamless-profile.py` now creates and pairs isolated persistent

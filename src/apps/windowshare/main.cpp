@@ -14,6 +14,9 @@
 #endif
 #include "NativeHost.h"
 #include "Transport.h"
+#ifndef WINDOWSHARE_BRIDGE_TEST
+#include "SessionControls.h"
+#endif
 #include "Viewer.h"
 #include "WindowDragPreviewController.h"
 #include "WindowDragPreviewProtocol.h"
@@ -2640,7 +2643,8 @@ int main(int argc, char **argv)
         "Experimental per-window sharing. Separate from the working Deskflow installation."
     );
     parser.addOptions(
-        {{"enable-seamless", "Explicitly enable experimental window sharing."},
+        {{"session-controls", "Open persistent pairing and Start/Stop controls without starting input."},
+         {"enable-seamless", "Explicitly enable experimental window sharing."},
          {"holding-display", "Enable the experimental private virtual holding display on the Mac."},
          {"share-clipboard-text",
           "Share new plain-text clipboard changes only for the focused exported window; both peers must opt in."},
@@ -2691,6 +2695,16 @@ int main(int argc, char **argv)
 #ifdef WINDOWSHARE_LOCAL_INPUT
     inputBootstrap.validateOptions(parser.optionNames());
 #endif
+    if (parser.isSet("session-controls")) {
+      require(argc == 2 && app.arguments().at(1) == "--session-controls", "Use --session-controls alone");
+#ifdef WINDOWSHARE_VIEWPORT_ENDPOINT
+      viewportBootstrap.validateOptions(parser.optionNames());
+#endif
+      initializeNativeApplication();
+      SessionControls controls(SessionControls::packagedTools());
+      controls.show();
+      return app.exec();
+    }
     if (parser.isSet("enable-seamless") && (parser.isSet("listen") != parser.isSet("connect")))
       initializeNativeApplication();
 #ifdef WINDOWSHARE_LOCAL_INPUT

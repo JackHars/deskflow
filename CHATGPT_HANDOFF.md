@@ -19,9 +19,14 @@ Persistent setup now has a command-line backend:
 pairs public fingerprints, configures Ubuntu above Mac without automatic export,
 and explicitly starts/stops the existing runtime. It is included in experimental
 packages, with profile/owned-shutdown checks in both CI platforms. The normal
-pairing and Start/Stop GUI is still missing; implement that over this backend
-without changing Core's signed-bundle-main role or bypassing competing-session
-checks. No native input defect is claimed fixed by this setup work.
+pairing and Start/Stop GUI now uses this backend via `--session-controls`.
+Opening the experimental Mac Core bundle without arguments launches only these
+controls; Core retains its signed-bundle-main role. Linux has a separate controls
+wrapper. An inherited stdin lifetime pipe stops the owned session on GUI loss;
+Start still refuses a competing ordinary Core. Setup fields collapse after
+pairing, and failures are visible and logged. Native UI/input acceptance and
+in-place profile upgrades remain pending. No native input defect is claimed
+fixed by this setup work.
 
 Current status (2026-10-23): runtime `a17067ac7` is pushed. It contains the
 exact-ack and Core/peer-map wake fixes, hidden Host activity protection from

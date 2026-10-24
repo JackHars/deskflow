@@ -18,6 +18,7 @@
 #include "deskflow/ServerApp.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #ifdef WINDOWSHARE_CORE_COMPANION
+#include "SessionControlsEntry.h"
 #include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/InputEvidenceRuntime.h"
 #include "windowshare/LocalInputBootstrap.h"
@@ -33,6 +34,7 @@
 
 #include <QApplication>
 #include <QFileInfo>
+#include <QProcess>
 #include <QSharedMemory>
 #include <QTextStream>
 #include <QThread>
@@ -102,6 +104,13 @@ int main(int argc, char **argv)
     return localInputCodeAdmissionProbe(std::move(*inputBootstrap->pair));
   if (inputBootstrap->probe)
     return localInputCoreProbe(std::move(*inputBootstrap->pair));
+  if (const auto controls =
+          sessionControlsEntry(QCoreApplication::applicationFilePath(), QCoreApplication::arguments());
+      !controls.isEmpty()) {
+    // The short-lived bundle main exits before controls can explicitly start
+    // a session. No Arch, IPC server, native capture or ordinary-session stop.
+    return QProcess::startDetached(controls, {"--session-controls"}) ? s_exitSuccess : s_exitFailed;
+  }
 #endif
   Arch arch;
   arch.init();

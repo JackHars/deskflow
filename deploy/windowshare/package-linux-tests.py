@@ -118,7 +118,7 @@ class LinuxArchiveTests(unittest.TestCase):
         required = [f"{package.PROVIDER}/{name}" for name in package.PROVIDER_FILES]
         required += [f"{package.SHARE}/{name}" for name in package.DOCUMENT_FILES]
         required += [f"{package.SHARE}/{name}" for name in package.SESSION_FILES]
-        required += ["bin/deskflow-seamless-session"]
+        required += ["bin/deskflow-seamless-session", "bin/deskflow-seamless-controls"]
         for index, missing in enumerate(required):
             with self.subTest(missing=missing):
                 files = dict(original)
@@ -163,7 +163,7 @@ class LinuxArchiveTests(unittest.TestCase):
         result = subprocess.run([str(root / 'bin/deskflow-seamless-session'), '--help'],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{init,pair,run}', result.stdout)
+        self.assertIn('{init,pair,run,inspect}', result.stdout)
 
     def test_cannot_overwrite_archive_or_follow_output_symlink(self):
         dest = self.root / "do-not-touch.tar.gz"

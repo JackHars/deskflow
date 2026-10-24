@@ -83,6 +83,11 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
             'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
             f'exec python3 "$here/../{SHARE}/seamless-profile.py" "$@"\n'
         ).encode(), 0o755),
+        "bin/deskflow-seamless-controls": ((
+            '#!/bin/sh\nset -eu\n'
+            'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+            f'exec "$here/../{RUNTIME}/deskflow-windowshare" --session-controls "$@"\n'
+        ).encode(), 0o755),
     }
     for name in PROVIDER_FILES:
         path = provider / name
@@ -202,6 +207,7 @@ def verify_archive(path: Path) -> dict:
     # archive whose manifest omits a runtime import or compatibility contract.
     required = {"bin/deskflow-seamless-viewer", "bin/deskflow-seamless-core",
                 "bin/deskflow-seamless-session",
+                "bin/deskflow-seamless-controls",
                 f"{RUNTIME}/deskflow-windowshare", f"{RUNTIME}/deskflow-core"}
     required.update(f"{PROVIDER}/{name}" for name in PROVIDER_FILES)
     required.update(f"{SHARE}/{name}" for name in DOCUMENT_FILES + SESSION_FILES)

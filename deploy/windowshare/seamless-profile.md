@@ -10,11 +10,45 @@ its shared window appears on Ubuntu and its source moves to the holding display.
 There is no disposable test window, automatic export or two-minute session limit.
 
 The connected edge-drag implementation is present; complete physical acceptance
-is still pending. This command-line setup is the backend for future everyday
-pairing and Start/Stop controls, which are not yet integrated into the GUI.
+is still pending. The experimental package now includes pairing and Start/Stop
+controls backed by this profile manager.
 Known scrolling timestamp and held-key repeat issues remain. Interactive dragging
 back to the Mac is the last development priority; normal Stop, cancellation and
 failure restoration remain part of the session.
+
+## Graphical controls
+
+On the Mac, open `DeskflowSeamless-Core-Experimental.app` normally. Its default
+launch opens the controls and exits the short-lived Core launcher without
+starting capture. Explicit Core server/client/help commands retain their normal
+behavior. On Ubuntu, open `bin/deskflow-seamless-controls` from the extracted
+package in your normal Wayland desktop session.
+
+1. Click **Create setup** on each computer. The default private folders are
+   `~/DeskflowMac` and `~/DeskflowUbuntu`. You can type a different new folder
+   location or use **Open saved setup** for an existing one.
+2. Click **Save pairing file** and transfer that public file to the other
+   computer. Choose the other computer's file, enter the Mac's network address,
+   and click **Pair computers** on each endpoint. Choose the receiving monitor
+   on Ubuntu. Enable copied-text sharing on both endpoints if wanted.
+3. Stop ordinary Deskflow on both computers, then click **Start sharing** on
+   the Mac and Ubuntu. Once the peers connect, drag a Mac titlebar upward.
+4. Click **Stop sharing**, close the controls, or quit the app to request
+   graceful shutdown. The controls wait for their owned session to finish.
+
+After pairing, the setup fields collapse into **Show setup** and the normal
+view shows the monitor arrangement and Start/Stop. **Open logs** opens the
+profile's logs directory. `controls.log` keeps bounded helper output, including
+startup refusals before Core logging begins; `session.log` contains the runtime
+stages. Failures remain visible in the control window.
+
+**Ready to start** means the saved profile validates. **Session started** means
+the owned runtime process has launched; it does not claim native delivery or
+peer readiness. Opening, creating or pairing in these controls never starts
+sharing. The GUI's inherited lifetime pipe is separate from input: closing it,
+including on a controls-process crash, requests Stop; a closed pipe detected
+before launch prevents starting Core. The backend owns shutdown and recovery
+records. No ordinary connection is stopped automatically.
 
 ## Requirements
 
@@ -169,6 +203,10 @@ this launcher changes ordinary Deskflow settings or automatically resumes it.
 
 ## Changes, failures and recovery
 
+`inspect --profile DIRECTORY` returns validated public setup information without
+starting input. The GUI's pairing-file export uses that validated public identity,
+not arbitrary replacement contents of the local `pairing.json` copy.
+
 `session.json` records the launch time, owned process, stop request, exit code,
 shutdown method (including any signal fallback) and launcher error.
 It is historical evidence, not proof a recorded PID is still
@@ -177,8 +215,8 @@ operation is refused while that lock is held. A separate per-user lock also
 prevents two different profiles from launching competing experimental sessions.
 
 For a new peer, changed package, address or layout, stop and restore the old
-session first, then create a new profile and pair it. There is currently no GUI
-editor or in-place profile migration. Keep the old profile, package and especially
+session first, then create a new profile and pair it. There is currently no
+in-place profile migration. Keep the old profile, package and especially
 `restore.json` until any outstanding restoration has completed. Do not erase a
 restore journal to get past a failure. Native recovery remains responsible for
 restoring sources after process failure; a launcher exit alone does not prove

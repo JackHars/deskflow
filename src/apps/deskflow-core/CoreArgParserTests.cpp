@@ -3,7 +3,10 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "CoreArgParser.h"
+#include "SessionControlsEntry.h"
 #include <QCoreApplication>
+#include <QFile>
+#include <QTemporaryDir>
 #include <cstdio>
 #include <stdexcept>
 
@@ -18,6 +21,37 @@ int main(int argc, char **argv)
 {
   QCoreApplication application(argc, argv);
   try {
+    QTemporaryDir package;
+    check(package.isValid(), "create controls-entry fixture");
+    const auto directory = package.filePath("Sample.app/Contents/MacOS");
+    check(
+        QDir().mkpath(directory) && QDir().mkpath(package.filePath("Sample.app/Contents/Resources")),
+        "create inert bundle"
+    );
+    const auto core = directory + "/deskflow-core", controls = directory + "/deskflow-windowshare";
+    const auto arguments = QStringList{core};
+    check(
+        deskflow::windowshare::sessionControlsEntry(core, arguments).isEmpty(),
+        "unpackaged invocation keeps ordinary behavior"
+    );
+    QFile script(package.filePath("Sample.app/Contents/Resources/seamless-profile.py"));
+    check(script.open(QIODevice::WriteOnly), "create profile resource marker");
+    script.close();
+    QFile viewer(controls);
+    check(viewer.open(QIODevice::WriteOnly), "create controls executable fixture");
+    viewer.close();
+    check(
+        viewer.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner), "fixture mode"
+    );
+    check(
+        deskflow::windowshare::sessionControlsEntry(core, arguments) == QFileInfo(controls).canonicalFilePath(),
+        "bundle default selects controls only"
+    );
+    for (const auto &argument : {"server", "client", "--help", "--version", "--windowshare-ipc-probe"})
+      check(
+          deskflow::windowshare::sessionControlsEntry(core, {core, argument}).isEmpty(),
+          "explicit core mode is unchanged"
+      );
     for (const auto &arguments :
          {QStringList{"core", "server"},
           {"core", "client"},

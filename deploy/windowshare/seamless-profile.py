@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import plistlib
 import re
+import select
 import selectors
 import signal
 import socket
@@ -334,6 +335,19 @@ def launch_plan(root):
             'log': str(root / 'logs/session.log'), 'peer': connection['peer']['name']}
 
 
+def inspect_profile(root):
+    with locked(root):
+        value = load(root)
+        result = {'profile': str(root), 'name': value['local']['name'], 'role': value['local']['role'],
+                  'paired': (root / 'connection.json').exists(), 'pairingFile': str(root / 'pairing.json'),
+                  'pairing': value['local']}
+        if result['paired']:
+            plan = launch_plan(root)
+            connection = read_json(root / 'connection.json')
+            result.update(peer=plan['peer'], layout=plan['layout'], options=connection['options'])
+        return result
+
+
 def clean_environment(root):
     env = {key: value for key, value in os.environ.items() if not key.startswith('DYLD_') and key not in
            {'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QML_PLUGIN_PATH', 'QML_IMPORT_PATH',
@@ -433,11 +447,14 @@ def stop_child(process, endpoint, output):
         return {'method': 'signal-fallback', 'exitCode': process.returncode, 'ipcError': str(error)}
 
 
-def run(root, dry_run=False):
+def run(root, dry_run=False, control_fd=None):
     with locked(root), contextlib.ExitStack() as session_locks:
         plan = launch_plan(root)
         if dry_run:
             return plan
+        if control_fd is not None:
+            require(stat.S_ISFIFO(os.fstat(control_fd).st_mode) or stat.S_ISSOCK(os.fstat(control_fd).st_mode),
+                    'The controls connection must be an inherited pipe or socket')
         require(sys.platform == ('darwin' if plan['role'] == 'mac' else 'linux'),
                 'Use this profile on its designated platform')
         session_locks.enter_context(session_lock())
@@ -462,17 +479,31 @@ def run(root, dry_run=False):
         result = {'startedAt': now(), 'role': plan['role'], 'automaticExport': False}
         try:
             logger.info('SESSION %s', json.dumps(result))
+            # Closing the GUI (including a crash) closes its pipe. Do not start
+            # native input if the controller went away during setup checks.
+            if control_fd is not None and select.select([control_fd], [], [], 0)[0]:
+                result.update(cancelled=True, inputStarted=False, exitCode=0, stopReason='controller-closed-before-start')
+                return result
             process = subprocess.Popen(plan['command'], env=env, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT, start_new_session=True)
+                                       stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True)
             output = ProcessLog(process, logger)
             result['pid'] = process.pid
             write_json(root / 'session.json', result)
             print('Window-sharing session starting. Drag a Mac titlebar through the top edge once both computers connect.', flush=True)
             print('Press Control+C here to stop. Detailed progress is saved in ' + plan['log'], flush=True)
             with selectors.DefaultSelector() as selector:
-                selector.register(process.stdout, selectors.EVENT_READ)
+                selector.register(process.stdout, selectors.EVENT_READ, 'output')
+                if control_fd is not None:
+                    selector.register(control_fd, selectors.EVENT_READ, 'controller')
                 while process.poll() is None and not stop_requested:
                     for key, _ in selector.select(timeout=0.5):
+                        if key.data == 'controller':
+                            # This is a lifetime channel, never a remote command
+                            # interpreter. EOF or unexpected data requests Stop.
+                            result['stopReason'] = ('controller-closed' if not os.read(control_fd, 1)
+                                                    else 'unexpected-controller-data')
+                            stop_requested = True
+                            break
                         output.drain()
                         if output.eof:
                             selector.unregister(key.fileobj)
@@ -520,6 +551,9 @@ def main():
     launch = sub.add_parser('run', help='Start a normal session; Control+C stops and restores source windows')
     launch.add_argument('--profile', type=Path, required=True)
     launch.add_argument('--dry-run', action='store_true', help='Print the launch plan without starting processes')
+    launch.add_argument('--control-stdin', action='store_true', help='Stop if the graphical controller closes its input pipe')
+    inspect = sub.add_parser('inspect', help='Read saved setup without starting input')
+    inspect.add_argument('--profile', type=Path, required=True)
     args = parser.parse_args()
     if args.command == 'init':
         result = initialize(args.profile, args.role, args.name, args.core, args.windowshare)
@@ -527,8 +561,10 @@ def main():
         result = pair(private_root(args.profile), args.peer, {'macAddress': args.mac_address,
             'corePort': args.core_port, 'windowPort': args.window_port, 'screen': args.screen,
             'clipboardText': args.clipboard_text})
+    elif args.command == 'inspect':
+        result = inspect_profile(private_root(args.profile))
     else:
-        result = run(private_root(args.profile), args.dry_run)
+        result = run(private_root(args.profile), args.dry_run, sys.stdin.fileno() if args.control_stdin else None)
     print(json.dumps(result, indent=2))
     return int(result.get('exitCode', 0) != 0)
 

@@ -4,6 +4,47 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Graphical persistent-session controls — 2026-10-23
+
+`--session-controls` adds input-free pairing and Start/Stop controls backed by
+the persistent profile launcher. Default launch of the experimental Mac bundle
+opens these controls, retaining Core as the signed bundle main. Explicit Core
+arguments and inherited native Host restrictions are unchanged. Linux adds an
+inert `bin/deskflow-seamless-controls` wrapper. Opening, creating or pairing never
+starts sharing. Closing the controller's lifetime pipe requests owned shutdown;
+the same path covers Stop, window close, app quit and controller loss.
+
+- Both Mac and Ubuntu build the new UI and pass its offscreen owned-backend
+  lifecycle suite: creation/pairing without input, saved startup refusal,
+  explicit Start/Stop, bounded helper output, Close and Quit.
+- All 21 profile cases and 12 Linux archive cases pass on both platforms. The
+  added cases verify validated public export, cancellation before Core launch
+  and native-supervisor shutdown on controller EOF using an owned fake Core.
+- Five related app suites (controls, bootstrap, bridge, companion and code
+  admission) and the Core argument suite pass on both platforms. The final UI
+  logging/Quit changes receive an additional focused controls run on each.
+- Evidence is in `build/session-controls-l44vpcvk/` and
+  `build/session-controls-final-mmf6v_n5/`. Final source archive SHA-256 is
+  `16c677e40bcae39d0301936c5f8f08cb3597b47304b10373e817c0444e569dae`;
+  `source-binding.json` binds base `532eea437` plus every changed source file.
+  Ubuntu's development archive verifies with SHA-256
+  `54420a16150b2522c1955ecfe8bb74dd75d6682818715d23995d3bdb2b01dc12`.
+  Its manifest labels the base commit; the source-overlay report, rather than
+  that label alone, identifies the actual build inputs.
+- The signed Mac development package verifies its resource seal and all 77
+  exact dependency records. Core remains its bundle main; the packaged script
+  and guide match the frozen sources. ZIP SHA-256:
+  `79cee01a5bb7093e7b88ef7aede33d428fda3aea2bc63a497ce11295487b1842`.
+  `mac-package-result.json` records executable/resource hashes. This static
+  package audit does not assert loaded-image admission or authorize input.
+
+No desktop input or new physical test ran; the regular Deskflow connection
+remained running. Native permissions/provider onboarding and in-place profile
+upgrades remain manual. No input failure or hardware acceptance row is closed.
+Separately, base foundation CI `40043623182` fails only the GNOME provider job:
+Mutter `50.1-0ubuntu2.5` is newer than the two reviewed runtime contracts. Keep
+that failure explicit until source/build review and the native fixture pass.
+
 ## Persistent profile setup and launcher — 2026-10-23
 
 The new `seamless-profile.py` implements input-free creation/pairing/dry-run and

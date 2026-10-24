@@ -69,6 +69,8 @@ inspection. The wrapper scripts `bin/deskflow-seamless-viewer` and
 The third wrapper, `bin/deskflow-seamless-session`, runs the packaged Python
 profile manager for persistent top-edge sessions. See
 [persistent setup](seamless-profile.md) for creation, pairing, launch and Stop.
+`bin/deskflow-seamless-controls` opens the graphical pairing and Start/Stop
+window. Opening the controls alone does not start input sharing.
 No wrapper executes at archive creation or extraction. No ordinary
 `/usr/bin/deskflow-core` or application settings are changed.
 

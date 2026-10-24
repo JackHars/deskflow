@@ -114,6 +114,29 @@ class Profiles(unittest.TestCase):
         self.assertEqual(root.stat().st_mode & 0o777, 0o700)
         self.assertEqual((root / 'profile.json').stat().st_mode & 0o777, 0o600)
 
+    def test_inspect_uses_validated_public_identity_and_never_launches(self):
+        root = self.initialize('mac')
+        # Export comes from the validated profile, not a mutable copied file.
+        (root / 'pairing.json').write_text('untrusted replacement')
+        with mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')):
+            result = profile.inspect_profile(root)
+        self.assertEqual(result['pairing'], profile.load(root)['local'])
+        self.assertFalse(result['paired'])
+
+    def test_controller_closed_before_launch_does_not_start_core(self):
+        mac, ubuntu = self.endpoints()
+        root = mac if sys.platform == 'darwin' else ubuntu
+        read_end, write_end = os.pipe()
+        os.close(write_end)
+        self.addCleanup(os.close, read_end)
+        with mock.patch.object(profile, 'running_cores', return_value=[]), \
+             mock.patch.dict(os.environ, {'XDG_SESSION_TYPE': 'wayland', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/unused'}), \
+             mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')):
+            result = profile.run(root, control_fd=read_end)
+        self.assertTrue(result['cancelled'])
+        self.assertFalse(result['inputStarted'])
+        self.assertEqual(result['stopReason'], 'controller-closed-before-start')
+
     def test_dry_run_never_launches_or_checks_desktop(self):
         mac, ubuntu = self.endpoints()
         with mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')), \
@@ -230,6 +253,12 @@ class Profiles(unittest.TestCase):
         self.assertIn('intentional-startup-failure', (root / 'logs/session.log').read_text())
 
     def test_session_stop_is_owned_and_keeps_recovery_journal(self):
+        self.stoppable_session()
+
+    def test_controller_disappearance_stops_the_owned_core(self):
+        self.stoppable_session(controller=True)
+
+    def stoppable_session(self, controller=False):
         (self.package / 'deskflow-core').write_text('#!' + sys.executable + '\n' + r'''
 import os,socket
 with socket.socket(socket.AF_UNIX) as server:
@@ -243,10 +272,16 @@ with socket.socket(socket.AF_UNIX) as server:
         mac, ubuntu = self.endpoints()
         root = mac if sys.platform == 'darwin' else ubuntu
         (root / 'restore.json').write_text('retained-recovery-evidence')
+        read_end, write_end = os.pipe() if controller else (None, None)
+        if controller:
+            self.addCleanup(os.close, read_end)
         class StopOnReadiness(logging.Handler):
             def emit(self, record):
                 if record.getMessage() == 'owned-fixture-ready':
-                    os.kill(os.getpid(), signal.SIGHUP)
+                    if controller:
+                        os.close(write_end)
+                    else:
+                        os.kill(os.getpid(), signal.SIGHUP)
         logger, handler = logging.getLogger('seamless-session'), StopOnReadiness()
         logger.addHandler(handler)
         self.addCleanup(logger.removeHandler, handler)
@@ -254,11 +289,13 @@ with socket.socket(socket.AF_UNIX) as server:
         with mock.patch.object(profile, 'running_cores', return_value=[]), \
              mock.patch.dict(os.environ, {'XDG_SESSION_TYPE': 'wayland', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/unused'}), \
              mock.patch('builtins.print'):
-            result = profile.run(root)
+            result = profile.run(root, control_fd=read_end)
         self.assertEqual(signal.getsignal(signal.SIGHUP), before)
         self.assertEqual(result['exitCode'], 0)
         self.assertTrue(result['stopRequested'])
         self.assertEqual(result['stop']['method'], 'private-ipc')
+        if controller:
+            self.assertEqual(result['stopReason'], 'controller-closed')
         self.assertFalse(result['running'])
         self.assertIn('owned-fixture-stopped', (root / 'logs/session.log').read_text())
         self.assertEqual((root / 'restore.json').read_text(), 'retained-recovery-evidence')

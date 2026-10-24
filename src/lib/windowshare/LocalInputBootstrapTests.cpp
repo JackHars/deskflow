@@ -128,7 +128,7 @@ void hostArguments()
     denied([&] { host.validateOptions(clipboard); });
     for (const auto &name :
          {"recover", "init-identity", "request-permissions", "probe", "fingerprint", "connect", "help", "version",
-          "quit-after", "export-window"}) {
+          "quit-after", "export-window", "session-controls"}) {
       auto invalid = valid;
       invalid.append(name);
       denied([&] { host.validateOptions(invalid); });
