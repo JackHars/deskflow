@@ -27,7 +27,7 @@ setup resource at `17c4b208e`, with unchanged native source from `52e929731`.
 `build/input-candidate-alrvbdxx/prepared-candidate.json` binds the final Mac
 bundle under `mac-final`, Ubuntu package and both fresh profiles. The final Mac
 private handshake passes with input disabled; Mac permissions remain ready.
-Hosted run `40058287662` is in progress for `17c4b208e`; its source run
+Hosted run `40058287662` now passes all six jobs for `17c4b208e`; its source run
 `40058287624` passes. Ubuntu's read-only support check reports
 `update-needed`; the installed extension is disabled and still older than the
 package. A user request is pending to stop the regular Ubuntu client and approve
@@ -36,6 +36,19 @@ Deskflow, replace desktop support or start input without the required fresh
 permission. The regular connection remains running.
 Scroll timestamps, held repeat, full outward dragging and native queue gaps
 remain open; interactive drag-back stays last.
+
+Final hosted evidence is in `build/input-ci-mgewrxgb/`. Downloaded Linux and
+both ad-hoc Mac archives match their published checksums/source commit, pass
+their package audits, and contain the exact reviewed setup helper. These CI Mac
+archives do not replace the locally Apple-signed prepared candidate. The
+downloaded `8c6ed336c` source archive from run `40058644620` matches all 1,231
+tracked blobs/modes, the Git index and exact commit object. No archive was
+installed or launched. Mac Core PID 38904 remains connected to Ubuntu Core
+3597072. Current build/artifact verification is finished; the next meaningful
+native work needs the still-unanswered Ubuntu client-stop/update approval,
+followed by separate permission immediately before a desktop test. Preserve
+the existing failed repeat/scroll evidence instead of guessing at a new native
+change or claiming the roadmap complete from hosted results.
 
 ## One Host offer per acquisition — 2026-10-23
 

@@ -55,7 +55,26 @@ Final staged packages include the corrected helper at `17c4b208e`:
   helper. Private keys remain on their originating machine.
 - Mac's final permission status is ready. Ubuntu support still reports
   `update-needed`; it was not replaced or enabled. Final-source hosted run
-  `40058287662` is in progress; source-bundle run `40058287624` passes.
+  `40058287662` passes all six jobs; source-bundle run `40058287624` passes.
+
+Hosted artifacts were also downloaded and independently checked under
+`build/input-ci-mgewrxgb/`:
+
+- `foundation-final.json` retains the terminal success of all six jobs on
+  `17c4b208e`, including Mac/Linux profile checks and the actual isolated GNOME
+  integration. `foundation-watch.log` retains observation of that same run;
+  it was not cancelled or restarted during the wait.
+- `source-verification.json` covers the published `8c6ed336c` source bundle
+  from run `40058644620`: all four declared checksums, the exact Git commit
+  object, index/tree equality and all 1,231 archived blob hashes/file modes.
+- `linux-verification.json` verifies the published archive's manifest, source
+  commit, exact reviewed profile helper and SHA-256
+  `a227f5d7c777b8fbe43687fa4087820e6a38e08e1d67a0d23cdf95888b73652d`.
+- `mac-download-verification.json` binds both published Mac archives and their
+  source commit. `mac-package-verification.json` records successful audits of
+  the extracted Host and Core bundles and exact setup-helper bytes. These are
+  ad-hoc CI packages, not the local Apple-signed candidate or original-input
+  authorization. Neither extracted app was launched.
 
 No ordinary connection was paused, installed extension replaced, native window
 opened, input captured or physical test launched. Installation awaits the user

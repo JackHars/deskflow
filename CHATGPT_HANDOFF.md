@@ -25,8 +25,12 @@ passes with input disabled. The installed Ubuntu support is older and disabled;
 a request to stop its regular client and approve installing the update is
 pending. Do not treat the unanswered request as authorization. Native
 runtime `52e929731` now has all six hosted jobs passing in run `40056776495`.
-Run `40058287662` is in progress for the resource fix, with source run
-`40058287624` passing. No new desktop-input result is established by those checks.
+Run `40058287662` now passes all six jobs for the resource fix, with source run
+`40058287624` passing. Downloaded Linux/ad-hoc Mac archives and all 1,231 files
+of the later `8c6ed336c` source bundle verify under `build/input-ci-mgewrxgb/`.
+Current build/artifact verification is finished. Next native work still needs
+the pending Ubuntu client-stop/update approval and separate permission before
+desktop testing. No new desktop-input result is established by hosted checks.
 
 Mac/Linux lifecycle prints now use one bounded worker (128 records / 256 KiB,
 including in-flight output) with explicit loss reports and bounded shutdown.
