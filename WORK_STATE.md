@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## Ubuntu compositor update compatibility — 2026-10-23
+
+The closed GNOME sender contract now supports Ubuntu amd64 Mutter
+`50.1-0ubuntu2.5`. Primary Launchpad build 33824576, source descriptor, all
+Debian patches, build dependencies and the two exact library modules were
+reviewed. EIS/native-seat/virtual-device/backend/stage-view code is unchanged
+from 2.4; the tablet, focus and window-placement changes are documented and
+hashed. Exact module sizes now belong to each build, retaining strict pairing
+and refusing mixed versions or changed bytes. The native fixture expects the
+latest reviewed contract, with explicit older-contract selection still available.
+
+All three supported builds reproduce through the provenance verifier. The
+35 policy cases, 45 viewer fixture checks and nine Core wire cases pass.
+An isolated Ubuntu container with the new published packages passes mapped
+module verification, native provider/family checks, and real Qt/Core input
+fixtures at scales 1 and 1.25. No host display/input/GPU devices are exposed;
+this is native headless evidence, not actual monitor or physical-input evidence.
+
+Evidence: `build/mutter-2.5-review-3g8m2idt/` and matching Ubuntu `-revised/`
+directory. The initial Docker image-ID spelling and standalone GJS typelib
+search failures are retained. Optimized GCC also exposed a fixture optional
+deadline warning; checked `.value()` access resolves it without changing a
+deadline or suppressing warnings. The revised release fixture builds and passes.
+The ordinary Mac/Ubuntu connection and installed GNOME extension remain untouched.
+
 ## Everyday pairing and Start/Stop controls — 2026-10-23
 
 The experimental Mac bundle now opens graphical controls when launched without

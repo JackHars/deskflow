@@ -21,12 +21,15 @@ export const ORDERING_CLUTTER = '/usr/lib/x86_64-linux-gnu/mutter-18/libmutter-c
 export const ORDERING_MAPS_MAX = 2 * 1024 * 1024;
 export const ORDERING_FILE_MAX = 8 * 1024 * 1024;
 export const ORDERING_BUILDS = Object.freeze([
-    Object.freeze({package: '50.1-0ubuntu2.2',
+    Object.freeze({package: '50.1-0ubuntu2.2', mainBytes: 2755048, clutterBytes: 1104608,
         main: 'fec9023139ac8eff93fcc1af90413613cdb526e7f02389dc9d8fe90f7abc81e5',
         clutter: '1c15e51d1b1042b178e3a17d8e194894193e585a272bd56620a7cf52823ac56c'}),
-    Object.freeze({package: '50.1-0ubuntu2.4',
+    Object.freeze({package: '50.1-0ubuntu2.4', mainBytes: 2755048, clutterBytes: 1104608,
         main: '4d7ece1588279dbd3b66de3a28d1bf1098e7905b705d8e44743192b925d66b83',
         clutter: 'f1823cc61eeae023cbf8c56b571316f41ceff8219096da14ecf31fdc2671b1b0'}),
+    Object.freeze({package: '50.1-0ubuntu2.5', mainBytes: 2759144, clutterBytes: 1104608,
+        main: '72ffe9741f6258c838ab73c37df0d9aece3f5d394ead8b86b4b2a306ad16c192',
+        clutter: 'e7b5a123dcbed73f7185fe8675f79819065c5367ebcfbd74f47fe7847c1e13d4'}),
 ]);
 
 export function mappedOrderingModules(maps) {
@@ -76,9 +79,10 @@ export function matchesMappedOrderingFile(mapped, file) {
 
 export function orderingContractFor(files) {
     if (!Array.isArray(files) || files.length !== 2 || files[0].path !== ORDERING_MAIN ||
-        files[1].path !== ORDERING_CLUTTER || files[0].size !== 2755048 || files[1].size !== 1104608)
+        files[1].path !== ORDERING_CLUTTER)
         return '';
-    const build = ORDERING_BUILDS.find(item => item.main === files[0].sha256 && item.clutter === files[1].sha256);
+    const build = ORDERING_BUILDS.find(item => item.main === files[0].sha256 && item.clutter === files[1].sha256 &&
+        item.mainBytes === files[0].size && item.clutterBytes === files[1].size);
     return build ? `sha256:${build.main}` : '';
 }
 

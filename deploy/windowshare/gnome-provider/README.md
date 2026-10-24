@@ -269,7 +269,7 @@ sender PONG, event batch, authenticated Core connection or original capture.
 ## Native sender ordering build prerequisite
 
 The closed runtime allowlist supports **Ubuntu resolute amd64** packages
-`libmutter-18-0 50.1-0ubuntu2.2` and `50.1-0ubuntu2.4`, built with
+`libmutter-18-0 50.1-0ubuntu2.2`, `50.1-0ubuntu2.4` and `50.1-0ubuntu2.5`, built with
 `libeis-dev 1.5.0-3` and the native backend. It hashes both the actual loaded
 `/usr/lib/x86_64-linux-gnu/libmutter-18.so.0.0.0` and the matching
 `mutter-18/libmutter-clutter-18.so.0.0.0` at startup. The exact expected digests
@@ -279,6 +279,7 @@ are in `logic.js`; a mixed pair is unsupported. Main-module contract digests:
 | --- | --- |
 | 50.1-0ubuntu2.2 | `fec9023139ac8eff93fcc1af90413613cdb526e7f02389dc9d8fe90f7abc81e5` |
 | 50.1-0ubuntu2.4 | `4d7ece1588279dbd3b66de3a28d1bf1098e7905b705d8e44743192b925d66b83` |
+| 50.1-0ubuntu2.5 | `72ffe9741f6258c838ab73c37df0d9aece3f5d394ead8b86b4b2a306ad16c192` |
 
 `ordering.js` reads bounded `/proc/self/maps` data from the provider's own
 Shell process. It requires one exact, nondeleted, private executable mapping
@@ -326,13 +327,36 @@ shares the segment's revocation and original absolute deadline. Exact
 and removes unread results; a bounded in-flight native call settles before the
 slot is reused. Wrong IDs and late replies cannot revive a canceled result.
 
-Primary build records: [Ubuntu 2.2 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.2/+build/32927878)
-and [Ubuntu 2.4 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.4/+build/33579950).
-Both patched sources retain `meta-eis.c:100–169`'s held SYNC reference,
+For the standalone probe, GJS needs Mutter's private typelib/library directory
+(GNOME Shell normally supplies this itself):
+
+```sh
+GI_TYPELIB_PATH=/usr/lib/x86_64-linux-gnu/mutter-18 \
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/mutter-18 \
+gjs -m deploy/windowshare/gnome-provider/tests/ordering-native.js
+```
+
+Primary build records: [Ubuntu 2.2 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.2/+build/32927878),
+[Ubuntu 2.4 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.4/+build/33579950),
+and [Ubuntu 2.5 amd64 build](https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576).
+All three patched sources retain `meta-eis.c:100–169`'s held SYNC reference,
 input-thread task and main-thread return; `meson.build:590–591` enables that
 path from libeis >=1.5. Exact source and artifact digests are recorded in the
 checked-in evidence manifest, including the Debian patches affecting the
 surrounding native input implementation.
+
+The 2.5 review applies every Debian patch before comparison with 2.4. EIS,
+native-seat, virtual-device, backend and stage-view files are unchanged. Clutter
+adds tablet `PROXIMITY_OUT` to the existing immediate queue-drain branch and
+clears that tablet sprite's area; it does not defer the EIS prefix. Additional
+changes track sticky mouse focus, tablet implicit grabs and current maximized
+window placement. Their affected implementation files are also hashed in the
+2.5 source manifest. Existing focus/geometry invalidation still applies; the
+build contract grants no new tablet support. The main module grew to 2,759,144
+bytes, so module sizes are matched per exact build alongside both hashes.
+Mixed-build modules and wrong sizes remain unsupported. The isolated Qt fixture
+defaults to this latest reviewed contract; use its explicit
+`--expected-ordering-contract` option for an older supported installation.
 
 ## First-click preparation
 

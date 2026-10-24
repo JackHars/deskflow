@@ -79,6 +79,42 @@
       "bytes": 1498368,
       "sha256": "dd8e5661795b34cade0d6594ca029713e7af752b4fc34c0b5a124be727b00be1",
       "name": "libmutter-18-0_50.1-0ubuntu2.4_amd64.deb"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576/+files/mutter_50.1-0ubuntu2.5_amd64.buildinfo",
+      "name": "mutter_50.1-0ubuntu2.5_amd64.buildinfo",
+      "bytes": 29817,
+      "sha256": "09954bd77477ae76aa3bc0b4025683ce647e86b82ff5133a30bb85013f346194"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576/+files/mutter_50.1-0ubuntu2.5_amd64.changes",
+      "name": "mutter_50.1-0ubuntu2.5_amd64.changes",
+      "bytes": 7138,
+      "sha256": "475f7ce0406cc16cd912941b9ed87581f4c4bb1940abd154131767743c3163ff"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576/+files/buildlog_ubuntu-resolute-amd64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz",
+      "name": "buildlog_ubuntu-resolute-amd64.mutter_50.1-0ubuntu2.5_BUILDING.txt.gz",
+      "bytes": 351427,
+      "sha256": "086a90d91f9ebced714ff177655745e1bc3ca531b08c48b18fcf2a80e0fe930f"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+source/mutter/50.1-0ubuntu2.5/+build/33824576/+files/libmutter-18-0_50.1-0ubuntu2.5_amd64.deb",
+      "name": "libmutter-18-0_50.1-0ubuntu2.5_amd64.deb",
+      "bytes": 1498814,
+      "sha256": "b14129035279cbf640a290c5363aae680ffe98d8879c6e7eb025fee7ccd5c848"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mutter/50.1-0ubuntu2.5/mutter_50.1-0ubuntu2.5.dsc",
+      "name": "mutter_50.1-0ubuntu2.5.dsc",
+      "bytes": 4315,
+      "sha256": "34db0d1aa96e0ee6c3c5bd906b14fb9ed243e0ed3ff3c01f16c0952f5907dad7"
+    },
+    {
+      "url": "https://launchpad.net/ubuntu/+archive/primary/+sourcefiles/mutter/50.1-0ubuntu2.5/mutter_50.1-0ubuntu2.5.debian.tar.xz",
+      "name": "mutter_50.1-0ubuntu2.5.debian.tar.xz",
+      "bytes": 123940,
+      "sha256": "50d2d9f011972576ddc4467528c49601918e5a477aa6b3e8268b9d2bf86e7d06"
     }
   ],
   "builds": [
@@ -127,6 +163,38 @@
           "path": "./usr/lib/x86_64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0",
           "bytes": 1104608,
           "sha256": "f1823cc61eeae023cbf8c56b571316f41ceff8219096da14ecf31fdc2671b1b0"
+        }
+      ]
+    },
+    {
+      "version": "50.1-0ubuntu2.5",
+      "sourceFiles": {
+        "meson.build": "6a29fa68f7a82751a4397cae97815aa56c4d9679a1a437f6db6ecce9cef2b603",
+        "src/backends/meta-eis.c": "072b4f3bdf81f49a2ead1138967d24709823e7f2b6e597f7e8ef0c5bf05a3fc4",
+        "src/backends/native/meta-seat-impl.c": "148be52f4395da81130b34a21f865030ea1af1053366f77268e436b72d0709e5",
+        "src/backends/native/meta-virtual-input-device-native.c": "33649ed5d54ea6b9d9d263f5cc30c63443d1bb0262d31dfc5e70ba02ad7907f8",
+        "src/backends/meta-backend.c": "fc5725c3bddd8fd3ae00ef2542d893c086bd3e62285fc580ab75f1b1745cabd1",
+        "clutter/clutter/clutter-stage.c": "534b51d41c66d04070fee96042d2686e3bb05c74c3217a6b95d8758148fd109c",
+        "clutter/clutter/clutter-stage-view.c": "c9e017dd4ccea85f2f8466777593932e0e2eaf07a4b96d85f57459222a6b683f",
+        "clutter/clutter/clutter-main.c": "022ffd6b5c56ece0a8e2eebbf4728a9eb7226f6c1fbd336c2ce1a0b16ad1f2bd",
+        "src/core/display.c": "b37bed4ca6796f64206f4bfe9cae9fd9a26ece2ffc1be220c782a638d3aac5c0",
+        "src/core/events.c": "c4d1acb93014fef88462348fac3e8a90e9b49cbcb588c56e10286ab00f301745",
+        "src/core/window.c": "d8c7f0bdfb77c3627b2bf8b93a1d3b73825c83255c93974d2d7f1fb2393036f0",
+        "src/wayland/meta-window-wayland.c": "405ed90a18ab8a31715ee6d77b659c3e10db62822f7cec4267775651fa43197a",
+        "src/wayland/meta-wayland-seat.c": "64c7c39fefa0d5c5feabc5ea30e56298510801ff6ce5377a1a3240505c572fbb",
+        "src/wayland/meta-wayland-tablet-seat.c": "698aa42a93d07363f8422422b59c840c67770925ca9c987c0cdc99dbaaac28ec",
+        "src/wayland/meta-wayland-tablet-tool.c": "662e17ffd409b1652ce12d682b65057e1b0852cf4ee8140acc07853a4b998bc7"
+      },
+      "modules": [
+        {
+          "path": "./usr/lib/x86_64-linux-gnu/libmutter-18.so.0.0.0",
+          "bytes": 2759144,
+          "sha256": "72ffe9741f6258c838ab73c37df0d9aece3f5d394ead8b86b4b2a306ad16c192"
+        },
+        {
+          "path": "./usr/lib/x86_64-linux-gnu/mutter-18/libmutter-clutter-18.so.0.0.0",
+          "bytes": 1104608,
+          "sha256": "e7b5a123dcbed73f7185fe8675f79819065c5367ebcfbd74f47fe7847c1e13d4"
         }
       ]
     }

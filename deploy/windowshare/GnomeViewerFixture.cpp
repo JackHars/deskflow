@@ -658,12 +658,12 @@ int main(int argc, char **argv)
                {"live", prepared->live()},
                {"prefixPending", preparationPingDeadline.has_value()},
                {"ageMs", static_cast<qint64>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                 now - (*preparationDeadline - inputPreparationMaximumLifetime)
+                                                 now - (preparationDeadline.value() - inputPreparationMaximumLifetime)
                          )
                                                  .count())},
                {"remainingMs",
                 static_cast<qint64>(
-                    std::chrono::duration_cast<std::chrono::milliseconds>(*preparationDeadline - now).count()
+                    std::chrono::duration_cast<std::chrono::milliseconds>(preparationDeadline.value() - now).count()
                 )},
                {"originalDeliveryAuthority", false}}
           );
@@ -685,7 +685,7 @@ int main(int argc, char **argv)
                ForwardingScope::All},
               integer(command, "connection")
           };
-          const auto pointDeadline = std::min(*preparationDeadline, Clock::now() + inputCutoffMaximumLifetime);
+          const auto pointDeadline = std::min(preparationDeadline.value(), Clock::now() + inputCutoffMaximumLifetime);
           require(observed.routedPoint.has_value(), "Prepared focus lost its exact routed point");
           drainRequest =
               client.promoteInputPreparation(*prepared, {binding, *observed.routedPoint, pointDeadline, true});

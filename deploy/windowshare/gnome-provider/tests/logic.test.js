@@ -498,17 +498,21 @@ test('generation and revision cannot wrap into retained observations', () => {
 
 test('mapped build contract requires both exact reviewed modules from the same package', () => {
     for (const build of ORDERING_BUILDS) {
-        const files = [{path: ORDERING_MAIN, size: 2755048, sha256: build.main},
-            {path: ORDERING_CLUTTER, size: 1104608, sha256: build.clutter}];
+        const files = [{path: ORDERING_MAIN, size: build.mainBytes, sha256: build.main},
+            {path: ORDERING_CLUTTER, size: build.clutterBytes, sha256: build.clutter}];
         assert.equal(orderingContractFor(files), `sha256:${build.main}`);
         assert.equal(orderingContractFor([{...files[0], sha256: '0'.repeat(64)}, files[1]]), '');
         assert.equal(orderingContractFor([{...files[0], size: files[0].size + 1}, files[1]]), '');
+        assert.equal(orderingContractFor([files[0], {...files[1], size: files[1].size + 1}]), '');
         assert.equal(orderingContractFor([files[1], files[0]]), '');
         assert.equal(orderingContractFor([...files, files[0]]), '');
         assert.equal(orderingContractFor([{...files[0], path: '/tmp/libmutter-18.so.0.0.0'}, files[1]]), '');
+        for (const other of ORDERING_BUILDS) {
+            if (other !== build)
+                assert.equal(orderingContractFor([files[0],
+                    {...files[1], size: other.clutterBytes, sha256: other.clutter}]), '');
+        }
     }
-    assert.equal(orderingContractFor([{path: ORDERING_MAIN, size: 2755048, sha256: ORDERING_BUILDS[0].main},
-        {path: ORDERING_CLUTTER, size: 1104608, sha256: ORDERING_BUILDS[1].clutter}]), '');
     assert.equal(orderingContractFor({package: '50.1-0ubuntu2.4', HAVE_EIS_EVENT_REF: true}), '');
 });
 

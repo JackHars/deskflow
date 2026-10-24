@@ -4,6 +4,43 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Mutter 50.1-0ubuntu2.5 exact-build support — 2026-10-23
+
+Base foundation run `40043623182` rejected Ubuntu's new compositor build. The
+closed runtime allowlist now includes the reviewed amd64 2.5 module pair, with
+per-build exact sizes. The main module's SHA-256 is
+`72ffe9741f6258c838ab73c37df0d9aece3f5d394ead8b86b4b2a306ad16c192`;
+Clutter is `e7b5a123dcbed73f7185fe8675f79819065c5367ebcfbd74f47fe7847c1e13d4`.
+No version-text fallback, new input authority or deadline relaxation is added.
+
+- `verify-ordering-build.py` verifies all three published source/build/module
+  contracts. The 2.5 manifest also binds the changed focus, tablet and placement
+  source files; see the provider README for the review and primary build link.
+- 35 policy tests, 45 viewer fixture cases and nine Core wire cases pass.
+  Mixed pairs and wrong sizes are rejected for every supported build.
+- A private Ubuntu container passes the actual mapped-library probe, native
+  GNOME ownership/family checks and Qt/Core input fixtures at scales 1 and 1.25.
+  Both fixture types require the exact 2.5 ordering contract. No host desktop,
+  input devices or GPU are mounted. These scales concern Qt fixture scaling,
+  not real monitor/compositor scaling or Mac physical input.
+- Evidence: `build/mutter-2.5-review-3g8m2idt/`, including `verified.json`,
+  `source-review.json`, `reviewed-source.diff`, `native-evidence.json` and
+  `native-reports.json`. Native image:
+  `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`.
+  Frozen source archive:
+  `02df67273aecd15c82f3921f6c630a44be29e9d7053f840cf04c1c82d877639d`.
+  `source-revised-binding.json` records base `0f4cf76c5` and source overlays;
+  the source/readme-only follow-up does not change the verified executable code.
+
+Retained setup failures: BuildKit interpreted a bare image ID as a remote image
+name; the corrected driver verifies the local tag's exact ID before building.
+The first optimized fixture build rejected optional deadline dereference as
+possibly uninitialized; checked `.value()` accesses compile without warning
+suppression and pass the native fixtures. Standalone GJS initially lacked the
+private Mutter typelib path; the explicit documented environment fixes that
+probe. Original logs remain alongside the successful follow-up. No installed
+library/extension or ordinary connection was changed. No H-row is closed.
+
 ## Graphical persistent-session controls — 2026-10-23
 
 `--session-controls` adds input-free pairing and Start/Stop controls backed by

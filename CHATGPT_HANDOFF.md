@@ -13,6 +13,14 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Ubuntu compatibility follow-up: the exact GNOME sender-build allowlist now
+includes Mutter `50.1-0ubuntu2.5` after primary source/build/module review.
+The new main-library size is matched per build. Private native GNOME provider,
+family, Qt and Core fixtures pass on that published package at both fixture
+scales. The user desktop/extension was not changed. This resolves the locally
+reproduced build-contract gap from base CI `40043623182`; new hosted results
+must still be checked rather than reusing older green runs.
+
 Persistent setup now has a command-line backend:
 [`seamless-profile.py`](deploy/windowshare/seamless-profile.py) and its
 [guide](deploy/windowshare/seamless-profile.md). It creates separate identities,

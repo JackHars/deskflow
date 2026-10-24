@@ -522,6 +522,7 @@ def forwarding_fence_acceptance(processes, host, driver, initial, desktop):
 SUPPORTED_ORDERING_CONTRACTS = (
     "sha256:fec9023139ac8eff93fcc1af90413613cdb526e7f02389dc9d8fe90f7abc81e5",
     "sha256:4d7ece1588279dbd3b66de3a28d1bf1098e7905b705d8e44743192b925d66b83",
+    "sha256:72ffe9741f6258c838ab73c37df0d9aece3f5d394ead8b86b4b2a306ad16c192",
 )
 
 
@@ -1168,7 +1169,7 @@ def main(argv=None):
                         help="Diagnostic transition before the two-window checks; ordinary-click reproduces the "
                              "old focus recovery without running first-click preparation")
     parser.add_argument("--expected-ordering-contract", choices=("", *SUPPORTED_ORDERING_CONTRACTS),
-                        default=SUPPORTED_ORDERING_CONTRACTS[1],
+                        default=SUPPORTED_ORDERING_CONTRACTS[-1],
                         help="Expected mapped build for this isolated fixture; empty tests unverified no-authority branch")
     parser.add_argument("--focus-child", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args(argv)
