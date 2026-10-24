@@ -1,5 +1,34 @@
 # Seamless Windows work state
 
+## Mac permission readiness in everyday controls — 2026-10-23
+
+The Mac controls now check the actual configured Core and Host executables
+before enabling Start. Core has separate, standalone read-only and explicit
+request commands that exit before Arch, native capture or IPC setup. The Host
+uses its existing permission probe. Missing Accessibility/Screen Recording and
+missing native window/holding-display capabilities have different guidance.
+Only Request permissions prompts macOS; it refuses a running Core and retains
+both profile and session locks in the child processes. A request never counts
+as readiness. Check again after granting access; refreshing immediately clears
+old readiness. The launcher independently rechecks before starting Core, while
+dry-run remains desktop-free. The ordinary connection is not stopped for setup.
+
+The final Mac programs, bootstrap/argument checks and offscreen controls pass.
+Profile checks pass 35 cases with one Ubuntu-only skip, and all 12 archive cases
+pass. The compiled Core/Host read-only commands return valid native reports;
+a mixed permission-request command is rejected before prompting. No permission
+request, desktop capture, native window movement or input was started. The
+controls screenshot was inspected and keeps Start disabled for missing access.
+Ubuntu controls/bootstrap, all 36 profile checks, all 12 archive cases and the
+production Core/argument checks pass. The initial archive check exposed an old
+CLI help-list assertion; its expected list now includes the new command.
+Evidence: `build/mac-permission-setup-l9nkpyra/`.
+
+This adds setup guidance and pre-launch checks, not installed-package acceptance
+or a fix for strict scroll timestamps/held repeat. Those defects, complete
+outward H07 and remaining native queue/hardware work stay open. Drag-back remains
+last, and future physical capture still requires fresh permission.
+
 ## Input handoff progress without maintenance polling — 2026-10-23
 
 The production input coordinator now schedules the next owning thread when a

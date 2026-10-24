@@ -13,6 +13,15 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Mac setup now includes read-only permission readiness and an explicit Request
+permissions action. The actual Core and Host identities are probed separately;
+missing access or native capabilities disables Start. Request requires stopped
+Core and retained profile/session locks, never starts input and requires a new
+status check afterward. The launcher repeats the checks before launching Core;
+dry-run stays desktop-free. This is implemented setup behavior, not installed
+TCC acceptance or a fix for the remaining input defects. See the current
+`TESTING.md` evidence and `seamless-profile.md` instructions.
+
 Input preparation now schedules the next owning thread directly through the
 existing coalesced wakes. The new regression disables maintenance polling and
 completes keyboard/first-click acquisition followed by three scroll deliveries;
@@ -672,8 +681,10 @@ drop coordination is implemented. All six hosted jobs pass at `c748915cc`
   placement; GNOME currently uses compositor-managed transient placement.
 - [x] Integrate clipboard with the actual exported-window focus and lifetime,
   preserving configured sharing policy and avoiding feedback loops.
-- [x] Complete modifier/shortcut mapping and key-repeat behavior. Preserve the
-  fixed Mac mapping: Option = `alt`, Command = `super`; the old reversal is fixed.
+- [ ] Complete modifier/shortcut mapping and key-repeat behavior. The Mac
+  mapping is implemented: Option = `alt`, Command = `super`; the old reversal
+  is fixed. Exact native held-key repeat remains unresolved, so this combined
+  requirement is not complete.
 - [x] Add reproducible browser/Electron and native-app scenarios, including
   Unicode/composition behavior or clearly documented unsupported input methods.
 

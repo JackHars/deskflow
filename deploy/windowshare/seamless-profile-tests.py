@@ -21,6 +21,7 @@ from unittest import mock
 spec = importlib.util.spec_from_file_location('seamless_profile', Path(__file__).with_name('seamless-profile.py'))
 profile = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(profile)
+real_mac_permissions = profile.mac_permissions
 
 
 class Profiles(unittest.TestCase):
@@ -50,6 +51,9 @@ class Profiles(unittest.TestCase):
         support = mock.patch.object(profile, 'provider_operation', return_value={'ready': True, 'detail': 'fixture'})
         self.provider_call = support.start()
         self.addCleanup(support.stop)
+        permissions = mock.patch.object(profile, 'mac_permissions', return_value={'ready': True, 'detail': 'fixture'})
+        self.permissions_call = permissions.start()
+        self.addCleanup(permissions.stop)
         self.package = self.base / 'Experimental.app/Contents/MacOS'
         self.package.mkdir(parents=True)
         for name in ('deskflow-core', 'deskflow-windowshare'):
@@ -146,6 +150,92 @@ class Profiles(unittest.TestCase):
              self.assertRaisesRegex(ValueError, 'new login'):
             profile.run(root)
         self.provider_call.assert_called_once_with('status')
+
+    def test_mac_permission_probe_uses_both_packaged_identities(self):
+        root = self.initialize('mac')
+        value = profile.load(root)
+        core = {'supported': True, 'accessibility': True, 'inputStarted': False}
+        host = {'supported': True, 'accessibility': True, 'screenCapture': True,
+                'targetedPointer': True, 'exactWindowIdentity': True, 'holdingDisplay': True}
+        def output(command, **kwargs):
+            self.assertEqual(kwargs['pass_fds'], ())
+            self.assertNotIn('DYLD_INSERT_LIBRARIES', kwargs['env'])
+            data = core if command[0] == value['core'] else host
+            return subprocess.CompletedProcess(command, 0, json.dumps(data).encode(), b'')
+        with mock.patch.object(profile.sys, 'platform', 'darwin'), \
+             mock.patch.object(profile.subprocess, 'run', side_effect=output) as calls:
+            result = real_mac_permissions(value, root)
+            self.assertTrue(result['ready'])
+            self.assertFalse(result['inputStarted'])
+            self.assertEqual([c.args[0] for c in calls.call_args_list],
+                             [[value['core'], '--windowshare-permissions'], [value['windowshare'], '--probe']])
+            for data, field in [(core, 'accessibility'), (host, 'accessibility'), (host, 'screenCapture'),
+                                (host, 'targetedPointer'), (host, 'exactWindowIdentity'), (host, 'holdingDisplay')]:
+                data[field] = False
+                result = real_mac_permissions(value, root)
+                self.assertFalse(result['ready'])
+                self.assertEqual(result['action'], 'request' if field in ('accessibility', 'screenCapture') else '')
+                data[field] = True
+            core['inputStarted'] = True
+            with self.assertRaisesRegex(ValueError, 'unexpectedly started input'):
+                real_mac_permissions(value, root)
+            core['inputStarted'] = False
+            host['screenCapture'] = 'true'
+            with self.assertRaisesRegex(ValueError, 'invalid result'):
+                real_mac_permissions(value, root)
+
+    def test_mac_permission_request_is_not_readiness(self):
+        root = self.initialize('mac')
+        value = profile.load(root)
+        results = [dict(supported=True, accessibility=True, inputStarted=False),
+                   dict(supported=True, accessibility=True, screenCapture=True, targetedPointer=True,
+                        exactWindowIdentity=True, holdingDisplay=True)]
+        with mock.patch.object(profile.sys, 'platform', 'darwin'), \
+             mock.patch.object(profile.subprocess, 'run', side_effect=[
+                 subprocess.CompletedProcess([], 0, json.dumps(item).encode(), b'') for item in results]) as calls:
+            result = real_mac_permissions(value, root, 'request', (21, 22))
+        self.assertFalse(result['ready'])
+        self.assertFalse(result['inputStarted'])
+        self.assertEqual([c.args[0][1] for c in calls.call_args_list],
+                         ['--windowshare-request-permissions', '--request-permissions'])
+        self.assertTrue(all(c.kwargs['pass_fds'] == (21, 22) for c in calls.call_args_list))
+
+    def test_mac_permission_request_retains_locks_and_refuses_running_core(self):
+        root = self.initialize('mac')
+        with mock.patch.object(profile, 'running_cores', return_value=[123]) as cores:
+            self.assertTrue(profile.configure_mac_permissions(root, 'status')['ready'])
+            cores.assert_not_called()
+            with self.assertRaisesRegex(ValueError, 'Stop Deskflow'):
+                profile.configure_mac_permissions(root, 'request')
+        def child(value, directory, operation, fds):
+            self.assertEqual(directory, root)
+            self.assertEqual(operation, 'request')
+            self.assertEqual(len(fds), 2)
+            for fd in fds:
+                os.fstat(fd)
+            with self.assertRaisesRegex(ValueError, 'already running'):
+                with profile.locked(root):
+                    self.fail('missing profile lock')
+            with self.assertRaisesRegex(ValueError, 'already running'):
+                with profile.session_lock():
+                    self.fail('missing session lock')
+            return {'ready': False}
+        self.permissions_call.side_effect = child
+        with mock.patch.object(profile, 'running_cores', return_value=[]):
+            self.assertFalse(profile.configure_mac_permissions(root, 'request')['ready'])
+        ubuntu = self.initialize('ubuntu')
+        with self.assertRaisesRegex(ValueError, 'Mac computer'):
+            profile.configure_mac_permissions(ubuntu, 'status')
+
+    def test_launch_rechecks_mac_permissions_before_starting_core(self):
+        root, _ = self.endpoints()
+        self.permissions_call.return_value = {'ready': False, 'detail': 'Allow Screen Recording'}
+        with mock.patch.object(profile.sys, 'platform', 'darwin'), \
+             mock.patch.object(profile, 'running_cores', return_value=[]), \
+             mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')), \
+             self.assertRaisesRegex(ValueError, 'Screen Recording'):
+            profile.run(root)
+        self.permissions_call.assert_called_once()
 
     def test_top_edge_is_only_export_trigger(self):
         mac, ubuntu = self.endpoints()

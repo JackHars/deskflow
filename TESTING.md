@@ -4,6 +4,56 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Mac permission setup and pre-launch readiness — 2026-10-23
+
+Evidence: `build/mac-permission-setup-l9nkpyra/`. The controls now use explicit
+Mac permission status/request actions. Core's new commands are standalone and
+return before normal runtime construction. The existing Host probe supplies its
+own permission and native capability report. Missing access disables Start;
+requesting access cannot enable Start. The launcher independently rechecks,
+and permission requests retain setup/session locks and refuse ordinary Core.
+
+- `mac-build.log` retains the first test-build failure: two malformed-argument
+  cases supplied QString to the existing QByteArray fixture constructor. The
+  corrected cases still reject malformed permission commands.
+- `mac-build-reviewed.log` builds both production programs and all selected
+  checks. `bootstrap-mac-reviewed.log`, `core-args-mac-reviewed.log` and
+  `controls-mac-reviewed.log` pass. Controls exercise read-only opening, explicit
+  request, required recheck, readiness revocation, invalid results and existing
+  pairing/update/Stop/Close behavior without native input or permission prompts.
+- `profiles-mac-reviewed.log` passes 35 of 36 cases with the Ubuntu-only launch
+  check skipped. The new Mac pre-launch rejection case runs on both platforms
+  with an explicit platform fixture and refuses before spawning Core.
+  `archive-mac-reviewed.log` passes all 12 packaging cases.
+- `native-read-only-probes.json` contains compiled Core and Host status reports.
+  Both return success; the Core report explicitly says input was not started.
+  A request combined with `--help` exits 3 before prompting. These are development
+  build reports, not permission acceptance for a newly installed signed bundle.
+- `controls.png.mac-permissions.png` was visually inspected: missing access,
+  Check and Request actions are visible, with Start disabled. All screenshots
+  come from the offscreen fixture, not the user desktop.
+- `binding-reviewed.json` binds base `2f10fecef` plus exact overlays, including
+  the new Core header. Initial archive SHA-256:
+  `a15f5ac996439e5d9f7ccadea8ee899b977c62766373e1daa3b621da5842eb65`.
+  Ubuntu app/bootstrap/controls and all 36 profile cases pass on these bytes.
+  The archive suite then finds an outdated exact CLI help-list assertion; the
+  new permissions command is added to that expected list, without changing
+  production code or removing any archive checks.
+- `binding-final.json` and `source-final/` add only that fixture correction;
+  archive SHA-256:
+  `253cbe7e134cb935b12049fc2f5dc0a6198bde7b877b58bfb21ccae5bda3b8b2`.
+  `linux-initial-evidence.json` retains the earlier app/profile passes and archive
+  assertion failure. `linux-final-evidence.json` passes all 12 archive cases,
+  production Core build and Core arguments on the final bytes. Both use image
+  `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`
+  without network, host display/input/GPU mounts or added capabilities. Source
+  is read-only and all container commands run as UID 1000.
+
+The normal Deskflow connection remains running. No installed package/profile,
+TCC grant, desktop extension or native input session was changed. Native top-edge
+acceptance, strict scroll timestamps, held repeat and full queue/hardware checks
+remain open; permission readiness alone does not prove capture or delivery.
+
 ## Notification-driven input preparation — 2026-10-23
 
 Evidence: `build/handoff-progress-d27uu6mv/`. The coordinator now wakes the

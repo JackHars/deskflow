@@ -90,6 +90,21 @@ void coreArguments()
   check(config.pair && !config.probe && config.hostConfig == "/tmp/a b.json", "Configuration path changed");
   const auto configSeparate = Arguments{"core", "--windowshare-host-config", "config.json", "server"}.core();
   check(configSeparate.pair && configSeparate.hostConfig == "config.json", "Separate config option failed");
+  for (const auto &option : {"--windowshare-permissions", "--windowshare-request-permissions"}) {
+    const auto permissions = Arguments{"core", option}.core();
+    check(
+        permissions.permissionsProbe && !permissions.pair && !permissions.probe && permissions.hostConfig.isEmpty(),
+        "Permissions check created input IPC or routing"
+    );
+    check(
+        permissions.requestPermissions == (QString(option) == "--windowshare-request-permissions"),
+        "Read-only permission check requested access"
+    );
+    denied([&] { Arguments{"core", option, "server"}.core(); });
+    denied([&] { Arguments{"core", option, "--windowshare-host-config=/tmp/a"}.core(); });
+    denied([&] { Arguments{"core", QByteArray(option) + "=1"}.core(); });
+    denied([&] { Arguments{"core", QByteArray(option).mid(1)}.core(); });
+  }
 }
 void hostArguments()
 {

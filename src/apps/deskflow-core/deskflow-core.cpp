@@ -18,6 +18,7 @@
 #include "deskflow/ServerApp.h"
 #include "deskflow/ipc/CoreIpcServer.h"
 #ifdef WINDOWSHARE_CORE_COMPANION
+#include "MacPermissionStatus.h"
 #include "SessionControlsEntry.h"
 #include "platform/OriginalInputCaptureSource_mac.h"
 #include "windowshare/InputEvidenceRuntime.h"
@@ -34,6 +35,7 @@
 
 #include <QApplication>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QProcess>
 #include <QSharedMemory>
 #include <QTextStream>
@@ -100,6 +102,13 @@ int main(int argc, char **argv)
   QApplication app(argc, argv);
 
 #ifdef WINDOWSHARE_CORE_COMPANION
+  if (inputBootstrap->permissionsProbe) {
+    QTextStream(
+        stdout
+    ) << QJsonDocument(coreMacPermissions(inputBootstrap->requestPermissions)).toJson(QJsonDocument::Compact)
+      << '\n';
+    return s_exitSuccess;
+  }
   if (inputBootstrap->codeAdmissionProbe)
     return localInputCodeAdmissionProbe(std::move(*inputBootstrap->pair));
   if (inputBootstrap->probe)

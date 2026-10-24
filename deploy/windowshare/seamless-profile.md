@@ -31,8 +31,12 @@ package in your normal Wayland desktop session.
    computer. Choose the other computer's file, enter the Mac's network address,
    and click **Pair computers** on each endpoint. Choose the receiving monitor
    on Ubuntu. Enable copied-text sharing on both endpoints if wanted.
-3. On Ubuntu, follow **Ubuntu desktop support** to install or enable support
-   when needed. See the setup steps below. These actions never start sharing.
+3. On the Mac, use **Mac permissions** to check Accessibility and Screen
+   Recording. If access is missing, stop ordinary Deskflow and click **Request
+   permissions**, approve the experimental app in System Settings, then click
+   **Check Mac permissions**. Reopen the app if macOS asks you to. On Ubuntu,
+   follow **Ubuntu desktop support** to install or enable support when needed.
+   These actions never start sharing.
 4. Stop ordinary Deskflow on both computers, then click **Start sharing** on
    the Mac and Ubuntu. Once the peers connect, drag a Mac titlebar upward.
 5. Click **Stop sharing**, close the controls, or quit the app to request
@@ -51,8 +55,8 @@ profile's logs directory. `controls.log` keeps bounded helper output, including
 startup refusals before Core logging begins; `session.log` contains the runtime
 stages. Failures remain visible in the control window.
 
-**Ready to start** means the saved profile validates and, on Ubuntu, the
-current desktop-support check passes. **Session started** means
+**Ready to start** means the saved profile validates and this computer's
+permission or desktop-support check passes. **Session started** means
 the owned runtime process has launched; it does not claim native delivery or
 peer readiness. Opening, creating or pairing in these controls never starts
 sharing. The GUI's inherited lifetime pipe is separate from input: closing it,
@@ -190,6 +194,32 @@ python3 "$APP/Contents/Resources/seamless-profile.py" run \
 
 This checks the saved identities, binaries and generated configuration. It does
 not establish desktop permissions, peer availability or that input will work.
+
+## Mac permission readiness
+
+Opening a valid Mac setup runs read-only probes through its actual packaged
+Core and window-sharing executables. Core checks its Accessibility trust; the
+Host checks its own Accessibility and Screen Recording access and required
+native window/holding-display support. No event tap, window capture, network
+connection or native input session is created by these probes. Missing private
+native capabilities cannot be fixed by granting permissions and are reported
+separately.
+
+The same check is available from the command line:
+
+```sh
+python3 "$APP/Contents/Resources/seamless-profile.py" permissions \
+  --profile "$HOME/DeskflowMac" --operation status
+```
+
+Only the explicit **Request permissions** button or `--operation request`
+invokes macOS permission prompts. That action requires ordinary Deskflow to be
+stopped and retains the setup/session locks in each probe child. A completed
+request never counts as readiness: check again after granting access. Rechecking
+clears the controls' prior result immediately. The actual `run` command checks
+permissions again before launching Core, independently of the controls' result.
+`run --dry-run` remains desktop-free. Permission readiness does not establish
+successful native capture or full application compatibility.
 
 ## Start, use and stop
 

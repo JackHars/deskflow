@@ -163,7 +163,7 @@ class LinuxArchiveTests(unittest.TestCase):
         result = subprocess.run([str(root / 'bin/deskflow-seamless-session'), '--help'],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{init,pair,run,inspect,provider,update}', result.stdout)
+        self.assertIn('{init,pair,run,inspect,provider,permissions,update}', result.stdout)
 
     def test_cannot_overwrite_archive_or_follow_output_symlink(self):
         dest = self.root / "do-not-touch.tar.gz"

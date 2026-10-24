@@ -502,6 +502,60 @@ def clean_environment(root):
     return env
 
 
+def mac_permissions(profile, root, operation='status', lock_fds=()):
+    require(sys.platform == 'darwin' and profile['local']['role'] == 'mac',
+            'Check Mac permissions on the Mac computer')
+    require(operation in ('status', 'request'), 'Unknown Mac permissions operation')
+    results = {}
+    for component, argument, fields in (
+        ('core', '--windowshare-request-permissions' if operation == 'request' else '--windowshare-permissions',
+         ('supported', 'accessibility', 'inputStarted')),
+        ('windowshare', '--request-permissions' if operation == 'request' else '--probe',
+         ('supported', 'screenCapture', 'accessibility', 'targetedPointer', 'exactWindowIdentity', 'holdingDisplay'))
+    ):
+        completed = subprocess.run([profile[component], argument], env=clean_environment(root),
+                                   capture_output=True, timeout=30, check=True, pass_fds=lock_fds)
+        require(len(completed.stdout) <= MAX_JSON, 'Mac permission check returned too much output')
+        value = json.loads(completed.stdout, object_pairs_hook=unique_object)
+        require(isinstance(value, dict) and all(type(value.get(field)) is bool for field in fields),
+                'Mac permission check returned an invalid result')
+        if component == 'core':
+            require(value['inputStarted'] is False, 'Mac permission check unexpectedly started input')
+        results[component] = value
+    core, host = results['core'], results['windowshare']
+    supported = core['supported'] and host['supported'] and all(
+        host[field] for field in ('targetedPointer', 'exactWindowIdentity', 'holdingDisplay'))
+    missing = []
+    if not core['accessibility'] or not host['accessibility']:
+        missing.append('Accessibility')
+    if not host['screenCapture']:
+        missing.append('Screen Recording')
+    ready = supported and not missing and operation == 'status'
+    if ready:
+        detail = 'Mac permissions are ready.'
+    elif not supported:
+        detail = 'This macOS version is missing required window-sharing support.'
+    elif missing:
+        detail = ('Allow ' + ' and '.join(missing) + ' for the experimental Deskflow app in System Settings, '
+                  'then reopen the app if requested and click Check Mac permissions.')
+    else:
+        detail = 'Permission requests have finished. Click Check Mac permissions before starting sharing.'
+    return {'ready': ready, 'action': 'request' if supported and missing and operation == 'status' else '',
+            'detail': detail, 'missing': missing, 'checks': results, 'inputStarted': False}
+
+
+def configure_mac_permissions(root, operation):
+    require(operation in ('status', 'request'), 'Unknown Mac permissions operation')
+    with locked(root) as profile_fd, contextlib.ExitStack() as locks:
+        profile = load(root)
+        require(profile['local']['role'] == 'mac', 'Use Mac permission controls on the Mac computer')
+        if operation == 'request':
+            global_fd = locks.enter_context(session_lock())
+            require(not running_cores(), 'Stop Deskflow on the Mac before requesting permissions')
+            return mac_permissions(profile, root, operation, (profile_fd, global_fd))
+        return mac_permissions(profile, root, operation)
+
+
 def running_cores():
     if sys.platform == 'darwin':
         result = subprocess.run(['pgrep', '-x', 'deskflow-core'], capture_output=True, text=True, timeout=5)
@@ -612,6 +666,9 @@ def run(root, dry_run=False, control_fd=None):
             support = provider_operation('status')
             require(support['ready'], support['detail'])
             env['QT_QPA_PLATFORM'] = 'wayland'
+        else:
+            permissions = mac_permissions(load(root), root)
+            require(permissions['ready'], permissions['detail'])
         logger = logging.getLogger('seamless-session')
         logger.setLevel(logging.INFO)
         handler = logging.handlers.RotatingFileHandler(plan['log'], maxBytes=16 * 1024 * 1024, backupCount=3)
@@ -706,6 +763,9 @@ def main():
     provider = sub.add_parser('provider', help='Check or explicitly install/enable Ubuntu desktop support')
     provider.add_argument('--profile', type=Path, required=True)
     provider.add_argument('--operation', choices=('status', 'install', 'enable'), default='status')
+    permissions = sub.add_parser('permissions', help='Check or explicitly request Mac permissions without sharing input')
+    permissions.add_argument('--profile', type=Path, required=True)
+    permissions.add_argument('--operation', choices=('status', 'request'), default='status')
     refresh = sub.add_parser('update', help='Use a new package or connection options without changing pairing or starting input')
     refresh.add_argument('--profile', type=Path, required=True)
     refresh.add_argument('--core', type=Path, required=True)
@@ -726,6 +786,8 @@ def main():
         result = inspect_profile(private_root(args.profile), args.core, args.windowshare)
     elif args.command == 'provider':
         result = configure_provider(private_root(args.profile), args.operation)
+    elif args.command == 'permissions':
+        result = configure_mac_permissions(private_root(args.profile), args.operation)
     elif args.command == 'update':
         changes = {key: getattr(args, field) for key, field in
                    [('macAddress', 'mac_address'), ('corePort', 'core_port'), ('windowPort', 'window_port'),

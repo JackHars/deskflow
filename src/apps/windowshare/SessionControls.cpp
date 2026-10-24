@@ -194,27 +194,32 @@ SessionControls::SessionControls(SessionControlTools tools, QWidget *parent)
   pairRow->addWidget(m_pairSummary, 1);
   pairForm->addRow(pairRow);
   layout->addWidget(pairing);
-  auto *support = new QGroupBox("Ubuntu desktop support", this);
+  const bool mac = m_tools.role == "mac";
+  auto *support = new QGroupBox(mac ? "Mac permissions" : "Ubuntu desktop support", this);
   auto *supportLayout = new QVBoxLayout(support);
-  m_supportDetail = new QLabel("Create or open a setup to check Ubuntu support.", support);
+  m_supportDetail = new QLabel(
+      mac ? "Create or open a setup to check Mac permissions." : "Create or open a setup to check Ubuntu support.",
+      support
+  );
   m_supportDetail->setObjectName("supportDetail");
   m_supportDetail->setWordWrap(true);
   m_supportDetail->setTextFormat(Qt::PlainText);
   supportLayout->addWidget(m_supportDetail);
   auto *supportActions = new QHBoxLayout;
-  m_checkSupport = button("Check Ubuntu support", "checkSupport", support);
-  m_setupSupport = button("Install support", "setupSupport", support);
+  m_checkSupport = button(mac ? "Check Mac permissions" : "Check Ubuntu support", "checkSupport", support);
+  m_setupSupport = button(mac ? "Request permissions" : "Install support", "setupSupport", support);
   supportActions->addWidget(m_checkSupport);
   supportActions->addWidget(m_setupSupport);
   supportActions->addStretch();
   supportLayout->addLayout(supportActions);
-  support->setVisible(m_tools.role == "ubuntu");
   layout->addWidget(support);
-  connect(m_checkSupport, &QPushButton::clicked, this, [this] { invoke("provider", {"--operation", "status"}); });
+  connect(m_checkSupport, &QPushButton::clicked, this, [this] {
+    invoke(m_tools.role == "mac" ? "permissions" : "provider", {"--operation", "status"});
+  });
   connect(m_setupSupport, &QPushButton::clicked, this, [this] {
     const auto action = m_support.value("action").toString();
-    if (action == "install" || action == "enable")
-      invoke("provider", {"--operation", action});
+    if (m_tools.role == "mac" ? action == "request" : action == "install" || action == "enable")
+      invoke(m_tools.role == "mac" ? "permissions" : "provider", {"--operation", action});
   });
   auto *actions = new QHBoxLayout;
   m_setupToggle = button("Show setup", "toggleSetup", this);
@@ -347,7 +352,10 @@ void SessionControls::inspect()
     return;
   m_profile = {};
   m_support = {};
-  m_supportDetail->setText("Create or open a setup to check Ubuntu support.");
+  m_supportDetail->setText(
+      m_tools.role == "mac" ? "Create or open a setup to check Mac permissions."
+                            : "Create or open a setup to check Ubuntu support."
+  );
   m_showSetup = true;
   m_pairingFile.clear();
   m_pairSummary->clear();
@@ -378,9 +386,11 @@ void SessionControls::invoke(const QString &operation, QStringList arguments)
   m_stopping = false;
   m_outputOverflow = false;
   m_output.clear();
-  if (operation == "provider") {
+  if (operation == "provider" || operation == "permissions") {
     m_support = {};
-    m_supportDetail->setText("Checking or updating Ubuntu support…");
+    m_supportDetail->setText(
+        operation == "permissions" ? "Checking or requesting Mac permissions…" : "Checking or updating Ubuntu support…"
+    );
   }
   arguments.prepend(operation);
   arguments.prepend(m_tools.script);
@@ -453,18 +463,19 @@ void SessionControls::finish(int exitCode, QProcess::ExitStatus status)
     return;
   }
   if (operation != "inspect") {
-    if (operation == "provider") {
+    if (operation == "provider" || operation == "permissions") {
       const auto value = document.object();
       if (!value.value("ready").isBool() || !value.value("detail").isString() ||
           !value.value("inputStarted").isBool() || value.value("inputStarted").toBool()) {
-        message("Ubuntu support returned an invalid result", "Open logs for details. Sharing has not started.");
+        message("Setup check returned an invalid result", "Open logs for details. Sharing has not started.");
         return;
       }
       m_support = value;
       m_supportDetail->setText(value.value("detail").toString());
       message(
-          value.value("ready").toBool() ? (m_profile.value("paired").toBool() ? "Ready to start" : "Ready to pair")
-                                        : "Ubuntu support needs attention",
+          value.value("ready").toBool()
+              ? (m_profile.value("paired").toBool() ? "Ready to start" : "Ready to pair")
+              : (operation == "permissions" ? "Mac permissions need attention" : "Ubuntu support needs attention"),
           value.value("detail").toString()
       );
       updateButtons();
@@ -503,8 +514,8 @@ void SessionControls::finish(int exitCode, QProcess::ExitStatus status)
                     : "Save this computer’s pairing file and copy it to the other computer. Then choose its file here.")
   );
   updateButtons();
-  if (m_tools.role == "ubuntu" && packageReady)
-    invoke("provider", {"--operation", "status"});
+  if (packageReady)
+    invoke(m_tools.role == "mac" ? "permissions" : "provider", {"--operation", "status"});
 }
 
 void SessionControls::saveResult(int exitCode)
@@ -598,15 +609,19 @@ void SessionControls::updateButtons()
   m_clipboard->setEnabled(!m_busy && created);
   m_pair->setEnabled(!m_busy && created && !paired && !m_peerFile->text().isEmpty() && !m_address->text().isEmpty());
   m_start->setText(m_stopping ? "Stopping…" : (m_busy && m_operation == "run" ? "Stop sharing" : "Start sharing"));
-  const bool supportReady = m_tools.role != "ubuntu" || m_support.value("ready").toBool();
+  const bool supportReady = m_support.value("ready").toBool();
   m_start->setEnabled(
       !m_stopping && (m_busy ? m_operation == "run" : paired && packageReady && !changed && supportReady)
   );
   m_checkSupport->setEnabled(!m_busy && created && packageReady);
   const auto supportAction = m_support.value("action").toString();
-  m_setupSupport->setVisible(supportAction == "install" || supportAction == "enable");
+  m_setupSupport->setVisible(
+      m_tools.role == "mac" ? supportAction == "request" : supportAction == "install" || supportAction == "enable"
+  );
   m_setupSupport->setEnabled(!m_busy && created && packageReady);
-  m_setupSupport->setText(supportAction == "enable" ? "Enable support" : "Install support");
+  m_setupSupport->setText(
+      m_tools.role == "mac" ? "Request permissions" : (supportAction == "enable" ? "Enable support" : "Install support")
+  );
   if (paired)
     m_pairSummary->setText(changed ? "Changes not saved" : "Paired with " + m_profile.value("peer").toString());
   m_logs->setEnabled(created);

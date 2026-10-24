@@ -140,10 +140,18 @@ LocalInputCoreBootstrap LocalInputCoreBootstrap::inspect(int argc, char *const a
 {
   LocalInputCoreBootstrap result;
   constexpr std::string_view probe = "--windowshare-ipc-probe", admission = "--windowshare-code-admission-probe",
-                             config = "--windowshare-host-config";
+                             config = "--windowshare-host-config", permissions = "--windowshare-permissions",
+                             requestPermissions = "--windowshare-request-permissions";
   for (int index = 1; index < argc; ++index) {
     const std::string_view argument(argv[index]);
-    if (related(argument, probe)) {
+    if (related(argument, permissions) || related(argument, requestPermissions)) {
+      require(
+          (argument == permissions || argument == requestPermissions) && argc == 2,
+          "Use --windowshare-permissions or --windowshare-request-permissions alone"
+      );
+      result.permissionsProbe = true;
+      result.requestPermissions = argument == requestPermissions;
+    } else if (related(argument, probe)) {
       require(argument == probe && argc == 2, "Use --windowshare-ipc-probe alone");
       result.probe = true;
     } else if (related(argument, admission)) {

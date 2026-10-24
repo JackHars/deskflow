@@ -81,6 +81,17 @@ elif operation=='provider':
   (root/'support.json').write_text(json.dumps(value))
   print(json.dumps(dict(value,ready=False,detail='Enable requested; check again')))
  else: print(json.dumps(value))
+elif operation=='permissions':
+ action=sys.argv[sys.argv.index('--operation')+1]
+ with (root/'permission-commands').open('a') as log: log.write(action+'\n')
+ path=root/'permissions.json'
+ value=json.loads(path.read_text()) if path.exists() else {'ready':True,'action':'','detail':'Mac permissions are ready.','inputStarted':False}
+ if action=='request':
+  assert value['action']=='request'
+  value.update(ready=True,action='',detail='Mac permissions are ready.')
+  path.write_text(json.dumps(value))
+  print(json.dumps(dict(value,ready=False,detail='Click Check Mac permissions')))
+ else: print(json.dumps(value))
 elif operation=='update':
  if (root/'reject-update').exists():
   print('Window sharing: Cannot update this saved setup');sys.exit(1)
@@ -254,6 +265,51 @@ void ubuntuSupport(const QString &screenshot)
   check(!start->isEnabled() && !setup->isVisible(), "stale loaded support is not ready or automatically reenabled");
   window.close();
 }
+void macPermissions(const QString &screenshot)
+{
+  QTemporaryDir temporary;
+  const auto root = temporary.filePath("profile");
+  QDir().mkpath(root + "/logs");
+  const auto script = temporary.filePath("owned-helper.py"), core = temporary.filePath("unused-core");
+  write(script, backend);
+  write(core, "#!/bin/sh\nexit 99\n");
+  QFile::setPermissions(core, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+  write(
+      root + "/profile.json",
+      R"({"name":"MacBook","role":"mac","paired":true,"packageReady":true,"peer":"JackUbuntu","options":{"macAddress":"192.168.1.101","screen":0,"clipboardText":false}})"
+  );
+  write(
+      root + "/permissions.json",
+      R"({"ready":false,"action":"request","detail":"Allow Accessibility and Screen Recording","inputStarted":false})"
+  );
+  SessionControls window({QStandardPaths::findExecutable("python3"), script, core, core, root, "mac"});
+  window.show();
+  auto *status = child<QLabel>(window, "sessionStatus"), *detail = child<QLabel>(window, "supportDetail");
+  auto *start = child<QPushButton>(window, "startStop"), *request = child<QPushButton>(window, "setupSupport");
+  auto *refresh = child<QPushButton>(window, "checkSupport");
+  until([&] { return status->text() == "Mac permissions need attention"; });
+  check(
+      !start->isEnabled() && request->isEnabled() && request->text() == "Request permissions",
+      "missing Mac permissions cannot start"
+  );
+  QFile commands(root + "/permission-commands");
+  check(commands.open(QIODevice::ReadOnly) && commands.readAll() == "status\n", "opening controls requested access");
+  commands.close();
+  if (!screenshot.isEmpty())
+    check(window.grab().save(screenshot + ".mac-permissions.png"), "save offscreen Mac permission preview");
+  request->click();
+  until([&] { return detail->text() == "Click Check Mac permissions"; });
+  check(!start->isEnabled() && !QFileInfo::exists(root + "/started"), "permission request cannot start input");
+  refresh->click();
+  until([&] { return start->isEnabled(); });
+  check(!QFileInfo::exists(root + "/started"), "readiness alone started sharing");
+  write(root + "/permissions.json", R"({"ready":true,"action":"","detail":"invalid","inputStarted":true})");
+  refresh->click();
+  check(!start->isEnabled(), "permission refresh retained stale readiness");
+  until([&] { return status->text() == "Setup check returned an invalid result"; });
+  check(!start->isEnabled(), "invalid permission output enabled sharing");
+  window.close();
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -263,6 +319,7 @@ int main(int argc, char **argv)
   try {
     lifecycle(argc == 2 ? QString::fromLocal8Bit(argv[1]) : QString());
     ubuntuSupport(argc == 2 ? QString::fromLocal8Bit(argv[1]) : QString());
+    macPermissions(argc == 2 ? QString::fromLocal8Bit(argv[1]) : QString());
     std::puts("PASS: input-free controls creation, pairing, conflict, Start/Stop, output bounds and close lifecycle");
     return 0;
   } catch (const std::exception &error) {

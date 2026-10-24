@@ -35,6 +35,7 @@ struct LocalInputCoreBootstrap
   static LocalInputCoreBootstrap inspect(int argc, char *const argv[]);
   bool probe = false;
   bool codeAdmissionProbe = false;
+  bool permissionsProbe = false, requestPermissions = false;
   QString hostConfig;
   std::optional<LocalInputSocketPair> pair;
 };
