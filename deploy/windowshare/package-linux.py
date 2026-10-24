@@ -32,7 +32,8 @@ PROVIDER_FILES = (
     "ordering-builds.json", "ordering-builds.json.license", "verify-ordering-build.py",
     "tests/ordering-native.js", "tests/logic.test.js", "tests/window-drag.test.js", "tests/launcher.gjs.js", "tests/launcher-native.py",
 )
-DOCUMENT_FILES = ("package-linux.md", "app-compatibility.md", "focused-clipboard.md")
+DOCUMENT_FILES = ("package-linux.md", "app-compatibility.md", "focused-clipboard.md", "seamless-profile.md")
+SESSION_FILES = ("seamless-profile.py",)
 MAX_ARCHIVE_MEMBER = 128 * 1024 * 1024
 MAX_ARCHIVE_TOTAL = 256 * 1024 * 1024
 
@@ -77,6 +78,11 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
         f"{RUNTIME}/deskflow-core": (executable(core), 0o755),
         "bin/deskflow-seamless-viewer": (launcher("deskflow-windowshare"), 0o755),
         "bin/deskflow-seamless-core": (launcher("deskflow-core"), 0o755),
+        "bin/deskflow-seamless-session": ((
+            '#!/bin/sh\nset -eu\n'
+            'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+            f'exec python3 "$here/../{SHARE}/seamless-profile.py" "$@"\n'
+        ).encode(), 0o755),
     }
     for name in PROVIDER_FILES:
         path = provider / name
@@ -88,7 +94,7 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
     metadata = json.loads(files[f"{PROVIDER}/metadata.json"][0])
     if metadata.get("uuid") != "seamless-windows@deskflow.org" or metadata.get("shell-version") != ["50"]:
         raise ValueError("GNOME extension identity or Shell 50 pin was changed")
-    for name in DOCUMENT_FILES:
+    for name in DOCUMENT_FILES + SESSION_FILES:
         path = source / "deploy/windowshare" / name
         if path.is_symlink() or not path.is_file() or not stat.S_ISREG(path.stat().st_mode):
             raise ValueError(f"Compatibility document missing or symlinked: {path}")
@@ -103,6 +109,7 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
         "gnomeProviderEnabled": False,
         "bundledSystemLibraries": False,
         "requirements": [
+            "Python 3.9 or newer for persistent session setup and launch",
             "Linux x86_64 or matching build architecture and ABI",
             "runtime Qt version matching compiled Qt Wayland private APIs",
             "the build's FFmpeg, XCB/Wayland and GIO dependencies, and libei >= 1.5.0",
@@ -194,9 +201,10 @@ def verify_archive(path: Path) -> dict:
     # Checking hashes alone accepts an internally consistent but unlaunchable
     # archive whose manifest omits a runtime import or compatibility contract.
     required = {"bin/deskflow-seamless-viewer", "bin/deskflow-seamless-core",
+                "bin/deskflow-seamless-session",
                 f"{RUNTIME}/deskflow-windowshare", f"{RUNTIME}/deskflow-core"}
     required.update(f"{PROVIDER}/{name}" for name in PROVIDER_FILES)
-    required.update(f"{SHARE}/{name}" for name in DOCUMENT_FILES)
+    required.update(f"{SHARE}/{name}" for name in DOCUMENT_FILES + SESSION_FILES)
     if not required.issubset(contents):
         raise ValueError("Package missing an experimental runtime, provider, or compatibility diagnostic")
     return manifest

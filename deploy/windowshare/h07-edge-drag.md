@@ -23,6 +23,12 @@ H04's existing runner automatically exports its source and deliberately validate
 a configuration with no edge links. Do not use its exit status as an H07 result.
 For H07, prepare a distinct attended session with these actual runtime settings:
 
+The persistent [profile builder](seamless-profile.md) can generate these paired
+runtime settings without capture. Its normal `run` has no test deadline or
+disposable source; H07 still needs the independent visible controls, bounded
+supervision and fresh permission described here. A successful profile dry-run
+does not pass H07.
+
 - Mac Core uses `--windowshare-host-config=/absolute/private/host.json` in server
   mode. The v1 Host configuration enables `holdingDisplay:true`, names the
   exact approved WindowShare peer and explicit Core-pin/WindowShare-pin pair.

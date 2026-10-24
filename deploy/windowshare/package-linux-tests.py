@@ -12,6 +12,7 @@ import posixpath
 import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -116,6 +117,8 @@ class LinuxArchiveTests(unittest.TestCase):
         original = self.files()
         required = [f"{package.PROVIDER}/{name}" for name in package.PROVIDER_FILES]
         required += [f"{package.SHARE}/{name}" for name in package.DOCUMENT_FILES]
+        required += [f"{package.SHARE}/{name}" for name in package.SESSION_FILES]
+        required += ["bin/deskflow-seamless-session"]
         for index, missing in enumerate(required):
             with self.subTest(missing=missing):
                 files = dict(original)
@@ -133,10 +136,10 @@ class LinuxArchiveTests(unittest.TestCase):
         windowshare = source / "deploy/windowshare"
         windowshare.mkdir(parents=True)
         shutil.copytree(HERE / "gnome-provider", windowshare / "gnome-provider")
-        for name in package.DOCUMENT_FILES:
+        for name in package.DOCUMENT_FILES + package.SESSION_FILES:
             shutil.copy2(HERE / name, windowshare / name)
         for name in ("gnome-provider/ordering-builds.json", "gnome-provider/verify-ordering-build.py",
-                     "app-compatibility.md", "focused-clipboard.md"):
+                     "app-compatibility.md", "focused-clipboard.md", "seamless-profile.py"):
             with self.subTest(missing=name):
                 path = windowshare / name
                 contents = path.read_bytes()
@@ -148,6 +151,19 @@ class LinuxArchiveTests(unittest.TestCase):
                     package.package_files(self.viewer, self.core, source, self.source_sha)
                 path.unlink()
                 path.write_bytes(contents)
+
+    def test_packaged_session_launcher_runs_with_spaces_in_path_without_core(self):
+        root = self.root / 'package with spaces'
+        for name, (data, mode) in self.files().items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            path.chmod(mode)
+        # The ELF fixtures cannot execute. Help must remain input-free.
+        result = subprocess.run([str(root / 'bin/deskflow-seamless-session'), '--help'],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('{init,pair,run}', result.stdout)
 
     def test_cannot_overwrite_archive_or_follow_output_symlink(self):
         dest = self.root / "do-not-touch.tar.gz"

@@ -4,6 +4,46 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Persistent profile setup and launcher — 2026-10-23
+
+The new `seamless-profile.py` implements input-free creation/pairing/dry-run and
+an explicit persistent foreground launch. It uses real runtime configuration
+with Ubuntu above Mac and **no `exportWindow`**. It is separate from H04's
+automatic export and from a supervised physical test. See
+[persistent setup](deploy/windowshare/seamless-profile.md).
+
+- 18 profile checks pass on Mac and jack's Ubuntu: distinct peer/channel pins,
+  immutable identities/configuration, refusal of competing Core sessions,
+  profile/per-user locking, startup failure logs, owned shutdown after terminal
+  hangup, unchanged recovery evidence and pipe-capacity shutdown draining.
+  Native input is never captured by these fixtures.
+- 12 Linux archive checks pass on both machines, including a launcher under a
+  path containing spaces and rejection of self-consistent manifests that omit
+  the new launcher or profile resources. Both CI platforms now run the profile
+  checks; Linux CI also invokes the packaged session command's input-free help.
+- Real native binaries from the existing `a17067ac7` Mac and Ubuntu packages
+  generated local identities, paired via public files and passed dry-run.
+  This establishes setup compatibility, not native routing or a completed drag.
+- Mac packaging includes the script and guide before signing the Core bundle;
+  Linux packages include `bin/deskflow-seamless-session` and those resources.
+  Local assembly checks retain the existing native code plus new profile files.
+  These are development packaging checks, not a new same-source live candidate.
+  The final Mac resource seal/exact-library audit passes with 77 library records;
+  `mac-final-package.json` records the current script/guide hashes and archive
+  SHA-256 `83acb7bafdb9dcf5ec3115b145e228e5b6a6f85190e0296cbc0434bfcde4a1ab`.
+  The first resource refresh correctly refused to overwrite its immutable
+  library manifest. Its error is retained; the already generated constraint
+  was compared with the unchanged manifest before resealing and verification.
+
+Evidence: `build/persistent-profile-mrr9_4qv/`, plus the retained Ubuntu source
+copy and logs at `/tmp/deskflow-profile-check-2kh28vaj/`. Its first package check
+rejected a transferred `._window-drag.test.js` AppleDouble sidecar. The sidecar
+was removed from that disposable transfer; no package rule was relaxed.
+
+No ordinary connection was paused, no input-sharing session was launched and
+no H-row is closed. The known scroll timestamp and held-repeat failures below
+remain unresolved. Everyday graphical setup/Start/Stop is still outstanding.
+
 ## Actual-desktop attempt after pause approval — 2026-10-23
 
 The user authorized pausing regular Deskflow for one automated test, then

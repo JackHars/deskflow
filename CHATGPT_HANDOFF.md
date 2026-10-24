@@ -13,6 +13,16 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Persistent setup now has a command-line backend:
+[`seamless-profile.py`](deploy/windowshare/seamless-profile.py) and its
+[guide](deploy/windowshare/seamless-profile.md). It creates separate identities,
+pairs public fingerprints, configures Ubuntu above Mac without automatic export,
+and explicitly starts/stops the existing runtime. It is included in experimental
+packages, with profile/owned-shutdown checks in both CI platforms. The normal
+pairing and Start/Stop GUI is still missing; implement that over this backend
+without changing Core's signed-bundle-main role or bypassing competing-session
+checks. No native input defect is claimed fixed by this setup work.
+
 Current status (2026-10-23): runtime `a17067ac7` is pushed. It contains the
 exact-ack and Core/peer-map wake fixes, hidden Host activity protection from
 startup through teardown, retained child diagnostics for the input-disabled

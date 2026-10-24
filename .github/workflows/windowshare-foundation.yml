@@ -179,6 +179,8 @@ jobs:
         run: python3 deploy/windowshare/viewer-smoke.py build/app/deskflow-windowshare
       - name: Check cross-machine control and bounded relay shutdown
         run: python3 deploy/windowshare/gnome-crossmachine-tests.py
+      - name: Check persistent profiles and owned shutdown without desktop input
+        run: python3 deploy/windowshare/seamless-profile-tests.py
       - name: Verify passive resource-soak evidence sampler
         run: |
           python3 deploy/windowshare/resource-soak-tests.py
@@ -230,6 +232,7 @@ jobs:
           tar -xzf build/DeskflowSeamless-Linux-Experimental.tar.gz -C build/verify-stage
           QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-viewer --help
           QT_QPA_PLATFORM=offscreen build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-core --help
+          build/verify-stage/deskflow-seamless-linux-experimental/bin/deskflow-seamless-session --help
       - name: Record verified Linux package provenance
         run: |
           mkdir -p build/ci-artifacts
@@ -281,6 +284,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Check persistent profiles and owned shutdown without desktop input
+        run: python3 deploy/windowshare/seamless-profile-tests.py
       - name: Check manual coordinator cancellation and receipt freshness without input
         run: |
           python3 deploy/windowshare/physical-macos-tests.py

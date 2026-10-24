@@ -1,5 +1,38 @@
 # Seamless Windows work state
 
+## Persistent top-edge session foundation — 2026-10-23
+
+`deploy/windowshare/seamless-profile.py` now creates and pairs isolated persistent
+Mac/Ubuntu profiles and launches the actual packaged Core/Host/GNOME runtime.
+It exchanges public fingerprints only, keeps local private identities, configures
+Ubuntu above Mac, enables the holding display and exact dual-pin policy, and
+omits automatic export. Normal titlebar dragging is the intended trigger. This
+is a reusable command-line session backend; a normal pairing and Start/Stop GUI
+is still needed. It is not a replacement for the bounded supervised H07 harness.
+
+Creation, pairing and dry-run do not start input. Run refuses a regular Core,
+uses per-profile and per-user experimental locks, and records bounded rotating
+logs plus lifecycle results. Control+C, termination and terminal hangup request
+Stop over a kernel-verified owned Core socket. Shutdown drains child logs,
+reports signal fallback separately and retains recovery journals. No existing
+regular connection is stopped or automatically resumed by this tool.
+
+Mac and Ubuntu offline checks cover 18 profile/lifecycle cases and 12 Linux
+archive cases each. Real existing packaged executables on both machines created
+identities, exchanged public pairing files and produced successful dry-runs.
+The first Ubuntu package check failed on AppleDouble metadata introduced by the
+source-transfer archive; removing those sidecars from that disposable copy
+resolved it without changing the verifier. Evidence is in
+`build/persistent-profile-mrr9_4qv/` and Ubuntu
+`/tmp/deskflow-profile-check-2kh28vaj/`. Native runtime remains `a17067ac7`;
+packaging checks with the new profile resources do not qualify live input.
+No capture, source relocation, extension change or regular-session stop occurred.
+
+Next implementation: everyday pairing and Start/Stop controls using this
+backend, then outward top-edge interaction and remaining input refinements.
+Keep Core as the Mac bundle main for code admission. Scrolling timestamps,
+held repeat, full edge-drag acceptance and native queue limits remain open.
+
 ## Priority change: Mac top edge to Ubuntu — 2026-10-23
 
 The user now prioritizes ordinary Mac titlebar dragging through the top of the

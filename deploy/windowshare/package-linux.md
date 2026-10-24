@@ -63,10 +63,13 @@ and build logs remain the authority.
 ## Installation boundaries
 
 Extract **only into an intentionally selected new staging directory** for
-inspection. Two wrapper scripts, `bin/deskflow-seamless-viewer` and
+inspection. The wrapper scripts `bin/deskflow-seamless-viewer` and
 `bin/deskflow-seamless-core`, invoke binaries retained under the
 `libexec/deskflow-seamless-experimental` directory with their original basenames.
-Neither wrapper executes at archive creation or extraction. No ordinary
+The third wrapper, `bin/deskflow-seamless-session`, runs the packaged Python
+profile manager for persistent top-edge sessions. See
+[persistent setup](seamless-profile.md) for creation, pairing, launch and Stop.
+No wrapper executes at archive creation or extraction. No ordinary
 `/usr/bin/deskflow-core` or application settings are changed.
 
 System runtime libraries are not bundled. Verify compatible ABI, Qt/QtWayland

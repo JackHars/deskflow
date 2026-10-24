@@ -77,6 +77,11 @@ if "$exact_libraries"; then
   verification_options+=(--exact-libraries)
 fi
 ditto "$source_app" "$app_path"
+mkdir -p "$app_path/Contents/Resources"
+# Include persistent setup before the root signature seals these resources.
+# Core remains the bundle main and sole native input authority.
+ditto "$script_dir/seamless-profile.py" "$app_path/Contents/Resources/seamless-profile.py"
+ditto "$script_dir/seamless-profile.md" "$app_path/Contents/Resources/seamless-profile.md"
 helper_path="$app_path/Contents/MacOS/deskflow-holding-display-helper"
 if [ ! -x "$helper_path" ]; then
   echo "The holding-display helper is missing from the built application bundle." >&2
