@@ -19,7 +19,10 @@ public:
   struct Providers
   {
     std::function<bool()> admission;
-    std::function<bool(OriginalInputStamp)> armMotion, refreshMotion;
+    // Successful arming returns the exact capture prefix that may still
+    // contain native movement (same epoch, original sequence, part zero).
+    std::function<std::optional<OriginalInputStamp>(OriginalInputStamp)> armMotion;
+    std::function<bool(OriginalInputStamp)> refreshMotion;
     std::function<void()> cancelMotion;
     std::shared_ptr<WindowDragEdgeMailbox> mailbox;
   };

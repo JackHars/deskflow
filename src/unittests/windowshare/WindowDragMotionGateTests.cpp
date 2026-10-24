@@ -3,8 +3,12 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "WindowDragMotionGate.h"
+#include <array>
+#include <barrier>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
+#include <thread>
 
 using namespace deskflow::windowshare;
 using namespace std::chrono_literals;
@@ -92,13 +96,67 @@ void expiryAndInterruption()
   check(!gate.observe(move(2), now + 351ms), "stalled owner automatically returns movement locally");
   check(!gate.observe(up(3), now + 352ms), "release passes after timeout");
 }
+void capturePrefix()
+{
+  WindowDragMotionGate gate(7);
+  const auto now = WindowDragMotionGate::Clock::now();
+  gate.observe(down(), now);
+  for (std::uint64_t sequence = 2; sequence <= 12; ++sequence)
+    check(!gate.observe(move(sequence), now), "pre-arm movement belongs to the native owner");
+  const auto prefix = gate.armWithPrefix({7, 1, 1}, now);
+  check(prefix == OriginalInputStamp{7, 12, 0}, "arming names the native capture prefix, not the press alone");
+  check(gate.observe(move(13), now), "later admitted movement is suppressed");
+  check(!gate.armWithPrefix({7, 1, 1}, now), "prefix admission cannot rearm the same press");
+  check(!gate.observe(up(14), now), "prefix admission still passes the real release");
+  gate.observe(down(15), now);
+  check(gate.armWithPrefix({7, 15, 1}, now) == OriginalInputStamp{7, 15, 0}, "next press gets its own prefix");
+}
+void concurrentPrefix()
+{
+  // Real producer/coordinator racing; barriers bound fixture phases, not the
+  // arm/observe order. No sleep, native input or extra consumer is involved.
+  constexpr int rounds = 2000;
+  const auto now = WindowDragMotionGate::Clock::now();
+  std::barrier phase(2);
+  std::array<std::unique_ptr<WindowDragMotionGate>, rounds> gates;
+  std::array<bool, rounds> suppressed{};
+  std::array<std::optional<OriginalInputStamp>, rounds> prefixes;
+  for (auto &gate : gates)
+    gate = std::make_unique<WindowDragMotionGate>(7);
+  std::thread producer([&] {
+    for (int i = 0; i < rounds; ++i) {
+      gates[i]->observe(down(), now);
+      phase.arrive_and_wait();
+      suppressed[i] = gates[i]->observe(move(2), now);
+      phase.arrive_and_wait();
+    }
+  });
+  for (int i = 0; i < rounds; ++i) {
+    phase.arrive_and_wait();
+    prefixes[i] = gates[i]->armWithPrefix({7, 1, 1}, now);
+    phase.arrive_and_wait();
+  }
+  producer.join();
+  for (int i = 0; i < rounds; ++i) {
+    // A concurrently observed event is either withheld or explicitly included
+    // in the prefix. An unheld event beyond it would be a false gate-loss signal.
+    const auto &prefix = prefixes[i];
+    check(
+        prefix && prefix->epoch == 7 && prefix->part == 0 && prefix->sequence >= 1 && prefix->sequence <= 2 &&
+            (suppressed[i] || prefix->sequence == 2),
+        "concurrent native movement escaped the arming prefix"
+    );
+  }
+}
 } // namespace
 int main()
 {
   try {
     cycle();
     expiryAndInterruption();
-    std::cout << "PASS: exact-press motion hold, single native release, expiry and cancellation\n";
+    capturePrefix();
+    concurrentPrefix();
+    std::cout << "PASS: exact-press motion hold, capture prefix/race, single native release, expiry and cancellation\n";
     return 0;
   } catch (const std::exception &error) {
     std::cerr << error.what() << '\n';

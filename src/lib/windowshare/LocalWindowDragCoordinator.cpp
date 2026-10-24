@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #include "LocalWindowDragCoordinator.h"
+#include "LifecycleDiagnostics.h"
 #include <QPointer>
 #include <QThread>
 #include <utility>
@@ -57,7 +58,7 @@ struct LocalWindowDragCore::State
   Providers providers;
   QTimer timer;
   bool stopped = false, checking = false, holding = false, upMatched = false, upRouted = false, transferring = false;
-  std::uint64_t next = 0, lastBoundary = 0;
+  std::uint64_t next = 0, lastBoundary = 0, nativeThrough = 0;
   std::optional<WindowDragEdgeCandidate> candidate;
   std::optional<WindowDragEdgeMailbox::Observation> returnBoundary;
   std::optional<OriginalInputCaptured> returnDown;
@@ -70,6 +71,10 @@ struct LocalWindowDragCore::State
   std::optional<OriginalInputCaptured> released;
   Clock::time_point deadline{}, lastSent{}, gateLost{};
 
+  bool canHoldMotion() const
+  {
+    return providers.armMotion && providers.refreshMotion && providers.cancelMotion && providers.mailbox;
+  }
   bool admitted()
   {
     if (stopped || checking || !channel || QThread::currentThread() != channel->thread() ||
@@ -103,6 +108,7 @@ struct LocalWindowDragCore::State
     sent.reset();
     upMatched = upRouted = transferring = false;
     gateLost = {};
+    nativeThrough = 0;
     motionOff();
   }
   void cancel()
@@ -246,7 +252,11 @@ struct LocalWindowDragCore::State
       return;
     }
     candidate = value;
-    if (!holding && moved.sequence > sent->sequence) {
+    // Keep the first painted preview stable until its exact Ready arrives.
+    // Otherwise continuous movement supersedes every in-flight acknowledgement
+    // and the native-to-preview handoff cannot arm until the user stops moving.
+    // One retained candidate coalesces that movement without adding a queue.
+    if (!holding && !canHoldMotion() && moved.sequence > sent->sequence) {
       moved.kind = LocalWindowDrag::Kind::Motion;
       send(moved);
     }
@@ -299,14 +309,33 @@ struct LocalWindowDragCore::State
     if (released)
       return cancel(); // A newer interaction cannot inherit a pending drop.
     if (const auto *motion = std::get_if<OriginalInputMotion>(&record.payload)) {
-      if (!value.windowDragMotionHeld) {
-        if (holding)
+      const bool queuedNative = !value.windowDragMotionHeld && record.sequence <= nativeThrough;
+      if (!value.windowDragMotionHeld && !queuedNative) {
+        if (holding) {
+          lifecycleDiagnostic(
+              "Core window drag", "drag.motion.capture", "failed", "Native movement followed the arming prefix",
+              {{"drag", QString::number(sent->drag)},
+               {"sequence", QString::number(record.sequence)},
+               {"nativeThrough", QString::number(nativeThrough)}}
+          );
           cancel();
+        }
         return;
       }
-      if (!holding || !contextCurrent() || motion->dragButton != 0 || value.translation.parts ||
-          value.translation.uncertain)
+      // Primary-screen motion samples the live cursor for legacy translation,
+      // so that translation is explicitly uncertain and may emit no part at a
+      // clamped edge. The exact pre-arm raw record still describes movement;
+      // it updates only the preview, never input routing or source ownership.
+      const bool translationValid =
+          value.translation.stamp == OriginalInputStamp{record.epoch, record.sequence, 0} &&
+          (queuedNative ? value.translation.parts <= 1 : !value.translation.parts && !value.translation.uncertain);
+      if (!holding || !contextCurrent() || motion->dragButton != 0 || !translationValid ||
+          (record.flags & (originalKey::shiftFlag | originalKey::controlFlag | originalKey::optionFlag |
+                           originalKey::commandFlag | originalKey::functionFlag)))
         return cancel();
+      // Account for each queued pre-arm delta once, just like later held
+      // movement. A newer boundary observation cannot replay it because sent
+      // retains its original sequence. Every real up still follows its joins.
       auto moved = *sent;
       moved.kind = LocalWindowDrag::Kind::Motion;
       moved.sequence = record.sequence;
@@ -409,20 +438,48 @@ struct LocalWindowDragCore::State
     if (expected != value.command || !admitted() || Clock::now() >= deadline)
       return cancel();
     if (value.kind == LocalWindowDragStatus::Kind::Ready) {
-      if (holding || released || !providers.armMotion || !providers.refreshMotion || !providers.cancelMotion ||
-          !providers.mailbox)
+      if (holding || released || !canHoldMotion())
         return;
       if (!contextCurrent())
         return cancel();
       holding = true; // Reserve before an injected provider can destroy us.
+      const auto requested = *sent;
       const auto arm = providers.armMotion;
-      bool armed = false;
+      std::optional<OriginalInputStamp> armed;
       try {
         armed = arm({sent->captureEpoch, sent->pressSequence, 1});
       } catch (...) {
       }
-      if (!armed || stopped || !sent || !contextCurrent())
-        cancel();
+      if (!armed || armed->epoch != requested.captureEpoch || armed->part || armed->sequence < requested.sequence ||
+          !admitted() || stopped || !holding || !sent || *sent != requested || !contextCurrent() ||
+          Clock::now() >= deadline) {
+        lifecycleDiagnostic(
+            "Core window drag", "drag.motion.arm", "failed", "Preview lost its exact capture/owner admission",
+            {{"drag", QString::number(requested.drag)},
+             {"previewSequence", QString::number(requested.sequence)},
+             {"prefixReturned", armed.has_value()},
+             {"nativeThrough", QString::number(armed ? armed->sequence : 0)}}
+        );
+        return cancel();
+      }
+      nativeThrough = armed->sequence;
+      if (candidate) {
+        auto latest = command(*candidate, sent->drag, sent->windowSharePin);
+        if (!sent->sameDrag(latest) || latest.sequence > nativeThrough)
+          return cancel();
+        if (latest.sequence > sent->sequence) {
+          latest.kind = LocalWindowDrag::Kind::Motion;
+          send(latest);
+        }
+      }
+      if (sent)
+        lifecycleDiagnostic(
+            "Core window drag", "drag.motion.arm", "ready", "Exact preview accepted; captured motion may continue",
+            {{"drag", QString::number(sent->drag)},
+             {"previewSequence", QString::number(requested.sequence)},
+             {"latestSequence", QString::number(sent->sequence)},
+             {"nativeThrough", QString::number(nativeThrough)}}
+        );
     } else if (value.kind == LocalWindowDragStatus::Kind::Committed) {
       if (transferring)
         return;

@@ -247,8 +247,9 @@ int main(int argc, char **argv)
                   const auto proof = inputAdmission ? inputAdmission->proof() : std::nullopt;
                   return proof && proof->live();
                 },
-                [source = inputSession->captureSource()](OriginalInputStamp press) {
-                  return source->epoch().live() && source->windowDragMotionGate().arm(press);
+                [source =
+                     inputSession->captureSource()](OriginalInputStamp press) -> std::optional<OriginalInputStamp> {
+                  return source->epoch().live() ? source->windowDragMotionGate().armWithPrefix(press) : std::nullopt;
                 },
                 [source = inputSession->captureSource()](OriginalInputStamp press) {
                   return source->epoch().live() && source->windowDragMotionGate().refresh(press);

@@ -1,5 +1,37 @@
 # Seamless Windows work state
 
+## Continuous outward drag preparation and capture cutover — 2026-10-23
+
+The production outward coordinator now retains the latest boundary candidate
+without superseding the initial preview while its exact Ready is pending. A
+protocol-driven regression reproduced the old failure before the change: motion
+arriving throughout preparation prevented the motion gate from arming. Once the
+first Ready passes current admission/identity/deadline checks, the coordinator
+arms and forwards the latest retained position with its original sequence.
+
+The capture gate now returns an exact native prefix using a sequentially
+consistent request/producer-sequence ordering. Already captured native motion
+inside that prefix updates the preview once; later unsuppressed motion cancels.
+Mac primary motion explicitly uses uncertain live-cursor legacy translation and
+may emit zero translated parts at the edge. That is accepted only for original
+raw motion within the prefix, never as input routing authority. Exact stamps,
+single left-button ownership, modifiers, release joins and current boundary
+checks remain mandatory. Failed arm admission and post-prefix gate loss now have
+structured lifecycle diagnostics. No sleep statements were added.
+
+Mac and isolated Ubuntu production builds pass, as do 53 private coordinator
+scenarios, preview checks and drag foundations. Mac capture adapter checks pass.
+The 2,000-round producer/coordinator race passes on both systems; its reviewed
+fixture passes ThreadSanitizer without suppressions. The initial sanitizer run
+reported fixture publication/result races; the fixture now preallocates its gates
+and reads producer results only after thread join. Evidence and source bindings
+are in `build/drag-preparation-yjh1cebb/` and the latest `TESTING.md` entry.
+
+No user desktop capture, extension change, installed-package replacement or
+ordinary Deskflow interruption occurred. These changes do not establish full
+native H07; scroll timestamps, held repeat, native queue gaps and remaining
+hardware acceptance stay open. Interactive drag-back remains last.
+
 ## Ubuntu desktop-support setup and readiness — 2026-10-23
 
 The everyday controls now expose read-only **Check Ubuntu support** and explicit

@@ -4,6 +4,58 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Continuous top-edge preparation and exact capture prefix — 2026-10-23
+
+Evidence: `build/drag-preparation-yjh1cebb/`. The outward coordinator now holds
+the initial preview position until exact Ready, retaining one latest boundary
+candidate. After arming it forwards that candidate once. A capture-prefix receipt
+distinguishes already queued native motion from a later loss of suppression.
+Only original raw movement inside that prefix can use Mac primary motion's
+uncertain/zero-part legacy translation; this changes preview position, not input
+authority. Real-release, native identity, paint and cursor-transfer requirements
+remain unchanged. Lifecycle logs name arm acceptance/failure and post-prefix
+native motion without printing every movement.
+
+- `mac-before.log`: the continuous-preparation regression fails against the old
+  coordinator (`drop-preparing`, preview never armed). `mac-after.log` records
+  the first preparation fix; it predates the capture-prefix follow-up.
+- `mac-final-build.log`: production Mac Core/WindowShare, coordinator, capture,
+  gate and preview targets build. `mac-final-coordinator-preview.log` passes
+  both suites; `mac-final-app-detail.log` retains all **53 coordinator scenarios**.
+  `mac-final-foundations-capture.log` passes transaction, edge, gate and the Mac
+  capture adapter. These fixtures do not install an event tap or post native input.
+- `linux-final-evidence.json`: both production programs build and the coordinator,
+  preview, transaction, edge and gate suites pass on Ubuntu in the existing
+  private container. The image is
+  `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`.
+  It has no network or host display/input/GPU mounts, drops capabilities, and
+  runs as UID 1000. Source is read-only; build output is a disposable cache.
+- `source-final/` and `binding-final.json` bind base `4d36b122a` plus six exact
+  overlays. Archive SHA-256:
+  `81820496591526bc38c2f84c93d8c1fdf26109e87adf803d7cf4ce3f91ea7277`.
+  Later production source is identical; only the race fixture and documentation
+  changed after this complete build/check pass.
+- The first ThreadSanitizer run (`mac-thread-sanitizer.log`) reports shared
+  publication/result races in the initial barrier-based fixture. The revised
+  fixture preallocates each gate before creating the producer and reads results
+  only after join. No sanitizer suppression was added.
+  `mac-thread-sanitizer-revised.log`, `mac-reviewed-gate.log` and
+  `linux-reviewed-evidence.json` pass the revised **2,000-round** producer/arm
+  race. The reviewed snapshot `source-reviewed/` and `binding-reviewed.json`
+  include that fixture; archive SHA-256:
+  `1f44d312abd0360a5045733ed22a350a059f7d2767c86a57ea3a553589dd0822`.
+- The first aggregate Mac build named a nonexistent capture-test target after
+  successfully building both programs; `mac-build.log` retains that failure.
+  The final build uses `windowshare-original-input-capture-mac-tests` and passes.
+  Earlier Linux logs/snapshots remain separate from the final/reviewed evidence.
+
+The normal Deskflow PID 38904 stayed connected to jack at 192.168.1.12. No
+desktop capture, installed extension/profile update or packaged runtime launch
+occurred. H07's complete physical top-edge gesture, scroll timestamp correctness,
+held repeat and remaining native queue/acceptance work are still open. These
+results neither certify arbitrary native application dragging nor replace the
+user's required permission immediately before a physical test.
+
 ## Ubuntu setup, loaded-provider readiness and setup lifetime — 2026-10-23
 
 The controls now offer explicit provider installation and enablement, with a

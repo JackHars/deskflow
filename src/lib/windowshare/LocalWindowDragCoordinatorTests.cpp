@@ -232,6 +232,13 @@ int dropChild(QCoreApplication &app, int descriptor, const QString &mode)
   const auto ticket = *issuer.issue(pin(2));
   std::unique_ptr<LocalWindowDragHost> coordinator;
   const bool returning = mode.startsWith("drop-return");
+  const bool preparing = mode.startsWith("drop-preparing");
+  const bool top = mode.endsWith("-top");
+  const bool queued = mode.contains("-queued");
+  const std::uint64_t moveSequence = queued ? 14 : preparing ? 13 : 3;
+  const auto targetX = (top ? 940 : 130) + (queued ? 5 : 0);
+  const auto targetY = top ? -66 : preparing ? 312 : 302;
+  bool initialReady = false, preparationSuperseded = false;
   int prepared = 0, dropped = 0, finished = 0, cancelled = 0;
   LocalWindowDragHost::Providers providers;
   providers.admission = [] { return true; };
@@ -243,11 +250,37 @@ int dropChild(QCoreApplication &app, int descriptor, const QString &mode)
         "Drag direction must match independent native move offer"
     );
     // This fixture models the separately tested native placement/paint result.
-    QTimer::singleShot(0, &app, [&, binding, sequence = command.sequence] { coordinator->ready(binding, sequence); });
+    if (!preparing)
+      QTimer::singleShot(0, &app, [&, binding, sequence = command.sequence] { coordinator->ready(binding, sequence); });
     return true;
   };
   providers.motion = [&](const WindowDragBinding &binding, const LocalWindowDrag &command) {
-    check(command.destinationX == 130 && command.destinationY == 302, "Held raw deltas move only preview");
+    if (preparing && !initialReady) {
+      preparationSuperseded = command.kind != LocalWindowDrag::Kind::Hold || command.sequence != 2;
+      check(!preparationSuperseded, "Continuous movement must not supersede the pending initial preview");
+      // Complete placement on the protocol's first hold, after the parent
+      // has submitted all pre-ready motion. No sleep or timing race is needed.
+      initialReady = true;
+      coordinator->ready(binding, 2);
+      return;
+    }
+    if (preparing && command.sequence == 12) {
+      check(
+          command.destinationX == (top ? 910 : 100) && command.destinationY == (top ? -51 : 297),
+          "Readiness forwards the latest retained boundary position"
+      );
+      coordinator->ready(binding, command.sequence);
+      return;
+    }
+    if (queued && command.sequence == 13) {
+      check(
+          command.destinationX == (top ? 915 : 105) && command.destinationY == (top ? -51 : 297),
+          "Queued native motion contributes its original delta exactly once"
+      );
+      coordinator->ready(binding, command.sequence);
+      return;
+    }
+    check(command.destinationX == targetX && command.destinationY == targetY, "Held raw deltas move only preview");
     coordinator->ready(binding, command.sequence);
   };
   providers.cancel = [&](const WindowDragBinding &) {
@@ -257,8 +290,9 @@ int dropChild(QCoreApplication &app, int descriptor, const QString &mode)
   providers.drop = [&](const WindowDragBinding &binding, const LocalWindowDrag &command, const WindowDragRelease &up) {
     ++dropped;
     check(
-        command.kind == LocalWindowDrag::Kind::Drop && command.sequence == 3 && command.releaseSequence == 4 &&
-            command.releaseTime == 400 && up.sequence == 4 && up.window == 812 && up.eventNumber == 52,
+        command.kind == LocalWindowDrag::Kind::Drop && command.sequence == moveSequence &&
+            command.releaseSequence == moveSequence + 1 && command.releaseTime == 400 &&
+            up.sequence == moveSequence + 1 && up.window == 812 && up.eventNumber == 52,
         "Drop joins final preview with the one original up"
     );
     if (mode == "drop-native-denied")
@@ -293,8 +327,10 @@ int dropChild(QCoreApplication &app, int descriptor, const QString &mode)
   QTimer::singleShot(3500, &app, &QCoreApplication::quit);
   app.exec();
   coordinator->stop();
+  check(!preparationSuperseded, "Continuous movement superseded the pending initial preview");
   const bool success = mode == "drop-normal" || mode == "drop-server-first" || mode == "drop-return" ||
-                       mode == "drop-return-native-first";
+                       mode == "drop-return-native-first" || mode == "drop-preparing" || top ||
+                       mode == "drop-preparing-queued" || mode == "drop-preparing-queued-untranslated";
   check(
       prepared == 1 && (success ? finished == 1 && dropped == 1 && cancelled == 0 : finished == 0 && cancelled == 1),
       "Native completion or exact rollback count"
@@ -323,7 +359,23 @@ void dropScenario(const QString &mode)
   check(until([&] { return channel->authenticated(); }), "Drop handshake authenticates both processes");
   Source source;
   const bool returning = mode.startsWith("drop-return");
+  const bool preparing = mode.startsWith("drop-preparing");
+  const bool top = mode.endsWith("-top");
+  const bool queued = mode.contains("-queued");
+  const bool postArmLocal = mode == "drop-preparing-post-arm-local";
+  const bool abortPreparation = preparing && mode != "drop-preparing" && !top && !queued && !postArmLocal;
+  const std::uint64_t moveSequence = queued ? 14 : preparing ? 13 : 3;
+  const auto targetX = (top ? 940 : 130) + (queued ? 5 : 0);
+  const auto targetY = top ? -66 : preparing ? 312 : 302;
   source.edge.returning = returning;
+  if (top) {
+    source.edge.side = WindowDragEdgeSide::Top;
+    source.edge.destination.y = -950;
+    source.edge.sourceX = -600;
+    source.edge.sourceY = 0;
+    source.edge.destinationX = 900;
+    source.edge.destinationY = -51;
+  }
   auto box = std::shared_ptr<WindowDragEdgeMailbox>(&source.mailbox, [](auto *) {});
   auto position = std::make_shared<std::atomic<std::uint64_t>>(2);
   check(box->bindCapture(source.stream.epoch(), position), "One producer fence binds before transfer");
@@ -333,18 +385,54 @@ void dropScenario(const QString &mode)
       source.stream.push({source.stream.epoch().id(), 2, 200, 0, OriginalInputMotion{1, 0, 0}}), "Boundary raw motion"
   );
   gate.observe(source.stream.pop()->record);
-  bool armed = false;
+  bool armed = false, admitted = true;
+  int armAttempts = 0;
+  std::optional<OriginalInputCaptured> queuedNative;
+  LocalWindowDragCore *owner = nullptr;
   LocalWindowDragCore core(
       *channel, policy(),
       LocalWindowDragCore::Providers{
-          [] { return true; },
-          [&](OriginalInputStamp press) {
-            armed = gate.arm(press);
-            return armed;
+          [&] { return admitted; },
+          [&](OriginalInputStamp press) -> std::optional<OriginalInputStamp> {
+            ++armAttempts;
+            if (mode == "drop-preparing-arm-denied")
+              return {};
+            if (queued) {
+              OriginalInputRecord record{press.epoch, 13, 250, 0, OriginalInputMotion{5, 0, 0}};
+              check(source.stream.push(record) && !gate.observe(record), "Queued pre-arm motion remains native");
+              position->store(record.sequence);
+              // Normal Mac primary movement deliberately marks its legacy
+              // live-cursor translation uncertain. At a clamped edge it can
+              // also produce no legacy motion event at all.
+              queuedNative = OriginalInputCaptured{*source.stream.pop(), {{record.epoch, 13, 0}, 1, true}};
+            }
+            auto prefix = gate.armWithPrefix(press);
+            armed = prefix.has_value();
+            if (mode == "drop-preparing-arm-stop")
+              owner->stop();
+            if (mode == "drop-preparing-arm-revoked")
+              admitted = false;
+            if (mode == "drop-preparing-arm-throw")
+              throw std::runtime_error("Arming provider failed after accepting the press");
+            if (prefix && mode == "drop-preparing-arm-wrong-epoch")
+              ++prefix->epoch;
+            if (prefix && mode == "drop-preparing-arm-short-prefix")
+              prefix->sequence = press.sequence;
+            return prefix;
           },
           [&](OriginalInputStamp press) { return gate.refresh(press); }, [&] { gate.cancel(); }, box
       }
   );
+  owner = &core;
+  const auto expectCancelled = [&] {
+    check(until([&] { return process.state() == QProcess::NotRunning; }), "Interrupted preparation cancels boundedly");
+    const auto output = process.readAllStandardOutput() + process.readAllStandardError();
+    if (process.exitStatus() != QProcess::NormalExit || process.exitCode() || !output.contains("PASS"))
+      throw std::runtime_error((mode + ": " + QString::fromUtf8(output)).toStdString());
+    check(!gate.active(source.edge.press), "Interrupted preparation cannot retain held motion");
+    check(!WindowDragEdgeMailboxTestAccess::take(*box), "Interrupted preparation cannot switch the cursor");
+    core.stop();
+  };
   auto pointer = down();
   pointer.captureEpoch = source.stream.epoch().id();
   if (returning) {
@@ -364,6 +452,40 @@ void dropScenario(const QString &mode)
   }
   check(channel->sendWindowPointer(pointer), "Original down is observed before edge");
   core.observe(source.candidate());
+  if (preparing) {
+    // Do not pump the parent's event loop until these positions have all
+    // arrived: readiness must make progress while the user keeps dragging.
+    for (std::uint64_t sequence = 3; sequence <= 12; ++sequence) {
+      OriginalInputRecord move{
+          source.stream.epoch().id(), sequence, 200 + sequence, 0, OriginalInputMotion{top ? 1 : 0, top ? 0 : 1, 0}
+      };
+      check(source.stream.push(move) && !gate.observe(move), "Pre-ready movement remains with the native owner");
+      position->store(sequence);
+      core.capture({*source.stream.pop(), {{move.epoch, sequence, 0}, 1, false}});
+      source.edge.motion.sequence = sequence;
+      if (top)
+        ++source.edge.destinationX;
+      else
+        ++source.edge.destinationY;
+      core.observe(source.candidate());
+    }
+  }
+  if (abortPreparation) {
+    if (mode == "drop-preparing-boundary-loss")
+      WindowDragEdgeMailboxTestAccess::clear(source.mailbox);
+    if (mode == "drop-preparing-release") {
+      OriginalInputRecord up{source.stream.epoch().id(), 13, 400, 0, OriginalInputButton{0, false, 0}};
+      check(source.stream.push(up) && !gate.observe(up), "Release during preparation remains native");
+      position->store(up.sequence);
+      OriginalInputCaptured captured{*source.stream.pop(), {{up.epoch, up.sequence, 0}, 1, false}};
+      source.join.capture(captured);
+      core.capture(captured);
+      core.observe({});
+    }
+    expectCancelled();
+    check(armAttempts == (mode.contains("-arm-") ? 1 : 0), "Only current preparation may attempt one arm");
+    return;
+  }
   if (returning) {
     QElapsedTimer waiting;
     waiting.start();
@@ -375,33 +497,65 @@ void dropScenario(const QString &mode)
     check(observed && !observed->annotation && observed->window() == 0, "Remote press fabricated a Mac annotation");
     core.pointer(*observed);
   }
-  check(until([&] { return armed; }), "Native preview readiness arms only the matching motion gate");
-  OriginalInputRecord move{source.stream.epoch().id(), 3, 300, 0, OriginalInputMotion{30, 15, 0}};
+  check(until([&] { return armed || process.state() == QProcess::NotRunning; }), "Preview readiness terminates");
+  if (!armed)
+    throw std::runtime_error(
+        (mode + ": preview never armed: " + QString::fromUtf8(process.readAllStandardError())).toStdString()
+    );
+  if (queuedNative) {
+    if (mode.endsWith("-untranslated"))
+      queuedNative->translation.parts = 0;
+    if (mode.endsWith("-multipart"))
+      queuedNative->translation.parts = 2;
+    if (mode.endsWith("-wrong-stamp"))
+      ++queuedNative->translation.stamp.sequence;
+    if (mode.endsWith("-modified"))
+      queuedNative->input.record.flags = originalKey::shiftFlag;
+    core.capture(*queuedNative);
+    if (mode.endsWith("-multipart") || mode.endsWith("-wrong-stamp") || mode.endsWith("-modified")) {
+      expectCancelled();
+      return;
+    }
+  }
+  if (postArmLocal) {
+    gate.cancel();
+    OriginalInputRecord record{source.stream.epoch().id(), moveSequence, 300, 0, OriginalInputMotion{5, 0, 0}};
+    check(source.stream.push(record) && !gate.observe(record), "Lost gate leaves later movement native");
+    position->store(record.sequence);
+    core.capture({*source.stream.pop(), {{record.epoch, record.sequence, 0}, 1, false}});
+    expectCancelled();
+    return;
+  }
+  OriginalInputRecord move{
+      source.stream.epoch().id(), moveSequence, 300, 0, OriginalInputMotion{30, top ? -15 : 15, 0}
+  };
   check(source.stream.push(move), "Held raw movement enters sole consumer");
   const bool suppressed = gate.observe(move);
   check(suppressed, "Admitted held motion is withheld");
-  position->store(3);
-  OriginalInputCaptured captured{*source.stream.pop(), {{move.epoch, 3, 0}, 0, false}, {}, {}, suppressed};
+  position->store(moveSequence);
+  OriginalInputCaptured captured{*source.stream.pop(), {{move.epoch, moveSequence, 0}, 0, false}, {}, {}, suppressed};
   core.capture(captured);
-  OriginalInputRecord up{move.epoch, 4, 400, 0, OriginalInputButton{0, false, 0}};
+  OriginalInputRecord up{move.epoch, moveSequence + 1, 400, 0, OriginalInputButton{0, false, 0}};
   check(source.stream.push(up) && !gate.observe(up), "Real zero-click up always dispatches normally");
-  position->store(4);
+  position->store(up.sequence);
   OriginalInputCaptured released{
       *source.stream.pop(),
-      {{up.epoch, 4, 0}, 1, false},
+      {{up.epoch, up.sequence, 0}, 1, false},
       {},
-      OriginalPointerObservation{up.epoch, 4, 400, -1, 300, 0, 0, 52, 0, 1, 3}
+      OriginalPointerObservation{up.epoch, up.sequence, 400, -1, 300, 0, 0, 52, 0, 1, 3}
   };
   if (mode == "drop-server-first")
     check(
-        WindowDragEdgeMailboxTestAccess::release(*box, source.edge.press, {up.epoch, 4, 1}), "Server wins release race"
+        WindowDragEdgeMailboxTestAccess::release(*box, source.edge.press, {up.epoch, up.sequence, 1}),
+        "Server wins release race"
     );
   source.join.capture(released);
   core.capture(released);
   core.observe({}); // Up withdraws held evidence without cancelling a pending joined drop.
   if (mode != "drop-server-first")
     check(
-        WindowDragEdgeMailboxTestAccess::release(*box, source.edge.press, {up.epoch, 4, 1}), "Server resolves local up"
+        WindowDragEdgeMailboxTestAccess::release(*box, source.edge.press, {up.epoch, up.sequence, 1}),
+        "Server resolves local up"
     );
   const auto release = box->readRelease();
   check(release.has_value(), "Separate bounded release evidence survives held-edge withdrawal");
@@ -417,13 +571,13 @@ void dropScenario(const QString &mode)
   );
   check(matched.has_value(), "Release joins exact raw observation");
   pointer.kind = LocalWindowPointer::Kind::Up;
-  pointer.sequence = 4;
+  pointer.sequence = up.sequence;
   pointer.sourceTime = 400;
   pointer.clicks = 0;
   pointer.window = window;
   check(channel->sendWindowPointer(pointer), "Host sees real up before explicit Drop on same FIFO");
   OriginalInputRouteDecision route;
-  route.stamp = {up.epoch, 4, 1};
+  route.stamp = {up.epoch, up.sequence, 1};
   route.kind = OriginalInputRouteKind::Button;
   route.outcome = mode.endsWith("wrong-route") ? OriginalInputRouteOutcome::Filtered
                   : returning                  ? OriginalInputRouteOutcome::Dispatched
@@ -443,7 +597,7 @@ void dropScenario(const QString &mode)
     core.capture({*source.stream.pop(), {{up.epoch, 5, 0}, 1, false}});
   }
   if (mode == "drop-normal" || mode == "drop-server-first" || mode == "drop-transfer-failed" || mode == "drop-return" ||
-      mode == "drop-return-native-first" || mode == "drop-return-transfer-failed") {
+      mode == "drop-return-native-first" || mode == "drop-return-transfer-failed" || preparing) {
     std::optional<WindowDragEdgeMailbox::Transfer> transfer;
     if (!until([&] {
           if (!transfer)
@@ -453,7 +607,10 @@ void dropScenario(const QString &mode)
       throw std::runtime_error((QString("Cursor transfer missing: ") + channelError + " child: " +
                                 QString::fromUtf8(process.readAllStandardOutput() + process.readAllStandardError()))
                                    .toStdString());
-    check(transfer->release.live() && transfer->x == 130 && transfer->y == 302, "Final preview coordinates retained");
+    check(
+        transfer->release.live() && transfer->x == targetX && transfer->y == targetY,
+        "Final preview coordinates retained"
+    );
     WindowDragEdgeMailboxTestAccess::complete(*box, *transfer, !mode.endsWith("transfer-failed"));
   }
   check(until([&] { return process.state() == QProcess::NotRunning; }), "Drop or cancellation finishes boundedly");
@@ -559,9 +716,37 @@ int main(int argc, char **argv)
       scenario(QString::fromLatin1(mode));
     }
     for (const auto *mode :
-         {"drop-normal", "drop-server-first", "drop-wrong-window", "drop-wrong-route", "drop-new-input",
-          "drop-transfer-failed", "drop-native-denied", "drop-no-commit", "drop-return", "drop-return-native-first",
-          "drop-return-no-native-up", "drop-return-native-cancel", "drop-return-wrong-route", "drop-return-new-input",
+         {"drop-preparing",
+          "drop-preparing-top",
+          "drop-preparing-queued",
+          "drop-preparing-queued-top",
+          "drop-preparing-queued-untranslated",
+          "drop-preparing-queued-multipart",
+          "drop-preparing-queued-wrong-stamp",
+          "drop-preparing-queued-modified",
+          "drop-preparing-post-arm-local",
+          "drop-preparing-release",
+          "drop-preparing-boundary-loss",
+          "drop-preparing-arm-denied",
+          "drop-preparing-arm-stop",
+          "drop-preparing-arm-revoked",
+          "drop-preparing-arm-throw",
+          "drop-preparing-arm-wrong-epoch",
+          "drop-preparing-arm-short-prefix",
+          "drop-normal",
+          "drop-server-first",
+          "drop-wrong-window",
+          "drop-wrong-route",
+          "drop-new-input",
+          "drop-transfer-failed",
+          "drop-native-denied",
+          "drop-no-commit",
+          "drop-return",
+          "drop-return-native-first",
+          "drop-return-no-native-up",
+          "drop-return-native-cancel",
+          "drop-return-wrong-route",
+          "drop-return-new-input",
           "drop-return-transfer-failed"}) {
       QTextStream(stdout) << "RUN: " << mode << '\n' << Qt::flush;
       dropScenario(QString::fromLatin1(mode));

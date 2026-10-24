@@ -8,8 +8,9 @@ P5's ordinary-titlebar paths are connected in both directions through real-relea
 drop and ordinary Core cursor transfer. The original native press and its real up
 retain their owner throughout. A painted remote preview is an internal part of
 that same drag; no separate selection or thumbnail interaction is required.
-Physical bidirectional acceptance remains open. The latest user instruction is **“Keep building; test later.”** Do not
-launch a physical fixture or enable routing on the user's desktop.
+Physical acceptance remains open. Prioritize ordinary dragging through the Mac's
+top edge onto Ubuntu above it; interactive drag-back is last. Ask immediately
+before a physical fixture or changing the user's running input session.
 
 ## Outbound production path
 
@@ -35,6 +36,11 @@ launch a physical fixture or enable routing on the user's desktop.
    native placement, an actual later Qt paint and an exact native frame/revision
    recheck. No peer-supplied PID or unrelated window can be addressed.
 5. Core arms the original capture adapter's movement-only gate after Ready.
+   While that first preview is preparing, retain only the latest boundary
+   candidate; keep Begin/Hold at the exact initial position until its Ready
+   arrives. Otherwise continuous movement can supersede every in-flight paint
+   acknowledgement and prevent arming. After exact readiness and fresh admission,
+   forward the retained latest position once, preserving its original sequence.
    Only held left-button movement for that exact press is withheld before
    native/legacy dispatch. The preserved raw deltas still reach the sole
    consumer and move the preview. Every original button transition passes.
@@ -70,6 +76,30 @@ private-channel loss, stale paint, resize, cancellation and shutdown all retire
 the exact attempt. Callbacks are rechecked after reentrancy. Untouched
 preparation cancellation does not move or raise the source. Durable recovery
 covers attempted native mutations.
+
+### Capture boundary at arming
+
+`armWithPrefix` returns the capture epoch and sequence through which native
+movement can already be queued. The producer publishes its sequence before its
+suppression decision; the request and that sequence use a shared sequentially
+consistent atomic order. Thus an unheld decision made before arming cannot
+escape the returned prefix. The producer remains lock-free, with no allocation,
+native query, additional consumer or posted input.
+
+The coordinator validates that receipt against the acknowledged preview and
+the current owner. Queued raw deltas inside the prefix advance only the preview,
+once per original sequence. Mac primary-screen legacy translation samples the
+live cursor, marks itself uncertain and may emit zero parts at a clamped edge;
+those facts do not invalidate the original raw movement inside this exact prefix.
+Wrong stamps, modifiers, other drag buttons or multiple translated parts still
+cancel. Later movement must carry actual suppression evidence with zero certain
+translation parts. Native motion outside the prefix cancels instead of being
+silently ignored. Every real up retains the existing independent release joins.
+
+`drag.motion.arm` records the initial acknowledged sequence, latest forwarded
+sequence and returned native prefix, or failed admission. `drag.motion.capture`
+records an unexpected native movement beyond that prefix. These are lifecycle
+diagnostics, not per-motion logging or a new input-authority mechanism.
 
 ## Return production path
 
@@ -133,12 +163,17 @@ Relevant test targets are `ServerTests`, `windowshare-drag-coordinator-tests`,
 Viewer/Bridge tests use `QT_QPA_PLATFORM=offscreen`; they post no desktop input.
 Use a separately ad-hoc-signed copy when macOS refuses an unsigned executable.
 
-The real private-channel coordinator suite has 36 child-process scenarios:
+The real private-channel coordinator suite has 53 child-process scenarios:
 preparation/ownership/lifetime failures plus normal drop, raw-up/Server ordering,
 wrong annotated window, wrong route, newer input, native denial, transfer failure
 and missing commit. Return cases also cover both native/Core release orderings,
 missing native release, native cancellation, original-route mismatch, newer input,
-failed final transfer and unannotated remote pointer metadata. Native callbacks in this suite are explicit fixtures;
+failed final transfer and unannotated remote pointer metadata. Continuous
+preparation covers right/top edges, latest-position coalescing, queued native
+motion (including zero-part legacy translation), exact capture prefixes,
+interrupted arming, early release and rejection after actual suppression loss.
+The motion-gate suite also races the producer and coordinator 2,000 times, with
+no sleep statements or native input. Native callbacks in this suite are explicit fixtures;
 separate native tests establish their platform behavior.
 
 For native Viewer continuity, build Linux target

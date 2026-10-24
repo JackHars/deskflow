@@ -13,6 +13,18 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Continuous outward-drag preparation now keeps the first preview stable until
+its exact Ready, then forwards the latest retained position. Arming returns an
+exact capture prefix so queued native movement is accounted for once instead
+of mistaken for a lost motion gate. Mac primary-motion legacy translation can
+be uncertain/zero-part; only the admitted raw prefix can use that exception,
+and it updates only preview position. Later unsuppressed motion still cancels.
+Production builds and targeted Mac/Ubuntu checks pass, including 53 private
+coordinator scenarios and a 2,000-round gate race; the revised race fixture also
+passes ThreadSanitizer. See the latest `TESTING.md` entry and
+`window-drag-preparation.md`. No physical gesture or new desktop package was
+launched, and scroll timestamp/held-repeat issues remain open.
+
 Ubuntu setup/readiness now lives in the everyday controls and the profile
 manager's `provider` command. Status is read-only; install and enable are explicit
 stopped-session actions. The helper inherits profile/global locks, preserves the

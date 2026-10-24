@@ -7,6 +7,7 @@
 #include "OriginalInputRoute.h"
 #include <atomic>
 #include <chrono>
+#include <optional>
 
 namespace deskflow::windowshare {
 
@@ -31,15 +32,28 @@ public:
   // cannot be undone by a late ready or heartbeat for that press.
   bool arm(OriginalInputStamp press, Clock::time_point now = Clock::now()) noexcept
   {
+    return armWithPrefix(press, now).has_value();
+  }
+  // The returned capture prefix can still contain queued native movement.
+  // The producer publishes its sequence BEFORE deciding whether to suppress;
+  // the request and sequence use one SC order so an unsuppressed decision made
+  // before arming cannot fall beyond this prefix. This does not authorize a
+  // button transition or excuse any later loss of suppression.
+  std::optional<OriginalInputStamp>
+  armWithPrefix(OriginalInputStamp press, Clock::time_point now = Clock::now()) noexcept
+  {
     if (m_stopped.load(std::memory_order_acquire) || press.epoch != m_epoch || !press.sequence ||
         press.sequence <= m_lastAttempt)
-      return false;
+      return {};
     m_lastAttempt = press.sequence;
     if (m_press.load(std::memory_order_acquire) != press.sequence)
-      return false;
+      return {};
     m_deadline.store(ticks(now + silence), std::memory_order_release);
-    m_requested.store(press.sequence, std::memory_order_release);
-    return active(press, now);
+    m_requested.store(press.sequence, std::memory_order_seq_cst);
+    const auto prefix = m_observingSequence.load(std::memory_order_seq_cst);
+    if (!active(press, now))
+      return {};
+    return OriginalInputStamp{m_epoch, prefix, 0};
   }
   bool refresh(OriginalInputStamp press, Clock::time_point now = Clock::now()) noexcept
   {
@@ -53,13 +67,13 @@ public:
   bool active(OriginalInputStamp press, Clock::time_point now = Clock::now()) const noexcept
   {
     return !m_stopped.load(std::memory_order_acquire) && press.epoch == m_epoch && press.sequence &&
-           m_requested.load(std::memory_order_acquire) == press.sequence &&
+           m_requested.load(std::memory_order_seq_cst) == press.sequence &&
            m_press.load(std::memory_order_acquire) == press.sequence &&
            ticks(now) < m_deadline.load(std::memory_order_acquire);
   }
   void cancel() noexcept
   {
-    m_requested.store(0, std::memory_order_release);
+    m_requested.store(0, std::memory_order_seq_cst);
   }
   void stop() noexcept
   {
@@ -81,6 +95,7 @@ public:
       return false;
     }
     m_lastSequence = record.sequence;
+    m_observingSequence.store(record.sequence, std::memory_order_seq_cst);
     if (const auto *button = std::get_if<OriginalInputButton>(&record.payload)) {
       cancel();
       const auto previous = m_press.exchange(0, std::memory_order_acq_rel);
@@ -95,12 +110,12 @@ public:
       return false;
     }
     const auto press = m_press.load(std::memory_order_acquire);
-    auto requested = m_requested.load(std::memory_order_acquire);
+    auto requested = m_requested.load(std::memory_order_seq_cst);
     if (!active({m_epoch, press, 0}, now)) {
       // Preserve an unarmed press for later preview admission. An expired
       // request is retired, while a later heartbeat cannot rearm it.
       if (requested && ticks(now) >= m_deadline.load(std::memory_order_acquire))
-        m_requested.compare_exchange_strong(requested, 0, std::memory_order_acq_rel);
+        m_requested.compare_exchange_strong(requested, 0, std::memory_order_seq_cst);
       return false;
     }
     m_lastSuppressed.store(record.sequence, std::memory_order_release);
@@ -119,7 +134,7 @@ private:
   }
   const std::uint64_t m_epoch;
   std::atomic_bool m_stopped{false};
-  std::atomic<std::uint64_t> m_press{0}, m_requested{0}, m_lastSuppressed{0};
+  std::atomic<std::uint64_t> m_press{0}, m_requested{0}, m_lastSuppressed{0}, m_observingSequence{0};
   std::atomic<std::int64_t> m_deadline{0};
   std::uint64_t m_lastAttempt = 0;  // Coordinator only.
   std::uint64_t m_lastSequence = 0; // Producer only.
