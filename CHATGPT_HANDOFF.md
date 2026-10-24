@@ -13,6 +13,15 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Mac/Linux lifecycle prints now use one bounded worker (128 records / 256 KiB,
+including in-flight output) with explicit loss reports and bounded shutdown.
+Full/closed diagnostic pipes are covered by disposable-process regressions;
+the Active harness rejects incomplete diagnostic evidence. This removes a
+demonstrated synchronous-log stall, not the unresolved native scroll/repeat
+defects. The previous commit's hosted Mac job also exposed a duplicate empty
+Host offer; retain that failure until its separate race correction is verified.
+See `TESTING.md` and `deploy/windowshare/diagnostic-output.md`.
+
 Mac setup now includes read-only permission readiness and an explicit Request
 permissions action. The actual Core and Host identities are probed separately;
 missing access or native capabilities disables Start. Request requires stopped

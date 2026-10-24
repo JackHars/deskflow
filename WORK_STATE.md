@@ -1,5 +1,33 @@
 # Seamless Windows work state
 
+## Bounded lifecycle output — 2026-10-23
+
+Mac/Linux lifecycle diagnostics now enqueue producer-stamped records for one
+bounded worker instead of writing stderr on the input thread. The queue includes
+the in-flight line in its 128-record / 256 KiB budget, caps each line at 16 KiB,
+and reports overflow. Raw descriptor writes avoid a blocked stdio lock; shutdown
+waits up to 250 ms before detaching owned state. The late worker uses no Qt.
+The physical harness rejects explicit diagnostic loss/malformed records while
+allowing cleanup. No input checks, deadlines or event payloads changed.
+
+Evidence: `build/diagnostic-writer-q_79qepo/`. The original synchronous header
+reproduces a full-pipe stall. The corrected writer passes Mac ASan/UBSan and
+ThreadSanitizer; the actual lifecycle-header subprocess passes normal output,
+full-pipe progress/bounded exit and closed-reader survival on Mac and Ubuntu.
+Both production programs build on each platform; private-channel/preflight,
+coordinator/Server/ClientProxy suites and all 115 harness checks pass. Linux
+checks used a private container without desktop/input access. The first Mac
+closed-reader check exposed Darwin's process-directed SIGPIPE; the correction
+uses its output-file option without changing process-wide signal handlers.
+See `deploy/windowshare/diagnostic-output.md` for bounds and evidence limits.
+
+The preceding commit's hosted run `40054522869` finished with five passing jobs
+and one Mac coordinator failure: an empty Host decline was offered twice.
+That race is being addressed separately; the hosted run is not a pass.
+Logging isolation does not prove native scrolling or held repeat fixed. Those
+defects, outbound H07 and remaining physical/native-queue work remain open.
+The regular connection stayed running; no desktop test or installation occurred.
+
 ## Mac permission readiness in everyday controls — 2026-10-23
 
 The Mac controls now check the actual configured Core and Host executables

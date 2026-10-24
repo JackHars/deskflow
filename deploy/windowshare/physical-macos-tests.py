@@ -551,6 +551,24 @@ class DiagnosticTests(unittest.TestCase):
             trace.close()
             self.assertNotIn('secret-test-text', (root / 'trace').read_text())
 
+    def test_native_diagnostic_loss_and_malformed_records_refuse_active_evidence(self):
+        loss = dict(component='Diagnostics', step='diagnostic.loss', state='failed',
+                    message='Diagnostic output exceeded its bounded queue',
+                    details=dict(droppedRecords='2', oversizedRecords='1'))
+        for line in ('DESKFLOW_STEP ' + json.dumps(loss) + '\n', 'DESKFLOW_STEP {broken\n'):
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                trace = module.DIAGNOSTICS.Diagnostics(root / 'trace', 'test')
+                log = root / 'native.log'
+                observer = module.DIAGNOSTICS.LogObserver(log, trace)
+                log.write_text(line)
+                observer.poll()
+                with self.assertRaisesRegex(RuntimeError, 'diagnostic evidence is incomplete'):
+                    observer.require_live_input(True)
+                observer.require_live_input(False)  # Owned cleanup must still finish.
+                self.assertIsNotNone(trace.first_failure)
+                trace.close()
+
     def test_native_ax_observations_retain_errors_without_claiming_terminal_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

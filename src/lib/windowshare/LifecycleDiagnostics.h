@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OpenSSL-Exception
  */
 #pragma once
+#include "DiagnosticOutput.h"
+#include "DiagnosticWriter.h"
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QJsonDocument>
@@ -14,7 +16,7 @@
 namespace deskflow::windowshare {
 // Low-frequency lifecycle observations only. No event payload, key text,
 // clipboard contents, credentials or input-authority decisions are logged.
-inline void lifecycleDiagnostic(
+inline QByteArray lifecycleDiagnosticLine(
     const QString &component, const QString &step, const QString &state, const QString &message,
     const QJsonObject &details = {}
 )
@@ -34,9 +36,43 @@ inline void lifecycleDiagnostic(
               {"monotonicNs", QString::number(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count())}
           }
       ).toJson(QJsonDocument::Compact);
-  const auto line = QByteArray("DESKFLOW_STEP ") + bytes + '\n';
-  std::fwrite(line.constData(), 1, line.size(), stderr);
+  return QByteArray("DESKFLOW_STEP ") + bytes + '\n';
+}
+
+inline void lifecycleDiagnostic(
+    const QString &component, const QString &step, const QString &state, const QString &message,
+    const QJsonObject &details = {}
+)
+{
+#ifndef Q_OS_WIN
+  // The detached shutdown path must own everything it uses, and must not call
+  // Qt after application/static teardown. Normal records are formatted with
+  // their original producer metadata before admission; loss notices use only
+  // standard-library state on the writer thread.
+  static DiagnosticWriter writer(
+      [output = std::make_shared<DiagnosticOutput>(STDERR_FILENO)](std::string_view line) {
+        return output->write(line);
+      },
+      [pid = QCoreApplication::applicationPid()](std::uint64_t dropped, std::uint64_t oversized) {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        return std::string(
+                   "DESKFLOW_STEP {\"component\":\"Diagnostics\",\"step\":\"diagnostic.loss\","
+                   "\"state\":\"failed\",\"message\":\"Diagnostic output exceeded its bounded queue\","
+                   "\"details\":{\"droppedRecords\":\""
+               ) +
+               std::to_string(dropped) + "\",\"oversizedRecords\":\"" + std::to_string(oversized) +
+               "\"},\"pid\":" + std::to_string(pid) + " ,\"monotonicNs\":\"" +
+               std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(now).count()) + "\"}\n";
+      }
+  );
+  (void)writer.append(lifecycleDiagnosticLine(component, step, state, message, details).toStdString());
+#else
+  // Window sharing's native hosts are Mac/Linux. Preserve existing Windows
+  // logging until a native descriptor sink is supplied for that platform.
+  const auto line = lifecycleDiagnosticLine(component, step, state, message, details);
+  std::fwrite(line.constData(), 1, std::size_t(line.size()), stderr);
   std::fflush(stderr);
+#endif
 }
 
 // Report expensive synchronous native work without printing every motion or

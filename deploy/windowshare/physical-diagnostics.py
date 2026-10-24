@@ -112,6 +112,7 @@ class LogObserver:
         self.offset, self.pending = 0, b''
         self.native = {}
         self.input_failure = None
+        self.diagnostic_failure = None
 
     def require_live_input(self, active):
         """A revoked input route or stopped stream cannot continue an Active run.
@@ -119,6 +120,8 @@ class LogObserver:
         The normal shutdown path still consumes final logs and recorder
         footers. This guard never interrupts that owned cleanup.
         """
+        if active and self.diagnostic_failure is not None:
+            raise RuntimeError('Native diagnostic evidence is incomplete: ' + self.diagnostic_failure)
         if active and self.input_failure is not None:
             value = self.input_failure
             details = value.get('details')
@@ -154,6 +157,9 @@ class LogObserver:
                         raise ValueError('Invalid native lifecycle fields')
                     name = value['component'] + ': ' + value['step']
                     self.native[name] = value
+                    if value['component'] == 'Diagnostics' and value['step'] == 'diagnostic.loss' and \
+                            value['state'] == 'failed' and self.diagnostic_failure is None:
+                        self.diagnostic_failure = value['message']
                     terminal_capture = value['component'] == 'Core input' and \
                         value['step'] in ('capture.continuity', 'capture.delivery', 'capture.route-join') and \
                         value['state'] == 'failed'
@@ -168,6 +174,8 @@ class LogObserver:
                         self.input_failure = value
                     self.diagnostics.emit(name, value['state'], value['message'], native=value)
                 except (ValueError, KeyError, TypeError):
+                    if self.diagnostic_failure is None:
+                        self.diagnostic_failure = 'Malformed native lifecycle diagnostic'
                     self.diagnostics.emit('Native diagnostic parsing', 'failed', 'Malformed native lifecycle diagnostic')
             elif 'WARNING: original input dispatch stopped: ' in text:
                 # Older packages have only this terminal Server warning.

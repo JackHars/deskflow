@@ -66,8 +66,10 @@ endif()
 add_test(NAME windowshare-original-keyboard COMMAND windowshare-original-keyboard-tests)
 
 find_package(Threads REQUIRED)
-foreach(check original-input original-input-route original-pointer-join window-drag-transaction window-drag-edge window-drag-motion-gate viewport-lease module-policy library-constraint)
-  if(check STREQUAL "original-input")
+foreach(check diagnostic-writer original-input original-input-route original-pointer-join window-drag-transaction window-drag-edge window-drag-motion-gate viewport-lease module-policy library-constraint)
+  if(check STREQUAL "diagnostic-writer")
+    set(foundation_sources DiagnosticWriterTests.cpp)
+  elseif(check STREQUAL "original-input")
     set(foundation_sources ../../lib/windowshare/OriginalInputTests.cpp
       ../../lib/windowshare/OriginalInput.cpp ../../lib/windowshare/OriginalKeyboard.cpp)
   elseif(check STREQUAL "original-input-route")

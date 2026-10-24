@@ -68,6 +68,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND (WINDOWSHARE_APP OR BUILD_WINDOWSHARE)
 endif()
 if(APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   find_package(Threads REQUIRED)
+  if(WINDOWSHARE_TRANSPORT_TESTS)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    add_executable(windowshare-lifecycle-diagnostics-probe LifecycleDiagnosticsProbe.cpp)
+    target_include_directories(windowshare-lifecycle-diagnostics-probe PRIVATE "${WS_ROOT}/..")
+    target_compile_features(windowshare-lifecycle-diagnostics-probe PRIVATE cxx_std_20)
+    target_link_libraries(windowshare-lifecycle-diagnostics-probe PRIVATE Qt6::Core Threads::Threads)
+    add_test(NAME windowshare-lifecycle-diagnostics
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/LifecycleDiagnosticsTests.py"
+        $<TARGET_FILE:windowshare-lifecycle-diagnostics-probe>)
+    set_tests_properties(windowshare-lifecycle-diagnostics PROPERTIES TIMEOUT 35)
+  endif()
   # A private inherited socketpair and explicit packaged companion bootstrap.
   # Merely linking this library neither launches a companion nor enables input.
   add_library(windowshare-local-input STATIC

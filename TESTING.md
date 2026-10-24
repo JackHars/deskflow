@@ -4,6 +4,46 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Bounded lifecycle output — 2026-10-23
+
+Evidence: `build/diagnostic-writer-q_79qepo/`. `binding.json` freezes base
+`b39d55688` and ten code/harness overlays; archive SHA-256 is
+`3c9fa8b60fa2a191a3e7f311e30b9edda4787057403c8b182c6e09800ec5aa87`.
+Documentation added afterward does not change these executable bytes.
+
+- `baseline-result.json` records the original header's success with a normal
+  pipe and failure to progress/exit with an already-full private pipe; only
+  that disposable process was killed at the ten-second observation deadline.
+- `mac-foundation-test.log` retains the initial SIGPIPE failure. Darwin's write
+  path can signal the process, so thread masking alone was insufficient. The
+  reviewed output applies the no-SIGPIPE option to the stderr file description;
+  its shared effect on the original descriptor is documented explicitly.
+- `mac-foundation-test-reviewed.log` passes bounded count/bytes including the
+  in-flight line, loss reporting, terminal errors, concurrent ordering, detached
+  worker lifetime and owned-descriptor checks with ASan/UBSan. `tsan-test.log`
+  passes the same fixture under ThreadSanitizer, without suppressions.
+- `mac-build.log` built production Core/Host but reached the newly added probe
+  through an already-running Make invocation, which lacked that target. The
+  subsequent `mac-build-reviewed.log` builds both programs and all selected
+  targets on the final source. `mac-app-tests.log` passes lifecycle output,
+  private channel and preflight; `mac-core-tests.log` passes coordinator,
+  Server and ClientProxy. `harness-mac.log` passes all 115 checks.
+- `linux-evidence.json` retains all ten successful build/check steps and full
+  logs: production Core/Viewer, sanitized writer, actual lifecycle header,
+  private channel/preflight, Server/ClientProxy/coordinator and 115 harness
+  checks. The coordinator's Mac capture cases remain platform skips. The
+  container image is
+  `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`;
+  source was read-only, UID 1000, no network/capabilities or host desktop mounts.
+
+The actual logging probe formats only invented fixture metadata. It registers
+no event tap, posts no input and opens no window. These results prove diagnostic
+backpressure behavior, not native scroll/repeat correction. The ordinary
+connection remained established. The previous commit's hosted Mac failure is
+retained in `previous-ci-mac-failure.log`: `emptyHostDeclinePreservesOrdinaryInput`
+observed two candidates instead of one. Five other jobs in `40054522869` pass;
+the run as a whole fails and is not evidence for this new implementation.
+
 ## Mac permission setup and pre-launch readiness — 2026-10-23
 
 Evidence: `build/mac-permission-setup-l9nkpyra/`. The controls now use explicit
