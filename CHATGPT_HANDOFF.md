@@ -18,11 +18,15 @@ control-socket pathname before generating identities or reporting readiness.
 An actual 107-byte Ubuntu profile had passed dry-run but could not pass the
 existing launch limit. Mac checks pass 38 cases with one platform skip; Ubuntu
 passes all 39. Retain the initial invalid profile under
-`build/input-candidate-alrvbdxx/` and use a fresh shorter folder with the new
-packaged helper. The installed Ubuntu support is older and disabled; its update
-requires an ordinary-session pause, so obtain fresh permission first. Native
+`build/input-candidate-alrvbdxx/`. Final packages and shorter paired profiles are
+now bound in its `prepared-candidate.json`, using `17c4b208e` setup resources
+and unchanged native source from `52e929731`. The final packaged Mac handshake
+passes with input disabled. The installed Ubuntu support is older and disabled;
+a request to stop its regular client and approve installing the update is
+pending. Do not treat the unanswered request as authorization. Native
 runtime `52e929731` now has all six hosted jobs passing in run `40056776495`.
-No new desktop-input result is established by those checks.
+Run `40058287662` is in progress for the resource fix, with source run
+`40058287624` passing. No new desktop-input result is established by those checks.
 
 Mac/Linux lifecycle prints now use one bounded worker (128 records / 256 KiB,
 including in-flight output) with explicit loss reports and bounded shutdown.

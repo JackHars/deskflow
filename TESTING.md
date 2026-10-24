@@ -34,9 +34,32 @@ existing launch limit is strictly below 104 bytes on both platforms.
   retained as evidence, not a launch candidate. Mac permissions report ready;
   actual Ubuntu support reports `update-needed` with the extension disabled.
 
+Final staged packages include the corrected helper at `17c4b208e`:
+
+- `source-final-binding.json` records the exact archive and the empty native
+  source diff from `52e929731`. `mac-final-artifact.json` and
+  `linux-final-artifact.json` bind executables, helper, archives and profile
+  paths. The helper hash on both endpoints is
+  `a903d8ff05bca7f04d94119cbd751933d2608d282f302f375979c036fc3858fa`.
+- Final Mac archive SHA-256:
+  `e4a7e0ead8e72964140f3ba9a2322d603cf6ef3a89e080a90c03250179ffd4a0`;
+  Linux: `8909655e880ab8087b5311c6dcd97221017dad203d9fe87744b81e2efcd4f1bc`.
+  `package-mac-final.log` includes the successful package audit;
+  `mac-final-handshake.log` passes the actual packaged private/code-admission
+  probes with input disabled. `linux-build-final.log` records isolated
+  production builds and inert packaging/verification.
+- `prepared-candidate.json` joins the artifacts and fresh paired `mac`/`ubuntu`
+  profiles. Their socket paths are 93/99 bytes. Both final dry-runs use the
+  top-edge arrangement with automatic export off. `linux-final-readiness.json`
+  also confirms rejection of the original 107-byte profile by the real packaged
+  helper. Private keys remain on their originating machine.
+- Mac's final permission status is ready. Ubuntu support still reports
+  `update-needed`; it was not replaced or enabled. Final-source hosted run
+  `40058287662` is in progress; source-bundle run `40058287624` passes.
+
 No ordinary connection was paused, installed extension replaced, native window
-opened, input captured or physical test launched. Packages still need their
-corrected setup resources and a shorter Ubuntu profile before a future session.
+opened, input captured or physical test launched. Installation awaits the user
+stopping the regular Ubuntu client and approving the prepared support update.
 The native scrolling/repeat and full outward-transfer requirements remain open.
 
 ## Empty-decline release ordering — 2026-10-23

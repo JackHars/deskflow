@@ -16,16 +16,24 @@ of partial identity creation and unchanged legacy setup contents. Mac passes
 38 cases with one Ubuntu-only skip; Ubuntu passes all 39. Evidence is retained
 in `build/profile-path-_x1syhk1/`. The initial package/profile preparation is in
 `build/input-candidate-alrvbdxx/`; its oversized Ubuntu profile is retained and
-must not be launched. Prepare a fresh shorter profile with the corrected helper.
+must not be launched. The corrected packaged helper rejects that exact profile.
+Fresh `mac` and `ubuntu` profiles now have 93- and 99-byte socket paths and pass
+creation, pairing and dry-run with Ubuntu above Mac and automatic export off.
 
 All six jobs of hosted run `40056776495` pass for runtime `52e929731`. Its signed
 Mac bundle passes dependency/signature and input-disabled Core/Host checks;
-Ubuntu's matching inert archive verifies. Native binaries are unchanged by this
-folder fix; packages must include the corrected setup resource before reuse.
-Mac permissions are ready. Ubuntu's read-only support check reports
+Ubuntu's matching inert archive verifies. Final packages include the corrected
+setup resource at `17c4b208e`, with unchanged native source from `52e929731`.
+`build/input-candidate-alrvbdxx/prepared-candidate.json` binds the final Mac
+bundle under `mac-final`, Ubuntu package and both fresh profiles. The final Mac
+private handshake passes with input disabled; Mac permissions remain ready.
+Hosted run `40058287662` is in progress for `17c4b208e`; its source run
+`40058287624` passes. Ubuntu's read-only support check reports
 `update-needed`; the installed extension is disabled and still older than the
-package. Do not pause ordinary Deskflow, replace desktop support or start input
-without the required fresh permission. The regular connection remains running.
+package. A user request is pending to stop the regular Ubuntu client and approve
+installing the staged update. No approval has arrived. Do not pause ordinary
+Deskflow, replace desktop support or start input without the required fresh
+permission. The regular connection remains running.
 Scroll timestamps, held repeat, full outward dragging and native queue gaps
 remain open; interactive drag-back stays last.
 
