@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
 """Regressions for diagnosis that must never turn missing input into a pass."""
 import pathlib
 import runpy

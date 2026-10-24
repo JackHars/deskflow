@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: (C) 2026 Deskflow Contributors
+# SPDX-License-Identifier: MIT
 """Explain scroll delivery differences without changing the acceptance evidence.
 
 The source, process event tap and AppKit journals are different observation
