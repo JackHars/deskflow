@@ -21,6 +21,7 @@
 #include <QEventLoop>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QScopeGuard>
 #include <QTest>
 #include <QTextStream>
 #include <QTimer>
@@ -1048,6 +1049,102 @@ void OriginalInputCoordinatorTests::firstClickWaitsForFocusAndExactHostBeforeDel
   }));
   QCOMPARE(f.count("mapped"), 1u);
   f.finish();
+#endif
+}
+
+void OriginalInputCoordinatorTests::handoffProgressWithoutPollingTimers_data()
+{
+  QTest::addColumn<bool>("firstClick");
+  QTest::addColumn<int>("invalidate");
+  QTest::newRow("keyboard") << false << 0;
+  QTest::newRow("first-click") << true << 0;
+  QTest::newRow("admission-lost-before-wake") << false << 1;
+  QTest::newRow("destroyed-before-wake") << false << 2;
+}
+void OriginalInputCoordinatorTests::handoffProgressWithoutPollingTimers()
+{
+#if !defined(__APPLE__)
+  QSKIP("Positive source admission uses the actual Mac capture adapter");
+#else
+  QFETCH(bool, firstClick);
+  QFETCH(int, invalidate);
+  Fixture f(false, firstClick);
+  Capture source;
+  OriginalInputCoordinatorTestAccess::stopPolling(*f.coordinator);
+  f.maintenance.stop();
+  QObject coreEvents;
+  bool queued = false;
+  std::uint64_t ticket = 0;
+  Result result = Result::pending(0);
+  const auto notify = [&] {
+    // Model the existing coalesced Server progress event. Never poll inline
+    // under the coordinator's mutex, or from until()'s predicate/timer.
+    if (queued)
+      return;
+    queued = true;
+    QMetaObject::invokeMethod(
+        &coreEvents,
+        [&] {
+          queued = false;
+          if (ticket && result.state == State::Pending)
+            result = f.poll(ticket);
+        },
+        Qt::QueuedConnection
+    );
+  };
+  f.dispatcher->setProgressNotifier(notify);
+  f.wire.proxy->setInputMappingNotifier(notify);
+  const auto cleanup = qScopeGuard([&] {
+    f.dispatcher->setProgressNotifier({});
+    f.wire.proxy->setInputMappingNotifier({});
+  });
+  result = f.reserve(firstClick ? source.freshButton() : source.fresh(), 0, Clock::now() + 500ms);
+  QCOMPARE(result.state, State::Pending);
+  ticket = result.ticket;
+  if (invalidate == 1)
+    f.admitted = false;
+  else if (invalidate == 2)
+    f.coordinator.reset();
+  if (invalidate) {
+    QVERIFY(until([&] { return result.state != State::Pending; }));
+    QCOMPARE(result.state, State::Revoked);
+    QCOMPARE(f.count("mapped"), 0u);
+    f.finish();
+    return;
+  }
+  if (firstClick) {
+    QVERIFY(until([&] { return f.wire.preparations.size() == 1; }));
+    QCOMPARE(f.count("candidate"), 0u);
+    f.wire.prepared(f.wire.preparedResult());
+  }
+  QVERIFY(until([&] { return f.wire.requests.size() == 1; }));
+  QCOMPARE(f.count("mapped"), 0u);
+  f.wire.complete(f.wire.result());
+  QVERIFY(until([&] { return result.state != State::Pending; }));
+  QCOMPARE(result.state, State::Accepted);
+  QVERIFY(result.reservation.has_value());
+  QCOMPARE(f.count("mapped"), 0u);
+  QVERIFY(f.dispatcher->commit(*result.reservation));
+  QVERIFY(until([&] { return f.count("mapped") == 1; }));
+  const auto owner = result.reservation->owner;
+  // Continue through fresh scroll batches and their ordered dispatch replies.
+  // No new physical event or maintenance poll may be needed to unstick one.
+  for (std::size_t delivered = 2; delivered <= 4; ++delivered) {
+    result = f.reserve(source.scroll(), owner, Clock::now() + 500ms);
+    QCOMPARE(result.state, State::Pending);
+    ticket = result.ticket;
+    QVERIFY(until([&] { return f.wire.requests.size() == delivered; }));
+    f.wire.complete(f.wire.result());
+    QVERIFY(until([&] { return result.state != State::Pending; }));
+    QCOMPARE(result.state, State::Accepted);
+    QVERIFY(result.reservation.has_value());
+    QCOMPARE(result.reservation->owner, owner);
+    QVERIFY(f.dispatcher->commit(*result.reservation));
+    QVERIFY(until([&] { return f.count("mapped") == delivered; }));
+  }
+  QVERIFY(!f.closed);
+  f.finish();
+  QCOMPARE(f.count("mapped"), 4u);
 #endif
 }
 

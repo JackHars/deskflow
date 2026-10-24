@@ -264,6 +264,12 @@ public:
     });
     const auto ticket = m_preparing->ticket;
     const bool prepared = owner->active && !m_batch.empty() && m_batch.front().capture == route.stamp;
+    if (!prepared) {
+      if (m_preparing->phase == Shared::Phase::FocusPreparing)
+        m_state->notifyProgress(); // The Core backend owns focus preparation.
+      else if (m_state->wake)
+        m_state->wake(); // The Qt owner starts the exact private handoff.
+    }
     lock.unlock();
     // Consume independent batch point receipts in source order without a
     // timer or network round trip for each key, scroll or drag record.
@@ -515,6 +521,8 @@ public:
         m_reserved = std::exchange(m_preparing, {});
         return Result::accepted({operation->owner->id, ticket}, ticket);
       }
+      if (m_state->wake)
+        m_state->wake(); // The validated receipt can now continue preflight.
     }
     return Result::pending(ticket);
   }
@@ -791,6 +799,8 @@ private:
       owner->prepared = prepared;
       operation->phase = Shared::Phase::Requested;
       operation->trace(2, "input.focus-preparation", "completed");
+      if (m_state->wake)
+        m_state->wake();
       return Result::pending(ticket);
     }
     const auto state = m_backend.preparationState(owner->selected, binding);
@@ -1020,6 +1030,13 @@ OriginalInputCoordinator::OriginalInputCoordinator(
         alive->m_shared->owner->target = target;
         alive->m_shared->owner->lease = lease;
         alive->m_shared->notifyProgress();
+      },
+      [alive] {
+        if (!alive)
+          return;
+        std::lock_guard lock(alive->m_shared->mutex);
+        if (!alive->m_shared->closed && alive->m_shared->wake)
+          alive->m_shared->wake();
       }
   );
   channel.onReleased = [alive](const LocalInputOffer &offer) {
@@ -1246,6 +1263,7 @@ bool OriginalInputCoordinator::tickOne()
     if (active) {
       std::lock_guard lock(m_shared->mutex);
       operation->phase = Shared::Phase::Preparing;
+      m_shared->notifyProgress();
     } else if (m_preflight->phase() == LocalInputPreflight::Phase::Idle) {
       operation->trace(3, "input.host-offer", "started");
       const bool begun = m_preflight->begin(operation->captured.input.epoch, ForwardingScope::All);

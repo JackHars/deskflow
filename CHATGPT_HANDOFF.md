@@ -13,6 +13,15 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Input preparation now schedules the next owning thread directly through the
+existing coalesced wakes. The new regression disables maintenance polling and
+completes keyboard/first-click acquisition followed by three scroll deliveries;
+admission loss and destruction still revoke pending delivery. Prepared-focus,
+capability and cleanup replies wake Core, and processed private controls wake
+the Qt coordinator. All authorization, input fields, capacities and deadlines
+are unchanged. This removes demonstrated polling dependencies, not a proven
+native scroll/repeat defect. See the newest evidence in `TESTING.md`.
+
 Continuous outward-drag preparation now keeps the first preview stable until
 its exact Ready, then forwards the latest retained position. Arming returns an
 exact capture prefix so queued native movement is accounted for once instead

@@ -61,6 +61,10 @@ public:
   // It grants no authority. Valid retired replies are discarded before this
   // notification; a current full-input attempt accepts exactly one target.
   using TargetNotification = std::function<void(const LocalInputLease &, const LocalInputTarget &)>;
+  // Core-only scheduling hint after queued controls finish processing. The
+  // observer must defer any service work: this grants no authority, changes no
+  // deadline and must not synchronously reenter a dispatcher/native backend.
+  using ProgressNotification = std::function<void()>;
   enum class Phase
   {
     Idle,
@@ -130,7 +134,8 @@ public:
   };
   static std::unique_ptr<LocalInputPreflight> core(
       LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
-      Checks checks = {}, PreparationNotification preparation = {}, TargetNotification target = {}
+      Checks checks = {}, PreparationNotification preparation = {}, TargetNotification target = {},
+      ProgressNotification progress = {}
   );
   static std::unique_ptr<LocalInputPreflight>
   host(LocalInputChannel &channel, LocalInputPeerPolicy policy, Host host, Checks checks = {});

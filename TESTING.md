@@ -4,6 +4,51 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Notification-driven input preparation — 2026-10-23
+
+Evidence: `build/handoff-progress-d27uu6mv/`. The coordinator now wakes the
+appropriate Qt/Core consumer after initial reservation, prepared focus, exact
+mapping, Host activation and preparation cleanup. This extends the existing
+coalesced scheduling path; receipt validation and original deadlines still
+govern every operation. No native event tap or input posting is used here.
+
+- `mac-before.log`: old production code fails keyboard, first-click and lost
+  admission progress when both maintenance timers are stopped; destruction
+  before wake already passes.
+- `mac-after.log`: the initial implementation resolves keyboard/lost-admission
+  progress. The new first-click fixture used a one-second deadline, exceeding
+  the existing 500 ms focus contract; the fixture was corrected to 500 ms.
+- `mac-notification-regression.log` and `mac-server-checks.log`: first-click
+  reaches preparation but stalls after the reply. ClientProxy stored prepared
+  focus without notifying Core. These failures predate the final proxy change.
+- `mac-reviewed-build.log`: production Core/WindowShare and all selected test
+  targets build. `mac-reviewed-server.log` and its `-detail` companion pass
+  Server, ClientProxy and OriginalInputCoordinator. All four new coordinator
+  rows pass; positive paths include three subsequent scroll deliveries, with
+  no state-changing polls in the observation predicates. Proxy callbacks can
+  destroy the proxy after capability, focus, failure and no-target replies.
+  Qt reports 60 Server, 64 ClientProxy and 38 coordinator passes, with no skips.
+- `mac-reviewed-private.log` and its `-detail` companion pass both local-input
+  and preflight suites. Progress callbacks may throw, stop or destroy their
+  coordinator without reviving input or losing cleanup.
+- `binding-reviewed.json` binds base `a3767b263` plus nine exact source/test
+  overlays in `source-reviewed/`. Archive SHA-256:
+  `79828f12376a4a0ba71cb1532f25cb8b78df60e742a2a83b33c560b89bf41bb7`.
+  Ubuntu runs use this frozen snapshot, not later documentation edits.
+- `linux-evidence.json` retains all six step logs and their successful results.
+  Both production programs build; private-input/preflight suites pass. Server
+  has 60 passes and ClientProxy 64; the coordinator has four passes and 34
+  Mac-capture-only skips. Do not count those skipped cases as Ubuntu execution.
+  The existing isolated image is
+  `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`,
+  with no network or host display/input/GPU mounts, capabilities dropped,
+  UID 1000 and read-only source.
+
+The existing regular Deskflow session remains connected. No physical session,
+installed package/profile change or desktop
+capture occurred. Strict scroll timestamps, held repeat, full outward H07,
+native queue limits and remaining hardware acceptance are still open.
+
 ## Continuous top-edge preparation and exact capture prefix — 2026-10-23
 
 Evidence: `build/drag-preparation-yjh1cebb/`. The outward coordinator now holds

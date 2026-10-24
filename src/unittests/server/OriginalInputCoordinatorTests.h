@@ -16,6 +16,8 @@ private Q_SLOTS:
   void emptyHostDeclinePreservesOrdinaryInput();
   void lateTargetAfterCancellationPreservesNextHandoff();
   void firstClickWaitsForFocusAndExactHostBeforeDelivery();
+  void handoffProgressWithoutPollingTimers_data();
+  void handoffProgressWithoutPollingTimers();
   void committedInputWakesWithoutPollingTimer_data();
   void committedInputWakesWithoutPollingTimer();
   void mappedDispatchAcknowledgementWakesWithoutPollingTimer();

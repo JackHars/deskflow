@@ -1,5 +1,34 @@
 # Seamless Windows work state
 
+## Input handoff progress without maintenance polling — 2026-10-23
+
+The production input coordinator now schedules the next owning thread when a
+reservation starts, native focus preparation completes, an exact mapped receipt
+arrives or the private Host activation completes. ClientProxy also notifies the
+existing Core progress event after preparation capability, focus and cleanup
+replies. Duplicate/retired replies do not enqueue redundant notifications. The
+existing coalesced Qt/Core wakes retain no input records; maintenance timers
+remain responsible for expiry and fallback cleanup. No authority checks, raw
+input fields, queue capacities or deadlines changed, and no sleeps were added.
+
+The new regression stops both coordinator and simulated Core polling timers.
+Keyboard acquisition, first-click focus preparation and three subsequent scroll
+deliveries now complete from notifications alone. Lost admission and destruction
+before a queued wake still revoke delivery. Additional checks retire ClientProxy
+from each new reply callback and stop/destroy/throw from preflight progress
+callbacks, preserving exact cleanup.
+
+The old code failed three notification-only scenarios. The intermediate fix
+resolved keyboard progress but exposed a missing prepared-focus notification;
+the final Mac build and all five selected suites pass. Evidence is retained in
+`build/handoff-progress-d27uu6mv/`, with the exact source snapshot and failures
+described in `TESTING.md`. This removes identified avoidable polling waits; it
+does not establish a fix for the saved native scroll timestamp failure or held
+repeat. Ubuntu production builds, Server/ClientProxy and private-input/preflight
+checks pass against the frozen source in isolation; its coordinator suite has
+four passes and 34 Mac-capture-only skips. The ordinary Deskflow connection
+remains running; no desktop capture was started.
+
 ## Continuous outward drag preparation and capture cutover — 2026-10-23
 
 The production outward coordinator now retains the latest boundary candidate

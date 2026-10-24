@@ -49,6 +49,7 @@ private Q_SLOTS:
   void batchedCutoff_rejectsPartialChangedAndLateResults();
   void mappedCutoff_notificationMayRetireProxy();
   void preparation_negotiatesPromotesAndWaitsForCleanup();
+  void preparation_notificationMayRetireProxy();
   void preparation_boundsCancellationAndPreservesAttemptIdentity();
 
 private:

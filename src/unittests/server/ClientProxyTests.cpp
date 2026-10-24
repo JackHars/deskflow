@@ -1502,7 +1502,10 @@ void ClientProxyTests::preparation_negotiatesPromotesAndWaitsForCleanup()
   if (!traceBuilt)
     QSKIP("Preparation is disabled in this build");
   TraceFixture f;
+  auto notifications = std::make_shared<unsigned>(0);
+  f.proxy->setInputMappingNotifier([notifications] { ++*notifications; });
   const auto generation = f.negotiatePreparation();
+  QCOMPARE(*notifications, 1u);
   const auto binding = f.startPreparation();
   QVERIFY(binding);
   QCOMPARE(binding->coreConnectionGeneration, generation);
@@ -1516,6 +1519,7 @@ void ClientProxyTests::preparation_negotiatesPromotesAndWaitsForCleanup()
   result.viewerPeerFingerprint.fill(0x7a);
   const auto packet = QByteArray::fromStdString(encodePreparedInputFocusResult(result));
   f.receive({packet, packet});
+  QCOMPARE(*notifications, 2u); // Duplicate prepared replies do not schedule more work.
   const auto focus = f.proxy->preparedInputFocus(*binding);
   QVERIFY(focus && focus->live());
   const KeyboardRouteBinding all{{11, 12}, 13, 14, 15, 16, ForwardingScope::All};
@@ -1532,6 +1536,7 @@ void ClientProxyTests::preparation_negotiatesPromotesAndWaitsForCleanup()
   QCOMPARE(promotion.size(), 1u);
   QCOMPARE(decodeInputPreparationPromotion(promotion[0].toStdString().substr(4))->cutoff, *promoted);
   f.receive({QByteArray::fromStdString(encodeInputCutoffSealedResult({mappedResult(*promoted), promoted->request}))});
+  QCOMPARE(*notifications, 3u);
   QCOMPARE(f.proxy->inputPreparationState(*binding), InputPreparationState::Sealed);
   const auto observation = f.proxy->inputCutoffObservation(*promoted);
   QVERIFY(observation && observation->live() && focus->live());
@@ -1546,17 +1551,56 @@ void ClientProxyTests::preparation_negotiatesPromotesAndWaitsForCleanup()
   QVERIFY(f.take().empty());
   f.cutoffReceipt(*promoted, InputCutoffState::Resumed);
   const auto release = f.take();
+  QCOMPARE(*notifications, 4u);
   QCOMPARE(release.size(), 1u);
   QVERIFY(release[0].startsWith("DMUP"));
   QCOMPARE(f.proxy->inputPreparationState(*binding), InputPreparationState::Released);
   f.cutoffReceipt(*promoted, InputCutoffState::Resumed);
+  QCOMPARE(*notifications, 4u);
   QVERIFY(f.take().empty());
   QVERIFY(!f.stream->closed);
   const auto newer = f.startPreparation();
   QVERIFY(newer && newer->request > promoted->request);
   f.take();
   f.receive({packet}); // Old prepared focus cannot replace the new operation.
+  QCOMPARE(*notifications, 4u);
   QVERIFY(!f.proxy->preparedInputFocus(*newer));
+}
+
+void ClientProxyTests::preparation_notificationMayRetireProxy()
+{
+  if (!traceBuilt)
+    QSKIP("Preparation is disabled in this build");
+  for (int stage = 0; stage < 4; ++stage) {
+    TraceFixture f;
+    QByteArray packet;
+    if (stage == 0) {
+      const auto generation = f.proxy->requestInputPreparationCapability();
+      QVERIFY(generation);
+      f.proxy->setOptions({kOptionBatchedInputCutoff, *generation, kOptionInputPreparation, *generation});
+      f.take();
+      f.receive({"CICB" + integer(*generation, 4)});
+      packet = "CIPA" + integer(*generation, 4);
+    } else {
+      f.negotiatePreparation();
+      const auto binding = f.startPreparation();
+      QVERIFY(binding);
+      f.take();
+      if (stage == 1) {
+        PreparedInputFocusResult result{*binding, {-10, 27}, 17, {11, 12}, 16, 14, 15};
+        result.viewerPeerFingerprint.fill(0x7a);
+        packet = QByteArray::fromStdString(encodePreparedInputFocusResult(result));
+      } else {
+        packet = QByteArray::fromStdString(encodeInputPreparationReceipt(
+            {*binding, stage == 2 ? InputPreparationState::Failed : InputPreparationState::Released,
+             InputPreparationOutcome::NoTarget}
+        ));
+      }
+    }
+    f.proxy->setInputMappingNotifier([&] { f.proxy.reset(); });
+    f.receive({packet});
+    QVERIFY(!f.proxy);
+  }
 }
 
 void ClientProxyTests::preparation_boundsCancellationAndPreservesAttemptIdentity()

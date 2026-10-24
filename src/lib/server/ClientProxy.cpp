@@ -371,7 +371,10 @@ void ClientProxy::receiveInputPreparationAck(std::uint32_t generation)
   if (!m_preparationIssued || !m_cutoffBatched || !generation || generation != m_cutoffGeneration ||
       !inputCutoffTlsLive())
     throw BadClientException("Unrequested input preparation acknowledgement");
+  const bool first = !m_preparationAcknowledged;
   m_preparationAcknowledged = true;
+  if (first)
+    notifyInputMappingProgress();
 }
 
 void ClientProxy::revokeInputPreparation() noexcept
@@ -476,6 +479,7 @@ void ClientProxy::receivePreparedInputFocus(const PreparedInputFocusResult &resu
   if (state == InputPreparationState::Preparing) {
     m_preparation->focus = result;
     m_preparation->state->store(InputPreparationState::Prepared, std::memory_order_release);
+    notifyInputMappingProgress();
   }
 }
 
@@ -587,7 +591,10 @@ void ClientProxy::receiveInputPreparationReceipt(const InputPreparationReceipt &
   if (receipt.state == InputPreparationState::Failed) {
     if (state != InputPreparationState::Canceling) {
       m_preparation->state->store(InputPreparationState::Failed, std::memory_order_release);
+      const auto alive = proxyLifetime();
       cancelInputPreparation(receipt.binding, InputCutoffClock::now() + inputCutoffMaximumLifetime);
+      if (*alive)
+        notifyInputMappingProgress();
     }
     return;
   }
@@ -628,6 +635,7 @@ void ClientProxy::receiveInputPreparationReceipt(const InputPreparationReceipt &
   }
   if (m_preparation)
     m_preparation->flushing = false;
+  notifyInputMappingProgress();
 }
 
 bool ClientProxy::inputCutoffTlsLive() const

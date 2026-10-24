@@ -312,7 +312,8 @@ struct Fixture
 
   explicit Fixture(
       const QString &mode = "normal", LocalInputPreflight::Checks checks = allow(),
-      LocalInputPreflight::PreparationNotification preparation = {}, LocalInputPreflight::TargetNotification target = {}
+      LocalInputPreflight::PreparationNotification preparation = {},
+      LocalInputPreflight::TargetNotification target = {}, LocalInputPreflight::ProgressNotification progress = {}
   )
   {
     auto pair = LocalInputSocketPair::create();
@@ -355,7 +356,7 @@ struct Fixture
       };
     channel->onRevoked = [&](const auto &, auto) { ++revokeNotifications; };
     coordinator = LocalInputPreflight::core(
-        *channel, mailbox, policy(), std::move(checks), std::move(preparation), std::move(target)
+        *channel, mailbox, policy(), std::move(checks), std::move(preparation), std::move(target), std::move(progress)
     );
   }
   ~Fixture()
@@ -747,6 +748,48 @@ void deferredNotificationReentry()
     f.finish();
   }
 }
+void controlProgressNotification()
+{
+  enum class Action
+  {
+    Observe,
+    Throw,
+    Stop,
+    Destroy
+  };
+  for (const auto action : {Action::Observe, Action::Throw, Action::Stop, Action::Destroy}) {
+    Fixture *fixture = nullptr;
+    bool activeObserved = false;
+    Fixture f("normal", allow(), {}, {}, [&] {
+      if (!fixture || !fixture->coordinator || fixture->coordinator->phase() != Phase::Active)
+        return;
+      activeObserved = true;
+      if (action == Action::Throw)
+        throw std::runtime_error("Scheduling observer failed");
+      if (action == Action::Stop)
+        fixture->coordinator->stop();
+      if (action == Action::Destroy)
+        fixture->coordinator.reset();
+    });
+    fixture = &f;
+    f.begin();
+    check(until([&] { return activeObserved || f.closed; }) && activeObserved, "Activation did not notify progress");
+    if (action == Action::Observe || action == Action::Throw) {
+      check(
+          f.coordinator && f.coordinator->phase() == Phase::Active && f.channel->phase() == LocalInputPhase::Active &&
+              f.releases == 0,
+          "A scheduling notification changed input authority"
+      );
+    } else {
+      check(
+          (!f.coordinator || f.coordinator->phase() == Phase::Stopped) && !f.channel->lease() && f.releases == 1,
+          "Progress callback destruction lost exact cleanup or revived its owner"
+      );
+    }
+    f.finish();
+  }
+}
+
 void hostFailureCases()
 {
   for (const auto mode :
@@ -1379,6 +1422,7 @@ int main(int argc, char **argv)
     deferredCancellationAndStale();
     deferredChecks();
     deferredNotificationReentry();
+    controlProgressNotification();
     hostFailureCases();
     unsupportedReservationScope();
     hostActivation();

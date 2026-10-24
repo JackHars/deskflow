@@ -131,6 +131,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
   Checks checks;
   PreparationNotification preparation;
   TargetNotification target;
+  ProgressNotification progress;
   Host host;
   std::shared_ptr<SelectedPeerMailbox> mailbox;
   std::optional<Attempt> attempt;
@@ -237,6 +238,7 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
       return;
     running = false;
     timer.stop();
+    progress = {};
     controls.clear();
     cancel(LocalInputRevocation::Requested, true);
   }
@@ -451,7 +453,9 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     if (processing || cancelling || authorizing)
       return;
     processing = true;
+    bool processed = false;
     while (running && !controls.empty()) {
+      processed = true;
       const auto control = controls.front();
       controls.pop_front();
       try {
@@ -462,6 +466,18 @@ struct LocalInputPreflight::State final : QObject, std::enable_shared_from_this<
     }
     processing = false;
     schedule();
+    if (processed && running && progress) {
+      // In particular, Committed/Activated can complete after the coordinator's
+      // last tick. Notify only after the bounded control drain has unwound, so
+      // its queued service need not wait for a maintenance timer to see Active.
+      const auto notify = progress;
+      try {
+        notify();
+      } catch (...) {
+        // Notifications are scheduling hints; normal deadline maintenance and
+        // all independent authorization checks remain responsible for safety.
+      }
+    }
   }
   // Returns true only for current traffic. Shape validation happens even for
   // retired traffic. Only the last retired binding needs an equality check;
@@ -830,7 +846,7 @@ LocalInputPreflight::LocalInputPreflight(std::shared_ptr<State> state) : m_state
 }
 std::unique_ptr<LocalInputPreflight> LocalInputPreflight::core(
     LocalInputChannel &channel, std::shared_ptr<SelectedPeerMailbox> mailbox, LocalInputPeerPolicy policy,
-    Checks checks, PreparationNotification preparation, TargetNotification target
+    Checks checks, PreparationNotification preparation, TargetNotification target, ProgressNotification progress
 )
 {
   if (!mailbox)
@@ -839,6 +855,7 @@ std::unique_ptr<LocalInputPreflight> LocalInputPreflight::core(
   state->mailbox = std::move(mailbox);
   state->preparation = std::move(preparation);
   state->target = std::move(target);
+  state->progress = std::move(progress);
   state->attach();
   return std::unique_ptr<LocalInputPreflight>(new LocalInputPreflight(std::move(state)));
 }
