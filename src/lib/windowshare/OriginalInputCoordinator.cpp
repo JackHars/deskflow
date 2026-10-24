@@ -43,6 +43,7 @@ struct OriginalInputCoordinator::Shared
   {
     Requested,
     FocusPreparing,
+    HostOffered,
     Preparing,
     Mapped,
     Ready,
@@ -1048,6 +1049,10 @@ OriginalInputCoordinator::OriginalInputCoordinator(
       return; // Retired releases cannot affect a newer owner.
     owner->revoked = true;
     owner->hostReleased = true;
+    // Cleanup belongs to Qt too. Its earlier Cancel wake may already have
+    // drained before this exact release arrives; do not wait for its timer.
+    if (alive->m_shared->wake)
+      alive->m_shared->wake();
     alive->m_shared->notifyProgress();
   };
   m_shared->wake = [this] {
@@ -1265,6 +1270,16 @@ bool OriginalInputCoordinator::tickOne()
       operation->phase = Shared::Phase::Preparing;
       m_shared->notifyProgress();
     } else if (m_preflight->phase() == LocalInputPreflight::Phase::Idle) {
+      {
+        std::lock_guard lock(m_shared->mutex);
+        if (operation->phase != Shared::Phase::Requested || !Shared::live(*operation->owner) || m_shared->closed)
+          return false;
+        // One Host offer per acquisition, including the interval after Cancel
+        // makes preflight idle but before the exact Released reaches Core.
+        // Reoffering there replaces the retained offer and loses its cleanup
+        // acknowledgement. Only a new acquisition may start another offer.
+        operation->phase = Shared::Phase::HostOffered;
+      }
       operation->trace(3, "input.host-offer", "started");
       const bool begun = m_preflight->begin(operation->captured.input.epoch, ForwardingScope::All);
       if (!alive)

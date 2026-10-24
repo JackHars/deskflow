@@ -4,6 +4,38 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Empty-decline release ordering — 2026-10-23
+
+Evidence: `build/diagnostic-writer-q_79qepo/`, `decline-` files. The previous
+hosted Mac job saw two Host candidates for one acquisition. The new regression
+holds the exact release callback after cancellation, stops coordinator polling,
+and explicitly services that interval. It also checks Pending before release,
+Refused afterward, zero native/Viewer ownership or mapped requests, cleanup
+without the polling timer and a new independent acquisition.
+
+- `decline-before.log` fails on the old code: servicing Idle starts another
+  Host offer. The retained trace contains repeated route generations.
+- `decline-after.log` prevents reoffers but fails cleanup readiness because
+  the exact release notified Core without waking Qt. That missing wake is fixed.
+- `decline-reviewed-build.log` builds Core, Host and the coordinator fixture
+  after the final callback ordering review. `decline-reviewed.log` passes;
+  `decline-mac-output.log` contains all 39 passing cases. No event tap, posted
+  input or user desktop is used.
+- `decline-final-binding.json` binds base `36963a413` plus the three coordinator
+  source/fixture overlays. Final archive SHA-256:
+  `9eee205b17e741dc5ed0584aafc573fbe990fdc318f1a3245d64e8bd5cece10d`.
+  `decline-binding.json` retains the earlier intermediate source binding.
+- `decline-linux-evidence.json` records successful production Viewer/Core builds
+  and four coordinator passes, with 35 Mac-source-admission skips. It uses the
+  same isolated image/mount restrictions described in the logging section.
+- `reuse.log` retains two missing license headers from earlier scroll-diagnostic
+  scripts; `reuse-reviewed.log` passes after adding their MIT/SPDX declarations.
+
+This corrects a demonstrated host-offer race, not the remaining native scroll
+or repeat defects. Hosted run `40054522869` remains a failed historical run;
+new source requires its own hosted result. No installed package or regular
+Deskflow session was changed.
+
 ## Bounded lifecycle output — 2026-10-23
 
 Evidence: `build/diagnostic-writer-q_79qepo/`. `binding.json` freezes base

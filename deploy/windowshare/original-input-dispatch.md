@@ -216,7 +216,12 @@ claim of application consumption.
 Cleanup retains the original seal as the resume address. A failed or canceled
 handoff cannot return to ordinary delivery until both exact Core resume and
 Host completed-release acknowledgments arrive. An explicit empty Host decline
-can return `Refused` only after that empty release is acknowledged. Lost focus,
+can return `Refused` only after that empty release is acknowledged. Each
+acquisition enters Host-offered before starting private preparation. Cancel can
+make preflight Idle while Released is still in transit; that interval never
+starts another offer or replaces the acknowledgement's identity. Exact release
+wakes both Core progress and Qt cleanup, so retirement does not require a
+maintenance tick. A later acquisition can then make its own offer. Lost focus,
 selection, capture, process, surface, device or transport revokes the route and
 keeps physical-up tombstones; no new destination inherits a held press.
 

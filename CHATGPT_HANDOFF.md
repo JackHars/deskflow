@@ -19,7 +19,12 @@ Full/closed diagnostic pipes are covered by disposable-process regressions;
 the Active harness rejects incomplete diagnostic evidence. This removes a
 demonstrated synchronous-log stall, not the unresolved native scroll/repeat
 defects. The previous commit's hosted Mac job also exposed a duplicate empty
-Host offer; retain that failure until its separate race correction is verified.
+Host offer. An explicit Host-offered phase now prevents reoffering between
+Cancel and the exact Released acknowledgement; the latter wakes Qt cleanup as
+well as Core progress. A deterministic delayed-release regression reproduces
+the old failure and passes with all 39 Mac coordinator cases after the fix.
+Ubuntu builds pass with Mac-source-specific cases skipped. Preserve the failed
+historical hosted run; these changed bytes require their own hosted result.
 See `TESTING.md` and `deploy/windowshare/diagnostic-output.md`.
 
 Mac setup now includes read-only permission readiness and an explicit Request

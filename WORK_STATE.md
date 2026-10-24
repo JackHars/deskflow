@@ -1,5 +1,30 @@
 # Seamless Windows work state
 
+## One Host offer per acquisition — 2026-10-23
+
+The coordinator now enters an explicit Host-offered phase before beginning
+private preparation. A Cancel that returns preflight to Idle cannot start a
+second offer while the first exact Released acknowledgement is pending. That
+acknowledgement wakes both Core progress and Qt cleanup; cleanup no longer
+depends on the Qt maintenance timer after a delayed release. A new acquisition
+can still offer normally after the previous release completes.
+
+This resolves the concrete duplicate-offer race exposed by hosted run
+`40054522869`, without weakening input ownership or extending deadlines. The
+new deterministic regression holds the release callback and services the idle
+interval: old code reoffers and fails. The first correction prevents reoffers
+but reveals the missing cleanup wake with polling stopped; the final correction
+passes all 39 Mac coordinator cases. Production Core/Host builds pass. Ubuntu
+production builds pass, with four coordinator passes and 35 Mac-specific skips.
+Evidence and both intermediate failures are retained under
+`build/diagnostic-writer-q_79qepo/` with the `decline-` prefix. The final source
+is bound separately from the logging change. Full REUSE also passes after
+adding missing license headers to two earlier scroll-diagnostic scripts.
+
+No desktop capture or ordinary connection interruption occurred. Native scroll
+timestamps, held repeat, complete outward dragging and remaining hardware/queue
+requirements stay open; drag-back remains last.
+
 ## Bounded lifecycle output — 2026-10-23
 
 Mac/Linux lifecycle diagnostics now enqueue producer-stamped records for one

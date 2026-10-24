@@ -59,6 +59,10 @@ struct OriginalInputCoordinatorTestAccess
   {
     coordinator.tick();
   }
+  static bool preflightIdle(const OriginalInputCoordinator &coordinator)
+  {
+    return coordinator.m_preflight->phase() == LocalInputPreflight::Phase::Idle;
+  }
 };
 class SelectedPeerTestAccess
 {
@@ -964,6 +968,48 @@ void OriginalInputCoordinatorTests::emptyHostDeclinePreservesOrdinaryInput()
   QCOMPARE(f.count("quiesced"), 0u);
   QCOMPARE(f.count("mapped"), 0u);
   QVERIFY(f.wire.requests.empty());
+  f.finish();
+#endif
+}
+
+void OriginalInputCoordinatorTests::emptyHostDeclineWaitsForExactRelease()
+{
+#if !defined(__APPLE__)
+  QSKIP("Positive source admission uses the actual Mac capture adapter");
+#else
+  Fixture f(true);
+  OriginalInputCoordinatorTestAccess::stopPolling(*f.coordinator);
+  Capture source;
+  std::optional<LocalInputOffer> delayedRelease;
+  const auto release = f.channel->onReleased;
+  f.channel->onReleased = [&](const auto &offer) { delayedRelease = offer; };
+  const auto pending = f.reserve(source.fresh());
+  QCOMPARE(pending.state, State::Pending);
+  QVERIFY(until([&] { return delayedRelease && OriginalInputCoordinatorTestAccess::preflightIdle(*f.coordinator); }));
+  // The Host cancellation is processed, but its exact release has not been
+  // acknowledged by the coordinator. Service that interval deterministically;
+  // no timer delay or repeated randomized run is needed to expose a reoffer.
+  OriginalInputCoordinatorTestAccess::service(*f.coordinator);
+  QVERIFY(OriginalInputCoordinatorTestAccess::preflightIdle(*f.coordinator));
+  QCOMPARE(f.count("candidate"), 1u);
+  QCOMPARE(f.poll(pending.ticket).state, State::Pending);
+  release(*delayedRelease);
+  QCOMPARE(f.poll(pending.ticket).state, State::Refused);
+  QCOMPARE(f.count("quiesced"), 0u);
+  QCOMPARE(f.count("mapped"), 0u);
+  QVERIFY(f.wire.requests.empty());
+  f.channel->onReleased = release;
+  QVERIFY(until([&] { return f.dispatcher->legacyAcquisitionReady(f.selected.recipient()); }));
+  const auto next = f.reserve(source.fresh(1));
+  QCOMPARE(next.state, State::Pending);
+  Result result = Result::pending(next.ticket);
+  QVERIFY(until([&] {
+    if (result.state == State::Pending)
+      result = f.poll(next.ticket);
+    return result.state != State::Pending;
+  }));
+  QCOMPARE(result.state, State::Refused);
+  QCOMPARE(f.count("candidate"), 2u); // A new acquisition may make its own offer.
   f.finish();
 #endif
 }
