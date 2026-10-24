@@ -32,6 +32,27 @@ const uuid = () => GLib.uuid_string_random();
 const typeName = object => GObject.type_name_from_instance(object);
 const rectArray = rect => [rect.x, rect.y, rect.width, rect.height];
 
+// Capture once when this module is loaded, not on enable or on a status query.
+// GNOME caches imported modules across disable/enable; replacing files must not
+// make an older loaded implementation advertise the replacement's revision.
+const providerRevision = (() => {
+    try {
+        const directory = Gio.File.new_for_uri(import.meta.url).get_parent();
+        const checksum = new GLib.Checksum(GLib.ChecksumType.SHA256);
+        for (const name of ['extension.js', 'interface.xml', 'launcher.js', 'logic.js',
+            'metadata.json', 'ordering.js', 'window-drag.js']) {
+            const [ok, bytes] = directory.get_child(name).load_contents(null);
+            if (!ok || bytes.length > 2 * 1024 * 1024)
+                return '';
+            checksum.update(new TextEncoder().encode(name + '\0'));
+            checksum.update(bytes);
+        }
+        return checksum.get_string();
+    } catch (_) {
+        return '';
+    }
+})();
+
 function removeSource(id) {
     if (id)
         GLib.source_remove(id);
@@ -252,6 +273,7 @@ class Provider {
     GetCapabilitiesAsync(_args, invocation) {
         invocation.return_value(new GLib.Variant('(usa{sv})', [1, Config.PACKAGE_VERSION, variants({
             providerApi: ['u', 1], backend: ['s', this._backend],
+            providerRevision: ['s', providerRevision],
             nativeHitTesting: ['b', this._native], exactWaylandClientBinding: ['b', true],
             eisSessionOwned: ['b', true], trustedDesktopOnly: ['b', true],
             viewportChannel: ['b', true], routedPointObservation: ['b', true],

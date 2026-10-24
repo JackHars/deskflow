@@ -180,7 +180,9 @@ jobs:
       - name: Check cross-machine control and bounded relay shutdown
         run: python3 deploy/windowshare/gnome-crossmachine-tests.py
       - name: Check persistent profiles and owned shutdown without desktop input
-        run: python3 deploy/windowshare/seamless-profile-tests.py
+        run: |
+          python3 deploy/windowshare/seamless-profile-tests.py
+          python3 deploy/windowshare/seamless-provider-tests.py
       - name: Verify passive resource-soak evidence sampler
         run: |
           python3 deploy/windowshare/resource-soak-tests.py
@@ -285,7 +287,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Check persistent profiles and owned shutdown without desktop input
-        run: python3 deploy/windowshare/seamless-profile-tests.py
+        run: |
+          python3 deploy/windowshare/seamless-profile-tests.py
+          python3 deploy/windowshare/seamless-provider-tests.py
       - name: Check manual coordinator cancellation and receipt freshness without input
         run: |
           python3 deploy/windowshare/physical-macos-tests.py

@@ -47,6 +47,9 @@ class Profiles(unittest.TestCase):
         lock_root = mock.patch.object(profile, 'session_lock_root', return_value=self.base / 'shared-session-lock')
         lock_root.start()
         self.addCleanup(lock_root.stop)
+        support = mock.patch.object(profile, 'provider_operation', return_value={'ready': True, 'detail': 'fixture'})
+        self.provider_call = support.start()
+        self.addCleanup(support.stop)
         self.package = self.base / 'Experimental.app/Contents/MacOS'
         self.package.mkdir(parents=True)
         for name in ('deskflow-core', 'deskflow-windowshare'):
@@ -81,6 +84,68 @@ class Profiles(unittest.TestCase):
         profile.pair(mac, ubuntu / 'pairing.json', self.options)
         profile.pair(ubuntu, mac / 'pairing.json', self.options)
         return mac, ubuntu
+
+    def test_setup_child_retains_lock_after_controller_releases_it(self):
+        root = self.initialize('ubuntu')
+        with profile.locked(root) as descriptor:
+            child = subprocess.Popen([sys.executable, '-I', '-c', 'import sys;sys.stdin.buffer.read()'],
+                                     stdin=subprocess.PIPE, pass_fds=(descriptor,))
+        try:
+            with self.assertRaisesRegex(ValueError, 'already running'):
+                with profile.locked(root):
+                    self.fail('inherited lock was lost')
+        finally:
+            child.communicate(timeout=5)
+        with profile.locked(root):
+            pass
+
+    def test_provider_mutation_inherits_both_locks(self):
+        root = self.initialize('ubuntu')
+        def child(operation, descriptors):
+            self.assertEqual(operation, 'install')
+            self.assertEqual(len(descriptors), 2)
+            for descriptor in descriptors:
+                self.assertGreaterEqual(os.fstat(descriptor).st_size, 0)
+            with self.assertRaisesRegex(ValueError, 'already running'):
+                with profile.locked(root):
+                    self.fail('profile lock missing')
+            with self.assertRaisesRegex(ValueError, 'already running'):
+                with profile.session_lock():
+                    self.fail('global lock missing')
+            return {'ready': False}
+        self.provider_call.side_effect = child
+        with mock.patch.object(profile, 'running_cores', return_value=[]):
+            self.assertFalse(profile.configure_provider(root, 'install')['ready'])
+
+    def test_provider_mutation_refuses_running_core_but_status_does_not(self):
+        root = self.initialize('ubuntu')
+        with mock.patch.object(profile, 'running_cores', return_value=[123]) as cores:
+            self.assertTrue(profile.configure_provider(root, 'status')['ready'])
+            cores.assert_not_called()
+            for operation in ('install', 'enable'):
+                with self.assertRaisesRegex(ValueError, 'Stop Deskflow'):
+                    profile.configure_provider(root, operation)
+        self.assertEqual(self.provider_call.call_args_list, [mock.call('status')])
+
+    def test_provider_setup_respects_active_profile_lock_and_platform(self):
+        root = self.initialize('ubuntu')
+        with profile.locked(root), self.assertRaisesRegex(ValueError, 'already running'):
+            profile.configure_provider(root, 'install')
+        mac = self.initialize('mac')
+        with self.assertRaisesRegex(ValueError, 'Ubuntu computer'):
+            profile.configure_provider(mac, 'status')
+        self.provider_call.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == 'linux', 'Ubuntu launch preflight')
+    def test_launch_rechecks_provider_before_starting_core(self):
+        _, root = self.endpoints()
+        self.provider_call.return_value = {'ready': False, 'detail': 'GNOME needs a new login'}
+        with mock.patch.object(profile, 'running_cores', return_value=[]), \
+             mock.patch.dict(os.environ, {'XDG_SESSION_TYPE': 'wayland', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/unused'}), \
+             mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')), \
+             self.assertRaisesRegex(ValueError, 'new login'):
+            profile.run(root)
+        self.provider_call.assert_called_once_with('status')
 
     def test_top_edge_is_only_export_trigger(self):
         mac, ubuntu = self.endpoints()

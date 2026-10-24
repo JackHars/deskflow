@@ -4,6 +4,65 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Ubuntu setup, loaded-provider readiness and setup lifetime — 2026-10-23
+
+The controls now offer explicit provider installation and enablement, with a
+read-only readiness check and a separate pre-launch recheck. Installed files
+and the revision captured by the loaded GNOME module must agree. Missing support,
+disabled support, an undiscovered installation, a stale loaded module and
+unsupported native capabilities cannot enable Start. Install stages the exact
+seven runtime files, preserves the old tree and refuses active/foreign/linked
+installations. A caught final-rename failure restores the old directory; power
+loss is not claimed as an atomic directory exchange. Both setup locks survive
+controller exit in the subprocess performing a mutation.
+
+Evidence directory: `build/provider-setup-mn2jr5gz/`.
+
+- Mac: 19 provider cases pass; profile suite has 31 passes and one Ubuntu-only
+  pre-launch check skipped (32 cases total). The application and controls build,
+  and the offscreen controls lifecycle passes, including install/enable/check
+  separation and readiness revocation. Screenshots `controls.png.ubuntu.png`
+  and the existing pairing/update views were inspected. No actual UI opened.
+- Ubuntu: all 19 provider, 32 profile and 12 archive cases pass. The actual
+  controls build and lifecycle pass in the isolated container. Profile checks
+  cover refusing mutation while a Core runs, exact profile/global lock retention,
+  inherited-lock survival and refusal to launch on failed provider readiness.
+- Real GNOME 50.1/Mutter 2.5, private headless desktop: disabled status, explicit
+  installation with preserved backup, EnableExtension, current loaded revision,
+  required native capabilities and stale loaded-module rejection all pass. The
+  fixture replaces owned files behind the loaded module and confirms
+  `restart-needed`, then restores those files. The existing provider input fixture
+  also passes. This is isolated desktop evidence, not the user's installed H12
+  or physical top-edge/input acceptance.
+- `linux-locked-evidence.json` retains all final step logs and the native report.
+  Its image is `sha256:ba55e77da945084b3c97d90e566e80b3d45b8ad803aceac66f7427130750be27`.
+  The source archive SHA-256 is
+  `706f78ee08adc3edb7eefa983a99960a7212049028e9cdd76ec2996d800b0cf0`;
+  `source-locked-binding.json` binds base `4ec798cf3` plus exact overlays. These
+  root evidence notes were added after freezing; the implementation matches.
+- The initial Linux archive regression expected an unlisted-member error;
+  adding the new required helper reaches the strict member cap first. Both
+  rejection paths are now accepted, with the original failure retained in
+  `package-linux.log`. The final archive cases pass. Initial/final sources and
+  outputs before the setup-lock review fix remain separate from `-locked` results.
+- Linux development package:
+  `/home/jack/src/deskflow-h04-20261015-zgta6i4f/read-dispatch-ui9j2vl6/out/DeskflowSeamless-provider-setup-mn2jr5gz-locked.tar.gz`,
+  SHA-256 `3cb09b21217bf5e4cc083c9d1787f917fc1b9111254f60ea341499ae1d728012`.
+  Its base-commit manifest must be read with the overlay binding above.
+
+The final Mac development bundle is
+`build/provider-setup-mn2jr5gz/mac-locked-package/DeskflowSeamless-Core-Experimental.app`.
+Its ZIP SHA-256 is `8818f948d93df95117577779e4371ceac172acf86c8e35ad110af243859daf79`.
+Apple-team signing and the 77-entry exact-library package audit pass; bundled
+profile script/document bytes match the working source. This static audit does
+not establish loaded-image admission or authorize original input. The earlier
+`mac-package` candidate predates the setup-lock fix and is not the current one.
+
+The ordinary Mac PID 38904 remains connected to jack on port 24800. No user
+profile or installed extension was changed, and no physical test was launched.
+Scroll timestamps, held repeat, complete outward H07, native queue contracts and
+remaining hardware acceptance remain open; interactive drag-back is last.
+
 ## Persistent setup upgrade and connection editing — 2026-10-23
 
 Explicit `update` retains identities, peer fingerprints and recovery journals

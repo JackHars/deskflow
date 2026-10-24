@@ -5,6 +5,7 @@
 #include "SessionControls.h"
 
 #include <QApplication>
+#include <QDir>
 #include <QEventLoop>
 #include <QFile>
 #include <QLabel>
@@ -66,6 +67,20 @@ elif operation=='inspect':
  value=json.loads((root/'profile.json').read_text());value.update(pairingFile=str(root/'pairing.json'),pairing={'name':'MacBook','role':'mac'})
  if (root/'requires-update').exists(): value.update(packageReady=False,packageError='A new package is available')
  print(json.dumps(value))
+elif operation=='provider':
+ action=sys.argv[sys.argv.index('--operation')+1]
+ value=json.loads((root/'support.json').read_text())
+ if action=='install':
+  assert value['action']=='install'
+  value.update(code='disabled',action='enable',ready=False,detail='Enable Ubuntu support')
+  (root/'support.json').write_text(json.dumps(value))
+  print(json.dumps(dict(value,action='',detail='Sign out and back in')))
+ elif action=='enable':
+  assert value['action']=='enable'
+  value.update(code='ready',action='',ready=True,detail='Ubuntu support ready')
+  (root/'support.json').write_text(json.dumps(value))
+  print(json.dumps(dict(value,ready=False,detail='Enable requested; check again')))
+ else: print(json.dumps(value))
 elif operation=='update':
  if (root/'reject-update').exists():
   print('Window sharing: Cannot update this saved setup');sys.exit(1)
@@ -189,6 +204,56 @@ void lifecycle(const QString &screenshot)
   check(!QFileInfo::exists(root + "/started"), "explicit update does not start sharing");
   upgradeWindow.close();
 }
+
+void ubuntuSupport(const QString &screenshot)
+{
+  QTemporaryDir temporary;
+  const auto root = temporary.filePath("profile"), script = temporary.filePath("helper.py");
+  QDir().mkpath(root + "/logs");
+  write(script, backend);
+  const auto core = temporary.filePath("unused-core");
+  write(core, "#!/bin/sh\nexit 99\n");
+  QFile::setPermissions(core, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+  write(
+      root + "/profile.json",
+      R"({"name":"Ubuntu","role":"ubuntu","paired":true,"packageReady":true,"peer":"MacBook","options":{"macAddress":"192.168.1.101","screen":0,"clipboardText":false}})"
+  );
+  write(
+      root + "/support.json",
+      R"({"ready":false,"code":"missing","action":"install","detail":"Install Ubuntu support","inputStarted":false})"
+  );
+  SessionControls window({QStandardPaths::findExecutable("python3"), script, core, core, root, "ubuntu"});
+  window.show();
+  auto *status = child<QLabel>(window, "sessionStatus"), *detail = child<QLabel>(window, "supportDetail");
+  auto *start = child<QPushButton>(window, "startStop"), *setup = child<QPushButton>(window, "setupSupport");
+  auto *refresh = child<QPushButton>(window, "checkSupport");
+  until([&] { return status->text() == "Ubuntu support needs attention"; });
+  check(
+      !start->isEnabled() && setup->isEnabled() && setup->text() == "Install support", "missing support cannot start"
+  );
+  if (!screenshot.isEmpty())
+    check(window.grab().save(screenshot + ".ubuntu.png"), "save offscreen Ubuntu setup preview");
+  setup->click();
+  until([&] { return detail->text() == "Sign out and back in"; });
+  check(!start->isEnabled() && !QFileInfo::exists(root + "/started"), "installation cannot start input");
+  refresh->click();
+  until([&] { return setup->isEnabled() && setup->text() == "Enable support"; });
+  setup->click();
+  until([&] { return detail->text() == "Enable requested; check again"; });
+  check(!start->isEnabled(), "enable request alone is not readiness");
+  refresh->click();
+  until([&] { return start->isEnabled(); });
+  check(!QFileInfo::exists(root + "/started"), "readiness never starts input");
+  write(
+      root + "/support.json",
+      R"({"ready":false,"code":"restart-needed","action":"","detail":"Sign out and back in","inputStarted":false})"
+  );
+  refresh->click();
+  check(!start->isEnabled(), "refresh immediately revokes old readiness");
+  until([&] { return status->text() == "Ubuntu support needs attention"; });
+  check(!start->isEnabled() && !setup->isVisible(), "stale loaded support is not ready or automatically reenabled");
+  window.close();
+}
 } // namespace
 
 int main(int argc, char **argv)
@@ -197,6 +262,7 @@ int main(int argc, char **argv)
   app.setQuitOnLastWindowClosed(false);
   try {
     lifecycle(argc == 2 ? QString::fromLocal8Bit(argv[1]) : QString());
+    ubuntuSupport(argc == 2 ? QString::fromLocal8Bit(argv[1]) : QString());
     std::puts("PASS: input-free controls creation, pairing, conflict, Start/Stop, output bounds and close lifecycle");
     return 0;
   } catch (const std::exception &error) {

@@ -139,7 +139,7 @@ class LinuxArchiveTests(unittest.TestCase):
         for name in package.DOCUMENT_FILES + package.SESSION_FILES:
             shutil.copy2(HERE / name, windowshare / name)
         for name in ("gnome-provider/ordering-builds.json", "gnome-provider/verify-ordering-build.py",
-                     "app-compatibility.md", "focused-clipboard.md", "seamless-profile.py"):
+                     "app-compatibility.md", "focused-clipboard.md", "seamless-profile.py", "seamless-provider.py"):
             with self.subTest(missing=name):
                 path = windowshare / name
                 contents = path.read_bytes()
@@ -163,7 +163,7 @@ class LinuxArchiveTests(unittest.TestCase):
         result = subprocess.run([str(root / 'bin/deskflow-seamless-session'), '--help'],
                                 capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('{init,pair,run,inspect,update}', result.stdout)
+        self.assertIn('{init,pair,run,inspect,provider,update}', result.stdout)
 
     def test_cannot_overwrite_archive_or_follow_output_symlink(self):
         dest = self.root / "do-not-touch.tar.gz"
@@ -210,7 +210,7 @@ class LinuxArchiveTests(unittest.TestCase):
         files["private.txt"] = (b"unknown", 0o600)
         bad = self.root / "extra.tar.gz"
         package.write_archive(bad, files)
-        with self.assertRaisesRegex(ValueError, "Unlisted"):
+        with self.assertRaisesRegex(ValueError, "Unlisted|Too many package members"):
             package.verify_archive(bad)
 
     def test_duplicate_entries_are_rejected_even_with_valid_manifest(self):

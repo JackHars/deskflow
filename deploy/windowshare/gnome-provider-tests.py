@@ -453,9 +453,41 @@ def run_fixture(arguments):
             report["initialExtensionState"] = wait_for_disabled_extension(processes, shell, provider)["state"]
             require(provider.bus("NameHasOwner", "(s)", (SERVICE,)) == (False,), "Default-off provider unexpectedly active")
             report["defaultDisabled"] = True
-            processes.run("enable-extension", ["gsettings", "set", "org.gnome.shell", "enabled-extensions", f"['{UUID}']"])
+            setup_command = ["/usr/bin/python3", "-I", str(source / "seamless-provider.py")]
+            disabled = json.loads(processes.run("support-disabled", [*setup_command, "status"]))
+            require(disabled.get("action") == "enable" and disabled.get("ready") is False,
+                    f"Disabled provider readiness was incorrect: {disabled}")
+            installed = json.loads(processes.run("support-install", [*setup_command, "install"]))
+            require(installed.get("code") == "installed" and installed.get("ready") is False and
+                    Path(installed["backup"]).is_dir(), f"Explicit provider installation failed: {installed}")
+            enabled = json.loads(processes.run("enable-extension", [*setup_command, "enable"]))
+            require(enabled.get("code") == "enable-requested" and enabled.get("ready") is False,
+                    f"Explicit provider enable failed: {enabled}")
             capabilities = wait_for(processes, lambda: provider.call("GetCapabilities"), "provider activation", timeout=20)
             version, shell_version, caps = capabilities
+            readiness = json.loads(processes.run("support-ready", [*setup_command, "status"]))
+            require(readiness.get("ready") is True and readiness.get("inputStarted") is False and
+                    readiness.get("revision") == caps.get("providerRevision"),
+                    f"Loaded native provider readiness failed: {readiness}")
+            report["setupReadiness"] = {"disabled": disabled, "installed": installed, "enabled": enabled, "ready": readiness}
+            # Simulate files replaced behind a loaded module. A status query must
+            # not recalculate the loaded revision from those replacement bytes.
+            candidate = root / "replacement-package"
+            candidate.mkdir()
+            shutil.copyfile(source / "seamless-provider.py", candidate / "seamless-provider.py")
+            shutil.copytree(target, candidate / "gnome-provider")
+            original_logic = (target / "logic.js").read_bytes()
+            try:
+                replacement = original_logic + b"\n// disposable replacement revision\n"
+                (target / "logic.js").write_bytes(replacement)
+                (candidate / "gnome-provider/logic.js").write_bytes(replacement)
+                stale = json.loads(processes.run("support-stale-loaded", ["/usr/bin/python3", "-I",
+                    str(candidate / "seamless-provider.py"), "status"]))
+                require(stale.get("code") == "restart-needed" and stale.get("ready") is False,
+                        f"Replacement files incorrectly approved a stale loaded module: {stale}")
+                report["setupReadiness"]["staleLoadedModuleRejected"] = True
+            finally:
+                (target / "logic.js").write_bytes(original_logic)
             require(version == 1 and shell_version.split(".")[0] == "50", "Unexpected provider protocol/version")
             for key in ("nativeHitTesting", "exactWaylandClientBinding", "eisSessionOwned",
                         "routedPointObservation"):

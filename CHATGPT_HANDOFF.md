@@ -13,6 +13,16 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Ubuntu setup/readiness now lives in the everyday controls and the profile
+manager's `provider` command. Status is read-only; install and enable are explicit
+stopped-session actions. The helper inherits profile/global locks, preserves the
+previous installation and does not create native input sessions. Start is gated
+by current native GNOME capabilities and the loaded module's revision, then
+rechecked by `run`. The isolated GNOME fixture covers the real setup calls and
+stale loaded-copy rejection. The user's installed extension was not updated.
+See `seamless-profile.md`, `WORK_STATE.md` and the newest `TESTING.md` evidence;
+this does not close installed-desktop H12 or the remaining input defects.
+
 Ubuntu compatibility follow-up: the exact GNOME sender-build allowlist now
 includes Mutter `50.1-0ubuntu2.5` after primary source/build/module review.
 The new main-library size is matched per build. Private native GNOME provider,

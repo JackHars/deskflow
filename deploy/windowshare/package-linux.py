@@ -4,8 +4,8 @@
 """Build/verify a reproducible *inert* experimental Linux source/runtime archive.
 
 This never installs an executable, enables a GNOME extension, bundles unreviewed
-system libraries, or alters an ordinary Deskflow installation. A human must
-select the tested Qt/GNOME desktop and enable the experimental provider.
+system libraries, or alters an ordinary Deskflow installation. The controls offer explicit installation/enablement after a human selects the
+supported Qt/GNOME desktop; extracting an archive performs neither action.
 """
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ PROVIDER_FILES = (
     "tests/ordering-native.js", "tests/logic.test.js", "tests/window-drag.test.js", "tests/launcher.gjs.js", "tests/launcher-native.py",
 )
 DOCUMENT_FILES = ("package-linux.md", "app-compatibility.md", "focused-clipboard.md", "seamless-profile.md")
-SESSION_FILES = ("seamless-profile.py",)
+SESSION_FILES = ("seamless-profile.py", "seamless-provider.py")
 MAX_ARCHIVE_MEMBER = 128 * 1024 * 1024
 MAX_ARCHIVE_TOTAL = 256 * 1024 * 1024
 
@@ -115,6 +115,7 @@ def package_files(viewer: Path, core: Path, source: Path, source_sha: str) -> di
         "bundledSystemLibraries": False,
         "requirements": [
             "Python 3.9 or newer for persistent session setup and launch",
+            "Ubuntu system Python with python3-gi for GNOME support setup and readiness",
             "Linux x86_64 or matching build architecture and ABI",
             "runtime Qt version matching compiled Qt Wayland private APIs",
             "the build's FFmpeg, XCB/Wayland and GIO dependencies, and libei >= 1.5.0",
@@ -178,7 +179,7 @@ def verify_archive(path: Path) -> dict:
                 raise ValueError("Unsafe archive member path")
             if name in contents:
                 raise ValueError("Duplicated package member")
-            if len(contents) >= 32:
+            if len(contents) >= 6 + len(PROVIDER_FILES) + len(DOCUMENT_FILES) + len(SESSION_FILES) + 1:
                 raise ValueError("Too many package members")
             total += item.size
             if total > MAX_ARCHIVE_TOTAL:

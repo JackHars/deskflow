@@ -31,9 +31,11 @@ package in your normal Wayland desktop session.
    computer. Choose the other computer's file, enter the Mac's network address,
    and click **Pair computers** on each endpoint. Choose the receiving monitor
    on Ubuntu. Enable copied-text sharing on both endpoints if wanted.
-3. Stop ordinary Deskflow on both computers, then click **Start sharing** on
+3. On Ubuntu, follow **Ubuntu desktop support** to install or enable support
+   when needed. See the setup steps below. These actions never start sharing.
+4. Stop ordinary Deskflow on both computers, then click **Start sharing** on
    the Mac and Ubuntu. Once the peers connect, drag a Mac titlebar upward.
-4. Click **Stop sharing**, close the controls, or quit the app to request
+5. Click **Stop sharing**, close the controls, or quit the app to request
    graceful shutdown. The controls wait for their owned session to finish.
 
 For a newer or relocated package, open its controls and select your existing
@@ -49,7 +51,8 @@ profile's logs directory. `controls.log` keeps bounded helper output, including
 startup refusals before Core logging begins; `session.log` contains the runtime
 stages. Failures remain visible in the control window.
 
-**Ready to start** means the saved profile validates. **Session started** means
+**Ready to start** means the saved profile validates and, on Ubuntu, the
+current desktop-support check passes. **Session started** means
 the owned runtime process has launched; it does not claim native delivery or
 peer readiness. Opening, creating or pairing in these controls never starts
 sharing. The GUI's inherited lifetime pipe is separate from input: closing it,
@@ -66,8 +69,8 @@ records. No ordinary connection is stopped automatically.
 - A matching Linux package and the supported native GNOME Wayland desktop.
   Install and enable the packaged `seamless-windows@deskflow.org` provider as
   described below, subject to its [compatibility contract](gnome-provider/README.md)
-  and [Linux package requirements](package-linux.md). The launcher does not install
-  or enable extensions. It does not create a nested desktop.
+  and [Linux package requirements](package-linux.md). Ubuntu system Python needs
+  `python3-gi`. Setup never creates a nested desktop or starts input sharing.
 - The Mac's LAN address must be reachable from Ubuntu on TCP ports 24870 and
   24871 (or the same explicit replacements on both profiles).
 - Stop the regular Deskflow connection on **both** computers before `run`.
@@ -82,33 +85,41 @@ Core IPC uses a length-limited Unix socket.
 
 ## Ubuntu provider setup
 
-On Ubuntu set `PACKAGE` to the extracted Linux package directory. For a **first
-installation**, run this in jack's normal desktop terminal:
+The Ubuntu controls check desktop support after opening a saved setup. They show
+whether it is missing, disabled, out of date, still loaded from an older package,
+or unsupported by the current compositor. **Start sharing** stays unavailable
+until support is ready. The launcher repeats this read-only check immediately
+before starting Core; a prior Ready result cannot bypass it.
+
+1. Create or open the Ubuntu setup and choose **Check Ubuntu support**.
+2. If offered, choose **Install support**. Stop Deskflow first. An existing
+   provider must be disabled in GNOME Extensions before replacement. Installation
+   stages and checks the seven runtime files and keeps the complete old directory
+   in a `.deskflow-previous-*` sibling backup. A failed publication restores it.
+3. Save your work, sign out and back in when requested. The controls never log
+   you out or restart your desktop.
+4. Choose **Check Ubuntu support**, then **Enable support** when offered.
+   Enablement alone is not readiness: check again after GNOME has loaded it.
+5. Start sharing explicitly on both computers when setup is ready.
+
+Equivalent commands, after creating the Ubuntu profile, from its normal desktop:
 
 ```sh
-EXT="$HOME/.local/share/gnome-shell/extensions/seamless-windows@deskflow.org"
-if test -e "$EXT"; then
-  echo "Provider already exists; compare its version before replacing it."
-else
-  install -d -m 700 "$EXT"
-  for name in extension.js logic.js launcher.js ordering.js window-drag.js interface.xml metadata.json; do
-    install -m 644 "$PACKAGE/share/deskflow-seamless-experimental/gnome-provider/$name" "$EXT/$name" || break
-  done
-fi
+"$PACKAGE/bin/deskflow-seamless-session" provider --profile "$HOME/DeskflowUbuntu"
+"$PACKAGE/bin/deskflow-seamless-session" provider --profile "$HOME/DeskflowUbuntu" --operation install
+"$PACKAGE/bin/deskflow-seamless-session" provider --profile "$HOME/DeskflowUbuntu" --operation enable
 ```
 
-Verify that all seven files match the selected package. If an existing provider
-differs, stop window sharing and preserve that installation before deliberately
-updating it. After first installation, save your work and sign out and back in
-so GNOME discovers the extension. Then enable it from a desktop terminal:
+The default `provider` operation is read-only. Install and enable require the
+profile and per-user session locks and refuse any running Core. They never
+create a RemoteDesktop session, stop another connection or grant input authority.
+Unknown or linked installations are not overwritten. Runtime file revisions are
+captured once when GNOME loads the extension module; replacing files or toggling
+the extension cannot turn an old loaded module into a current one. This detects
+stale deployments on a trusted desktop; it is not executable-memory attestation.
 
-```sh
-gnome-extensions enable seamless-windows@deskflow.org
-```
-
-This enables the provider; a paired session still requires an explicit `run`.
-To disable it later, stop window sharing first, then use
-`gnome-extensions disable seamless-windows@deskflow.org`. Do not restart Shell
+To disable support later, stop window sharing first, then use GNOME Extensions
+or `gnome-extensions disable seamless-windows@deskflow.org`. Do not restart Shell
 or log out while shared source windows still need restoration.
 
 ## Create the endpoints

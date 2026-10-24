@@ -1,5 +1,36 @@
 # Seamless Windows work state
 
+## Ubuntu desktop-support setup and readiness — 2026-10-23
+
+The everyday controls now expose read-only **Check Ubuntu support** and explicit
+**Install support** / **Enable support** actions. Missing, disabled, undiscovered,
+outdated, stale-loaded and unsupported compositor states have separate guidance.
+Ubuntu Start remains disabled until readiness succeeds, and the actual launcher
+rechecks immediately before Core starts. These probes create no input session.
+
+Installation stages the seven runtime files, preserves the complete prior tree
+in a sibling backup, and restores it if publication raises an error. It refuses
+an enabled, foreign or linked installation. Setup mutations hold both profile
+and per-user session locks, refuse any running Core, and pass the lock descriptors
+to the helper so controller loss cannot allow a concurrent session mid-update.
+The GUI never signs out, restarts Shell or automatically enables support. GNOME
+reports a revision captured once at extension-module load, allowing the controls
+to reject current files with an older loaded module. This is trusted-desktop
+staleness detection, not executable-memory admission.
+
+The final source is frozen in `build/provider-setup-mn2jr5gz/source-locked/` with
+base `4ec798cf3` and exact overlays. Local provider cases, profile cases and
+controls checks pass; the private GNOME run exercises actual disabled status,
+installation with backup, explicit enablement, exact loaded-revision readiness
+and rejection after replacement files are placed behind the loaded module.
+No native user desktop, installed extension or saved profile was changed.
+The regular Mac Core PID 38904 remains connected to jack at 192.168.1.12.
+
+See `TESTING.md` for final evidence and package bindings. Native top-edge H07,
+scroll timestamps, held-key repeat, native queue gaps and remaining hardware
+acceptance are still open. Interactive drag-back remains last; automatic Stop
+and failure restoration remain required. Continue outward-flow/input work next.
+
 ## Saved setup updates without re-pairing — 2026-10-23
 
 The persistent launcher now supports explicit `update`, preserving both local

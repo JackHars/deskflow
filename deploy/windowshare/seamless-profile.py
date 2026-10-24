@@ -126,7 +126,7 @@ def locked(root, message='This window-sharing profile is already running'):
             fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise ValueError(message) from None
-        yield
+        yield descriptor
     finally:
         os.close(descriptor)
 
@@ -141,8 +141,8 @@ def session_lock_root():
 def session_lock():
     root = session_lock_root()
     root.mkdir(mode=0o700, exist_ok=True)
-    with locked(private_root(root), 'Another window-sharing session is already running'):
-        yield
+    with locked(private_root(root), 'Another window-sharing session is already running') as descriptor:
+        yield descriptor
 
 
 def executable(path, name):
@@ -462,6 +462,37 @@ def inspect_profile(root, core=None, windowshare=None):
         return result
 
 
+def provider_operation(operation, lock_fds=()):
+    require(sys.platform == 'linux', 'Ubuntu support is configured on the Ubuntu computer')
+    helper = Path(__file__).resolve().with_name('seamless-provider.py')
+    require(helper.is_file() and not helper.is_symlink(), 'This package is missing the Ubuntu support helper')
+    # Use Ubuntu's GI-enabled Python, not an unrelated venv selected by PATH.
+    # The helper uses the real desktop environment, before session isolation
+    # overrides XDG_DATA_HOME. It never creates a native input session.
+    completed = subprocess.run(['/usr/bin/python3', '-I', str(helper), operation],
+                               capture_output=True, timeout=25, check=True, pass_fds=lock_fds)
+    require(len(completed.stdout) <= MAX_JSON, 'Ubuntu support returned too much output')
+    result = json.loads(completed.stdout, object_pairs_hook=unique_object)
+    require(isinstance(result, dict) and type(result.get('ready')) is bool and
+            result.get('inputStarted') is False and result.get('action') in ('', 'install', 'enable') and
+            isinstance(result.get('detail'), str), 'Invalid Ubuntu support result')
+    return result
+
+
+def configure_provider(root, operation):
+    require(operation in ('status', 'install', 'enable'), 'Unknown Ubuntu support operation')
+    with locked(root) as profile_fd, contextlib.ExitStack() as locks:
+        profile = load(root)
+        require(profile['local']['role'] == 'ubuntu', 'Use Ubuntu support controls on the Ubuntu computer')
+        if operation != 'status':
+            global_fd = locks.enter_context(session_lock())
+            require(not running_cores(), 'Stop Deskflow on Ubuntu before changing Ubuntu support')
+            # The helper retains both flock descriptions if its controller
+            # exits unexpectedly. Another session cannot start mid-install.
+            return provider_operation(operation, (profile_fd, global_fd))
+        return provider_operation(operation)
+
+
 def clean_environment(root):
     env = {key: value for key, value in os.environ.items() if not key.startswith('DYLD_') and key not in
            {'QT_PLUGIN_PATH', 'QT_QPA_PLATFORM_PLUGIN_PATH', 'QT_QML_PLUGIN_PATH', 'QML_IMPORT_PATH',
@@ -578,6 +609,8 @@ def run(root, dry_run=False, control_fd=None):
         if plan['role'] == 'ubuntu':
             require(env.get('XDG_SESSION_TYPE') == 'wayland' and env.get('DBUS_SESSION_BUS_ADDRESS'),
                     'Launch from the logged-in Ubuntu Wayland desktop with the Deskflow GNOME provider enabled')
+            support = provider_operation('status')
+            require(support['ready'], support['detail'])
             env['QT_QPA_PLATFORM'] = 'wayland'
         logger = logging.getLogger('seamless-session')
         logger.setLevel(logging.INFO)
@@ -670,6 +703,9 @@ def main():
     inspect.add_argument('--profile', type=Path, required=True)
     inspect.add_argument('--core', type=Path)
     inspect.add_argument('--windowshare', type=Path)
+    provider = sub.add_parser('provider', help='Check or explicitly install/enable Ubuntu desktop support')
+    provider.add_argument('--profile', type=Path, required=True)
+    provider.add_argument('--operation', choices=('status', 'install', 'enable'), default='status')
     refresh = sub.add_parser('update', help='Use a new package or connection options without changing pairing or starting input')
     refresh.add_argument('--profile', type=Path, required=True)
     refresh.add_argument('--core', type=Path, required=True)
@@ -688,6 +724,8 @@ def main():
             'clipboardText': args.clipboard_text})
     elif args.command == 'inspect':
         result = inspect_profile(private_root(args.profile), args.core, args.windowshare)
+    elif args.command == 'provider':
+        result = configure_provider(private_root(args.profile), args.operation)
     elif args.command == 'update':
         changes = {key: getattr(args, field) for key, field in
                    [('macAddress', 'mac_address'), ('corePort', 'core_port'), ('windowPort', 'window_port'),

@@ -53,7 +53,7 @@ private:
   QTimer *m_deadline;
   QByteArray m_output;
   QString m_operation, m_pairingFile;
-  QJsonObject m_profile;
+  QJsonObject m_profile, m_support;
   QLineEdit *m_directory, *m_name, *m_address, *m_peerFile;
   QSpinBox *m_screen;
   QCheckBox *m_clipboard;
@@ -61,6 +61,8 @@ private:
   QGroupBox *m_setupPanel, *m_pairingPanel;
   QPushButton *m_setupToggle;
   QPushButton *m_browseProfile, *m_create, *m_update, *m_openPairing, *m_choosePeer, *m_pair, *m_start, *m_logs;
+  QPushButton *m_checkSupport, *m_setupSupport;
+  QLabel *m_supportDetail;
   bool m_busy = false, m_stopping = false, m_closing = false, m_outputOverflow = false;
   bool m_showSetup = true;
 };
