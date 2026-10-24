@@ -34,8 +34,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 SCHEMA = 'deskflow-seamless-profile-v1'
+UPDATED_SCHEMA = 'deskflow-seamless-profile-v2'
 PAIRING_SCHEMA = 'deskflow-seamless-pairing-v1'
 MAX_JSON = 16384
 
@@ -168,34 +170,60 @@ def public_identity(value):
     return value
 
 
-def load(root):
-    value = read_json(root / 'profile.json')
-    require(isinstance(value, dict) and set(value) == {'schema', 'local', 'core', 'windowshare', 'binaryHashes'},
-            'Invalid profile fields')
-    require(value['schema'] == SCHEMA, 'Unsupported profile')
-    public_identity(value['local'])
+def configuration_root(root, value):
+    if value['schema'] == SCHEMA:
+        return root / 'config'
+    generation = value['configuration']
+    require(isinstance(generation, str) and re.fullmatch('[0-9a-f]{32}', generation),
+            'Invalid configuration generation')
+    parent = private_root(root / 'configurations')
+    return private_root(parent / generation)
+
+
+def validate_binaries(value):
     core = executable(value['core'], 'deskflow-core')
     viewer = executable(value['windowshare'], 'deskflow-windowshare')
     require(core.parent == viewer.parent, 'Core and window-sharing executable must belong to the same package')
     require(value['binaryHashes'] == {'core': sha(core), 'windowshare': sha(viewer)},
-            'Packaged binaries changed; create a new profile for the new package')
-    require(value['local']['coreFingerprint'] == certificate_pin(root / 'core-identity/cert.pem') and
-            value['local']['windowFingerprint'] == certificate_pin(root / 'window-identity/cert.pem'),
-            'Profile identity has changed')
-    require((root / 'config/tls/deskflow.pem').read_bytes() ==
-            (root / 'core-identity/key.pem').read_bytes() + (root / 'core-identity/cert.pem').read_bytes(),
-            'Core TLS identity has changed')
-    for channel in ('core', 'window'):
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-        context.load_cert_chain(str(root / (channel + '-identity/cert.pem')),
-                                str(root / (channel + '-identity/key.pem')))
+            'Packaged binaries changed; explicitly update the saved setup to use this package')
     if value['local']['role'] == 'mac':
         with (core.parent.parent / 'Info.plist').open('rb') as stream:
             info = plistlib.load(stream)
         require(info.get('CFBundleExecutable') == 'deskflow-core' and
                 info.get('CFBundleIdentifier') == 'org.deskflow.seamless.core.experimental',
                 'Use the separately packaged experimental Core application')
+
+
+def validate_profile(root, value, check_binaries=True):
+    fields = {'schema', 'local', 'core', 'windowshare', 'binaryHashes'}
+    require(isinstance(value, dict) and value.get('schema') in (SCHEMA, UPDATED_SCHEMA), 'Unsupported profile')
+    if value['schema'] == UPDATED_SCHEMA:
+        fields |= {'configuration', 'connection'}
+    require(set(value) == fields, 'Invalid profile fields')
+    public_identity(value['local'])
+    text(value['core'])
+    text(value['windowshare'])
+    require(isinstance(value['binaryHashes'], dict) and set(value['binaryHashes']) == {'core', 'windowshare'},
+            'Invalid saved package hashes')
+    for digest in value['binaryHashes'].values():
+        fingerprint(digest)
+    if check_binaries:
+        validate_binaries(value)
+    require(value['local']['coreFingerprint'] == certificate_pin(root / 'core-identity/cert.pem') and
+            value['local']['windowFingerprint'] == certificate_pin(root / 'window-identity/cert.pem'),
+            'Profile identity has changed')
+    require((configuration_root(root, value) / 'tls/deskflow.pem').read_bytes() ==
+            (root / 'core-identity/key.pem').read_bytes() + (root / 'core-identity/cert.pem').read_bytes(),
+            'Core TLS identity has changed')
+    for channel in ('core', 'window'):
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.load_cert_chain(str(root / (channel + '-identity/cert.pem')),
+                                str(root / (channel + '-identity/key.pem')))
     return value
+
+
+def load(root, check_binaries=True):
+    return validate_profile(root, read_json(root / 'profile.json'), check_binaries)
 
 
 def initialize(directory, role, name, core, windowshare):
@@ -258,19 +286,20 @@ def configuration(root, profile, peer, options):
     public_identity(local)
     public_identity(peer)
     options = connection_options(options)
+    directory = configuration_root(root, profile)
     require(local['role'] != peer['role'] and local['name'] != peer['name'], 'Pair one Mac with a differently named Ubuntu')
     mac, ubuntu = (local, peer) if local['role'] == 'mac' else (peer, local)
     settings = {
         'core': {'computerName': local['name'], 'port': options['corePort'], 'preventSleep': 'false',
                  'enableEnterCommand': 'false', 'enableExitCommand': 'false'},
         'security': {'tlsEnabled': 'true', 'checkPeerFingerprints': 'true',
-                     'certificate': str(root / 'config/tls/deskflow.pem')},
+                     'certificate': str(directory / 'tls/deskflow.pem')},
         'log': {'level': 'INFO', 'toFile': 'false'},
     }
     files = {}
     if local['role'] == 'mac':
         settings['core']['interface'] = options['macAddress']
-        settings['server'] = {'externalConfig': 'true', 'externalConfigFile': str(root / 'config/server.conf'),
+        settings['server'] = {'externalConfig': 'true', 'externalConfigFile': str(directory / 'server.conf'),
                               'enableClipboard': 'false', 'relativeMouseMoves': 'false',
                               'enableHeartbeat': 'true', 'heartbeat': '1000', 'protocol': 'Barrier'}
         for computer in (mac, ubuntu):
@@ -305,8 +334,11 @@ def pair(root, peer_path, options):
         profile = load(root)
         peer = public_identity(read_json(peer_path))
         options = connection_options(options)
+        require(connection_for(root, profile) is None, 'This profile is already paired; create a new profile to change peers')
+        if profile['schema'] == UPDATED_SCHEMA:
+            publish_update(root, profile, {'peer': peer, 'options': options})
+            return {'paired': True, 'inputStarted': False, 'layout': 'Ubuntu above Mac', 'automaticExport': False}
         files = configuration(root, profile, peer, options)
-        require(not (root / 'connection.json').exists(), 'This profile is already paired; create a new profile to change peers')
         for name, value in files.items():
             if isinstance(value, dict):
                 write_json(root / 'config' / name, value)
@@ -317,34 +349,116 @@ def pair(root, peer_path, options):
     return {'paired': True, 'inputStarted': False, 'layout': 'Ubuntu above Mac', 'automaticExport': False}
 
 
-def launch_plan(root):
-    profile = load(root)
-    connection = read_json(root / 'connection.json')
+def connection_for(root, profile):
+    if profile['schema'] == UPDATED_SCHEMA:
+        return profile['connection']
+    return read_json(root / 'connection.json') if (root / 'connection.json').exists() else None
+
+
+def validate_connection(root, profile):
+    connection = connection_for(root, profile)
+    if connection is None:
+        return None
     require(isinstance(connection, dict) and set(connection) == {'peer', 'options', 'files'} and
             isinstance(connection['files'], dict), 'Invalid paired connection')
     files = configuration(root, profile, connection['peer'], connection['options'])
     require(set(connection['files']) == set(files), 'Incomplete paired configuration')
     for name, expected in connection['files'].items():
-        require(sha(root / 'config' / name) == expected, 'Session configuration changed: ' + name)
+        path = configuration_root(root, profile) / name
+        require(sha(path) == expected, 'Session configuration changed: ' + name)
+        value = files[name]
+        encoded = (json.dumps(value, indent=2, allow_nan=False) + '\n') if isinstance(value, dict) else value
+        require(path.read_bytes() == encoded.encode(), 'Session configuration no longer matches the pairing: ' + name)
+    return connection
+
+
+def publish_update(root, profile, connection):
+    """Prepare immutable files, then atomically select their complete descriptor.
+
+    The caller holds the profile lock. A failed/interrupted preparation leaves
+    the previous descriptor selected; unused generations are retained for diagnosis.
+    Identity files and restoration journals are never moved or rewritten.
+    """
+    parent = root / 'configurations'
+    parent.mkdir(mode=0o700, exist_ok=True)
+    private_root(parent)
+    generation = uuid.uuid4().hex
+    directory = parent / generation
+    directory.mkdir(mode=0o700)
+    (directory / 'tls').mkdir(mode=0o700)
+    candidate = {**profile, 'schema': UPDATED_SCHEMA, 'configuration': generation, 'connection': None}
+    write(directory / 'tls/deskflow.pem', (root / 'core-identity/key.pem').read_bytes() +
+          (root / 'core-identity/cert.pem').read_bytes())
+    if connection is not None:
+        files = configuration(root, candidate, connection['peer'], connection['options'])
+        for name, value in files.items():
+            if isinstance(value, dict):
+                write_json(directory / name, value)
+            else:
+                write(directory / name, value)
+        candidate['connection'] = {'peer': connection['peer'], 'options': connection_options(connection['options']),
+                                  'files': {name: sha(directory / name) for name in files}}
+    validate_profile(root, candidate)
+    validate_connection(root, candidate)
+    write(root / 'profile.previous.json', (root / 'profile.json').read_bytes())
+    write_json(root / 'profile.json', candidate)
+    return candidate
+
+
+def update(root, core, windowshare, changes=None):
+    with locked(root):
+        # Replacing/deleting the old package must not require regenerating keys.
+        # Identity and configuration checks still run before approving new bytes.
+        previous = load(root, check_binaries=False)
+        connection = validate_connection(root, previous)
+        core, windowshare = executable(core, 'deskflow-core'), executable(windowshare, 'deskflow-windowshare')
+        candidate = {**previous, 'core': str(core), 'windowshare': str(windowshare),
+                     'binaryHashes': {'core': sha(core), 'windowshare': sha(windowshare)}}
+        validate_binaries(candidate)
+        if changes:
+            require(connection is not None, 'Pair this setup before changing connection options')
+            require(set(changes) <= {'macAddress', 'corePort', 'windowPort', 'screen', 'clipboardText'},
+                    'Unknown setup change')
+            connection = {**connection, 'options': connection_options({**connection['options'], **changes})}
+        candidate = publish_update(root, candidate, connection)
+        return {'updated': True, 'inputStarted': False, 'pairingUnchanged': True,
+                'configuration': str(configuration_root(root, candidate))}
+
+
+def launch_plan(root):
+    profile = load(root)
+    connection = validate_connection(root, profile)
+    require(connection is not None, 'Pair this setup before starting sharing')
+    directory = configuration_root(root, profile)
     mac = profile['local']['role'] == 'mac'
-    args = [profile['core'], 'server' if mac else 'client', '--new-instance', '--settings', str(root / 'config/core.ini'),
+    args = [profile['core'], 'server' if mac else 'client', '--new-instance', '--settings', str(directory / 'core.ini'),
             ('--windowshare-host-config=' if mac else '--windowshare-gnome-config=') +
-            str(root / 'config' / ('host.json' if mac else 'provider.json'))]
+            str(directory / ('host.json' if mac else 'provider.json'))]
     return {'role': profile['local']['role'], 'command': args, 'layout': 'Ubuntu above Mac',
             'automaticExport': False, 'journal': str(root / 'restore.json'),
             'log': str(root / 'logs/session.log'), 'peer': connection['peer']['name']}
 
 
-def inspect_profile(root):
+def inspect_profile(root, core=None, windowshare=None):
     with locked(root):
-        value = load(root)
+        value = load(root, check_binaries=False)
+        connection = validate_connection(root, value)
+        package_error = ''
+        try:
+            validate_binaries(value)
+            if core is not None or windowshare is not None:
+                require(core is not None and windowshare is not None, 'Select both packaged executables')
+                require(executable(core, 'deskflow-core') == Path(value['core']) and
+                        executable(windowshare, 'deskflow-windowshare') == Path(value['windowshare']),
+                        'This setup uses another package. Choose Use this version to update it.')
+        except (ValueError, OSError) as error:
+            package_error = str(error)
         result = {'profile': str(root), 'name': value['local']['name'], 'role': value['local']['role'],
-                  'paired': (root / 'connection.json').exists(), 'pairingFile': str(root / 'pairing.json'),
+                  'paired': connection is not None, 'pairingFile': str(root / 'pairing.json'),
+                  'packageReady': not package_error, 'packageError': package_error,
                   'pairing': value['local']}
         if result['paired']:
-            plan = launch_plan(root)
-            connection = read_json(root / 'connection.json')
-            result.update(peer=plan['peer'], layout=plan['layout'], options=connection['options'])
+            result.update(peer=connection['peer']['name'], layout='Ubuntu above Mac', options=connection['options'])
         return result
 
 
@@ -554,6 +668,17 @@ def main():
     launch.add_argument('--control-stdin', action='store_true', help='Stop if the graphical controller closes its input pipe')
     inspect = sub.add_parser('inspect', help='Read saved setup without starting input')
     inspect.add_argument('--profile', type=Path, required=True)
+    inspect.add_argument('--core', type=Path)
+    inspect.add_argument('--windowshare', type=Path)
+    refresh = sub.add_parser('update', help='Use a new package or connection options without changing pairing or starting input')
+    refresh.add_argument('--profile', type=Path, required=True)
+    refresh.add_argument('--core', type=Path, required=True)
+    refresh.add_argument('--windowshare', type=Path, required=True)
+    refresh.add_argument('--mac-address')
+    refresh.add_argument('--core-port', type=int)
+    refresh.add_argument('--window-port', type=int)
+    refresh.add_argument('--screen', type=int)
+    refresh.add_argument('--clipboard-text', action=argparse.BooleanOptionalAction, default=None)
     args = parser.parse_args()
     if args.command == 'init':
         result = initialize(args.profile, args.role, args.name, args.core, args.windowshare)
@@ -562,7 +687,12 @@ def main():
             'corePort': args.core_port, 'windowPort': args.window_port, 'screen': args.screen,
             'clipboardText': args.clipboard_text})
     elif args.command == 'inspect':
-        result = inspect_profile(private_root(args.profile))
+        result = inspect_profile(private_root(args.profile), args.core, args.windowshare)
+    elif args.command == 'update':
+        changes = {key: getattr(args, field) for key, field in
+                   [('macAddress', 'mac_address'), ('corePort', 'core_port'), ('windowPort', 'window_port'),
+                    ('screen', 'screen'), ('clipboardText', 'clipboard_text')] if getattr(args, field) is not None}
+        result = update(private_root(args.profile), args.core, args.windowshare, changes)
     else:
         result = run(private_root(args.profile), args.dry_run, sys.stdin.fileno() if args.control_stdin else None)
     print(json.dumps(result, indent=2))

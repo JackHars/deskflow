@@ -4,6 +4,55 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Persistent setup upgrade and connection editing — 2026-10-23
+
+Explicit `update` retains identities, peer fingerprints and recovery journals
+when selecting another package or connection options. It writes a complete
+private configuration generation and atomically selects its version-2 descriptor;
+legacy profiles still load. `inspect` validates identity/configuration but reports
+unavailable/changed binaries as `packageReady: false`, allowing a deliberate
+update after removal of the old package. This does not authorize Start. The GUI
+provides Use this version/Save changes and disables Start for pending changes.
+
+- Mac and Ubuntu: all 27 profile cases, 12 Linux archive cases and the controls
+  lifecycle suite pass. Updated cases cover both roles, unchanged keys/pairing/
+  recovery, removed old binaries, unpaired updates followed by pairing, successive
+  configuration generations, atomic-selection failure, held locks, changed
+  configuration/private keys, invalid replacement bundles and generation symlinks.
+- The Qt fixture uses an owned fake helper and no native input. It checks explicit
+  update approval, failed-update retry, unsaved-settings refusal, then retains
+  the existing Start/Stop, Close, Quit and bounded-output checks.
+- Evidence: `build/profile-upgrade-ac0v452f/`, including Mac logs, Ubuntu
+  `linux-evidence.json`, and offscreen normal/update screenshots. Source archive
+  SHA-256: `67dca3e6cda2990fb40a6d9ab693dff1519f23a86af8940bbe85d20350447c17`.
+  `source-binding.json` binds base `4b6296a75` and every changed source. Development
+  archive labels alone identify only that base, not the source overlays.
+- Both packages verify. Mac ZIP SHA-256:
+  `797b2ee0d23fb91c745d8907ad1eeeb5ca6fe993b5cb99849adeb27ce69277c1`;
+  Linux archive SHA-256:
+  `9ac0dde9d147194c4f6fffd107acadce89c337e9e0d3c97dc6b78c60822fd215`.
+  The Mac resource seal and 77 exact dependency records verify; this static
+  audit does not authorize input or prove loaded-image admission.
+- Real packaged command checks pass on the Mac and in isolated Ubuntu: previous
+  package initialization, new-package inspect refusing Start, explicit update,
+  and successful inspection with unchanged private identities/recovery sentinels.
+  No Core is started; only identity-creation helpers run. Results are
+  `mac-packaged-upgrade.json` and `linux-packaged-upgrade-result.json`.
+  The first Ubuntu driver looked above the archive's top-level directory and
+  could not find its wrapper; the corrected driver passes. Original output is
+  retained in `linux-packaged-upgrade.json`.
+
+The initial Mac CTest command found no tests in the build root and failed with
+`--no-tests=error`; the corrected app-directory command passes. Original and
+corrected logs are retained. The first upgrade fixture assertion compared a
+noncanonical `/var` path with the resolved `/private/var` executable; its expected
+path is corrected without changing runtime validation. No installed profile,
+user desktop, ordinary connection or H-row was changed. These checks do not
+establish native permission/provider onboarding or installed upgrade acceptance.
+All six foundation jobs in base run `40046993659` and source run `40046993637`
+pass for `4b6296a75`; `base-ci-result.json` retains that completed result.
+Do not apply that earlier hosted result to the subsequent upgrade commit.
+
 ## Mutter 50.1-0ubuntu2.5 exact-build support — 2026-10-23
 
 Base foundation run `40043623182` rejected Ubuntu's new compositor build. The

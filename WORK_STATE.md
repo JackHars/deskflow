@@ -1,5 +1,48 @@
 # Seamless Windows work state
 
+## Saved setup updates without re-pairing — 2026-10-23
+
+The persistent launcher now supports explicit `update`, preserving both local
+identities, the exact paired peer and `restore.json`. Package paths/hashes,
+network address, receiving monitor and copied-text policy can change while the
+profile is stopped. Update validates the existing identity/configuration even
+if the old package has been removed, builds a complete private configuration
+generation, validates it and atomically selects one version-2 descriptor.
+The previous descriptor and configuration generations remain available; a failed
+preparation cannot partially switch the active setup. Version-1 profiles remain
+readable, while older launchers reject version 2.
+
+The GUI offers **Use this version** after a package replacement and **Save
+changes** for edited connection settings. Opening/inspecting never approves
+replacement bytes or starts sharing. Start stays disabled while update approval
+or saved settings are pending. Updates cannot change the peer fingerprints or
+private keys, and an active profile lock prevents concurrent changes.
+
+All 27 profile cases, 12 archive cases and the offscreen controls lifecycle pass
+on Mac and Ubuntu. Coverage includes removed old packages, both endpoint roles,
+unchanged recovery records, repeated generation updates, a failed atomic select,
+locks, malformed/symlink generations, altered configuration/keys and invalid
+replacement bundles. UI coverage includes failed update/retry and unsaved settings.
+Evidence is in `build/profile-upgrade-ac0v452f/`; its source binding records base
+`4b6296a75` plus the exact changed files. The first Mac CTest invocation addressed
+the build root, which contains no tests; the corrected app-directory invocation
+passes and both logs are retained. An initial fixture assertion was corrected to
+compare canonical `/private/var` paths on macOS.
+
+The signed Mac and inert Linux development packages verify. Their actual packaged
+commands also create disposable identities using the previous package, report
+the new package as unapproved, update explicitly and inspect successfully with
+unchanged keys and recovery sentinels. No Core/input session is launched. Ubuntu
+runs this package check in the isolated container. Its first driver omitted the
+archive's top-level directory; the corrected driver passes, retaining the failure.
+
+No live sharing, installed profile migration, extension installation or regular
+connection stop occurred. Installation/provider onboarding and native acceptance
+remain pending, as do the scroll timestamp and held-repeat fixes. All six jobs
+in base CI `40046993659` pass, including the GNOME job that previously failed
+on Mutter 2.5. Its source-bundle run `40046993637` also passes. Those results
+qualify base `4b6296a75`; the new upgrade change needs its own hosted result.
+
 ## Ubuntu compositor update compatibility — 2026-10-23
 
 The closed GNOME sender contract now supports Ubuntu amd64 Mutter

@@ -32,9 +32,13 @@ Opening the experimental Mac Core bundle without arguments launches only these
 controls; Core retains its signed-bundle-main role. Linux has a separate controls
 wrapper. An inherited stdin lifetime pipe stops the owned session on GUI loss;
 Start still refuses a competing ordinary Core. Setup fields collapse after
-pairing, and failures are visible and logged. Native UI/input acceptance and
-in-place profile upgrades remain pending. No native input defect is claimed
-fixed by this setup work.
+pairing, and failures are visible and logged. Explicit saved-setup updates now
+retain identities and pairing across package/address/monitor/clipboard changes.
+They prepare a complete private configuration generation and atomically select
+a version-2 descriptor; legacy profiles remain readable and older launchers
+reject the new schema. The GUI requires Use this version or Save changes before
+Start. Native UI/input and installed upgrade acceptance remain pending. No native
+input defect is claimed fixed by this setup work.
 
 Current status (2026-10-23): runtime `a17067ac7` is pushed. It contains the
 exact-ack and Core/peer-map wake fixes, hidden Host activity protection from

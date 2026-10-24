@@ -57,14 +57,22 @@ from pathlib import Path
 operation=sys.argv[1]
 root=Path(sys.argv[sys.argv.index('--profile')+1])
 if operation=='init':
- root.mkdir();(root/'logs').mkdir();(root/'profile.json').write_text(json.dumps({'name':'MacBook','role':'mac','paired':False}))
+ root.mkdir();(root/'logs').mkdir();(root/'profile.json').write_text(json.dumps({'name':'MacBook','role':'mac','paired':False,'packageReady':True}))
  print('{}')
 elif operation=='pair':
  value=json.loads((root/'profile.json').read_text());value.update(paired=True,peer='JackUbuntu',options={'macAddress':'192.168.1.101','screen':0,'clipboardText':False})
  (root/'profile.json').write_text(json.dumps(value));print('{}')
 elif operation=='inspect':
  value=json.loads((root/'profile.json').read_text());value.update(pairingFile=str(root/'pairing.json'),pairing={'name':'MacBook','role':'mac'})
+ if (root/'requires-update').exists(): value.update(packageReady=False,packageError='A new package is available')
  print(json.dumps(value))
+elif operation=='update':
+ if (root/'reject-update').exists():
+  print('Window sharing: Cannot update this saved setup');sys.exit(1)
+ value=json.loads((root/'profile.json').read_text())
+ if value['paired']:
+  value['options'].update(macAddress=sys.argv[sys.argv.index('--mac-address')+1],screen=int(sys.argv[sys.argv.index('--screen')+1]),clipboardText='--clipboard-text' in sys.argv)
+ (root/'profile.json').write_text(json.dumps(value));(root/'requires-update').unlink(missing_ok=True);print('{}')
 elif operation=='run':
  assert '--control-stdin' in sys.argv
  if (root/'reject-run').exists():
@@ -106,6 +114,15 @@ void lifecycle(const QString &screenshot)
   QCoreApplication::processEvents();
   if (!screenshot.isEmpty())
     check(window.grab().save(screenshot), "save offscreen controls preview");
+
+  child<QPushButton>(window, "toggleSetup")->click();
+  child<QLineEdit>(window, "macAddress")->setText("192.168.1.102");
+  check(!start->isEnabled(), "unsaved connection changes cannot start with stale options");
+  auto *update = child<QPushButton>(window, "updateProfile");
+  check(update->isEnabled() && update->text() == "Save changes", "paired setup can save connection changes");
+  update->click();
+  until([&] { return status->text() == "Ready to start" && start->isEnabled(); });
+  check(!QFileInfo::exists(root + "/started"), "saving changes cannot start sharing");
 
   write(root + "/reject-run", "yes");
   start->click();
@@ -149,6 +166,28 @@ void lifecycle(const QString &screenshot)
   QCoreApplication::sendEvent(QCoreApplication::instance(), &quit);
   until([&] { return !quitWindow.isVisible(); });
   check(QFileInfo::exists(root + "/stopped"), "application Quit drains the session before closing");
+
+  check(QFile::remove(root + "/started"), "clear owned Start receipt before upgrade");
+  write(root + "/requires-update", "yes");
+  SessionControls upgradeWindow({QStandardPaths::findExecutable("python3"), script, core, core, root, "mac"});
+  upgradeWindow.show();
+  auto *upgradeStatus = child<QLabel>(upgradeWindow, "sessionStatus");
+  until([&] { return upgradeStatus->text() == "Update saved setup"; });
+  auto *upgrade = child<QPushButton>(upgradeWindow, "updateProfile");
+  check(!child<QPushButton>(upgradeWindow, "startStop")->isEnabled(), "package update requires explicit approval");
+  check(upgrade->isVisible() && upgrade->isEnabled(), "the saved setup exposes an update action");
+  if (!screenshot.isEmpty())
+    check(upgradeWindow.grab().save(screenshot + ".upgrade.png"), "save offscreen update controls preview");
+  write(root + "/reject-update", "yes");
+  upgrade->click();
+  until([&] { return upgradeStatus->text() == "Window sharing could not continue"; });
+  check(!child<QPushButton>(upgradeWindow, "startStop")->isEnabled(), "failed update does not approve Start");
+  check(QFile::remove(root + "/reject-update"), "clear owned update failure");
+  upgrade->click();
+  until([&] { return upgradeStatus->text() == "Ready to start"; });
+  check(child<QPushButton>(upgradeWindow, "startStop")->isEnabled(), "explicit update makes the saved setup ready");
+  check(!QFileInfo::exists(root + "/started"), "explicit update does not start sharing");
+  upgradeWindow.close();
 }
 } // namespace
 

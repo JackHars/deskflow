@@ -145,8 +145,10 @@ SessionControls::SessionControls(SessionControlTools tools, QWidget *parent)
   form->addRow("Computer name", m_name);
   auto *createRow = new QHBoxLayout;
   m_create = button("Create setup", "createProfile", setup);
+  m_update = button("Use this version", "updateProfile", setup);
   m_openPairing = button("Save pairing file…", "savePairing", setup);
   createRow->addWidget(m_create);
+  createRow->addWidget(m_update);
   createRow->addWidget(m_openPairing);
   createRow->addStretch();
   form->addRow(createRow);
@@ -221,6 +223,14 @@ SessionControls::SessionControls(SessionControlTools tools, QWidget *parent)
         {"--role", m_tools.role, "--name", m_name->text(), "--core", m_tools.core, "--windowshare", m_tools.windowShare}
     );
   });
+  connect(m_update, &QPushButton::clicked, this, [this] {
+    QStringList arguments{"--core", m_tools.core, "--windowshare", m_tools.windowShare};
+    if (m_profile.value("paired").toBool()) {
+      arguments << "--mac-address" << m_address->text() << "--screen" << QString::number(m_screen->value() - 1);
+      arguments << (m_clipboard->isChecked() ? "--clipboard-text" : "--no-clipboard-text");
+    }
+    invoke("update", arguments);
+  });
   connect(m_openPairing, &QPushButton::clicked, this, [this] {
     const auto path = QFileDialog::getSaveFileName(
         this, "Save public pairing file", m_name->text() + "-pairing.json", "Pairing files (*.json)"
@@ -242,6 +252,8 @@ SessionControls::SessionControls(SessionControlTools tools, QWidget *parent)
     updateButtons();
   });
   connect(m_address, &QLineEdit::textChanged, this, [this] { updateButtons(); });
+  connect(m_screen, &QSpinBox::valueChanged, this, [this] { updateButtons(); });
+  connect(m_clipboard, &QCheckBox::toggled, this, [this] { updateButtons(); });
   connect(m_pair, &QPushButton::clicked, this, [this] {
     QStringList arguments{"--peer",          m_peerFile->text(), "--mac-address",
                           m_address->text(), "--screen",         QString::number(m_screen->value() - 1)};
@@ -316,7 +328,7 @@ void SessionControls::inspect()
   m_pairingFile.clear();
   m_pairSummary->clear();
   if (QFileInfo::exists(QDir(m_directory->text()).filePath("profile.json")))
-    invoke("inspect", {});
+    invoke("inspect", {"--core", m_tools.core, "--windowshare", m_tools.windowShare});
   else {
     message(
         "Set up this computer",
@@ -426,7 +438,8 @@ void SessionControls::finish(int exitCode, QProcess::ExitStatus status)
   m_name->setText(m_profile.value("name").toString());
   m_pairingFile = m_profile.value("pairingFile").toString();
   const bool paired = m_profile.value("paired").toBool();
-  m_showSetup = !paired;
+  const bool packageReady = m_profile.value("packageReady").toBool();
+  m_showSetup = !paired || !packageReady;
   m_pairSummary->setText(paired ? "Paired with " + m_profile.value("peer").toString() : "Waiting for a pairing file");
   if (paired) {
     const auto options = m_profile.value("options").toObject();
@@ -435,10 +448,14 @@ void SessionControls::finish(int exitCode, QProcess::ExitStatus status)
     m_clipboard->setChecked(options.value("clipboardText").toBool());
   }
   message(
-      paired ? "Ready to start" : "Ready to pair",
-      paired ? "Paired with " + m_profile.value("peer").toString() +
-                   ". Ubuntu is above the Mac. Stop regular Deskflow on both computers before starting window sharing."
-             : "Save this computer’s pairing file and copy it to the other computer. Then choose its file here."
+      !packageReady ? "Update saved setup" : (paired ? "Ready to start" : "Ready to pair"),
+      !packageReady
+          ? "Click Use this version to keep your pairing with this package. Sharing will stay stopped. " +
+                m_profile.value("packageError").toString()
+          : (paired ? "Paired with " + m_profile.value("peer").toString() +
+                          ". Ubuntu is above the Mac. Stop regular Deskflow on both computers before starting window "
+                          "sharing."
+                    : "Save this computer’s pairing file and copy it to the other computer. Then choose its file here.")
   );
   updateButtons();
 }
@@ -497,9 +514,20 @@ void SessionControls::message(const QString &title, const QString &detail)
   m_detail->setText(detail);
 }
 
+bool SessionControls::hasSetupChanges() const
+{
+  if (!m_profile.value("paired").toBool())
+    return false;
+  const auto options = m_profile.value("options").toObject();
+  return m_address->text() != options.value("macAddress").toString() ||
+         m_screen->value() != options.value("screen").toInt() + 1 ||
+         m_clipboard->isChecked() != options.value("clipboardText").toBool();
+}
+
 void SessionControls::updateButtons()
 {
   const bool created = !m_profile.isEmpty(), paired = m_profile.value("paired").toBool();
+  const bool packageReady = m_profile.value("packageReady").toBool(), changed = hasSetupChanges();
   const bool changeSize = m_setupPanel->isHidden() == m_showSetup;
   m_setupPanel->setVisible(m_showSetup);
   m_pairingPanel->setVisible(m_showSetup);
@@ -511,15 +539,21 @@ void SessionControls::updateButtons()
   m_directory->setEnabled(!m_busy);
   m_browseProfile->setEnabled(!m_busy);
   m_create->setEnabled(!m_busy && !created);
+  m_create->setVisible(!created);
+  m_update->setVisible(created);
+  m_update->setText(packageReady ? "Save changes" : "Use this version");
+  m_update->setEnabled(!m_busy && created && (!packageReady || changed) && (!paired || !m_address->text().isEmpty()));
   m_name->setEnabled(!m_busy && !created);
   m_openPairing->setEnabled(!m_busy && created && !m_pairingFile.isEmpty());
   m_choosePeer->setEnabled(!m_busy && created && !paired);
-  m_address->setEnabled(!m_busy && created && !paired);
-  m_screen->setEnabled(!m_busy && created && !paired);
-  m_clipboard->setEnabled(!m_busy && created && !paired);
+  m_address->setEnabled(!m_busy && created);
+  m_screen->setEnabled(!m_busy && created);
+  m_clipboard->setEnabled(!m_busy && created);
   m_pair->setEnabled(!m_busy && created && !paired && !m_peerFile->text().isEmpty() && !m_address->text().isEmpty());
   m_start->setText(m_stopping ? "Stopping…" : (m_busy && m_operation == "run" ? "Stop sharing" : "Start sharing"));
-  m_start->setEnabled(!m_stopping && (m_busy ? m_operation == "run" : paired));
+  m_start->setEnabled(!m_stopping && (m_busy ? m_operation == "run" : paired && packageReady && !changed));
+  if (paired)
+    m_pairSummary->setText(changed ? "Changes not saved" : "Paired with " + m_profile.value("peer").toString());
   m_logs->setEnabled(created);
 }
 } // namespace deskflow::windowshare

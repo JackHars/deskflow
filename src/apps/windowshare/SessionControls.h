@@ -46,6 +46,7 @@ private:
   void stop();
   void message(const QString &title, const QString &detail);
   QStringList profileArguments() const;
+  bool hasSetupChanges() const;
 
   SessionControlTools m_tools;
   QProcess m_process;
@@ -59,7 +60,7 @@ private:
   QLabel *m_title, *m_detail, *m_pairSummary;
   QGroupBox *m_setupPanel, *m_pairingPanel;
   QPushButton *m_setupToggle;
-  QPushButton *m_browseProfile, *m_create, *m_openPairing, *m_choosePeer, *m_pair, *m_start, *m_logs;
+  QPushButton *m_browseProfile, *m_create, *m_update, *m_openPairing, *m_choosePeer, *m_pair, *m_start, *m_logs;
   bool m_busy = false, m_stopping = false, m_closing = false, m_outputOverflow = false;
   bool m_showSetup = true;
 };

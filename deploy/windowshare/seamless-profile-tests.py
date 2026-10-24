@@ -11,6 +11,7 @@ from pathlib import Path
 import plistlib
 import selectors
 import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -122,6 +123,133 @@ class Profiles(unittest.TestCase):
             result = profile.inspect_profile(root)
         self.assertEqual(result['pairing'], profile.load(root)['local'])
         self.assertFalse(result['paired'])
+
+    def replacement_package(self):
+        target = self.base / 'Updated.app/Contents/MacOS'
+        shutil.copytree(self.package.parent, target.parent)
+        for name in ('deskflow-core', 'deskflow-windowshare'):
+            (target / name).write_text('#!/bin/sh\n# new package\nexit 0\n')
+        return target.resolve()
+
+    def test_package_update_preserves_pairing_keys_and_recovery_on_both_roles(self):
+        endpoints = self.endpoints()
+        target = self.replacement_package()
+        for root in endpoints:
+            original = profile.load(root)
+            old_plan = profile.launch_plan(root)
+            retained = ['pairing.json', 'core-identity/key.pem', 'core-identity/cert.pem',
+                        'window-identity/key.pem', 'window-identity/cert.pem', 'restore.json']
+            (root / 'restore.json').write_text('retained recovery journal')
+            before = {name: (root / name).read_bytes() for name in retained}
+            with mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')):
+                result = profile.update(root, target / 'deskflow-core', target / 'deskflow-windowshare')
+            self.assertFalse(result['inputStarted'])
+            updated = profile.load(root)
+            self.assertEqual(updated['local'], original['local'])
+            self.assertEqual(updated['schema'], profile.UPDATED_SCHEMA)
+            self.assertEqual(updated['connection']['peer'], profile.read_json(root / 'connection.json')['peer'])
+            self.assertEqual(profile.read_json(root / 'profile.previous.json'), original)
+            self.assertEqual({name: (root / name).read_bytes() for name in retained}, before)
+            plan = profile.launch_plan(root)
+            self.assertEqual(plan['command'][0], str(target / 'deskflow-core'))
+            self.assertEqual(plan['journal'], old_plan['journal'])
+            directory = profile.configuration_root(root, updated)
+            self.assertIn(str(directory / 'core.ini'), plan['command'])
+            if original['local']['role'] == 'ubuntu':
+                self.assertEqual(profile.read_json(directory / 'provider.json')['viewerExecutable'],
+                                 str(target / 'deskflow-windowshare'))
+            self.assertTrue(profile.inspect_profile(root, target / 'deskflow-core',
+                                                    target / 'deskflow-windowshare')['packageReady'])
+
+    def test_update_works_after_old_package_removed_and_inspect_never_approves_new_bytes(self):
+        root = self.initialize('mac')
+        target = self.replacement_package()
+        shutil.rmtree(self.package.parent)
+        state = profile.inspect_profile(root, target / 'deskflow-core', target / 'deskflow-windowshare')
+        self.assertFalse(state['packageReady'])
+        with self.assertRaises(OSError):
+            profile.load(root)
+        profile.update(root, target / 'deskflow-core', target / 'deskflow-windowshare')
+        self.assertTrue(profile.inspect_profile(root)['packageReady'])
+        # Updating an unpaired setup still permits its later first pairing.
+        ubuntu = self.base / 'peer.json'
+        public = {**profile.load(root)['local'], 'role': 'ubuntu', 'name': 'Ubuntu'}
+        profile.write_json(ubuntu, public)
+        profile.pair(root, ubuntu, self.options)
+        self.assertEqual(profile.launch_plan(root)['peer'], 'Ubuntu')
+
+    def test_option_update_is_atomic_and_keeps_exact_peer(self):
+        _, root = self.endpoints()
+        peer = profile.validate_connection(root, profile.load(root))['peer']
+        profile.update(root, self.package / 'deskflow-core', self.package / 'deskflow-windowshare',
+                       {'macAddress': '192.168.1.102', 'screen': 1, 'clipboardText': True})
+        value = profile.load(root)
+        self.assertEqual(value['connection']['peer'], peer)
+        options = value['connection']['options']
+        self.assertEqual(options['macAddress'], '192.168.1.102')
+        self.assertEqual(options['screen'], 1)
+        self.assertTrue(options['clipboardText'])
+        profile.launch_plan(root)
+        # A second update selects another complete generation, retaining the first.
+        old_directory = profile.configuration_root(root, value)
+        profile.update(root, self.package / 'deskflow-core', self.package / 'deskflow-windowshare', {'screen': 2})
+        self.assertTrue(old_directory.is_dir())
+        self.assertNotEqual(old_directory, profile.configuration_root(root, profile.load(root)))
+
+    def test_failed_snapshot_selection_keeps_previous_launch_and_identity(self):
+        root, _ = self.endpoints()
+        target = self.replacement_package()
+        before = (root / 'profile.json').read_bytes()
+        old_plan = profile.launch_plan(root)
+        original = profile.os.replace
+        def reject_selection(source, destination):
+            if Path(destination) == root / 'profile.json':
+                raise OSError('simulated selection failure')
+            return original(source, destination)
+        with mock.patch.object(profile.os, 'replace', side_effect=reject_selection):
+            with self.assertRaisesRegex(OSError, 'selection failure'):
+                profile.update(root, target / 'deskflow-core', target / 'deskflow-windowshare')
+        self.assertEqual((root / 'profile.json').read_bytes(), before)
+        self.assertEqual(profile.launch_plan(root), old_plan)
+
+    def test_update_cannot_bypass_lock_tampered_configuration_identity_or_package(self):
+        root, other = self.endpoints()
+        target = self.replacement_package()
+        args = (root, target / 'deskflow-core', target / 'deskflow-windowshare')
+        before = (root / 'profile.json').read_bytes()
+        with profile.locked(root), self.assertRaisesRegex(ValueError, 'already running'):
+            profile.update(*args)
+        configuration = root / 'config/server.conf'
+        original = configuration.read_bytes()
+        configuration.write_bytes(original + b'# changed\n')
+        with self.assertRaisesRegex(ValueError, 'configuration changed'):
+            profile.update(*args)
+        configuration.write_bytes(original)
+        key = root / 'window-identity/key.pem'
+        original = key.read_bytes()
+        key.write_bytes((other / 'window-identity/key.pem').read_bytes())
+        with self.assertRaises(profile.ssl.SSLError):
+            profile.update(*args)
+        key.write_bytes(original)
+        (target.parent / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable': 'wrong'}))
+        with self.assertRaisesRegex(ValueError, 'separately packaged'):
+            profile.update(*args)
+        self.assertEqual((root / 'profile.json').read_bytes(), before)
+
+    def test_update_rejects_generation_symlink_and_malformed_generation(self):
+        root = self.initialize('mac')
+        outside = self.base / 'outside'
+        outside.mkdir(mode=0o700)
+        (root / 'configurations').symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'private directory'):
+            profile.update(root, self.package / 'deskflow-core', self.package / 'deskflow-windowshare')
+        self.assertEqual(list(outside.iterdir()), [])
+        (root / 'configurations').unlink()
+        profile.update(root, self.package / 'deskflow-core', self.package / 'deskflow-windowshare')
+        value = profile.load(root)
+        for generation in ['../config', '/tmp/escape', 'a' * 33]:
+            with self.subTest(generation=generation), self.assertRaisesRegex(ValueError, 'generation'):
+                profile.validate_profile(root, {**value, 'configuration': generation})
 
     def test_controller_closed_before_launch_does_not_start_core(self):
         mac, ubuntu = self.endpoints()

@@ -36,6 +36,13 @@ package in your normal Wayland desktop session.
 4. Click **Stop sharing**, close the controls, or quit the app to request
    graceful shutdown. The controls wait for their owned session to finish.
 
+For a newer or relocated package, open its controls and select your existing
+saved setup. Click **Use this version** to retain your identities and pairing.
+Sharing stays stopped. You can also edit the Mac address, receiving monitor or
+copied-text option in **Show setup**, then click **Save changes**. Start remains
+disabled while these fields have unsaved changes. Change the Mac address on
+both computers when it changes; clipboard sharing still needs both endpoints.
+
 After pairing, the setup fields collapse into **Show setup** and the normal
 view shows the monitor arrangement and Start/Stop. **Open logs** opens the
 profile's logs directory. `controls.log` keeps bounded helper output, including
@@ -68,7 +75,8 @@ records. No ordinary connection is stopped automatically.
   Profile creation, pairing and `run --dry-run` do not require that interruption.
 
 Keep the package in a permanent location before creating a profile. Profiles pin
-the executable paths and hashes; replacing a binary is refused. Keep each profile
+the executable paths and hashes; replacing a binary requires an explicit saved
+setup update before it can start. Keep each profile
 path short (for example `~/DeskflowMac` and `~/DeskflowUbuntu`) because private
 Core IPC uses a length-limited Unix socket.
 
@@ -206,18 +214,52 @@ this launcher changes ordinary Deskflow settings or automatically resumes it.
 `inspect --profile DIRECTORY` returns validated public setup information without
 starting input. The GUI's pairing-file export uses that validated public identity,
 not arbitrary replacement contents of the local `pairing.json` copy.
+Inspection reports `packageReady: false` if the saved binaries changed or went
+missing; it still validates identities and saved configuration. It never approves
+replacement bytes. The GUI also supplies its current executable paths so a setup
+bound to a different package requires the explicit update action.
 
 `session.json` records the launch time, owned process, stop request, exit code,
 shutdown method (including any signal fallback) and launcher error.
 It is historical evidence, not proof a recorded PID is still
-alive. Each profile has an exclusive session lock. A second run or pairing
-operation is refused while that lock is held. A separate per-user lock also
+alive. Each profile has an exclusive session lock. A second run, pairing or
+update operation is refused while that lock is held. A separate per-user lock also
 prevents two different profiles from launching competing experimental sessions.
 
-For a new peer, changed package, address or layout, stop and restore the old
-session first, then create a new profile and pair it. There is currently no
-in-place profile migration. Keep the old profile, package and especially
-`restore.json` until any outstanding restoration has completed. Do not erase a
+For a **new peer**, create a new profile and pair it. Package, address, monitor
+and copied-text changes can retain the existing pairing. Stop and restore the
+experimental session before updating; no ordinary connection needs to stop for
+the update itself. For example, using the new package's launcher:
+
+```sh
+python3 "$APP/Contents/Resources/seamless-profile.py" update \
+  --profile "$HOME/DeskflowMac" \
+  --core "$APP/Contents/MacOS/deskflow-core" \
+  --windowshare "$APP/Contents/MacOS/deskflow-windowshare"
+
+"$PACKAGE/bin/deskflow-seamless-session" update \
+  --profile "$HOME/DeskflowUbuntu" \
+  --core "$PACKAGE/libexec/deskflow-seamless-experimental/deskflow-core" \
+  --windowshare "$PACKAGE/libexec/deskflow-seamless-experimental/deskflow-windowshare"
+```
+
+Optional `--mac-address`, `--core-port`, `--window-port`, `--screen`, and
+`--clipboard-text`/`--no-clipboard-text` update only those connection settings.
+Unspecified values stay unchanged. Peer fingerprints, names and private keys
+cannot be replaced by this operation. The old package may already be missing;
+its saved identity and configuration must still validate before update.
+
+The update prepares a complete private `configurations/<generation>` directory,
+validates it, saves the previous descriptor in `profile.previous.json`, then
+atomically selects the new version-2 `profile.json`. Launch uses only that
+descriptor's generation. An interruption before selection leaves the old
+descriptor selected; unused directories are retained for diagnosis. Existing
+version-1 setups remain readable. Older launchers reject the version-2 schema
+rather than silently running a stale configuration. Updates do not install or
+enable the Ubuntu provider; update that component separately as described above.
+
+Keep the old package, profile history and especially `restore.json` until any
+outstanding restoration has completed. Do not erase a
 restore journal to get past a failure. Native recovery remains responsible for
 restoring sources after process failure; a launcher exit alone does not prove
 that every source was restored.
