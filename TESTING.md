@@ -4,6 +4,41 @@ SPDX-License-Identifier: MIT
 -->
 # Seamless Windows: cloud results and local verification
 
+## Setup-folder readiness and matching packages — 2026-10-23
+
+`build/profile-path-_x1syhk1/` retains the setup-path regression. The actual
+proposed Ubuntu profile in `build/input-candidate-alrvbdxx/` produced a 107-byte
+control-socket path even though creation/inspection/dry-run accepted it. The
+existing launch limit is strictly below 104 bytes on both platforms.
+
+- `baseline.log` reproduces false readiness and successful dry-run for a valid
+  legacy profile with an oversized path. Its boundary case also reaches the
+  mocked identity subprocess; the resulting mock-output TypeError is retained
+  and is not a product crash. The final fixture explicitly forbids that call.
+- `mac-reviewed.log` passes 38 cases with one Ubuntu-only skip;
+  `linux-reviewed.json` passes all 39 on jack, without desktop/input access.
+  Cases cover creation before any identity side effects, encoded non-ASCII
+  paths, parent-symlink resolution, the 103-byte accepted/104-byte rejected
+  boundary, inspection/dry-run rejection and preservation of existing files.
+- Hosted foundation run
+  [40056776495](https://github.com/JackHars/deskflow/actions/runs/40056776495)
+  passes all six jobs for `52e929731`; source run `40056776528` also passes.
+  This precedes the setup-resource change and does not cover that later change.
+- `build/input-candidate-alrvbdxx/mac-checks.json` records the signed initial
+  package's exact dependency audit and packaged private handshake; original
+  input and native hooks stay disabled. `source-artifact.json` hashes the signed
+  disposable source. `linux-build.log` records same-commit production builds
+  and inert package creation/verification in the private no-desktop container.
+- Initial paired profiles and dry-runs retain public pairing files and keep
+  private keys at their originating endpoint. The oversized Ubuntu profile is
+  retained as evidence, not a launch candidate. Mac permissions report ready;
+  actual Ubuntu support reports `update-needed` with the extension disabled.
+
+No ordinary connection was paused, installed extension replaced, native window
+opened, input captured or physical test launched. Packages still need their
+corrected setup resources and a shorter Ubuntu profile before a future session.
+The native scrolling/repeat and full outward-transfer requirements remain open.
+
 ## Empty-decline release ordering — 2026-10-23
 
 Evidence: `build/diagnostic-writer-q_79qepo/`, `decline-` files. The previous

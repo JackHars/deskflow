@@ -65,8 +65,8 @@ class Profiles(unittest.TestCase):
         self.options = {'macAddress': '192.168.1.101', 'corePort': 24870, 'windowPort': 24871,
                         'screen': 0, 'clipboardText': False}
 
-    def initialize(self, role):
-        root = self.base / role
+    def initialize(self, role, root=None):
+        root = self.base / role if root is None else root
         def identity(args, **kwargs):
             self.assertEqual(args[-1], '--init-identity')
             self.assertEqual(kwargs['env']['QT_QPA_PLATFORM'], 'offscreen')
@@ -278,6 +278,64 @@ class Profiles(unittest.TestCase):
             result = profile.inspect_profile(root)
         self.assertEqual(result['pairing'], profile.load(root)['local'])
         self.assertFalse(result['paired'])
+
+    def test_long_folder_rejected_before_creating_identity(self):
+        for leaf in ('x' * 104, '\u00e9' * 52):
+            with self.subTest(leaf=leaf), mock.patch.object(profile.subprocess, 'run',
+                    side_effect=AssertionError('identity process launched')) as create:
+                root = self.base / leaf
+                with self.assertRaisesRegex(ValueError, 'shorter setup folder'):
+                    profile.initialize(root, 'ubuntu', 'JackUbuntu', self.package / 'deskflow-core',
+                                       self.package / 'deskflow-windowshare')
+                create.assert_not_called()
+                self.assertFalse(root.exists())
+
+    def test_folder_limit_uses_resolved_path_and_socket_suffix(self):
+        prefix = len(os.fsencode(self.base.resolve() / 'runtime/deskflow-core')) + 1
+        allowed = self.base / ('x' * (103 - prefix))
+        self.initialize('ubuntu', allowed)
+        self.assertTrue(profile.inspect_profile(allowed)['packageReady'])
+        rejected = self.base / ('y' * (104 - prefix))
+        with mock.patch.object(profile.subprocess, 'run', side_effect=AssertionError('identity process launched')) as create, \
+             self.assertRaisesRegex(ValueError, 'shorter setup folder'):
+            profile.initialize(rejected, 'ubuntu', 'JackUbuntu', self.package / 'deskflow-core',
+                               self.package / 'deskflow-windowshare')
+        create.assert_not_called()
+        self.assertFalse(rejected.exists())
+
+        parent = self.base / ('z' * 100)
+        parent.mkdir()
+        alias = self.base / 'link'
+        alias.symlink_to(parent, target_is_directory=True)
+        with mock.patch.object(profile.subprocess, 'run', side_effect=AssertionError('identity process launched')) as create, \
+             self.assertRaisesRegex(ValueError, 'shorter setup folder'):
+            profile.initialize(alias / 'new', 'ubuntu', 'JackUbuntu', self.package / 'deskflow-core',
+                               self.package / 'deskflow-windowshare')
+        create.assert_not_called()
+        self.assertFalse((parent / 'new').exists())
+
+    def test_existing_long_folder_cannot_report_ready_or_produce_launch_plan(self):
+        root, _ = self.endpoints()
+        legacy = self.base / ('legacy-' + 'x' * 104)
+        shutil.copytree(root, legacy)
+        legacy.chmod(0o700)
+        value = profile.read_json(legacy / 'profile.json')
+        connection = profile.read_json(legacy / 'connection.json')
+        # Retain a complete old-version setup whose absolute paths really
+        # target this long folder, rather than a broken moved configuration.
+        files = profile.configuration(legacy, value, connection['peer'], connection['options'])
+        for name, content in files.items():
+            (profile.write_json if isinstance(content, dict) else profile.write)(legacy / 'config' / name, content)
+        connection['files'] = {name: profile.sha(legacy / 'config' / name) for name in files}
+        profile.write_json(legacy / 'connection.json', connection)
+        before = {str(p.relative_to(legacy)): p.read_bytes() for p in legacy.rglob('*') if p.is_file()}
+        with mock.patch.object(profile.subprocess, 'Popen', side_effect=AssertionError('launched')), \
+             mock.patch.object(profile, 'running_cores', side_effect=AssertionError('desktop inspected')):
+            for action in (lambda: profile.inspect_profile(legacy), lambda: profile.run(legacy, dry_run=True)):
+                with self.subTest(action=action), self.assertRaisesRegex(ValueError, 'shorter setup folder'):
+                    action()
+        for name, data in before.items():
+            self.assertEqual((legacy / name).read_bytes(), data)
 
     def replacement_package(self):
         target = self.base / 'Updated.app/Contents/MacOS'

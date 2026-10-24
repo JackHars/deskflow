@@ -194,7 +194,17 @@ def validate_binaries(value):
                 'Use the separately packaged experimental Core application')
 
 
+def validate_runtime_path(root):
+    # Core uses this pathname as a Unix socket on both supported platforms.
+    # Resolve parent aliases and count encoded bytes, including the suffix,
+    # before creating identities or reporting an existing setup as ready.
+    require(len(os.fsencode(Path(root).resolve() / 'runtime/deskflow-core')) < 104,
+            'Choose a shorter setup folder, such as ~/DeskflowMac or ~/DeskflowUbuntu. '
+            'The current folder is too long for the local connection.')
+
+
 def validate_profile(root, value, check_binaries=True):
+    validate_runtime_path(root)
     fields = {'schema', 'local', 'core', 'windowshare', 'binaryHashes'}
     require(isinstance(value, dict) and value.get('schema') in (SCHEMA, UPDATED_SCHEMA), 'Unsupported profile')
     if value['schema'] == UPDATED_SCHEMA:
@@ -232,6 +242,7 @@ def initialize(directory, role, name, core, windowshare):
     public_identity({'schema': PAIRING_SCHEMA, 'role': role, 'name': name,
                      'coreFingerprint': '1' * 64, 'windowFingerprint': '2' * 64})
     root = Path(text(str(directory))).absolute()
+    validate_runtime_path(root)
     root.mkdir(mode=0o700)  # Exclusive: never replace an existing identity/profile.
     root = private_root(root)
     for directory_name in ('config', 'config/tls', 'runtime', 'logs'):
@@ -658,7 +669,6 @@ def run(root, dry_run=False, control_fd=None):
                 'Use this profile on its designated platform')
         session_locks.enter_context(session_lock())
         require(not running_cores(), 'Stop the regular Deskflow connection before starting window sharing')
-        require(len(os.fsencode(root / 'runtime/deskflow-core')) < 104, 'Profile path is too long for the private IPC socket')
         env = clean_environment(root)
         if plan['role'] == 'ubuntu':
             require(env.get('XDG_SESSION_TYPE') == 'wayland' and env.get('DBUS_SESSION_BUS_ADDRESS'),

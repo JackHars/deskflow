@@ -13,6 +13,17 @@ window and disables edge links, so its passes cannot establish this behavior.
 Prepare the separate outbound H07 setup without automatic export. Keep the
 remaining input defects visible and request permission before desktop capture.
 
+Setup creation and saved-profile validation now reject an overlong resolved
+control-socket pathname before generating identities or reporting readiness.
+An actual 107-byte Ubuntu profile had passed dry-run but could not pass the
+existing launch limit. Mac checks pass 38 cases with one platform skip; Ubuntu
+passes all 39. Retain the initial invalid profile under
+`build/input-candidate-alrvbdxx/` and use a fresh shorter folder with the new
+packaged helper. The installed Ubuntu support is older and disabled; its update
+requires an ordinary-session pause, so obtain fresh permission first. Native
+runtime `52e929731` now has all six hosted jobs passing in run `40056776495`.
+No new desktop-input result is established by those checks.
+
 Mac/Linux lifecycle prints now use one bounded worker (128 records / 256 KiB,
 including in-flight output) with explicit loss reports and bounded shutdown.
 Full/closed diagnostic pipes are covered by disposable-process regressions;
@@ -24,7 +35,7 @@ Cancel and the exact Released acknowledgement; the latter wakes Qt cleanup as
 well as Core progress. A deterministic delayed-release regression reproduces
 the old failure and passes with all 39 Mac coordinator cases after the fix.
 Ubuntu builds pass with Mac-source-specific cases skipped. Preserve the failed
-historical hosted run; these changed bytes require their own hosted result.
+historical hosted run; the corrected runtime's hosted result is recorded above.
 See `TESTING.md` and `deploy/windowshare/diagnostic-output.md`.
 
 Mac setup now includes read-only permission readiness and an explicit Request

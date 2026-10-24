@@ -1,5 +1,34 @@
 # Seamless Windows work state
 
+## Reject unusable setup folders before readiness — 2026-10-23
+
+Preparing matching packages exposed an actual setup error: the proposed Ubuntu
+profile's control-socket pathname was 107 bytes, but the launcher requires fewer
+than 104. Creation and dry-run had succeeded; the same profile would fail only
+after Start. Validation now checks the resolved, encoded full pathname before
+creating identities and whenever loading a saved profile, including inspection
+and dry-run. It gives shorter-folder guidance without changing existing keys,
+configuration or recovery records. No runtime input behavior changes.
+
+The regression reproduces the old false Ready and successful dry-run. Checks
+cover the 103/104-byte boundary, non-ASCII names, resolved parent links, absence
+of partial identity creation and unchanged legacy setup contents. Mac passes
+38 cases with one Ubuntu-only skip; Ubuntu passes all 39. Evidence is retained
+in `build/profile-path-_x1syhk1/`. The initial package/profile preparation is in
+`build/input-candidate-alrvbdxx/`; its oversized Ubuntu profile is retained and
+must not be launched. Prepare a fresh shorter profile with the corrected helper.
+
+All six jobs of hosted run `40056776495` pass for runtime `52e929731`. Its signed
+Mac bundle passes dependency/signature and input-disabled Core/Host checks;
+Ubuntu's matching inert archive verifies. Native binaries are unchanged by this
+folder fix; packages must include the corrected setup resource before reuse.
+Mac permissions are ready. Ubuntu's read-only support check reports
+`update-needed`; the installed extension is disabled and still older than the
+package. Do not pause ordinary Deskflow, replace desktop support or start input
+without the required fresh permission. The regular connection remains running.
+Scroll timestamps, held repeat, full outward dragging and native queue gaps
+remain open; interactive drag-back stays last.
+
 ## One Host offer per acquisition — 2026-10-23
 
 The coordinator now enters an explicit Host-offered phase before beginning

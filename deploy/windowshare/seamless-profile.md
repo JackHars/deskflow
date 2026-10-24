@@ -85,7 +85,11 @@ Keep the package in a permanent location before creating a profile. Profiles pin
 the executable paths and hashes; replacing a binary requires an explicit saved
 setup update before it can start. Keep each profile
 path short (for example `~/DeskflowMac` and `~/DeskflowUbuntu`) because private
-Core IPC uses a length-limited Unix socket.
+Core IPC uses a length-limited Unix socket. Creation checks the resolved folder
+and full socket pathname before generating identities. Opening an older setup
+and requesting a dry-run also reject an overlong folder before reporting
+readiness; choose a new shorter setup folder if instructed. These checks do not
+move or delete an existing setup or its recovery records.
 
 ## Ubuntu provider setup
 
